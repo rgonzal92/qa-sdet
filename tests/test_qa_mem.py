@@ -12,6 +12,9 @@ def run(build="1.0", bugs=None, **page):
             "pages": [{"route": "/form", "name": "Form", **page}], "bugs": bugs or []}
 
 
+qm.claude_mcp_list = lambda: ""  # never run the real `claude mcp list` in tests
+
+
 class QaMem(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -548,6 +551,184 @@ class QaMem(unittest.TestCase):
         self.assertNotIn("abcdefghijklmnopqrst", (out / "BUG-1.md").read_text())
         self.assertFalse((Path(self.tmp.name) / "none").exists())  # no run.json: no DB touched
 
+    def test_doctor_reports_mcp_fallbacks(self):
+        import io, contextlib, shutil
+        real_which, real_list = shutil.which, qm.claude_mcp_list
+        shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli
+        qm.claude_mcp_list = lambda: ("playwright: npx @playwright/mcp@latest --secret-token-abc - ✔ Connected\n"
+                                      "claude.ai Atlassian: https://mcp.atlassian.com/v1?key=k123 - ✔ Connected\n"
+                                      "jira-old: npx jira-mcp - ✗ Failed to connect — https://x/?apikey=SECRET42\n")
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                qm.doctor()
+        finally:
+            shutil.which, qm.claude_mcp_list = real_which, real_list
+        out = buf.getvalue()
+        self.assertIn("ok   fallback browser: Playwright MCP playwright", out)
+        self.assertIn("ok   Jira fallback: Atlassian/Jira MCP claude.ai Atlassian", out)
+        self.assertNotIn("secret-token-abc", out)  # names only: commands and URLs can carry keys
+        self.assertNotIn("FIX  playwright-cli", out)  # a working MCP fallback: the CLI is advice, not a problem
+        self.assertIn("info no saved QA session: MCP runs", out)
+        self.assertNotIn("k123", out)
+        self.assertNotIn("SECRET42", out)  # error text after the status can hold keys too
+        qm.claude_mcp_list = lambda: "playwright: npx @playwright/mcp - ⏸ Pending approval (run `claude` to approve)\n"
+        shutil.which = lambda name, *a, **k: None
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                qm.doctor()
+        finally:
+            shutil.which, qm.claude_mcp_list = real_which, real_list
+        self.assertIn("FIX  fallback browser", buf.getvalue())
+        self.assertIn("playwright (pending approval)", buf.getvalue())
+        # finding 8: an HTTP server named "browser" counts; a connected server with an unknown name is "can't tell"
+        for listing, expect in (("browser: http://localhost:8931/mcp (HTTP) - ✔ Connected\n", "ok   fallback browser: Playwright MCP browser"),
+                                ("work-tools: http://localhost:9000/mcp (HTTP) - ✔ Connected\n", "info fallback browser: none named playwright/browser"),
+                                ("", "FIX  fallback browser: a connected Playwright MCP"),
+                                (None, "info fallback browser: couldn't list MCP servers"),
+                                (None, "info Jira fallback: couldn't list MCP servers"),
+                                ("TIMEOUT", "`claude mcp list` timed out"),
+                                ("chrome-devtools: npx chrome-devtools-mcp@latest --browser-url=http://127.0.0.1:9222 - ✔ Connected\n",
+                                 "info fallback browser: none named playwright/browser"),
+                                ("qa: npx @playwright/mcp@latest --isolated - ✔ Connected\n", "ok   fallback browser: Playwright MCP qa"),
+                                ("pw-test: npx playwright run-test-mcp-server - ✔ Connected\n", "FIX  fallback browser")):
+            qm.claude_mcp_list = lambda listing=listing: listing
+            shutil.which = lambda name, *a, **k: None
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    qm.doctor()
+            finally:
+                shutil.which, qm.claude_mcp_list = real_which, real_list
+            self.assertIn(expect, buf.getvalue(), listing)
+
+    def test_browser_choice_detection_and_doctor(self):
+        """Runs use the browser the user chose from what's installed (config `browser`), never an assumed Firefox."""
+        import io, contextlib, shutil, subprocess
+        tmp = Path(self.tmp.name)
+        chrome = tmp / "chrome"; chrome.write_text("")
+        build = tmp / "webkit-1"; build.mkdir(); (build / "INSTALLATION_COMPLETE").write_text("")
+        real_isfile, real_which, real_run = os.path.isfile, shutil.which, subprocess.run
+        os.path.isfile = lambda x: x == "/opt/google/chrome/chrome" or (str(x).endswith("INSTALLATION_COMPLETE") and real_isfile(x))  # only the stub's browsers, not this machine's
+        shutil.which = lambda name, *a, **k: "/x/playwright-cli" if name == "playwright-cli" else None
+        def fake_run(cmd, *a, **k):
+            out = f"Install location: {build if 'webkit' in cmd else tmp / 'firefox-missing'}\n" if "install-browser" in cmd else ""
+            return type("R", (), {"returncode": 0, "stdout": out})()
+        subprocess.run = fake_run
+        try:
+            got = qm.installed_browsers()
+            self.assertEqual({k: v[0] for k, v in got.items()}, {"chrome": True, "msedge": False, "firefox": False, "webkit": True})
+            self.assertIn("playwright-cli install-browser firefox", got["firefox"][1])
+            old_local = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = r"C:\Users\me\AppData\Local"  # audit 1: per-user Edge on Windows
+            os.path.isfile = lambda x: x == r"C:\Users\me\AppData\Local\Microsoft\Edge\Application\msedge.exe"
+            try:
+                self.assertTrue(qm.installed_browsers(("msedge",))["msedge"][0])
+            finally:
+                if old_local is None:
+                    del os.environ["LOCALAPPDATA"]
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+                os.path.isfile = lambda x: x == "/opt/google/chrome/chrome" or (str(x).endswith("INSTALLATION_COMPLETE") and real_isfile(x))
+            cfg = tmp / "config.json"
+            real_cfg = qm.CONFIG
+            qm.CONFIG = cfg
+            try:
+                for conf, want in (({}, "FIX  config has browser"), ({"browser": "opera"}, "FIX  config browser 'opera'"),
+                                   ({"browser": "webkit"}, "ok   browser webkit installed"),
+                                   ({"browser": "firefox"}, "FIX  browser firefox installed  -> playwright-cli install-browser firefox")):
+                    cfg.write_text(json.dumps(conf))
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        qm.doctor()
+                    self.assertIn(want, buf.getvalue(), conf)
+                    self.assertNotIn("Firefox installed", buf.getvalue())
+            finally:
+                qm.CONFIG = real_cfg
+        finally:
+            os.path.isfile, shutil.which, subprocess.run = real_isfile, real_which, real_run
+
+    def test_browser_detection_edge_cases(self):
+        """Review findings: interrupted downloads, failed lookups, HOMEDRIVE paths, the browsers command, the MCP hint."""
+        import io, contextlib, shutil, subprocess
+        tmp = Path(self.tmp.name)
+        half = tmp / "firefox-9"; half.mkdir()  # no INSTALLATION_COMPLETE: an interrupted download
+        real_isfile, real_which, real_run = os.path.isfile, shutil.which, subprocess.run
+        saved = {k: os.environ.get(k) for k in ("HOMEDRIVE", "PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")}
+        def runner(mode):
+            def fake(cmd, *a, **k):
+                if mode == "timeout" and "install-browser" in cmd:  # only the lookup fails; --version works
+                    raise subprocess.TimeoutExpired(cmd, 30)
+                out = f"Install location: {half}\n" if mode == "half" else "nothing useful\n"
+                return type("R", (), {"returncode": 0, "stdout": out})()
+            return fake
+        shutil.which = lambda name, *a, **k: "/x/playwright-cli" if name == "playwright-cli" else None
+        try:
+            for mode, want in (("half", "playwright-cli install-browser firefox"), ("timeout", "can't check: `playwright-cli"),
+                               ("noloc", "gave no install location")):
+                subprocess.run = runner(mode)
+                ok, how = qm.installed_browsers(("firefox",))["firefox"]
+                self.assertFalse(ok, mode); self.assertIn(want, how, mode)
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ["HOMEDRIVE"] = "D:"
+            os.path.isfile = lambda x: x == r"D:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+            self.assertTrue(qm.installed_browsers(("chrome",))["chrome"][0])
+            mac = {"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"}  # macOS app bundles
+            os.path.isfile = lambda x: x in mac
+            got = qm.installed_browsers(("chrome", "msedge"))
+            self.assertTrue(got["chrome"][0] and got["msedge"][0]); self.assertIn(".app/", got["msedge"][1])
+            os.path.isfile = real_isfile
+            subprocess.run = runner("timeout")
+            cfg, real_cfg = tmp / "config.json", qm.CONFIG
+            qm.CONFIG = cfg
+            try:
+                cfg.write_text(json.dumps({"browser": "firefox"}))
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    qm.doctor()
+                out = buf.getvalue()
+                self.assertIn("info browser firefox: can't check", out)  # a failed lookup isn't a FIX
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(qm.main(["browsers"]), 0)
+                self.assertRegex(buf.getvalue(), r"(?m)^chrome +(installed|missing)")
+                shutil.which = lambda name, *a, **k: None  # no CLI: the MCP hint follows the chosen browser
+                for conf, want in (({"browser": "webkit"}, "--browser webkit, then npx @playwright/mcp@latest install-browser webkit"),
+                                   ({}, "--browser <browser> (or install")):
+                    cfg.write_text(json.dumps(conf))
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        qm.doctor()
+                    self.assertIn(want, buf.getvalue(), conf)
+            finally:
+                qm.CONFIG = real_cfg
+        finally:
+            os.path.isfile, shutil.which, subprocess.run = real_isfile, real_which, real_run
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_doctor_acli_signed_out_with_jira_mcp(self):
+        import io, contextlib, shutil, subprocess
+        real_which, real_list, real_run = shutil.which, qm.claude_mcp_list, subprocess.run
+        shutil.which = lambda name, *a, **k: "/x/acli" if name == "acli" else None
+        subprocess.run = lambda cmd, *a, **k: type("R", (), {"returncode": 1, "stdout": ""})()
+        try:
+            for listing, want, unwanted in (
+                    ("claude.ai Atlassian: https://mcp.atlassian.com/v1/sse - ✔ Connected\n", "info acli not signed in", "FIX  acli"),
+                    ("", "FIX  acli signed in to Jira", "info acli not signed in")):
+                qm.claude_mcp_list = lambda listing=listing: listing
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    qm.doctor()
+                self.assertIn(want, buf.getvalue()); self.assertNotIn(unwanted, buf.getvalue())
+        finally:
+            shutil.which, qm.claude_mcp_list, subprocess.run = real_which, real_list, real_run
+
     def test_round9_doctor_and_config_robustness(self):
         import io, contextlib
         cfg = Path(self.tmp.name) / "config.json"
@@ -580,7 +761,8 @@ class QaMem(unittest.TestCase):
         plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())["name"]
         agent = re.search(r"^name:\s*(\S+)", (ROOT / "agents/qa-explorer.md").read_text(), re.M).group(1)
         self.assertIn(f"{plugin}:{agent}", hooks["SubagentStop"][0]["matcher"].split("|"))
-        self.assertEqual(set(hooks["PreToolUse"][0]["matcher"].split("|")), {"Bash", "Read", "Grep", "Write", "Edit", "MultiEdit"})
+        # every tool: MCP names vary in case and server name, and the explorer's tool allowlist is enforced here
+        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "*")
         for event in ("SubagentStop", "Stop"):
             self.assertIn('"$CLAUDE_PROJECT_DIR/qa-out"', hooks[event][0]["hooks"][0]["command"])
 

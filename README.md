@@ -23,6 +23,13 @@ claude plugin install qa-sdet@qa-sdet
 ```
 Needs: Claude Code, Python 3.9+ as `python3` (stdlib only; the hooks run it), `playwright-cli` (`npm i -g @playwright/cli`), and optionally `acli` signed in (`acli jira auth login`).
 
+Fallbacks, tried in order:
+- **Browser:** `playwright-cli`, then any Playwright MCP you have in Claude Code (tools `mcp__<server>__browser_*`); with neither, runs stop with install steps.
+- **Jira:** `acli`, then any Atlassian/Jira MCP (read tools only), then ticket text you paste.
+
+`qa-mem doctor` shows which path each one will take.
+With the MCP browser, runs use that browser's own login: the skill asks you to sign in in the MCP's browser window when needed (it must run headed; `qa-login` needs playwright-cli), and with `--isolated` the login lasts until Claude Code restarts. Those runs make no recordings (repro specs are written from the steps), and fault injection only works if the MCP exposes route/offline tools (e.g. `--caps=network`).
+
 Then check the machine: `python3 ~/Projects/qa-sdet/bin/qa-mem doctor` lists what works and the fix for each gap.
 
 After pulling or editing the repo, refresh the installed copy (it is cached):
@@ -40,10 +47,11 @@ The first run asks for these if the file is missing.
   "ssoHost": "login.microsoftonline.com",
   "jiraProject": "TRAF",
   "mapRoute": "/map",
-  "buildSource": {"type": "selector", "value": "footer .version"}
+  "buildSource": {"type": "selector", "value": "footer .version"},
+  "browser": "<chrome | msedge | firefox | webkit>"
 }
 ```
-`buildSource.type` is `selector` (text of an element), `url` (a version endpoint) or `header` (a response header). The build is what keeps memory honest: knowledge from an older build is marked stale and re-verified.
+`browser` is `chrome`, `msedge` (your installed Chrome or Edge), `firefox` or `webkit` (Playwright's own builds: `playwright-cli install-browser firefox`). Leave it out: the first run lists what's installed (`qa-mem browsers`) and asks you to choose. A Playwright MCP fallback uses its own `--browser` setting; `qa-mem doctor` suggests one that matches your choice. `buildSource.type` is `selector` (text of an element), `url` (a version endpoint) or `header` (a response header). The build is what keeps memory honest: knowledge from an older build is marked stale and re-verified.
 
 ## How it saves tokens and time
 
@@ -60,19 +68,22 @@ Coverage from a run that couldn't read the build counts for 7 days, then the heu
 Manual: `qa-mem bugs`, `qa-mem bug-status <hash> FILED` (a prefix must match exactly one bug), `qa-mem stale <build>`, `qa-mem search "closure AND schedule"`.
 Optional shortcut: `ln -s ~/Projects/qa-sdet/bin/qa-mem ~/.local/bin/qa-mem`.
 
-## Safety (hook: `hooks/guard.py`, PreToolUse on Bash, Read, Grep, Write and Edit)
+## Safety (hook: `hooks/guard.py`, PreToolUse on every tool; ~40 ms, and most tools pass straight through)
 
 Denied (everything else passes). Only words in command position are checked, so `echo acli create …` or a `grep` near the DB pass.
 1. `playwright-cli` navigation (`goto`/`open`/`tab-new`, URLs in `eval`) to hosts not in `allowedHosts` (add `localhost` there only if you test something local); `run-code` (it runs Node and can reach the host; batch inputs with `eval`, which runs in the page), `attach`, and `show --host` on a non-local address
 2. `acli` anything except reads (`view`, `search`, `list`, `get`, `auth login|status`, `--help`, `--version`): bug drafts end with the command for you to run
-3. During a run (marker `qa-out/.active`, written by the skill, ignored after 2 h): playwright-cli commands past the run's command budget or time limit (`close` always works; loops and xargs can't be counted, so they're denied), `route` / `network-state-set` unless the run used `--faults`, and every playwright-cli command if the marker is malformed
-4. Session secrets in the conversation: `cookie-*`, `localstorage-*`/`sessionstorage-*` reads, `request`/`request-headers`/`response-headers` (full headers, incl. `Set-Cookie`), `eval` reading cookie or web-storage values (key names are fine); any read of `~/.config/qa-sdet/qa-state.json` or your `PLAYWRIGHT_MCP_STORAGE_STATE` cookie jar (Bash incl. `<`, globs, `--opt=path`, inline `python -c`/`node -e` code naming it, and its own folder; Read; Grep; from a folder above it only recursive readers: `grep -r`/`rg`, `find -exec`, `tar`/`zip`/`rsync`/`cp -r`); `state-save` anywhere but the session file
+3. During a run (marker `qa-out/.active`, written by the skill, ignored after 2 h): browser commands (playwright-cli or MCP `browser_*`) past the run's command budget or time limit (`close` always works; loops and xargs can't be counted, so they're denied), `route` / `network-state-set` unless the run used `--faults`, and every browser command if the marker is malformed
+4. Session secrets in the conversation: `cookie-*`, `localstorage-*`/`sessionstorage-*` reads, `request`/`request-headers`/`response-headers` (full headers, incl. `Set-Cookie`), `tracing-start` (a trace file holds every header), `eval` reading cookie or web-storage values (key names are fine); any read of `~/.config/qa-sdet/qa-state.json`, of the Playwright MCP's browser profiles (`~/.cache/ms-playwright-mcp`), or your `PLAYWRIGHT_MCP_STORAGE_STATE` cookie jar (Bash incl. `<`, globs, `--opt=path`, inline `python -c`/`node -e` code naming it, and its own folder; Read; Grep; from a folder above it only recursive readers: `grep -r`/`rg`, `find -exec`, `tar`/`zip`/`rsync`/`cp -r`); `state-save` anywhere but the session file
 5. `rm`/`mv`/`trash`/`find -delete`/`cp`-onto/redirection onto the memory DB directory (or its parents for recursive deletes); `sqlite3` on it unless `-readonly`; playwright-cli files written into it
-6. For the explorer subagent only: editing or deleting the run marker, network tools outside the browser (`curl`, `wget`, `nc`, …), and dumping the page's HTML or scripts (it is a black-box tester; `snapshot` shows structure)
+6. For the explorer subagent only: editing or deleting the run marker, network tools outside the browser (`curl`, `wget`, `nc`, …), and dumping the page's HTML or scripts (it is a black-box tester; `snapshot` shows structure). It also gets only its own tools (Bash, Read, Write, Grep, Glob, the `browser_*` MCP tools): other MCPs you've connected, such as mail or Jira, are denied inside a test run
+7. MCP fallbacks get the same rules:
+   - Playwright MCP `browser_*`, inside a QA run (the explorer, or while a run marker exists; outside a run it is your own browser): any `url`, or URL anywhere in an evaluate call, outside `allowedHosts` (and non-web schemes such as `javascript:`), `browser_run_code*`, tracing, request headers, cookie/storage list and get tools, `browser_get_config`, reading cookie or storage values, `route`/offline tools without `--faults`, switching tabs (`browser_tabs select`: other tabs hold the sign-in or your own pages), `browser_close` (it would end the login), and file arguments (any field named like file, path or output) that point at the session file, the memory DB, the run marker, or outside the MCP's folder via `..`. Each call counts against the run budget (`browser_close` is free).
+   - Atlassian/Jira/Confluence MCP (matched on the server or tool name, so a Jira server named something else entirely isn't recognised), in every session while the plugin is enabled: every tool that isn't a read (`get…`, `search…`, `lookup…`, `list…`, `fetch…`).
 
 If the guard itself crashes or takes too long, it denies calls that mention a guarded tool or file and lets everything else through.
 
-Privacy: ingest scrubs auth headers, cookies, bearer/JWT/GitHub/AWS tokens, URL credentials and secret-named values from the run folder's Markdown and text files, and only the values of secret-named keys in JSON; repro specs only lose literal tokens, so they stay runnable. Screenshots can't be scrubbed: look before attaching them to a ticket. Response bodies the explorer reads appear in the conversation; it is told to leave login/session/token calls unread, but the guard can't tell which request number is which. If `PLAYWRIGHT_MCP_STORAGE_STATE` is set in your Claude settings, a playwright-cli session starts with those cookies; qa-sdet opens its sessions with `env -u PLAYWRIGHT_MCP_STORAGE_STATE` so your personal cookies never enter the QA browser or `qa-state.json`.
+Privacy: ingest scrubs auth headers, cookies, bearer/JWT/GitHub/AWS tokens, URL credentials and secret-named values from the run folder's Markdown and text files, and only the values of secret-named keys in JSON; repro specs only lose literal tokens, so they stay runnable. Screenshots can't be scrubbed: look before attaching them to a ticket. Response bodies the explorer reads appear in the conversation; it is told to leave login/session/token calls unread, but the guard can't tell which request number is which. If `PLAYWRIGHT_MCP_STORAGE_STATE` is set in your Claude settings, a playwright-cli session starts with those cookies; qa-sdet opens its sessions with `env -u PLAYWRIGHT_MCP_STORAGE_STATE` so your personal cookies never enter the QA browser or `qa-state.json`. A Playwright MCP fallback runs with its own settings and cookies, which the plugin can't change: run it with `--isolated` (the profile stays in memory, so the login lasts until Claude Code restarts and nothing on disk holds it). A profile on disk (`--user-data-dir`, `--storage-state`) holds the QA cookies where the guard can only protect the default locations (`~/.cache/ms-playwright-mcp`, `$XDG_CACHE_HOME`); never attach it to your everyday browser (`--cdp-endpoint`, `--extension`).
 
 Limits: this checks command text, not intent. A determined agent could still reach a host via `curl`, a script file, or JS that builds a URL at runtime. It stops mistakes; it isn't a sandbox.
 

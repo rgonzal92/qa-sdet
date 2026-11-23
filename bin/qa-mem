@@ -27,6 +27,7 @@ MAX_TEXT = 300
 MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
 UNKNOWN = "unknown"
 STATUSES = {"OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"}
+BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli / Playwright MCP --browser values
 VISIBLE = ("OPEN", "FILED", "REGRESSED")  # bugs the explorer must know about
 # Must match the IDs in references/heuristics.md.
 HEURISTICS = [
@@ -664,8 +665,59 @@ def bugs(con, status="OPEN"):
     return "\n".join(lines) or f"no {status} bugs"
 
 
+def installed_browsers(names=BROWSERS):
+    """{name: (installed, where or how to install)}. chrome and msedge are the system browsers (Playwright's
+    channel paths); firefox and webkit are Playwright's own builds: a system Firefox can't be driven."""
+    import shutil
+    import subprocess
+    env = os.environ  # Windows roots in Playwright's own lookup order (playwright-core _createChromiumChannel)
+    roots = [r for r in (env.get("LOCALAPPDATA"), env.get("PROGRAMFILES"), env.get("PROGRAMFILES(X86)")) if r]
+    if env.get("HOMEDRIVE"):
+        roots += [env["HOMEDRIVE"] + r"\Program Files", env["HOMEDRIVE"] + r"\Program Files (x86)"]
+    system = {
+        "chrome": ("Google Chrome", ["/opt/google/chrome/chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+                   + [r + r"\Google\Chrome\Application\chrome.exe" for r in roots]),
+        "msedge": ("Microsoft Edge", ["/opt/microsoft/msedge/msedge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+                   + [r + r"\Microsoft\Edge\Application\msedge.exe" for r in roots]),
+    }
+    pw, out = shutil.which("playwright-cli"), {}
+    for name in names:
+        if name in system:
+            label, paths = system[name]
+            hit = next((x for x in paths if os.path.isfile(x)), None)
+            out[name] = (bool(hit), hit or f"install {label} the usual way for this system")
+            continue
+        loc, why = None, "can't check: playwright-cli isn't working (npm i -g @playwright/cli), then install-browser " + name
+        if pw:
+            why = f"can't check: `playwright-cli install-browser --dry-run {name}` gave no install location"
+            try:
+                dry = subprocess.run([pw, "install-browser", "--dry-run", name], capture_output=True, text=True,
+                                     timeout=30).stdout
+                m = re.search(r"Install location:\s*(.+)", dry)
+                loc = m.group(1).strip() if m else None
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        # Playwright writes INSTALLATION_COMPLETE last: a folder without it is an interrupted download
+        ok = bool(loc) and (Path(loc) / "INSTALLATION_COMPLETE").is_file()
+        out[name] = (ok, f"Playwright build {Path(loc).name}" if ok else f"playwright-cli install-browser {name}" if loc
+                     else why)
+    return out
+
+
+def claude_mcp_list():
+    """`claude mcp list` output, or None when Claude Code isn't callable (it health-checks each server)."""
+    import subprocess
+    try:
+        return subprocess.run(["claude", "mcp", "list"], capture_output=True, text=True, timeout=30).stdout
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"  # a first `npx @playwright/mcp@latest` download can take this long
+    except OSError:
+        return None
+
+
 def doctor():
-    """Setup check for a new machine. Prints one line per item; returns the number of problems."""
+    """Setup check for a new machine. Prints one line per item; returns the number of problems.
+    Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 + 30 s) so a skill's Bash call never cuts it off."""
     import shutil
     import subprocess
     import time
@@ -677,27 +729,91 @@ def doctor():
         print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
 
     line(sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)")
-    pw = shutil.which("playwright-cli")
-    line(bool(pw), "playwright-cli on PATH", "npm i -g @playwright/cli")
-    if pw:  # runs use --browser=firefox; a fresh machine has the CLI but not the browser build it needs
+    try:
+        chosen = json.loads(CONFIG.read_text()).get("browser")
+    except (OSError, ValueError, AttributeError):
+        chosen = None
+    listing = []
+
+    def mcp_servers(*words):
+        """(connected, others) server names whose line mentions one of `words`. Names only: a line's command or URL can
+        carry keys. This script can't see the session's tools, so it asks `claude mcp list`."""
+        if not listing:
+            listing.append(claude_mcp_list())
+        hits = [ln.strip() for ln in ("" if listing[0] in (None, "TIMEOUT") else listing[0]).splitlines()
+                if ": " in ln and " - " in ln and "test-mcp" not in ln  # not the Playwright Test MCP
+                and (any(w in ln.split(": ", 1)[0].lower() for w in words)  # the server's name,
+                     or any(w in ln.lower() for w in words if "/" in w or "." in w))]  # or its package / URL
+        status = lambda ln: next((label for key, label in (("Connected", "connected"), ("Pending", "pending approval"),
+                                                            ("auth", "needs sign-in"), ("Failed", "failed to connect"))
+                                  if key in ln.rsplit(" - ", 1)[-1]), "not connected")  # fixed labels: error text can hold keys
+        connected = [ln.split(": ", 1)[0] for ln in hits if status(ln) == "connected"]
+        others = [f"{ln.split(': ', 1)[0]} ({status(ln)})" for ln in hits if status(ln) != "connected"]
+        return connected, others
+
+    pw, on_path, mcp_browser = shutil.which("playwright-cli"), bool(shutil.which("playwright-cli")), False
+    if pw:  # on PATH isn't enough: a broken install must fall back too
         try:
-            dry = subprocess.run([pw, "install-browser", "--dry-run", "firefox"], capture_output=True, text=True,
-                                 timeout=60).stdout
-            loc = re.search(r"Install location:\s*(.+)", dry)
-            line(bool(loc) and Path(loc.group(1).strip()).is_dir(), "playwright-cli Firefox installed",
-                 "playwright-cli install-browser firefox")
+            pw = pw if subprocess.run([pw, "--version"], capture_output=True, timeout=15).returncode == 0 else None
         except (subprocess.TimeoutExpired, OSError):
-            line(False, "playwright-cli Firefox check", "run: playwright-cli install-browser firefox")
-    acli = shutil.which("acli")
+            pw = None
+    if pw:
+        line(True, "playwright-cli runs (--version)")
+    else:
+        found, other = mcp_servers("playwright", "browser", "@playwright/mcp")
+        mcp_browser = bool(found)
+        unknown = [n for n in mcp_servers("")[0] if n not in found]  # connected servers this check can't classify
+        cli = "playwright-cli runs (--version)" if on_path else "playwright-cli on PATH"
+        cli_fix = "reinstall: npm i -g @playwright/cli" if on_path else "npm i -g @playwright/cli"
+        if mcp_browser:  # a working fallback: the CLI is a recommendation, not a problem
+            print(f"info {cli}: no, runs use the Playwright MCP instead (for qa-login and recordings: {cli_fix})")
+        else:
+            line(False, cli, cli_fix)
+        if listing[0] in (None, "TIMEOUT"):  # can't tell from here
+            why = "`claude` not on PATH" if listing[0] is None else "`claude mcp list` timed out; run doctor again"
+            print(f"info fallback browser: couldn't list MCP servers ({why}); runs look for browser_* tools themselves")
+        elif mcp_browser or other or not unknown:
+            line(mcp_browser, "fallback browser: " + ("Playwright MCP " + ", ".join(found) if found else "a connected Playwright MCP"),
+                 ("connect or approve it in Claude Code (/mcp): " + ", ".join(other)) if other else
+                 f"claude mcp add playwright -- npx @playwright/mcp@latest --isolated --browser {chosen if chosen in BROWSERS else '<browser>'}"
+             + (f", then npx @playwright/mcp@latest install-browser {chosen}" if chosen in ("firefox", "webkit") else "")
+             + " (or install playwright-cli)")
+        else:  # this script sees names, not tools; runs check for a browser_navigate tool (common.md C0)
+            print("info fallback browser: none named playwright/browser; runs use any connected MCP with browser_* tools "
+                  f"(connected: {', '.join(unknown)})")
+    if pw:  # runs open the browser the user chose (config `browser`); C1 asks for it from what's installed
+        if chosen is None:
+            line(False, "config has browser (chrome, msedge, firefox or webkit)",
+                 "qa-explore / qa-ticket / qa-login ask you which installed browser to use (`qa-mem browsers` lists them)")
+        elif chosen not in BROWSERS:
+            line(False, f"config browser {chosen!r} is one of {', '.join(BROWSERS)}", "`qa-mem browsers` lists what's installed")
+        else:
+            ok_b, how = installed_browsers((chosen,))[chosen]
+            if how.startswith("can't check"):  # the CLI works; only the lookup failed
+                print(f"info browser {chosen}: {how}")
+            else:
+                line(ok_b, f"browser {chosen} installed" + (f" ({how})" if ok_b else ""), how)
+    acli, ok = shutil.which("acli"), False
     if acli:
         try:
             ok = subprocess.run([acli, "jira", "auth", "status"], capture_output=True, text=True,
                                 timeout=30).returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
-        line(ok, "acli signed in to Jira", "acli jira auth login")
+    if acli and ok:
+        line(True, "acli signed in to Jira")
     else:
-        line(False, "acli on PATH (optional: without it, paste tickets)", "install Atlassian CLI")
+        found, other = mcp_servers("atlassian", "jira", "mcp.atlassian.com", "mcp-atlassian")
+        if acli and found:  # a working fallback: signing in to acli is optional
+            print("info acli not signed in: runs use the Jira MCP (to use acli: acli jira auth login)")
+        elif acli:
+            line(False, "acli signed in to Jira", "acli jira auth login")
+        print(f"{'ok  ' if found else 'info'} Jira fallback: " + (
+            "couldn't list MCP servers; runs look for Jira read tools, else you paste tickets"
+            if listing[0] in (None, "TIMEOUT") else
+            "Atlassian/Jira MCP " + ", ".join(found) if found else
+            "Jira MCP not connected: " + ", ".join(other) + " (connect it in /mcp) or paste tickets" if other else
+            "no acli or Jira MCP: tickets are pasted (optional: install acli or connect the Atlassian MCP)"))
     cfg = {}
     try:
         cfg = json.loads(CONFIG.read_text())
@@ -729,6 +845,8 @@ def doctor():
         line(state.stat().st_mode & 0o077 == 0, "qa-state.json readable only by you", f"chmod 600 {state}")
         age_h = (time.time() - state.stat().st_mtime) / 3600
         print(f"info qa-state.json saved {age_h:.0f} h ago (SSO sessions expire; re-run /qa-sdet:qa-login if runs get BLOCKED)")
+    elif mcp_browser:
+        print("info no saved QA session: MCP runs ask you to sign in in the MCP's browser window")
     else:
         line(False, "saved QA session (qa-state.json)", "run /qa-sdet:qa-login")
     try:
@@ -745,7 +863,7 @@ def doctor():
 
 USAGE = ("usage: qa-mem doctor | card <route|page name> | search <fts-query> | bugs [STATUS] | hash <route> <symptom> | "
          "bug-status <hash-prefix> <" + "|".join(sorted(STATUSES)) + "> | stale <build> | "
-         "ingest <run.json> | ingest-pending <dir>... | where")
+         "ingest <run.json> | ingest-pending <dir>... | where | browsers")
 
 
 def hook_input():
@@ -779,6 +897,11 @@ def main(argv):
         return 0
     if cmd == "doctor":
         return 1 if doctor() else 0
+    if cmd == "browsers":  # what C1 offers when it asks which browser to use
+        for name, (ok, how) in installed_browsers().items():
+            print(f"{name:8} {'installed' if ok else 'missing  '}  {how}")
+        print("(firefox and webkit mean Playwright's own builds; a system Firefox can't be driven)")
+        return 0
     if cmd == "hash" and len(args) >= 2:  # same normalisation as ingest, so draft and DB hashes match
         print(bug_hash(norm_route(args[0]), cap(redact(" ".join(args[1:])))))
         return 0

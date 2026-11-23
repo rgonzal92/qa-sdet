@@ -15,7 +15,7 @@ Always use the one named session `playwright-cli -s=qa <cmd>`, so the browser st
 | Many input values | one `--raw eval` loop in the page (recipe below) | one fill + one read command per value; `run-code` (blocked: it runs Node) |
 | Fault injection | `route <pattern>`, `network-state-set offline` (needs --faults) | |
 
-Session start: `env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --browser=firefox` → `state-load ~/.config/qa-sdet/qa-state.json` → `goto <url>`.
+Session start: `env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --browser=<config browser>` → `state-load ~/.config/qa-sdet/qa-state.json` → `goto <url>`.
 `goto` takes a full URL (`qaBaseUrl` + path); relative paths are denied, so build the URL from the config.
 Session end: `playwright-cli -s=qa close`.
 

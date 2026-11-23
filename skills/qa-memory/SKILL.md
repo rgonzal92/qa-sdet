@@ -1,7 +1,7 @@
 ---
 name: qa-memory
 description: Query the QA app memory (pages, facts, locators, coverage, known bugs) or mark a bug filed or fixed.
-argument-hint: doctor | card <route|name> | search <terms> | bugs [STATUS] | hash <route> <symptom> | bug-status <hash> <STATUS> | stale <build> | where
+argument-hint: doctor | browsers | card <route|name> | search <terms> | bugs [STATUS] | hash <route> <symptom> | bug-status <hash> <STATUS> | stale <build> | where
 ---
 
 Run `python3 ${CLAUDE_SKILL_DIR}/../../bin/qa-mem <subcommand> '<arg>' ...` for: $ARGUMENTS. Single-quote every argument (search terms can come from ticket text), and show the output as-is. With no arguments, run `bugs` and `where`.

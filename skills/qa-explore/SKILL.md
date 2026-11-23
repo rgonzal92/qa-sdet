@@ -6,10 +6,10 @@ argument-hint: <url | route | page name> [--faults] [--budget N]
 
 Explore and find bugs: $ARGUMENTS
 
-Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. First read `${CLAUDE_SKILL_DIR}/../../references/common.md` (steps C1–C7).
+Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. First read `${CLAUDE_SKILL_DIR}/../../references/common.md` (steps C0–C7).
 
 1. C1 config, then resolve the target: full URL as given (its host must be in `allowedHosts`; if not, stop and say so: the guard would deny every page load); a route → `qaBaseUrl + route`; a page name → `python3 ${CLAUDE_SKILL_DIR}/../../bin/qa-mem card '<name>'` shows its route; if NO CARD, ask the user for the route. A route with `:id` needs a real record id: ask the user, or give the explorer the list page's route and ask it to open one record from there.
-2. C2 login check.
+2. C0 browser tool, then C2 login check.
 3. C3: `out=${CLAUDE_PROJECT_DIR}/qa-out/<slug>`.
 4. C4 run marker.
 5. C5 card for the route.

@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""PreToolUse guard for qa-sdet (Bash, Read, Grep, Write, Edit). Denies, by default:
+"""PreToolUse guard for qa-sdet (runs on every tool; most pass straight through). Denies, by default:
 1. playwright-cli navigation to hosts not in config allowedHosts; run-code and attach (they reach
    outside the page: playwright-cli itself calls run-code RCE-equivalent); show bound to a non-local host
 2. acli anything except read verbs (Jira stays read-only; bugs are drafts)
-3. during a run (marker qa-out/.active): playwright-cli commands past the command budget or deadline,
+3. during a run (marker qa-out/.active): browser commands past the command budget or deadline,
    and route / network-state-set unless the run allows faults
 4. commands that print session secrets, and any read of the saved browser session file
 5. destructive commands / redirections onto the qa-sdet DB directory
 6. for the qa-explorer subagent only: touching the run marker, network CLIs (curl, wget, ...), and dumping
    the page's HTML
+7. the same rules for MCP fallbacks: a Playwright MCP's browser_* tools (hosts, run-code, secrets, files,
+   budget) and any Atlassian/Jira MCP tool that isn't a read; the explorer gets only its own tools
 Only words in command position are checked, so ordinary commands that merely mention these tools
 pass. If the guard itself fails, it denies commands that mention a guarded tool or file.
 Limit: it checks command text, not intent (curl, scripts, JS that builds URLs at runtime, etc.).
 """
+import glob
 import json
 import os
 import re
@@ -68,9 +71,11 @@ PW_DENY = {"attach": "attach connects to an unverified browser",
 for _verb in ("cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list",
               "sessionstorage-get", "request", "request-headers", "response-headers"):  # response: Set-Cookie
     PW_DENY[_verb] = _SECRET_HINT
+PW_DENY["tracing-start"] = ("a trace records every request with its headers, cookies included, into a file; "
+                            "use requests / response-body, and screenshots for evidence")
 # Page-side reads of cookies / web storage (eval runs in the page).
 SECRET_JS = re.compile(
-    r"document\s*(\.\s*cookie|\[\s*['\"`]cookie)|cookieStore|"
+    r"[dD]ocument\s*(\.\s*cookie|\[\s*['\"`]cookie)|cookieStore|"  # also el.ownerDocument.cookie
     r"(local|session)Storage\s*(\.\s*getItem\b|\[)|\.\.\.\s*(local|session)Storage|"
     r"(JSON\.stringify|Object\.(values|entries|assign|fromEntries))\s*\(\s*(local|session)Storage")
 # Key names (Object.keys(localStorage), localStorage.key(i), .length, for..in) are allowed: they show what a page stores.
@@ -113,6 +118,7 @@ class Ctx:
         self.marker_path, self.marker, self.marker_error = read_marker(cwd)
         self.marker_files = {os.path.realpath(os.path.join(b, "qa-out", ".active"))
                              for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
+        self.marker_files.add(os.path.realpath(CONFIG))  # the explorer leaves the allowlist alone too
         self.spend = 0
         self.raw = ""
         self.loop = False  # a playwright-cli call runs inside a loop / xargs / watch: can't be counted
@@ -139,6 +145,8 @@ def allowed_hosts():
 def host_ok(url, hosts):
     if url.strip().lower() == "about:blank":
         return True  # reaches no host
+    if "://" in url and url.split("://", 1)[0].strip().lower() not in ("http", "https", "ws", "wss"):
+        return False  # javascript://allowed.host/%0Acode runs code; data:, blob:, file:, view-source: reach no QA host
     authority = re.split(r"[/?#]", url.split("://", 1)[1] if "://" in url else url)[0]
     if "\\" in url or "@" in authority:
         return False  # user@host forms: browsers and urlparse disagree; don't guess (an @ in the query is fine)
@@ -173,6 +181,28 @@ def session_files():
     if os.environ.get("PLAYWRIGHT_MCP_STORAGE_STATE"):  # the user's own browser cookie jar
         files.add(os.path.realpath(expand(os.environ["PLAYWRIGHT_MCP_STORAGE_STATE"])))
     return files
+
+
+def profile_dirs():
+    """Playwright MCP browser profiles: with the MCP fallback the QA login lives there (cookies.sqlite etc.)."""
+    cache = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
+    dirs = {f"{cache}/ms-playwright-mcp", "~/Library/Caches/ms-playwright-mcp", "$LOCALAPPDATA/ms-playwright-mcp"}
+    dirs |= set(glob.glob(os.path.expanduser(f"{cache}/ms-playwright/mcp-*")))  # older MCP versions kept profiles here
+    if os.environ.get("PLAYWRIGHT_MCP_USER_DATA_DIR"):
+        dirs.add(os.environ["PLAYWRIGHT_MCP_USER_DATA_DIR"])
+    home = os.path.realpath(os.path.expanduser("~"))
+    return {os.path.realpath(expand(d)) for d in dirs if "$" not in expand(d)} - {home, "/", ""}
+
+
+def glob_reaches_profile(t, cwd):
+    """Could a shell glob reach into a browser profile folder (`~/.cache/ms-play*/*/cookies.sqlite`)?"""
+    parts = Path(os.path.normpath(os.path.join(cwd, t))).parts  # not resolve(): it stops at the first glob
+    return any(shell_glob_match(d, os.path.join(*parts[:k])) for d in profile_dirs() for k in range(2, len(parts) + 1))
+
+
+def in_profile_dir(path, cwd):
+    p = os.path.realpath(os.path.join(cwd, expand(path)))
+    return any(p == d or p.startswith(d + os.sep) for d in profile_dirs())
 
 
 def session_dirs():
@@ -236,12 +266,12 @@ def is_session_ref(token, cwds):
     if not code_like and os.path.basename(t).startswith("qa-state"):  # a copy or the file seen from anywhere
         return True
     for c in cwds:
-        if os.path.realpath(os.path.join(c, t)) in files:
+        if os.path.realpath(os.path.join(c, t)) in files or (not code_like and in_profile_dir(t, c)):
             return True
         if code_like:
             continue
         if GLOB_RE.search(t):  # `cat ~/.config/*/*.json`, `tar c ~/.config/qa-*`: a session file or its folder?
-            if glob_hits(t, c, files | session_dirs()):
+            if glob_hits(t, c, files | session_dirs()) or glob_reaches_profile(t, c):
                 return True
         elif os.path.realpath(os.path.join(c, t)) in session_dirs():
             return True
@@ -252,7 +282,7 @@ def is_session_ancestor(token, cwds):
     """A folder above a session file, at any level (~, /): a recursive content search from it reads the file."""
     for c in cwds:
         p = resolve(expand(token), c).rstrip(os.sep) + os.sep
-        if any(f.startswith(p) for f in session_files()):
+        if any(f.startswith(p) for f in session_files() | {d + os.sep for d in profile_dirs()}):
             return True
     return False
 
@@ -260,8 +290,10 @@ def is_session_ancestor(token, cwds):
 def glob_may_match_session(glob, base):
     """Could a Grep glob like '*.json', '**/*.{ts,json}' or '.config/**' (relative to base) select a session file?"""
     done = brace_alts(glob or "")
+    targets = session_files() | {os.path.join(d, "x") for d in profile_dirs() if d.startswith(base.rstrip(os.sep) + os.sep)}
     return any(fnmatch(f, a) or fnmatch(os.path.basename(f), a) or fnmatch(os.path.relpath(f, base), a)
-               for f in session_files() for a in done)
+               or (f not in session_files() and a.startswith("**"))  # `**/cookies.sqlite` reaches into a profile
+               for f in targets for a in done)
 
 
 def recursive_content_search(name, rest):
@@ -336,7 +368,7 @@ def read_marker(cwd):
 
 
 def spend_budget(path, n, explorer=False):
-    """Atomically count n playwright-cli commands against the run; deny reason when it's used up."""
+    """Atomically count n browser commands (playwright-cli or MCP browser_*) against the run; deny reason when used up."""
     lock = open(path.with_name(".active.lock"), "w")
     try:
         if fcntl:
@@ -347,10 +379,13 @@ def spend_budget(path, n, explorer=False):
         if deadline and time.time() > deadline + 600 and not explorer:  # a crashed run left it behind (user hint)
             return f"a qa-sdet run marker expired over 10 minutes ago; if no run is active, delete {path}"
         if deadline and time.time() > deadline:
-            return "the run's time budget is used up: close the browser, write the report and run.json now"
+            return "the run's time budget is used up: close the browser (MCP: browser_tabs close on your tab), write the report and run.json now"
         if budget and used + n > budget:
-            return (f"the run's budget of {budget} playwright-cli commands is used up ({used} used): "
-                    "close the browser, write the report and run.json now")
+            if used < budget:  # a batch bigger than what's left: the run can go on with fewer commands per call
+                return (f"this call has {n} browser commands but only {budget - used} of the run's {budget} are left "
+                        f"({used} used); send fewer per call, or close the browser and write the report if done")
+            return (f"the run's budget of {budget} browser commands is used up ({used} used): "
+                    "close the browser (MCP: browser_tabs close on your tab), write the report and run.json now")
         marker["used"] = used + n
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".active.")
         with os.fdopen(fd, "w") as f:
@@ -779,15 +814,19 @@ def acli_head(rest):
 
 def touches_marker(name, rest, outs, cwds, markers):
     """Would this command change or remove the run marker? Paths, globs, and folders that contain it."""
-    reason = "the run marker belongs to the calling skill: read it if you like, but leave it unchanged and carry on testing"
+    reason = ("the run marker and the qa-sdet config belong to the calling skill and the user: read them if you like, "
+              "but leave them unchanged and carry on testing")
     opts = set(rest)
     removes_folders = (name in ("mv", "rmdir", "trash", "trash-put", "gio")  # only these can take the folder with them
                        or (name == "rm" and any(re.match(r"^-[a-zA-Z]*[rR]", a) or a == "--recursive" for a in rest))
                        or (name == "find" and ("-delete" in opts or any(
                            prog_name((shlex.split(x) or [""])[0]) in REMOVERS for x in find_exec(rest))))
                        or (name == "rsync" and any(a.startswith(("--delete", "--remove-source")) for a in rest)))
-    read_only = name in READ_ONLY_TOOLS or (name == "find" and not removes_folders)  # `find -newer qa-out/.active`
+    read_only = (name in READ_ONLY_TOOLS or (name == "find" and not removes_folders)  # `find -newer qa-out/.active`
+                 or (name == "sed" and not any(x.startswith(("-i", "--in-place")) for x in rest)))  # `sed -n 1,5p`
     args = [] if read_only else [x.split("=", 1)[1] if x.startswith("-") and "=" in x else x for x in rest]
+    if name in ("cp", "rsync", "scp") and not any(x.startswith("--remove-source") for x in rest):  # copies leave sources unchanged
+        args = [x for x in args if x not in set(copy_sources(name, rest)[0])]
     embedded = [m.group(1) for x in rest if (m := re.search(r">>?([^\s>]+)$", x))]  # `printf x>qa-out/.active`
     for a in args + outs + embedded:
         if a.startswith("-") or NOT_A_PATH_RE.search(a):
@@ -1059,12 +1098,130 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
     return r or check_db(words, outs, name, rest, local)
 
 
+# ---------- MCP fallbacks (Playwright MCP, Atlassian/Jira MCP) ----------
+
+MCP_BROWSER_RE = re.compile(r"^mcp__.+__browser_[a-z_]+$")
+MCP_JIRA_RE = re.compile(r"^mcp__.*(atlassian|jira|confluence)", re.I)  # server or tool name (mcp__corp__createJiraIssue)
+MCP_JIRA_READ_RE = re.compile(r"^(batch_)?(get|search|lookup|list|fetch|read|view|download)|^atlassianuserinfo$", re.I)
+MCP_BUDGET_FREE = {"browser_install", "browser_tab_close", "browser_tab_list"}
+# The explorer inherits every tool (an agent's `tools:` list can't name "any server's browser_*"), so its
+# allowlist lives here: working tools plus housekeeping; other MCPs (mail, Jira, docs) stay out of a test run.
+EXPLORER_TOOLS = {"Bash", "Read", "Write", "Grep", "Glob", "LS", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate",
+                  "TaskGet", "TaskList", "TaskOutput", "BashOutput", "TaskStop", "KillShell", "KillBash"}
+MCP_SECRET_TOOL_RE = re.compile(r"(cookie|(local|session)storage)s?_(list|get)|storage_state|request_headers|"
+                                r"response_headers|get_config")  # set/delete/clear print nothing; config holds headers
+
+
+def _strings(obj, depth=0):
+    """Every string inside a tool input (nested dicts/lists), for scanning code wherever a version puts it."""
+    if isinstance(obj, str):
+        return [obj]
+    if not isinstance(obj, (dict, list, tuple)):
+        return []
+    if depth > 8:  # no real tool input nests this deep: fail closed (the crash fallback denies browser tools)
+        raise ValueError("tool input nested too deeply to check")
+    items = obj.values() if isinstance(obj, dict) else obj
+    return [x for v in items for x in _strings(v, depth + 1)]
+
+
+def check_mcp(tool, tin, cwd, explorer):
+    """Deny reason for an MCP tool call, or None: the browser_* rules mirror check_pw, Jira tools are read-only."""
+    name = tool[len("mcp__"):].rpartition("__")[2]
+    if MCP_BROWSER_RE.match(tool):
+        if not explorer:
+            path, marker, _ = read_marker(cwd)
+            if path is None or (marker and marker.get("deadline")
+                                and time.time() > float(marker["deadline"]) + 600):
+                return None  # no run (or one left behind by an interrupted skill): the user's everyday browser
+        return check_mcp_browser(name, tin, cwd, explorer)
+    if MCP_JIRA_RE.match(tool):
+        bare = re.sub(r"^(jira|confluence)_", "", name, flags=re.I)
+        if not MCP_JIRA_READ_RE.search(bare):
+            return (f"{name} writes to Jira/Confluence; Jira writes are yours: "
+                    "the bug draft ends with the command for you to run")
+    return None
+
+
+def check_mcp_browser(name, tin, cwd, explorer):
+    hosts, cwds = allowed_hosts(), {cwd}
+    if name == "browser_close":  # it ends the MCP browser's login: later routes and runs would land on SSO
+        return "browser_close would end the MCP browser's login; close your own tab: browser_tabs {action: \"close\"}"
+    if "tracing" in name:  # browser_start_tracing / browser_stop_tracing (devtools capability)
+        return f"{name} blocked: {PW_DENY['tracing-start']}"
+    if name.startswith("browser_run_code"):  # browser_run_code_unsafe; older versions: browser_run_code
+        return "browser_run_code_unsafe runs code in the Playwright server and can reach the host; use browser_evaluate"
+    if MCP_SECRET_TOOL_RE.search(name) or (name == "browser_network_request" and tin.get("part") not in
+                                           ("request-body", "response-body")):
+        return (f"{name} prints session secrets into the conversation; use browser_network_request with "
+                "part request-body or response-body, or read one header with browser_evaluate "
+                "\"() => fetch(url).then(r => r.headers.get('name'))\"")
+    if re.search(r"(?<!un)route(?!_list)|network_state|offline", name):  # unroute removes mocks, as CLI unroute
+        marker = read_marker(cwd)[1]
+        if not (marker and marker.get("faults") is True):
+            return f"{name} is fault injection; rerun the skill with --faults to allow it"
+    if name in ("browser_tabs", "browser_tab_select") and (name == "browser_tab_select" or tin.get("action") == "select"):
+        return ("switching tabs is blocked in a QA run: other tabs hold the sign-in (its network log has the login "
+                "request) or, on an MCP attached to a real browser, the user's own pages; work in your own tab and "
+                "open new-tab links there with browser_navigate")
+    url = tin.get("url")
+    if url is not None:  # browser_navigate, browser_tabs new, older versions' browser_tab_new, ...
+        if not isinstance(url, str) or not host_ok(url, hosts):
+            return f"{name} to non-allowlisted host: {url} (allowed: {sorted(hosts)})"
+    if re.search(r"eval|run_code|script", name):  # code tools: every string, whatever the version names its field
+        js = " ".join(_strings({k: v for k, v in tin.items()  # descriptions and selectors aren't code
+                                if k not in ("element", "target", "filename", "startElement", "endElement")}))
+    else:  # elsewhere only code-carrying fields; typed text (browser_type, fill_form) is test data
+        js = " ".join(str(tin.get(k) or "") for k in ("function", "code", "url"))  # a URL can carry script too
+    if js.strip():
+        if explorer and PAGE_DUMP_RE.search(js):
+            return ("dumping the page's HTML reads app code and wastes tokens; use browser_snapshot for structure, "
+                    "browser_find, or browser_evaluate on one element")
+        if SECRET_JS.search(js) or storage_value_read(js):
+            return ("browser_evaluate reading cookies or web storage values blocked (they hold session tokens); "
+                    "to check what a page stores, read key names: Object.keys(localStorage)")
+        hosts_ = [h for h in SCHEMELESS_URL_RE.findall(js) if "." in h or h.lower() == "localhost"]
+        for u in [m.group(0) for m in URL_RE.finditer(js) if not compared_only(js, m.start(), m.group(0))] + \
+                 ["http://" + h for h in hosts_]:
+            if not host_ok(u, hosts):
+                return f"{name} references non-allowlisted URL: {u}"
+    files, sent = [], []  # every field that names a file, whatever the version calls it (filename, path, outputPath, ...)
+    for key, v in tin.items():
+        if re.search(r"file|path|dir|output|save", str(key), re.I):
+            vals = v if isinstance(v, (list, tuple)) else [v]
+            files += vals
+            sent += vals if re.search(r"paths|files", str(key), re.I) else []  # uploads/drops send these to the page
+    for f in files:
+        if not f or not isinstance(f, str):
+            continue  # a flag such as saveSession: true names no file
+        if touches_db(f, cwds, False):
+            return f"{name} writing into the qa-sdet memory DB directory is blocked"
+        if is_session_ref(f, cwds):
+            return "the saved browser session holds live cookies; it stays out of the browser tools"
+        target = Path(os.path.realpath(os.path.join(cwd, expand(f))))  # realpath: a symlinked folder is the same
+        if (target.name in (".active", ".active.lock") and target.parent.name == "qa-out") or \
+                str(target) == os.path.realpath(CONFIG):  # a JSON result over config.json would widen allowedHosts
+            return "the run marker and the qa-sdet config are not output files; save files under the run's out folder"
+        if f in sent and is_session_ancestor(f, cwds):
+            return f"{name} would send a folder that holds the saved browser session"
+        if not os.path.isabs(expand(f)) and ".." in Path(f).parts:
+            return f"{name}: a relative path with .. can land outside the run folder; pass an absolute path under <out>"
+    if name not in MCP_BUDGET_FREE and not (name == "browser_tabs" and tin.get("action") in ("list", "close")):
+        path, marker, error = read_marker(cwd)
+        if error:
+            return error
+        if marker:
+            return spend_budget(path, 1, explorer)
+    return None
+
+
 # ---------- hook entry point ----------
 
 def mentions_session_path(text, folders=False):
     """Does the text name a session file (path, ~-path, $HOME-path or file name)? folders=True also counts its
     folder: right for the crash fallback, too wide for code (`open('~/.config/qa-sdet/config.json')` is fine)."""
     home = os.path.expanduser("~")
+    if "ms-playwright-mcp" in text or any(d in text for d in profile_dirs()):  # a browser profile with the QA login
+        return True
     for f in session_files():
         forms = {f, os.path.basename(f)} | ({os.path.dirname(f)} if folders else set())
         if f.startswith(home + os.sep):
@@ -1089,12 +1246,17 @@ def decide(data):
     cwd = str(data.get("cwd") or os.getcwd())
     is_explorer = str(data.get("agent_type") or "").split(":")[-1] == "qa-explorer"
     if is_explorer:  # the budget it runs under isn't its own
-        target = Path(os.path.normpath(os.path.join(cwd, str(tin.get("file_path") or "x"))))
-        if tool in ("Write", "Edit", "MultiEdit") and target.name == ".active" and target.parent.name == "qa-out":
+        if tool not in EXPLORER_TOOLS and not MCP_BROWSER_RE.match(str(tool or "")):
+            return (f"the qa-explorer tests through the browser only: {tool} is not one of its tools "
+                    "(Bash, Read, Write, Grep, Glob and the browser_* MCP tools)")
+        target = Path(os.path.realpath(os.path.join(cwd, str(tin.get("file_path") or "x"))))
+        if tool in ("Write", "Edit", "MultiEdit") and ((target.name == ".active" and target.parent.name == "qa-out")
+                                                       or str(target) == os.path.realpath(CONFIG)):
             return "the run marker belongs to the calling skill: read it if you like, but leave it unchanged and carry on testing"
     if tool in ("Read", "Grep"):
         target = str(tin.get("file_path") or tin.get("path") or "")
-        if target and (is_session_file(target, cwd) or (tool == "Grep" and is_session_ref(target, {cwd}))):
+        if target and (is_session_file(target, cwd) or in_profile_dir(target, cwd)
+                       or (tool == "Grep" and is_session_ref(target, {cwd}))):
             return "the saved browser session holds live cookies; it stays out of the conversation"
         if (tool == "Grep" and tin.get("output_mode") == "content" and is_session_ancestor(target or ".", {cwd})
                 and (not tin.get("glob") or glob_may_match_session(str(tin["glob"]), resolve(target or ".", cwd)))):
@@ -1103,6 +1265,8 @@ def decide(data):
         return None
     if tool == "Bash":
         return check(str(tin.get("command") or ""), cwd, explorer=is_explorer)
+    if str(tool or "").startswith("mcp__"):
+        return check_mcp(str(tool), tin, cwd, is_explorer)
     return None
 
 
@@ -1121,7 +1285,9 @@ def main():
         reason = decide(data)
     except Exception as e:  # noqa: BLE001 - a crashing guard must not mean "allowed"
         reason = (f"guard error ({type(e).__name__}) on a command that mentions a guarded tool or file"
-                  if GUARDED_ANY_RE.search(text) or DATA_DIR in text or mentions_session_path(text, folders=True) else None)
+                  if GUARDED_ANY_RE.search(text) or DATA_DIR in text or mentions_session_path(text, folders=True)
+                  or MCP_BROWSER_RE.match(str(data.get("tool_name") or ""))
+                  or MCP_JIRA_RE.match(str(data.get("tool_name") or "")) else None)
     if reason:
         deny(reason)
     return 0

@@ -29,6 +29,14 @@ class Docs(unittest.TestCase):
                 if name not in ("plan.md", "cases.md"):  # outputs, not plugin files
                     self.assertTrue((ROOT / "references" / name).exists() or (ROOT / name).exists(), f"{f.name}: {name}")
 
+    def test_no_hardcoded_browser(self):
+        """The browser is the user's choice (config `browser`, asked in C1), never assumed."""
+        for f in DOCS + [ROOT / "README.md"]:
+            text = f.read_text()
+            self.assertNotRegex(text, r"--browser\s*[= ]\s*(chrome|chromium|msedge|firefox|webkit)\b", f.name)
+            self.assertNotRegex(text, r"(?i)\b(firefox|chrome|chromium|webkit|(ms)?edge) headless\b", f.name)  # bug template text
+            self.assertNotRegex(text, r'"browser":\s*"(chrome|msedge|firefox|webkit)"', f.name)  # a preset config value
+
     def test_statuses_in_docs_are_real(self):
         text = (ROOT / "skills/qa-memory/SKILL.md").read_text()
         for status in re.findall(r"\b(OPEN|FILED|FIXED|INVALID|REGRESSED)\b", text):

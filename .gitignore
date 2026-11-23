@@ -2,5 +2,6 @@ qa-out/
 __pycache__/
 *.db
 .playwright-cli/
+.playwright-mcp/
 *.db-wal
 *.db-shm

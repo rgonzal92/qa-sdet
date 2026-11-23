@@ -1,6 +1,6 @@
 # <Short title: what breaks, where>
 
-**Classification:** CONFIRMED | SUSPECTED · **Severity:** HIGH · **Route:** /path · **Build:** <build> · **Browser:** Firefox headless
+**Classification:** CONFIRMED | SUSPECTED · **Severity:** HIGH · **Route:** /path · **Build:** <build> · **Browser:** <config browser> headless (or the MCP's browser)
 **Ticket:** <KEY or none> · **Repro:** 2/2 · **Found:** <date> · **qa-mem hash:** <output of `qa-mem hash <route> '<symptom>'`>
 
 ## Steps

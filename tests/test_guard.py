@@ -20,6 +20,11 @@ Path(TMP, "config.json").write_text(json.dumps({"allowedHosts": ["qa.traffic.exa
 g = SourceFileLoader("guard", str(ROOT / "hooks/guard.py")).load_module()
 
 
+RUN = tempfile.mkdtemp()  # a project with an active run (no budget limit) for the MCP browser rules
+Path(RUN, "qa-out").mkdir()
+Path(RUN, "qa-out/.active").write_text(json.dumps({"expires": time.time() + 86400}))
+
+
 class Guard(unittest.TestCase):
     def deny(self, cmd, cwd=TMP):
         self.assertIsNotNone(g.check(cmd, cwd), cmd)
@@ -710,6 +715,254 @@ class Guard(unittest.TestCase):
         self.deny(f"timeout -s KILL 5 rm -rf {TMP}/data")
         self.deny(f"cd {TMP} && rm -rf data")
         self.allow(f"cd {TMP}/data && ls")
+
+    def test_mcp_fallbacks(self):
+        def mcp(tool, cwd=RUN, agent=None, **tin):  # inside a QA run: browser MCP rules apply
+            data = {"tool_name": tool, "tool_input": tin, "cwd": cwd}
+            if agent:
+                data["agent_type"] = agent
+            return g.decide(data)
+        nav = "mcp__playwright__browser_navigate"
+        self.assertIsNone(mcp(nav, url="http://localhost:8765/form.html"))
+        self.assertIsNone(mcp("mcp__plugin_playwright_playwright__browser_navigate", url="https://qa.traffic.example/x"))
+        self.assertIsNotNone(mcp(nav, url="https://evil.com"))
+        self.assertIsNotNone(mcp(nav, url=["https://evil.com"]))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_tabs", action="new", url="https://evil.com"))
+        self.assertIsNone(mcp("mcp__playwright__browser_tabs", action="list"))
+        # finding 11b: no switching to tabs the explorer didn't open (sign-in tab, a real browser's own pages)
+        self.assertIsNotNone(mcp("mcp__playwright__browser_tabs", action="select", index=0))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_tab_select", index=0))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_tabs", agent="qa-sdet:qa-explorer", cwd=TMP, action="select", index=1))
+        self.assertIsNone(mcp("mcp__playwright__browser_tabs", action="close"))
+        self.assertIsNone(g.decide({"tool_name": "mcp__playwright__browser_tabs", "cwd": TMP,
+                                    "tool_input": {"action": "select", "index": 0}}))  # outside a run: the user's browser
+        self.assertIsNotNone(mcp("mcp__playwright__browser_run_code_unsafe", code="1"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_network_request", index=3))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_network_request", index=3, part="response-headers"))
+        self.assertIsNone(mcp("mcp__playwright__browser_network_request", index=3, part="response-body"))
+        self.assertIsNone(mcp("mcp__playwright__browser_network_requests"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_cookie_list"))
+        ev = "mcp__playwright__browser_evaluate"
+        self.assertIsNotNone(mcp(ev, function="() => document.cookie"))
+        self.assertIsNotNone(mcp(ev, function="() => localStorage.getItem('t')"))
+        self.assertIsNone(mcp(ev, function="() => Object.keys(localStorage)"))
+        self.assertIsNotNone(mcp(ev, function="() => fetch('https://evil.com/x')"))
+        self.assertIsNone(mcp(ev, function="() => document.body.innerHTML.length"))
+        self.assertIsNotNone(mcp(ev, agent="qa-sdet:qa-explorer", function="() => document.body.innerHTML"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", paths=[os.path.expanduser("~/.config/qa-sdet/qa-state.json")]))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_take_screenshot", filename=os.environ["QA_SDET_DATA"] + "/x.png"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_route", pattern="**"))  # no --faults marker
+        # Jira / Confluence MCPs: reads only
+        for ok in ("mcp__claude_ai_Atlassian__getJiraIssue", "mcp__atlassian__searchJiraIssuesUsingJql",
+                   "mcp__claude_ai_Atlassian__atlassianUserInfo", "mcp__mcp-atlassian__jira_get_issue",
+                   "mcp__atlassian__lookupJiraAccountId", "mcp__serena__write_memory", "mcp__claude_ai_Gmail__send_message"):
+            self.assertIsNone(mcp(ok), ok)
+        for bad in ("mcp__claude_ai_Atlassian__createJiraIssue", "mcp__atlassian__editJiraIssue",
+                    "mcp__atlassian__transitionJiraIssue", "mcp__atlassian__addCommentToJiraIssue",
+                    "mcp__mcp-atlassian__jira_create_issue", "mcp__atlassian__updateConfluencePage"):
+            self.assertIsNotNone(mcp(bad), bad)
+
+    def test_mcp_audit_rounds(self):
+        def mcp(tool, cwd=RUN, agent=None, **tin):  # inside a QA run: browser MCP rules apply
+            data = {"tool_name": tool, "tool_input": tin, "cwd": cwd}
+            if agent:
+                data["agent_type"] = agent
+            return g.decide(data)
+        ex = "qa-sdet:qa-explorer"
+        # R1 every url argument; R5 older run-code name; R6 unroute is cleanup
+        self.assertIsNotNone(mcp("mcp__playwright__browser_tab_new", url="https://evil.com"))
+        self.assertIsNone(mcp("mcp__playwright__browser_tab_new", url="http://localhost:8765/"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_run_code", code="1"))
+        self.assertIsNone(mcp("mcp__playwright__browser_unroute"))
+        # R21 script and non-web schemes, even with an allowed host in them (CLI and MCP)
+        for u in ("javascript://localhost/%0Alocation.href='https://evil.com'", "javascript://localhost/%0Adocument.cookie",
+                  "JavaScript://localhost/x", "data:text/html,<script>1</script>", "view-source:http://localhost/",
+                  "file:///etc/passwd", "blob:http://localhost/x"):
+            self.assertIsNotNone(mcp("mcp__playwright__browser_navigate", url=u), u)
+            self.assertIsNotNone(mcp("mcp__playwright__browser_tabs", action="new", url=u), u)
+            self.deny(f"playwright-cli -s=qa goto '{u}'")
+        self.assertIsNone(mcp("mcp__playwright__browser_navigate", url="http://localhost:8765/form.html?q=javascript:x"))
+        self.assertIsNone(mcp("mcp__playwright__browser_evaluate", function="() => new WebSocket('wss://qa.traffic.example/s')"))
+        # audit pass 4: file fields under any name
+        sess = os.path.join(os.path.dirname(os.environ["QA_SDET_CONFIG"]), "qa-state.json")
+        for key in ("path", "file", "outputPath", "saveAs", "filePath"):
+            self.assertIsNotNone(mcp("mcp__playwright__browser_pdf_save", **{key: sess}), key)
+            self.assertIsNotNone(mcp("mcp__playwright__browser_pdf_save", **{key: RUN + "/qa-out/.active"}), key)
+        self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", files=[os.path.dirname(sess)]))
+        self.assertIsNone(mcp("mcp__playwright__browser_pdf_save", path=RUN + "/qa-out/form/evidence/page.pdf"))
+        # audit pass 18: flags in file-like fields, numbers in code tools, a custom MCP profile folder
+        self.assertIsNone(mcp("mcp__playwright__browser_snapshot", saveSession=True, outputMaxSize=1000))
+        self.assertIsNone(mcp("mcp__playwright__browser_evaluate", function="() => 1", timeout=5000))
+        custom = tempfile.mkdtemp()
+        os.environ["PLAYWRIGHT_MCP_USER_DATA_DIR"] = custom
+        try:
+            self.assertIsNotNone(g.decide({"tool_name": "Read", "tool_input": {"file_path": custom + "/Default/Cookies"}, "cwd": TMP}))
+        finally:
+            del os.environ["PLAYWRIGHT_MCP_USER_DATA_DIR"]
+        # audit pass 3: code under any field name of an evaluate tool
+        for tin in ({"expression": "document.cookie"}, {"script": "localStorage.getItem('t')"},
+                    {"fn": "() => fetch('https://evil.com/x')"}, {"function": "() => 1", "args": ["https://evil.com"]},
+                    {"params": {"code": "document.cookie"}}):
+            self.assertIsNotNone(mcp("mcp__playwright__browser_evaluate", **tin), tin)
+        self.assertIsNone(mcp("mcp__playwright__browser_type", target="e1", text="see https://example.org for details"))
+        deep = "document.cookie"
+        for _ in range(12):
+            deep = {"x": deep}
+        with self.assertRaises(ValueError):  # main() turns this into a deny for browser tools
+            mcp("mcp__playwright__browser_evaluate", params=deep)
+        # audit pass 1: traces hold every request's headers (cookies) on disk
+        self.assertIsNotNone(mcp("mcp__playwright__browser_start_tracing"))
+        self.deny("playwright-cli -s=qa tracing-start")
+        self.allow("playwright-cli -s=qa tracing-stop")  # stopping one is harmless
+        # R2 Jira tools on servers with other names, any case
+        for bad in ("mcp__corp__createJiraIssue", "mcp__corp__JIRA_create_issue", "mcp__tools__confluence_update_page"):
+            self.assertIsNotNone(mcp(bad), bad)
+        self.assertIsNone(mcp("mcp__corp__getJiraIssue"))
+        # R18 the read/write split across the Atlassian (Rovo) and mcp-atlassian tool sets
+        for ok in ("getTransitionsForJiraIssue", "getVisibleJiraProjects", "searchConfluenceUsingCql", "search", "fetch",
+                   "getAccessibleAtlassianResources", "jira_search_fields", "jira_get_sprint_issues",
+                   "jira_batch_get_changelogs", "confluence_get_page"):
+            self.assertIsNone(mcp("mcp__atlassian__" + ok), ok)
+        for bad in ("addWorklogToJiraIssue", "createConfluenceInlineComment", "jira_batch_create_issues",
+                    "jira_link_to_epic", "jira_remove_issue_link", "jira_create_sprint", "jira_delete_issue",
+                    "confluence_add_label"):
+            self.assertIsNotNone(mcp("mcp__atlassian__" + bad), bad)
+        # R4 the explorer's allowlist
+        for tool in ("mcp__claude_ai_Gmail__send_message", "mcp__claude_ai_Atlassian__getJiraIssue", "WebFetch",
+                     "Agent", "Skill", "SendUserFile", "Edit"):
+            self.assertIsNotNone(mcp(tool, agent=ex), tool)
+        for tool in ("Glob", "ToolSearch", "TodoWrite"):
+            self.assertIsNone(mcp(tool, agent=ex), tool)
+        self.assertIsNone(mcp("mcp__pw__browser_snapshot", agent=ex))
+        self.assertIsNone(mcp("mcp__claude_ai_Gmail__send_message"))  # the main session is the user's
+        # R7 marker through file arguments; R8 relative paths escaping the MCP's output folder
+        self.assertIsNotNone(mcp("mcp__playwright__browser_take_screenshot", filename="qa-out/.active"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_snapshot", filename=TMP + "/qa-out/.active"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_snapshot", filename="../../x.md"))
+        self.assertIsNone(mcp("mcp__playwright__browser_snapshot", filename=TMP + "/qa-out/form/snap.md"))
+        self.assertIsNone(mcp("mcp__playwright__browser_snapshot", filename="snap.md"))
+        # R23 the MCP's browser profile holds the QA login; symlinked marker folders; uploading a session folder
+        prof = "~/.cache/ms-playwright-mcp/mcp-firefox-abc/cookies.sqlite"
+        self.assertIsNotNone(g.decide({"tool_name": "Read", "tool_input": {"file_path": os.path.expanduser(prof)}, "cwd": TMP}))
+        self.assertIsNotNone(g.decide({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": os.path.expanduser("~/.cache/ms-playwright-mcp")}, "cwd": TMP}))
+        self.deny(f"sqlite3 {prof} 'select host,name,value from moz_cookies'")
+        self.deny("cp -r ~/.cache/ms-playwright-mcp /tmp/x")
+        self.deny("grep -r sid ~/.cache")
+        self.allow("ls ~/.cache/ms-playwright")  # the CLI's browser builds are fine
+        cwd = tempfile.mkdtemp()
+        Path(cwd, "qa-out").mkdir()
+        os.symlink(Path(cwd, "qa-out"), Path(cwd, "x"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_evaluate", cwd=cwd, agent=ex, function="() => 1", filename=cwd + "/x/.active"))
+        self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": ex, "cwd": cwd,
+                                       "tool_input": {"file_path": cwd + "/x/.active", "content": "{}"}}))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", paths=[os.path.expanduser("~/.config")]))
+        self.assertIsNone(mcp("mcp__playwright__browser_file_upload", paths=[TMP + "/fixture.csv"]))
+        # R25 the explorer can't rewrite the config (allowedHosts) by any route
+        cfg = os.environ["QA_SDET_CONFIG"]
+        self.assertIsNotNone(mcp("mcp__playwright__browser_evaluate", function="() => ({allowedHosts: ['evil.com']})", filename=cfg))
+        self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": ex, "cwd": TMP,
+                                       "tool_input": {"file_path": cfg, "content": "{}"}}))
+        self.assertIsNotNone(g.check(f"echo '{{}}' > {cfg}", TMP, explorer=True))
+        self.assertIsNone(g.check(f"cat {cfg}", TMP, explorer=True))  # reading it is fine
+        self.assertIsNone(g.decide({"tool_name": "Write", "cwd": TMP, "tool_input": {"file_path": cfg + ".x", "content": "{}"}}))
+        # R17 the C4 prune covers the MCP's snapshot folder too
+        self.allow(f"find {TMP}/.playwright-cli {TMP}/.playwright-mcp -type f -mtime +7 -delete 2>/dev/null")
+
+    def test_mcp_browser_rules_scope(self):
+        """R24: a Playwright MCP is also the user's everyday browser; its rules apply inside QA runs only."""
+        nav = {"tool_name": "mcp__playwright__browser_navigate", "tool_input": {"url": "https://playwright.dev"}}
+        self.assertIsNone(g.decide({**nav, "cwd": TMP}))  # no run marker: not a QA run
+        self.assertIsNotNone(g.decide({**nav, "cwd": RUN}))  # a run is active
+        self.assertIsNotNone(g.decide({**nav, "cwd": TMP, "agent_type": "qa-sdet:qa-explorer"}))  # the explorer always
+        self.assertIsNotNone(g.decide({"tool_name": "mcp__x__createJiraIssue", "tool_input": {}, "cwd": TMP}))  # Jira always
+        bad = tempfile.mkdtemp()
+        Path(bad, "qa-out").mkdir()
+        Path(bad, "qa-out/.active").write_text("{oops")
+        self.assertIsNotNone(g.decide({**nav, "cwd": bad}))  # malformed marker: fail closed
+        # R24 narrower secret tools; route_list; get_config; ownerDocument.cookie
+        call = lambda name, **tin: g.decide({"tool_name": "mcp__playwright__" + name, "tool_input": tin, "cwd": RUN})
+        for ok in ("browser_cookie_set", "browser_cookie_delete", "browser_cookie_clear", "browser_localstorage_set",
+                   "browser_localstorage_clear", "browser_route_list"):
+            self.assertIsNone(call(ok), ok)
+        for bad_tool in ("browser_cookie_list", "browser_cookie_get", "browser_localstorage_get",
+                         "browser_sessionstorage_list", "browser_storage_state", "browser_get_config"):
+            self.assertIsNotNone(call(bad_tool), bad_tool)
+        self.assertIsNotNone(call("browser_evaluate", element="x", target="e1", function="(el) => el.ownerDocument.cookie"))
+
+    def test_audit_pass24_review_findings(self):
+        ex = "qa-sdet:qa-explorer"
+        mcp = lambda tool, cwd=RUN, agent=ex, **tin: g.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd,
+                                                                **({"agent_type": agent} if agent else {})})
+        # 2: profiles reached by globs, inline code and Grep globs; XDG cache
+        for cmd in ("sqlite3 ~/.cache/ms-playwright-m*/mcp-*/cookies.sqlite 'select name,value from moz_cookies'",
+                    "cat ~/.cache/ms-play*/*/cookies.sqlite",
+                    "python3 -c \"import sqlite3; sqlite3.connect('$HOME/.cache/ms-playwright-mcp/p/cookies.sqlite')\""):
+            self.deny(cmd)
+        self.allow("ls ~/.cache/ms-playwright/")  # browser builds
+        self.assertIsNotNone(g.decide({"tool_name": "Grep", "cwd": TMP, "tool_input": {
+            "pattern": "x", "path": os.path.expanduser("~/.cache"), "glob": "**/cookies.sqlite", "output_mode": "content"}}))
+        xdg = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = xdg
+        try:
+            self.assertIsNotNone(g.decide({"tool_name": "Read", "cwd": TMP, "tool_input": {"file_path": xdg + "/ms-playwright-mcp/p/Cookies"}}))
+        finally:
+            del os.environ["XDG_CACHE_HOME"]
+        # 3: browser_close ends the login during runs; outside a run it's the user's browser
+        self.assertIsNotNone(mcp("mcp__playwright__browser_close"))
+        self.assertIsNone(mcp("mcp__playwright__browser_close", cwd=TMP, agent=None))
+        # 4: a marker left by an interrupted run doesn't block the main session's everyday browsing
+        stale = tempfile.mkdtemp()
+        Path(stale, "qa-out").mkdir()
+        Path(stale, "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600, "deadline": time.time() - 700}))
+        self.assertIsNone(mcp("mcp__playwright__browser_navigate", cwd=stale, agent=None, url="https://github.com"))
+        self.assertIsNotNone(mcp("mcp__playwright__browser_navigate", cwd=stale, url="https://github.com"))  # explorer: still guarded
+        # 6: descriptions and selectors aren't code
+        self.assertIsNone(mcp("mcp__playwright__browser_evaluate", element="Help link to https://docs.vendor.com",
+                              target="a[href='https://docs.vendor.com/help']", function="(el) => el.textContent"))
+        self.assertIsNone(mcp("mcp__playwright__browser_evaluate", element="the localStorage notice", function="(el) => el.hidden"))
+        # minor: read-only config commands for the explorer; download is a Jira read
+        cfg = os.environ["QA_SDET_CONFIG"]
+        for cmd in (f"sed -n 1,5p {cfg}", f"cp {cfg} {TMP}/cfg-copy.json"):
+            self.assertIsNone(g.check(cmd, TMP, explorer=True), cmd)
+        for cmd in (f"sed -i s/x/y/ {cfg}", f"cp {TMP}/x.json {cfg}", f"rsync --remove-source-files {cfg} {TMP}/"):
+            self.assertIsNotNone(g.check(cmd, TMP, explorer=True), cmd)
+        self.assertIsNone(mcp("mcp__mcp-atlassian__jira_download_attachments", agent=None))
+
+    def test_every_browser_choice_starts(self):
+        """The browser is the user's choice; the guard must accept each value in the start and login commands."""
+        for b in ("chrome", "msedge", "firefox", "webkit"):
+            self.allow(f"env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --browser {b}")
+            self.allow(f"env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa-login open --browser={b} --headed about:blank")
+            self.allow(f"playwright-cli install-browser {b}")
+
+    def test_batch_over_budget_says_what_is_left(self):
+        """A 9-command batch with 8 left isn't 'used up': the explorer should split it, not stop the run."""
+        cwd = tempfile.mkdtemp()
+        Path(cwd, "qa-out").mkdir()
+        Path(cwd, "qa-out/.active").write_text(json.dumps({"expires": time.time() + 600, "budget": 15, "used": 7}))
+        r = g.check("; ".join(["playwright-cli -s=qa click e1"] * 9), cwd)
+        self.assertIn("only 8 of the run's 15 are left", r)
+        self.assertIsNone(g.check("playwright-cli -s=qa click e1", cwd))
+        Path(cwd, "qa-out/.active").write_text(json.dumps({"expires": time.time() + 600, "budget": 15, "used": 15}))
+        self.assertIn("is used up", g.check("playwright-cli -s=qa click e1", cwd))
+
+    def test_mcp_budget(self):
+        cwd = tempfile.mkdtemp()
+        Path(cwd, "qa-out").mkdir()
+        active = Path(cwd, "qa-out/.active")
+        active.write_text(json.dumps({"expires": time.time() + 600, "budget": 2}))
+        call = lambda name, **tin: g.decide({"tool_name": "mcp__playwright__" + name, "tool_input": tin, "cwd": cwd})
+        self.assertIsNone(call("browser_navigate", url="http://localhost:1/a"))
+        self.assertIsNone(call("browser_click", target="e1"))
+        self.assertIsNotNone(call("browser_click", target="e2"))
+        self.assertIsNotNone(call("browser_close"))  # pass 24: it would end the MCP browser's login
+        self.assertIsNone(call("browser_tabs", action="close"))  # the explorer closes its own tab: free
+        self.assertIsNone(call("browser_tab_close"))  # older versions' tab tools are free too
+        self.assertIsNotNone(call("browser_tabs", action="select", index=0))
+        self.assertIsNotNone(call("browser_navigate", url="https://evil.com"))
+        self.assertEqual(json.loads(active.read_text())["used"], 2)
+        active.write_text("{bad")
+        self.assertIsNotNone(call("browser_snapshot"))  # malformed marker: fail closed
 
     def test_unrelated_commands_pass(self):
         self.allow("git status && npm test")
