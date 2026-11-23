@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Map</title></head>
+<body><nav><a href="index.html">Incidents</a> | <a href="form.html">Speed zone</a> | <a href="map.html">Map</a></nav>
+<h1>Traffic map</h1>
+<label>Layer <select id="layer"><option value="incidents">Incidents</option><option value="closures">Closures</option></select></label>
+<p id="count" role="status"></p>
+<canvas id="c" width="400" height="300" style="border:1px solid #888"></canvas>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const ctx=document.getElementById('c').getContext('2d');
+function load(layer){fetch(`api/${layer}.json`).then(r=>r.ok?r.json():[]).then(d=>{
+ ctx.clearRect(0,0,400,300);ctx.fillStyle=layer==='closures'?'red':'orange';
+ d.forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,6,0,7);ctx.fill()});
+ document.getElementById('count').textContent=`${d.length} ${layer} shown`;});}
+document.getElementById('layer').onchange=e=>load(e.target.value);load('incidents');
+</script></body></html>

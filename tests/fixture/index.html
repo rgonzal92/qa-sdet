@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Incidents</title></head>
+<body><nav><a href="index.html">Incidents</a> | <a href="form.html">Speed zone</a> | <a href="map.html">Map</a></nav>
+<h1>Incidents</h1>
+<table id="t"><thead><tr><th><button data-k="id">ID</button></th><th><button data-k="road">Road</button></th><th><button data-k="type">Type</button></th></tr></thead><tbody></tbody></table>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+let rows=[];const tb=document.querySelector('tbody');
+const draw=()=>tb.innerHTML=rows.map(r=>`<tr><td>${r.id}</td><td>${r.road}</td><td>${r.type}</td></tr>`).join('');
+fetch('api/incidents.json').then(r=>r.json()).then(d=>{rows=d;draw()});
+document.querySelectorAll('th button').forEach(b=>b.onclick=()=>{const k=b.dataset.k;rows.sort((a,c)=>a[k]>c[k]?1:-1);draw()});
+</script></body></html>

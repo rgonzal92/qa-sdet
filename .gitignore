@@ -1,0 +1,6 @@
+qa-out/
+__pycache__/
+*.db
+.playwright-cli/
+*.db-wal
+*.db-shm

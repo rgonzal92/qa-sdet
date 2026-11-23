@@ -1,0 +1,14 @@
+{
+  "name": "qa-sdet",
+  "owner": {
+    "name": "local"
+  },
+  "plugins": [
+    {
+      "name": "qa-sdet",
+      "description": "SDET QA helper (plans, cases, exploration, app memory)",
+      "source": "./"
+    }
+  ],
+  "description": "Local marketplace for the qa-sdet QA helper plugin"
+}

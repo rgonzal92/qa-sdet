@@ -1,0 +1,8 @@
+{
+  "name": "qa-sdet",
+  "version": "0.3.0",
+  "description": "SDET helper: test plans, test cases, storyless exploration and Jira-ticket bug hunting with playwright-cli, plus an auto-updating SQLite memory of the app.",
+  "author": {
+    "name": "local"
+  }
+}

@@ -1,0 +1,19 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Speed zone</title></head>
+<body><nav><a href="index.html">Incidents</a> | <a href="form.html">Speed zone</a> | <a href="map.html">Map</a></nav>
+<h1>Create speed zone</h1>
+<p>Speed limit must be between 0 and 130 km/h.</p>
+<form id="f">
+ <label>Zone name <input name="name" required></label>
+ <label>Speed limit (km/h) <input name="speed" type="text"></label>
+ <button>Save</button>
+</form>
+<p id="msg" role="status"></p>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+document.getElementById('f').onsubmit=e=>{e.preventDefault();
+ const s=Number(e.target.speed.value);
+ const m=document.getElementById('msg');
+ if(!e.target.name.value.trim()){m.textContent='Zone name is required';return}
+ if(Number.isNaN(s)||s<0){m.textContent='Invalid speed limit';return}
+ m.textContent=`Saved zone "${e.target.name.value}" at ${s} km/h`;};
+</script></body></html>

@@ -1,0 +1,844 @@
+#!/usr/bin/env python3
+"""qa-mem: compact SQLite memory of the app under test.
+
+Agents read it (card/search/bugs/hash). Knowledge is written only by `ingest`, which the plugin's
+Stop/SubagentStop hook runs on every changed qa-out/**/run.json; the user's manual writes are
+`bug-status` and `stale`.
+"""
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # shortcut: no file lock on Windows; fine while one session runs QA at a time
+    fcntl = None
+
+CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
+DATA_DIR = Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser()
+MAX_TEXT = 300
+MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
+UNKNOWN = "unknown"
+STATUSES = {"OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"}
+VISIBLE = ("OPEN", "FILED", "REGRESSED")  # bugs the explorer must know about
+# Must match the IDs in references/heuristics.md.
+HEURISTICS = [
+    "happy-path", "boundary", "empty-null", "invalid-format", "unicode-whitespace",
+    "duplicate", "sequence-repeat", "back-refresh", "sort-filter-paginate",
+    "error-handling", "loading-empty-states", "keyboard-a11y", "console-errors",
+    "network-failures", "permissions",
+]
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS pages(route TEXT PRIMARY KEY, name TEXT, build TEXT, last_verified TEXT);
+CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, page TEXT NOT NULL, kind TEXT NOT NULL,
+  text TEXT NOT NULL, source TEXT, build TEXT, ts TEXT, stale INTEGER DEFAULT 0, UNIQUE(page, kind, text));
+CREATE INDEX IF NOT EXISTS facts_page ON facts(page, kind);
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, content='facts', content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+  INSERT INTO facts_fts(rowid, text) VALUES (new.id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+  INSERT INTO facts_fts(facts_fts, rowid, text) VALUES ('delete', old.id, old.text); END;
+CREATE TABLE IF NOT EXISTS locators(page TEXT, name TEXT, locator TEXT, build TEXT,
+  last_verified TEXT, stale INTEGER DEFAULT 0, PRIMARY KEY(page, name));
+CREATE TABLE IF NOT EXISTS coverage(page TEXT, target TEXT, heuristic TEXT, result TEXT, build TEXT,
+  run_id TEXT, ts TEXT, PRIMARY KEY(page, target, heuristic, build));
+CREATE INDEX IF NOT EXISTS coverage_page ON coverage(page, build);
+CREATE TABLE IF NOT EXISTS bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT,
+  classification TEXT, status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT,
+  seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT);
+CREATE INDEX IF NOT EXISTS bugs_page ON bugs(page, status);
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
+  summary TEXT, ts TEXT);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def db_path():
+    if os.environ.get("QA_MEM_DB"):
+        return Path(os.environ["QA_MEM_DB"])
+    app = "default"
+    if CONFIG.exists():
+        try:
+            app = str(json.loads(CONFIG.read_text()).get("app") or app)
+        except (json.JSONDecodeError, OSError, AttributeError) as e:
+            print(f"qa-mem: ignoring unreadable {CONFIG}: {e}", file=sys.stderr)
+    return DATA_DIR / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', app)}.db"
+
+
+def connect():
+    p = db_path()
+    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # app facts and bugs: owner only
+    con = sqlite3.connect(p, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.executescript(SCHEMA)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
+    for col in ("last_run", "symptom"):  # migrations for DBs made by older versions
+        if col not in cols:
+            con.execute(f"ALTER TABLE bugs ADD COLUMN {col} TEXT")
+    # facts_fts reads its text from `facts`, so count what is actually indexed (its docsize shadow table):
+    # facts from before the index existed must be indexed, or a later delete corrupts it.
+    if con.execute("SELECT count(*) FROM facts").fetchone()[0] != con.execute(
+            "SELECT count(*) FROM facts_fts_docsize").fetchone()[0]:
+        con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+        con.commit()
+    return con
+
+
+def txt(v, field):
+    """Scalar field as str (or None). Lists/dicts are a bad run.json, not a transient error."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+        raise ValueError(f"'{field}' must be a string")
+    return str(v)
+
+
+def norm_route(r):
+    """'/form.html', 'http://host/form.html?x=1', '/form.html/' -> '/form.html'. Keeps SPA hash routes (#/..., #!/...)."""
+    r = str(r or "").strip()
+    if not r:
+        return ""
+    parts = urlsplit(r if "://" in r else "http://x" + ("" if r.startswith(("/", "#")) else "/") + r)
+    path = _ids(parts.path) or "/"
+    f = parts.fragment.split("?")[0]
+    bang = "!" if f.startswith("!/") else ""  # AngularJS hashbang routes: #!/incidents
+    frag = _ids(f[len(bang):]) if f[len(bang):].startswith("/") else ""
+    return path + (f"#{bang}{frag}" if frag else "")
+
+
+ID_SEGMENT = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}", re.I)
+
+
+def _ids(path):
+    """'/incidents/4521//' -> '/incidents/:id': one card and one bug hash for every record's detail page."""
+    segs = [":id" if ID_SEGMENT.fullmatch(x) else x for x in (y.strip() for y in path.split("/")) if x]
+    return ("/" + "/".join(segs)) if segs else ""
+
+
+def cap(s):
+    return " ".join(str(s or "").split())[:MAX_TEXT]
+
+
+def norm(s):
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).split())
+
+
+def bug_hash(route, symptom):
+    return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode()).hexdigest()[:12]
+
+
+def meta(con, key):
+    row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(con, key, value):
+    con.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (key, value))
+
+
+def dicts(obj, key):
+    items = obj.get(key) or []
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        raise ValueError(f"'{key}' must be a list of objects")
+    return items
+
+
+def heuristic_id(h):
+    h = norm(h).replace(" ", "-")
+    return h if h in HEURISTICS else f"other:{h}"
+
+
+def coverage_result(r):
+    """pass / fail / blocked, whatever the agent wrote: 'BLOCKED (needs --faults)', NOT_RUN and skipped
+    mean not done, so the heuristic stays UNTRIED; anything else is kept short as written."""
+    w = norm(r).split()
+    if not w or w[0] in ("pass", "passed", "ok", "covered", "done"):
+        return "pass"
+    if w[0] in ("fail", "failed", "failure", "bug"):
+        return "fail"
+    if w[0] in ("blocked", "skipped", "skip", "untested", "na", "not", "notrun", "none", "pending", "question"):
+        return "blocked"
+    return cap(r)[:20]
+
+
+def resolve_draft(path, run_dir):
+    """Absolute draft path: the DB is per app and shared by projects, so relative paths would be ambiguous.
+    Relative paths are tried against the project (parent of qa-out/) and then the run folder."""
+    if not path or run_dir is None:
+        return path
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return str(p)
+    run_dir = Path(run_dir).resolve()
+    tries = [run_dir / p]
+    for anc in (run_dir, *run_dir.parents):
+        if anc.name == "qa-out":
+            tries.insert(0, anc.parent / p)
+            break
+    return str(next((t for t in tries if t.exists()), tries[0]))
+
+
+def ingest(con, run, ts=None, run_dir=None):
+    """Upsert one run.json dict. ts = when the run finished (file mtime); run_dir = folder of the run.json.
+    Raises ValueError on bad shape."""
+    if not isinstance(run, dict):
+        raise ValueError("run.json must be an object")
+    if not run.get("run_id"):
+        raise ValueError("run.json missing 'run_id'")
+    # Same build text however the page laid it out ("Build:\n 1.42" == "Build: 1.42"); capped like all text.
+    # An empty or missing build (empty version element) is unknown, not a broken run.
+    build, rid, ts = cap(txt(run.get("build"), "build")), txt(run["run_id"], "run_id"), ts or now()
+    b = build.lower().strip(" .:()[]'\"")
+    if b in ("", "n/a", "na", "none", "null", "undefined", "?", "-", "not found") or b.startswith(UNKNOWN):
+        build = UNKNOWN  # couldn't read the build ('undefined' from ?.textContent, 'unknown (...)'): stale nothing
+    known = build.lower() != UNKNOWN
+    for f in ("mode", "target", "status", "summary"):
+        txt(run.get(f), f)
+    pages, bug_list = dicts(run, "pages"), dicts(run, "bugs")
+    for pg in pages:
+        pg["route"] = norm_route(txt(pg.get("route"), "route"))
+        if not pg["route"]:
+            raise ValueError("page entry missing 'route'")
+        txt(pg.get("name"), "name")
+        for key, fields in (("facts", ("kind", "text", "source")), ("locators", ("name", "locator")),
+                            ("coverage", ("target", "heuristic", "result"))):
+            for item in dicts(pg, key):
+                for f in fields:
+                    txt(item.get(f), f"{key}.{f}")
+    for b in bug_list:
+        for f in ("title", "symptom", "severity", "classification", "draft_path", "hash", "route"):
+            txt(b.get(f), f"bugs.{f}")
+        if not b.get("title") or not b.get("route"):
+            raise ValueError("bug entry needs 'title' and 'route'")
+        b["route"] = norm_route(b["route"])
+    with con:
+        con.execute("INSERT OR REPLACE INTO runs VALUES(?,?,?,?,?,?,?)",
+                    (rid, cap(run.get("mode")) or None, cap(run.get("target")), build, cap(run.get("status")) or None,
+                     cap(run.get("summary")), ts))
+        # The deployed build only moves forward in time: an old run.json ingested late must not roll it back.
+        if known and (meta(con, "build_ts") or "") <= ts:
+            set_meta(con, "build", build)
+            set_meta(con, "build_ts", ts)
+        for pg in pages:
+            route = pg["route"]
+            old = con.execute("SELECT build, last_verified FROM pages WHERE route=?", (route,)).fetchone()
+            # A run older than what we already know (ingested late) must not roll the page back.
+            late = bool(old and old["last_verified"] and ts < old["last_verified"])
+            if known and not late and old and old["build"] not in (build, UNKNOWN):  # new build: re-verify
+                con.execute("UPDATE facts SET stale=1 WHERE page=?", (route,))
+                con.execute("UPDATE locators SET stale=1 WHERE page=?", (route,))
+            if late:
+                con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
+            elif known:
+                con.execute("INSERT INTO pages VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
+                            "name=coalesce(excluded.name, name), build=excluded.build, "
+                            "last_verified=excluded.last_verified",
+                            (route, cap(pg.get("name")) or None, build, ts))
+            else:  # e.g. a plan from a ticket: knows the page, verified nothing
+                con.execute("INSERT INTO pages(route, name, build) VALUES(?,?,?) ON CONFLICT(route) DO UPDATE "
+                            "SET name=coalesce(name, excluded.name)", (route, cap(pg.get("name")) or None, UNKNOWN))
+            for f in pg.get("facts") or []:
+                text = cap(f.get("text"))
+                if text:
+                    # Only a verifying run (known build, not late) refreshes an existing fact.
+                    con.execute("INSERT INTO facts(page,kind,text,source,build,ts,stale) VALUES(?,?,?,?,?,?,?) "
+                                "ON CONFLICT(page,kind,text) DO UPDATE SET "
+                                "source=CASE WHEN ? AND lower(coalesce(excluded.source, '')) = 'observed' "
+                                "THEN 'observed' ELSE source END, "  # a ticket rule the explorer has now seen
+                                "stale=CASE WHEN ? THEN 0 ELSE stale END, "
+                                "build=CASE WHEN ? THEN excluded.build ELSE build END, "
+                                "ts=CASE WHEN ? THEN excluded.ts ELSE ts END",
+                                (route, cap(f.get("kind"))[:30] or "note", text, cap(f.get("source")), build, ts,
+                                 int(late), *(int(known and not late),) * 4))
+            for loc in pg.get("locators") or []:
+                # A truncated locator would be broken, so skip oversized ones instead of capping.
+                if not late and loc.get("name") and loc.get("locator") and len(str(loc["locator"])) <= MAX_TEXT:
+                    con.execute("INSERT OR REPLACE INTO locators VALUES(?,?,?,?,?,0)",
+                                (route, cap(loc["name"]), str(loc["locator"]).strip(), build, ts))
+            for c in pg.get("coverage") or []:
+                if c.get("heuristic"):
+                    con.execute("INSERT OR REPLACE INTO coverage VALUES(?,?,?,?,?,?,?)",
+                                (route, cap(c.get("target")) or "*", heuristic_id(c["heuristic"]),
+                                 coverage_result(c.get("result")), build, rid, ts))
+        for pg in pages:  # size caps: keep the freshest knowledge per page
+            con.execute("DELETE FROM facts WHERE page=? AND id NOT IN (SELECT id FROM facts WHERE page=? "
+                        "ORDER BY stale, ts DESC LIMIT ?)", (pg["route"], pg["route"], MAX_FACTS))
+            con.execute("DELETE FROM coverage WHERE page=? AND rowid NOT IN (SELECT rowid FROM coverage WHERE page=? "
+                        "ORDER BY ts DESC LIMIT ?)", (pg["route"], pg["route"], MAX_COVERAGE))
+            con.execute("DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
+                        "ORDER BY stale, last_verified DESC LIMIT 60)", (pg["route"], pg["route"]))
+        con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (MAX_RUNS,))
+        for b in bug_list:
+            symptom = cap(b.get("symptom") or b["title"])
+            raw = str(b.get("hash") or "").strip()
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw):
+                continue  # a Jira key: a bug tracked in Jira, not a local one to create
+            m = re.match(r"#?\s*([0-9a-fA-F]{4,12})\b", raw)  # '<hash> ', '#<hash>', '<hash> (known)'
+            given = m.group(1).lower() if m else ""  # 'n/a', 'TBD', 'new': no hash, so the bug is created
+            h = None
+            if given:  # re-sighting of a known bug (prefix ok if unique)
+                hits = con.execute("SELECT hash FROM bugs WHERE substr(hash,1,?)=?", (len(given), given)).fetchall()
+                h = hits[0][0] if len(hits) == 1 else None
+            h = h or bug_hash(b["route"], symptom)
+            # seen_count counts runs (re-ingesting a rewritten run.json doesn't inflate it);
+            # a FIXED bug seen again becomes REGRESSED.
+            con.execute("INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
+                        "last_seen,last_run,symptom) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
+                        "seen_count=seen_count + (coalesce(last_run,'') != excluded.last_run), "
+                        "status=CASE WHEN status='FIXED' AND coalesce(last_run,'') != excluded.last_run "
+                        "THEN 'REGRESSED' ELSE status END, "
+                        "last_run=excluded.last_run, last_seen=excluded.last_seen, "
+                        "severity=coalesce(excluded.severity, severity), "
+                        "classification=coalesce(excluded.classification, classification), "
+                        "draft_path=coalesce(excluded.draft_path, draft_path), "
+                        "symptom=coalesce(symptom, excluded.symptom)",
+                        (h, b.get("route"), cap(b["title"]), cap(b.get("severity"))[:20] or None,
+                         cap(b.get("classification"))[:20] or None,
+                         resolve_draft(b.get("draft_path"), run_dir), ts, ts, rid, symptom))
+
+
+def ingest_pending(root):
+    """Scrub the qa-out tree, then ingest every run.json that changed since its last ingest. Never raises.
+    Touches nothing when root doesn't exist, and no DB when there is no run.json (the hook runs everywhere)."""
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    scrub_tree(root)
+    pending = _pending(root)
+    if not pending:  # the common case on every Stop: nothing new, so no DB, no lock
+        return 0
+    db = db_path()
+    db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(db.with_suffix(".lock"), "w") as lock:
+        if fcntl:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # Stop and SubagentStop may fire together; also guards migrations
+        con = connect()
+        try:
+            return _ingest_files(con, pending)
+        finally:
+            con.close()
+
+
+# ---------- redaction: secrets must not reach drafts the user files, or the DB ----------
+SECRET_HEADERS = ("authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
+                  "x-xsrf-token|x-amz-security-token")
+# Any name ending in one of these (PRIVATE_TOKEN, secret_key, bearerToken); not 'sid': site/segment IDs.
+SECRET_KEYS = ("[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|secret[_-]?key|"
+               "access[_-]?key)|session[_-]?id")
+SECRET_NAME_RE = re.compile(rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid)$")
+# Literal tokens: safe to replace anywhere, including inside code and JSON strings.
+LITERAL_REDACTIONS = [
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED-JWT]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "[REDACTED-GITHUB-TOKEN]"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
+    (re.compile(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{16,}=*"), r"\1\2[REDACTED]"),
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s:@\"'`]+:[^/\s@\"'`]+@"), r"\1[REDACTED]@"),
+    (re.compile(r"(?i)\b(jsessionid|phpsessid|asp\.net_sessionid|connect\.sid)=(?!\[REDACTED)[^;\s\"'`&]+"),
+     r"\1=[REDACTED]"),
+    (re.compile(r"(?i)(\bsid[\"']?\s*[:=]\s*[\"']?)(?!\[REDACTED)[A-Za-z0-9%._~+/-]{16,}"), r"\1[REDACTED]"),  # session-length only
+    # not ?code=: usually an ordinary value (road/segment codes); an OAuth code is single-use and short-lived
+    (re.compile(r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey)=)(?!\[REDACTED)"
+                r"[^&\s\"'`#]+"), r"\1[REDACTED]"),
+]
+_SEP = r"([ \t]*\\?[\"']?[ \t]*[:=][ \t]*\\?[\"']?)"
+HEADER_VALUE_RE = re.compile(rf"(?im)\b({SECRET_HEADERS})\b{_SEP}(?!\[REDACTED)([^\n\"'`\\}}]+)")
+KEY_VALUE_RE = re.compile(rf"(?i)\b({SECRET_KEYS})\b{_SEP}(?!\[REDACTED)([^\s\"'&,;\\`}}]+)")
+HARMLESS = {"null", "none", "true", "false", "undefined", "required", "optional", "n/a", "na", "empty", "hidden"}
+
+
+def _secret_looking(v):
+    """Prose like 'consent banner covers Save' or 'min' stays; tokens, k=v cookies and digits-in-a-word go."""
+    v = v.strip()
+    if not v or v.lower().strip(".,:;") in HARMLESS or v.startswith(("process.", "${", "env.", "<", "[REDACTED")):
+        return False
+    if "=" in v or ";" in v or re.search(r"[A-Za-z0-9._~+/-]{16,}", v):
+        return True
+    return " " not in v and bool(re.search(r"\d", v)) and len(v) >= 4
+
+
+def redact_literals(text):
+    for pattern, repl in LITERAL_REDACTIONS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+AUTH_SCHEME_RE = re.compile(r"(\s*(?:bearer|basic|token|digest|negotiate|ntlm|aws4-hmac-sha256)\s+)(\S+)", re.I)
+COOKIE_PAIRS_RE = re.compile(r"\s*(?:[^\s;=]+=[^\s;]*;?\s*)+")
+
+
+def _basic_credentials(tok):
+    """Base64 of 'user:password' (it can be all letters, like dXNlcjpwYXNz)."""
+    import base64
+    import binascii
+    try:
+        return ":" in base64.b64decode(tok + "=" * (-len(tok) % 4), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+
+
+def _header_value(val):
+    """Redact only the credential in a header line's value, so prose after it survives:
+    'Bearer <tok>' -> the token; 'a=1; sid=x' -> the pairs; otherwise a secret-looking first word."""
+    m = AUTH_SCHEME_RE.match(val)
+    if m:
+        tok = m.group(2)
+        secret = _secret_looking(tok) or (len(tok) >= 8 and not tok.isalpha()) or _basic_credentials(tok)
+        return m.group(1) + ("[REDACTED]" if secret else tok) + val[m.end():]
+    m = COOKIE_PAIRS_RE.match(val)
+    if m and "=" in m.group(0):
+        return " " * (m.group(0)[:1] == " ") + "[REDACTED]" + (" " if val[m.end():] else "") + val[m.end():]
+    first = (val.split() or [""])[0]
+    if first and _secret_looking(first):
+        return val.replace(first, "[REDACTED]", 1)
+    return val
+
+
+def redact(text):
+    """Prose and log text: literal tokens plus secret-looking values of secret-named headers and keys."""
+    sub = lambda m: m.group(1) + m.group(2) + ("[REDACTED]" if _secret_looking(m.group(3)) else m.group(3))
+    for _ in range(5):  # a value ends early now, so a second header on the same line needs another pass
+        before = text
+        text = redact_literals(text)
+        text = HEADER_VALUE_RE.sub(lambda m: m.group(1) + m.group(2) + _header_value(m.group(3)), text)
+        text = KEY_VALUE_RE.sub(sub, text)
+        if text == before:
+            break
+    return text
+
+
+def redact_json(obj):
+    """Structured: values of secret-named keys (and HAR-style {name, value} headers) become "[REDACTED]"."""
+    if isinstance(obj, dict):
+        named = isinstance(obj.get("name"), str) and "value" in obj and (SECRET_NAME_RE.match(obj["name"]) or (
+            obj["name"].lower() == "sid" and len(str(obj["value"])) >= 16))  # sid: session cookie vs site id
+        out = {}
+        for k, v in obj.items():
+            secret = (isinstance(k, str) and (SECRET_NAME_RE.match(k) or (k.lower() == "sid" and len(str(v)) >= 16))
+                      or (named and k == "value"))
+            out[k] = "[REDACTED]" if secret and v not in (None, True, False, "") else redact_json(v)
+        return out
+    if isinstance(obj, list):
+        return [redact_json(v) for v in obj]
+    return redact(obj) if isinstance(obj, str) else obj
+
+
+PROSE_SUFFIXES = {".md", ".txt", ".log", ".html", ".htm", ".yml", ".yaml", ".csv"}
+JSON_SUFFIXES = {".json", ".har"}
+CODE_SUFFIXES = {".ts", ".js", ".mjs", ".cjs", ".py"}
+
+
+def scrub_file(f):
+    try:
+        text = f.read_text()
+    except (OSError, UnicodeDecodeError):
+        return
+    if f.suffix in JSON_SUFFIXES:
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return  # leave unparseable JSON as is rather than corrupt it
+        clean_obj = redact_json(obj)
+        clean = text if clean_obj == obj else json.dumps(clean_obj, indent=2, ensure_ascii=False) + "\n"
+    elif f.suffix in CODE_SUFFIXES:
+        clean = redact_literals(text)  # repro specs must stay runnable
+    else:
+        clean = redact(text)
+    if clean != text:
+        st = f.stat()
+        tmp = f.with_name(f".{f.name}.scrub")
+        tmp.write_text(clean)  # write + rename: a hook killed mid-write can't leave a truncated draft
+        os.chmod(tmp, st.st_mode & 0o7777)
+        os.utime(tmp, (st.st_atime, st.st_mtime))  # keep the run's finish time for late-ingest ordering
+        os.replace(tmp, f)
+
+
+def scrub_tree(root):
+    """Scrub text files under qa-out changed since the last scrub (also folders without a run.json)."""
+    stamp = root / ".scrubbed"
+    try:
+        since = float(stamp.read_text())
+    except (OSError, ValueError):
+        since = 0.0
+    started = time.time()
+    for f in root.rglob("*"):
+        try:
+            if (f.is_file() and not f.is_symlink() and f.suffix in PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES
+                    and f.stat().st_mtime >= since - 2 and f.stat().st_size < 20_000_000):
+                scrub_file(f)
+        except OSError:
+            continue
+    try:
+        stamp.write_text(str(started))
+    except OSError:
+        pass
+
+
+def _first_line(p):
+    try:
+        return p.read_text().split("\n", 1)[0]
+    except OSError:
+        return None
+
+
+def _pending(root):
+    """[(run.json, bytes, mtime, sha1)] whose content changed since its last ingest, oldest first.
+    Sentinels hold the sha1 of the run.json they cover, so clock skew or copied mtimes can't cause loops."""
+    out = []
+    for f in root.rglob("run.json"):
+        try:
+            data, mtime = f.read_bytes(), f.stat().st_mtime
+        except OSError:
+            continue
+        digest = hashlib.sha1(data).hexdigest()
+        if digest not in (_first_line(f.with_name("run.json.ingested")), _first_line(f.with_name("run.json.error"))):
+            out.append((f, data, mtime, digest))
+    return sorted(out, key=lambda x: x[2])
+
+
+PARKED = []  # run.json files this process could not ingest (shown to the agent by the hook)
+
+
+def _ingest_files(con, pending):
+    n = 0
+    for f, data, mtime, digest in pending:
+        done, err = f.with_name("run.json.ingested"), f.with_name("run.json.error")
+        # When the run finished; never in the future (a skewed mtime would freeze the current build).
+        ts = datetime.fromtimestamp(min(mtime, time.time()), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            ingest(con, redact_json(json.loads(data)), ts, f.parent)  # also files the mtime-based scrub skipped
+            done.write_text(f"{digest}\n{now()}\n")
+            err.unlink(missing_ok=True)
+            n += 1
+        except sqlite3.OperationalError as e:  # transient (e.g. DB locked): retry on the next hook run
+            print(f"qa-mem: will retry {f}: {e}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 - bad file: park it until it is rewritten
+            err.write_text(f"{digest}\n{now()} {type(e).__name__}: {e}\n")
+            print(f"qa-mem: skipped {f}: {e}", file=sys.stderr)
+            PARKED.append(f"{f}: {type(e).__name__}: {e}")
+    return n
+
+
+def find_page(con, q):
+    """Routes ('/x') match exactly; anything else matches a route or page name fuzzily."""
+    q = q.strip()
+    if not q:
+        return None
+    if q.startswith("/") or "://" in q:
+        return con.execute("SELECT * FROM pages WHERE route=?", (norm_route(q),)).fetchone()
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like, seg = f"%{esc}%", f"%/{esc}%"
+    # Best first: the route itself (/zones, /zones.html), the exact page name, a route segment starting with
+    # the word (/map.html before /roadmap), then the shortest route.
+    return con.execute("SELECT * FROM pages WHERE route LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' "
+                       "ORDER BY (route = ? OR route LIKE ? ESCAPE '\\') DESC, lower(coalesce(name, '')) = lower(?) DESC, "
+                       "route LIKE ? ESCAPE '\\' DESC, length(route) LIMIT 1",
+                       (like, like, "/" + q, f"/{esc}.%", q, seg)).fetchone()
+
+
+def short(s, n):
+    s = str(s or "")
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def card(con, q):
+    pg = find_page(con, q)
+    if not pg:
+        return (f"NO CARD for '{q}': first visit. Untried heuristics: {', '.join(HEURISTICS)}\n"
+                + bug_lines(con, None))
+    r = pg["route"]
+    b = meta(con, "build") or pg["build"]  # coverage only counts on the build deployed now
+    unknown_page = pg["build"] == UNKNOWN  # its build was never readable (e.g. a map page without the footer)
+    current = pg["build"] == b or unknown_page
+    out = [f"PAGE {r} \"{pg['name'] or ''}\" build={pg['build']} verified={pg['last_verified'] or 'never'}"
+           + ("" if norm_route(q) == r else f"  (matched from '{q}')")]
+    if not current:
+        out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
+    elif unknown_page and b != UNKNOWN:
+        out.append(f"NOTE: this page's build was never readable; its knowledge may predate build {b}.")
+    facts, seen = [], []
+    for f in con.execute("SELECT kind,text,stale,source FROM facts WHERE page=? ORDER BY stale, ts DESC LIMIT 60",
+                         (r,)):
+        words = set(norm(f["text"]).split())
+        # Runs restate facts in new words; show only the freshest of near-duplicates.
+        if any(k == f["kind"] and len(words & w) >= 0.8 * max(len(words | w), 1)
+               and not any(x.isdigit() for x in words ^ w) for k, w in seen):  # '130' vs '120' is news, not a repeat
+            continue
+        seen.append((f["kind"], words))
+        facts.append(f)
+        if len(facts) == 15:
+            break
+    if facts:
+        out.append("FACTS (* = stale, re-verify; 'from X' = stated in X, not yet observed):")
+        out += [f"- [{f['kind']}] {f['text']}"
+                + (f" (from {f['source']})" if f["source"] and f["source"].lower() != "observed" else "")
+                + (" *" if f["stale"] or not current else "") for f in facts]
+    if current:
+        locs, size = [], 0
+        for x in con.execute("SELECT name,locator FROM locators WHERE page=? AND stale=0 LIMIT 20", (r,)):
+            entry = f"{short(x['name'], 40)}={x['locator']}"  # locators stay whole: a cut one is useless
+            if size + len(entry) > 2000:
+                break
+            locs.append(entry)
+            size += len(entry)
+        if locs:
+            out.append("LOCATORS (fresh): " + "; ".join(locs))
+    cov = {}
+    # Coverage from runs that couldn't read the build counts for a week, then the heuristic is retried.
+    week_ago = datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for c in con.execute("SELECT heuristic, target, result FROM coverage WHERE page=? AND ((build=? AND "
+                         "build!='unknown') OR (build='unknown' AND ts >= ?)) ORDER BY heuristic, result='pass', ts DESC",
+                         (r, b, week_ago)):  # failures first
+        cov.setdefault(c["heuristic"], []).append(f"{short(c['target'], 40)}:{short(c['result'], 12)}")
+    # A heuristic only blocked (e.g. needs --faults) is still untried: the next run may be able to do it.
+    tried = {h for h, t in cov.items() if any(not x.endswith(":blocked") for x in t)}
+    if cov:  # at most 4 targets per heuristic keeps the card short
+        out.append(f"COVERED on build {b} (only-blocked ones are retried, listed in UNTRIED): " + " | ".join(
+            f"{h}({', '.join(t[:4])}{f', +{len(t) - 4} more' if len(t) > 4 else ''})" for h, t in cov.items()))
+    out.append("UNTRIED: " + (", ".join(h for h in HEURISTICS if h not in tried) or "none"))
+    out.append(bug_lines(con, r))
+    return "\n".join(x for x in out if x)
+
+
+def bug_lines(con, route):
+    q = "SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status IN (?,?,?)"
+    args = list(VISIBLE)
+    if route is not None:
+        q += " AND page=?"
+        args.append(route)
+    rows = con.execute(q + " ORDER BY last_seen DESC LIMIT 10", args).fetchall()
+    fixed = con.execute("SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status='FIXED'"
+                        + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
+                        [route] if route is not None else []).fetchall()
+    line = lambda x: (f"- {x['hash']} {x['status']} [{x['severity']}] "
+                      + (f"{x['page']} " if route is None else "")  # app-wide list: say which page
+                      + f"{short(x['title'], 100)} | symptom: {short(x['symptom'] or x['title'], 120)} (seen {x['seen_count']})")
+    out = []
+    if rows:
+        out += ["KNOWN BUGS (don't re-draft; to report a sighting put its hash in run.json):"] + [line(x) for x in rows]
+    if fixed:
+        out += ["PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):"] + [line(x) for x in fixed]
+    invalid = con.execute("SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status='INVALID'"
+                          + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
+                          [route] if route is not None else []).fetchall()
+    if invalid:
+        out += ["NOT BUGS (the user marked these INVALID: don't report them):"] + [line(x) for x in invalid]
+    return "\n".join(out)
+
+
+def search(con, q):
+    try:
+        rows = _search(con, q)
+    except sqlite3.OperationalError:  # FTS syntax error ('closure AND', 'NEAR('): retry as plain words, all required
+        words = [w for w in re.findall(r"\w+", q) if w.upper() not in ("AND", "OR", "NOT", "NEAR")]
+        rows = _search(con, " ".join(f'"{w}"' for w in words)) if words else []
+    return "\n".join(f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in rows) \
+        or f"no facts match '{q}'"
+
+
+def _search(con, q):
+    return con.execute("SELECT f.page,f.kind,f.text,f.stale FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
+                       "WHERE facts_fts MATCH ? ORDER BY rank LIMIT 20", (q,)).fetchall()
+
+
+def bugs(con, status="OPEN"):
+    total = con.execute("SELECT count(*) FROM bugs WHERE status=?", (status,)).fetchone()[0]
+    rows = con.execute("SELECT * FROM bugs WHERE status=? ORDER BY last_seen DESC LIMIT 30", (status,)).fetchall()
+    lines = [f"{x['hash']} [{x['severity']}] {x['classification']} {x['page']} {short(x['title'], 100)} "
+             f"(seen {x['seen_count']}) {x['draft_path'] or ''}" for x in rows]
+    if total > len(rows):
+        lines.append(f"... {total - len(rows)} older {status} bugs not shown (search facts or ask for a page's card)")
+    return "\n".join(lines) or f"no {status} bugs"
+
+
+def doctor():
+    """Setup check for a new machine. Prints one line per item; returns the number of problems."""
+    import shutil
+    import subprocess
+    import time
+    problems = 0
+
+    def line(ok, what, fix=""):
+        nonlocal problems
+        problems += not ok
+        print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
+
+    line(sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)")
+    pw = shutil.which("playwright-cli")
+    line(bool(pw), "playwright-cli on PATH", "npm i -g @playwright/cli")
+    if pw:  # runs use --browser=firefox; a fresh machine has the CLI but not the browser build it needs
+        try:
+            dry = subprocess.run([pw, "install-browser", "--dry-run", "firefox"], capture_output=True, text=True,
+                                 timeout=60).stdout
+            loc = re.search(r"Install location:\s*(.+)", dry)
+            line(bool(loc) and Path(loc.group(1).strip()).is_dir(), "playwright-cli Firefox installed",
+                 "playwright-cli install-browser firefox")
+        except (subprocess.TimeoutExpired, OSError):
+            line(False, "playwright-cli Firefox check", "run: playwright-cli install-browser firefox")
+    acli = shutil.which("acli")
+    if acli:
+        try:
+            ok = subprocess.run([acli, "jira", "auth", "status"], capture_output=True, text=True,
+                                timeout=30).returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            ok = False
+        line(ok, "acli signed in to Jira", "acli jira auth login")
+    else:
+        line(False, "acli on PATH (optional: without it, paste tickets)", "install Atlassian CLI")
+    cfg = {}
+    try:
+        cfg = json.loads(CONFIG.read_text())
+        line(isinstance(cfg, dict), f"config {CONFIG}")
+    except (OSError, ValueError) as e:
+        line(False, f"config {CONFIG} ({e.__class__.__name__})", "run any qa-sdet skill once; it asks for the values")
+    if isinstance(cfg, dict) and cfg:
+        missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost", "buildSource") if not cfg.get(k)]
+        line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost, buildSource", f"add {missing}")
+        bs = cfg.get("buildSource")
+        line(isinstance(bs, dict) and bs.get("type") in ("selector", "url", "header") and bool(bs.get("value")),
+             "buildSource is {type: selector|url|header, value}", 'e.g. {"type": "selector", "value": "footer .version"}')
+        hosts = cfg.get("allowedHosts")
+        line(isinstance(hosts, list) and all(isinstance(h, str) for h in hosts), "allowedHosts is a list of hosts",
+             'e.g. "allowedHosts": ["qa.example.com"]')
+        norm_hosts = [h.lower().strip().rstrip(".").removeprefix("*.") for h in hosts
+                      if isinstance(h, str)] if isinstance(hosts, list) else []  # same rules as the guard
+        try:
+            base = (urlsplit(str(cfg.get("qaBaseUrl") or "")).hostname or "").rstrip(".")
+        except ValueError:
+            base = ""
+        line(bool(base) and any(base == h or base.endswith("." + h) for h in norm_hosts),
+             "qaBaseUrl host is in allowedHosts", "add the qaBaseUrl host to allowedHosts")
+        sso = str(cfg.get("ssoHost") or "").lower().strip().rstrip(".")
+        line(not sso or sso != base.lower(), "ssoHost differs from the qaBaseUrl host",
+             "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED")
+    state = CONFIG.with_name("qa-state.json")
+    if state.exists():
+        line(state.stat().st_mode & 0o077 == 0, "qa-state.json readable only by you", f"chmod 600 {state}")
+        age_h = (time.time() - state.stat().st_mtime) / 3600
+        print(f"info qa-state.json saved {age_h:.0f} h ago (SSO sessions expire; re-run /qa-sdet:qa-login if runs get BLOCKED)")
+    else:
+        line(False, "saved QA session (qa-state.json)", "run /qa-sdet:qa-login")
+    try:
+        con = connect()
+        con.close()
+        line(True, f"memory DB {db_path()}")
+        line(db_path().parent.stat().st_mode & 0o077 == 0, "memory DB folder readable only by you",
+             f"chmod 700 {db_path().parent}")
+    except (OSError, sqlite3.Error) as e:
+        line(False, f"memory DB {db_path()} ({e})", "use a python3 whose sqlite3 has FTS5 (python.org or Homebrew builds do)"
+             if "fts5" in str(e).lower() else "check the directory is writable")
+    return problems
+
+
+USAGE = ("usage: qa-mem doctor | card <route|page name> | search <fts-query> | bugs [STATUS] | hash <route> <symptom> | "
+         "bug-status <hash-prefix> <" + "|".join(sorted(STATUSES)) + "> | stale <build> | "
+         "ingest <run.json> | ingest-pending <dir>... | where")
+
+
+def hook_input():
+    """The hook's JSON on stdin (Claude Code sends it and closes stdin); {} when run by hand."""
+    try:
+        import select
+        if sys.stdin is None or sys.stdin.isatty() or not select.select([sys.stdin], [], [], 0.2)[0]:
+            return {}
+        data = json.loads(sys.stdin.read() or "{}")
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def main(argv):
+    if not argv:
+        print(USAGE)
+        return 2
+    cmd, args = argv[0], argv[1:]
+    if cmd == "ingest-pending":  # runs from hooks: must never break the session
+        for root in dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a):  # cwd + project dir
+            try:
+                ingest_pending(root)
+            except Exception as e:  # noqa: BLE001
+                print(f"qa-mem: {e}", file=sys.stderr)
+        if PARKED and not hook_input().get("stop_hook_active"):
+            # Exit 2 from a Stop/SubagentStop hook shows this to the agent that just wrote the file, once.
+            print("qa-sdet memory could not save this run; fix run.json per references/run-json.md and rewrite it:\n"
+                  + "\n".join(PARKED), file=sys.stderr)
+            return 2
+        return 0
+    if cmd == "doctor":
+        return 1 if doctor() else 0
+    if cmd == "hash" and len(args) >= 2:  # same normalisation as ingest, so draft and DB hashes match
+        print(bug_hash(norm_route(args[0]), cap(redact(" ".join(args[1:])))))
+        return 0
+    if cmd in ("where", "init"):
+        print(db_path())
+        if cmd == "where":
+            return 0
+    con = connect()
+    try:
+        return run_cmd(con, cmd, args)
+    finally:
+        con.close()
+
+
+def run_cmd(con, cmd, args):
+    if cmd == "init":
+        pass
+    elif cmd == "card" and args:
+        print(card(con, " ".join(args)))
+    elif cmd == "search" and args:
+        print(search(con, " ".join(args)))
+    elif cmd == "bugs":
+        status = args[0].upper() if args else "OPEN"
+        if status not in STATUSES:
+            print(f"unknown status '{args[0]}'; use one of {sorted(STATUSES)}")
+            return 2
+        print(bugs(con, status))
+    elif cmd == "bug-status" and len(args) == 2:
+        prefix, status = args[0].lower(), args[1].upper()
+        if not re.fullmatch(r"[0-9a-f]{4,12}", prefix) or status not in STATUSES:
+            print(f"need a hex hash prefix (4-12 chars) and a status in {sorted(STATUSES)}")
+            return 2
+        hits = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE substr(hash, 1, ?)=?", (len(prefix), prefix))]
+        if len(hits) != 1:  # an ambiguous prefix must not change several bugs at once
+            print(f"{len(hits)} bugs match '{prefix}'" + (": " + ", ".join(hits[:10]) if hits else "") + "; give one hash")
+            return 1
+        with con:
+            con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
+        print(f"updated {hits[0]} -> {status}")
+    elif cmd == "ingest" and args:
+        # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
+        ingest(con, redact_json(json.loads(Path(args[0]).read_text())), run_dir=Path(args[0]).parent)
+        print("ingested")
+    elif cmd == "stale" and args:
+        build = cap(" ".join(args))  # normalised like ingest, so it matches stored builds
+        if not build or build.lower() == UNKNOWN:
+            print("give the deployed build, e.g. qa-mem stale 1.43.0")
+            return 2
+        with con:
+            set_meta(con, "build", build)
+            set_meta(con, "build_ts", now())
+            for table in ("facts", "locators"):
+                con.execute(f"UPDATE {table} SET stale=1 WHERE page IN (SELECT route FROM pages WHERE build!=?)",
+                            (build,))
+        print(f"current build set to {build}; older knowledge marked stale")
+    else:
+        print(USAGE)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
