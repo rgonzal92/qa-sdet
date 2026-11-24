@@ -20,22 +20,22 @@ def cli(*argv, stdin=None):
 
 
 PLAN = {
-    "kind": "ticket", "title": "STUDIO-1, STUDIO-2", "created": "2026-11-23T18:00:00Z",
+    "kind": "ticket", "title": "PROJ-1, PROJ-2", "created": "2026-11-23T18:00:00Z",
     "env": {"url": "https://qa.example", "browser": "chrome"},
     "tickets": [
-        {"key": "STUDIO-1", "summary": "Speed limit form", "acs": [{"id": "AC-1", "text": "Saves 0-130"},
+        {"key": "PROJ-1", "summary": "Speed limit form", "acs": [{"id": "AC-1", "text": "Saves 0-130"},
                                                                   {"id": "AC-2", "text": "Rejects 131"}],
          "plan": {"scope": "speed field", "risks": ["rounding"], "out_of_scope": ["mobile"]}},
-        {"key": "STUDIO-2", "summary": "Incident list", "acs": [{"id": "AC-1", "text": "Sorted by date"}]},
+        {"key": "PROJ-2", "summary": "Incident list", "acs": [{"id": "AC-1", "text": "Sorted by date"}]},
     ],
     "cases": [
-        {"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "Save 130", "route": "/form", "priority": "P1",
+        {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "Save 130", "route": "/form", "priority": "P1",
          "steps": ["Open form", "Type 130 | save"], "expected": "Saved"},
-        {"id": "TC-2", "ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
+        {"id": "TC-2", "ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
          "steps": ["Type 131"], "expected": "Error shown"},
-        {"id": "TC-3", "ticket": "STUDIO-2", "ac": "AC-1", "title": "Sort", "route": "/list", "steps": ["Open"],
+        {"id": "TC-3", "ticket": "PROJ-2", "ac": "AC-1", "title": "Sort", "route": "/list", "steps": ["Open"],
          "expected": "Newest first"},
-        {"id": "TC-4", "ticket": "STUDIO-2", "ac": "AC-1", "title": "Ties", "route": "/list", "steps": ["Open"],
+        {"id": "TC-4", "ticket": "PROJ-2", "ac": "AC-1", "title": "Ties", "route": "/list", "steps": ["Open"],
          "expected": "Stable"},
     ],
 }
@@ -48,7 +48,7 @@ RUN_FORM = {"run_id": "ticket-form-1", "mode": "ticket", "target": "/form", "bui
             "questions": ["Is 0 a valid speed?"], "not_tested": ["Keyboard only: out of time"],
             "bugs": [{"route": "/form", "title": "Speed accepts 131", "severity": "HIGH", "classification": "CONFIRMED",
                       "draft_path": "bugs/BUG-1.md", "evidence": "/x/evidence/BUG-1.png", "annotated": True,
-                      "ticket": "STUDIO-1"}]}
+                      "ticket": "PROJ-1"}]}
 RUN_LIST = {"run_id": "ticket-list-1", "mode": "ticket", "target": "/list", "build": "1.42", "status": "COMPLETED",
             "summary": "s", "cases": [{"id": "TC-3", "status": "pass"},
                                       {"id": "TC-4", "status": "QUESTION", "notes": "Order of ties unspecified"}],
@@ -84,7 +84,7 @@ class Base(unittest.TestCase):
         core.CONFIG.parent.mkdir(parents=True, exist_ok=True)
         core.CONFIG.write_text(json.dumps(cfg))
 
-    def rundir(self, name="2026-11-23-STUDIO-1+STUDIO-2", plan=None, runs=()):
+    def rundir(self, name="2026-11-23-PROJ-1+PROJ-2", plan=None, runs=()):
         d = self.proj / "qa-out" / name
         for sub in ("bugs", "evidence", "repro", ".data"):
             (d / sub).mkdir(parents=True, exist_ok=True)
@@ -134,21 +134,21 @@ class Slug(unittest.TestCase):
 
 class Keys(Base):
     def test_expansion_validation_and_order(self):
-        self.assertEqual(ops.expand_keys(["1234", "ops-7,1250", "STUDIO-1234"], "studio-"),
-                         ["STUDIO-1234", "OPS-7", "STUDIO-1250"])
-        self.assertEqual(ops.expand_keys(["1 2,3"], "STUDIO"), ["STUDIO-1", "STUDIO-2", "STUDIO-3"])
-        for bad in ("abc", "STUDIO-", "1-STUDIO", "STUDIO-12a", "S-1", "ß-12", "ﬀ-1"):  # ß.upper() is SS
+        self.assertEqual(ops.expand_keys(["1234", "ops-7,1250", "PROJ-1234"], "proj-"),
+                         ["PROJ-1234", "OPS-7", "PROJ-1250"])
+        self.assertEqual(ops.expand_keys(["1 2,3"], "PROJ"), ["PROJ-1", "PROJ-2", "PROJ-3"])
+        for bad in ("abc", "PROJ-", "1-PROJ", "PROJ-12a", "S-1", "ß-12", "ﬀ-1"):  # ß.upper() is SS
             with self.assertRaises(core.BadInput) as e:
-                ops.expand_keys([bad], "STUDIO")
+                ops.expand_keys([bad], "PROJ")
             self.assertIn(repr(bad), str(e.exception))
         with self.assertRaisesRegex(core.BadInput, "jiraKeyPrefix"):
             ops.expand_keys(["1234"], None)
         self.assertEqual(ops.expand_keys(["OPS-7"], None), ["OPS-7"])  # full keys need no prefix
 
     def test_cli(self):
-        self.config(jiraKeyPrefix="STUDIO")
-        code, out, _ = cli("keys", "1234", "studio-1250")
-        self.assertEqual((code, json.loads(out)), (0, ["STUDIO-1234", "STUDIO-1250"]))
+        self.config(jiraKeyPrefix="PROJ")
+        code, out, _ = cli("keys", "1234", "proj-1250")
+        self.assertEqual((code, json.loads(out)), (0, ["PROJ-1234", "PROJ-1250"]))
         code, out, err = cli("keys", "12;rm")
         self.assertEqual((code, out), (2, ""))
         self.assertIn("12;rm", err)
@@ -648,9 +648,9 @@ class Verdict(unittest.TestCase):
 
 class MergedCases(Base):
     def test_most_decisive_result_wins(self):
-        plan = {"kind": "ticket", "tickets": [{"key": "STUDIO-1"}], "cases": [
-            {"id": "TC-1", "ticket": "STUDIO-1", "route": "/a"}, {"id": "TC-2", "ticket": "STUDIO-1", "route": "/b"},
-            {"id": "TC-3", "ticket": "STUDIO-1", "route": "/b"}]}
+        plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1"}], "cases": [
+            {"id": "TC-1", "ticket": "PROJ-1", "route": "/a"}, {"id": "TC-2", "ticket": "PROJ-1", "route": "/b"},
+            {"id": "TC-3", "ticket": "PROJ-1", "route": "/b"}]}
         older = {"target": "/a", "cases": [{"id": "TC-1", "status": "FAIL", "actual": "131 saved"},
                                            {"id": "TC-2", "status": "NOT_RUN"}, {"id": "TC-3", "status": "BLOCKED"}]}
         newer = {"target": "/b", "cases": [{"id": "TC-2", "status": "PASS"}, {"id": "TC-3", "status": "PASS"},
@@ -659,17 +659,17 @@ class MergedCases(Base):
         cases = report.merged_cases(d["plan"], d["runs"])
         self.assertEqual([(c["id"], c["status"], c["actual"]) for c in cases],
                          [("TC-1", "FAIL", "131 saved"), ("TC-2", "PASS", ""), ("TC-3", "PASS", "")])
-        self.assertEqual(report.verdict("STUDIO-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
+        self.assertEqual(report.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
         # same rank: the newest run wins
         tie = report.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
                                      ("b", {"cases": [{"id": "TC-1", "status": "pass", "actual": "new"}]})])
         self.assertEqual(tie[0]["actual"], "new")
 
     def test_case_without_or_with_a_repeated_id_is_named_not_dropped_silently(self):
-        plan = {"kind": "ticket", "tickets": [{"key": "STUDIO-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}]}], "cases": [
-            {"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "Save 130"},
-            {"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 131"},  # added by hand in --review
-            {"ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 0"}]}
+        plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}]}], "cases": [
+            {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "Save 130"},
+            {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 131"},  # added by hand in --review
+            {"ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 0"}]}
         d = self.rundir(plan=plan)
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
@@ -716,11 +716,11 @@ class Report(Base):
         self.assertEqual((code, out.strip()), (0, str(d / "REPORT.md")))
         r = (d / "REPORT.md").read_text()
         lines = r.splitlines()
-        self.assertEqual(lines[0], "# QA report: STUDIO-1, STUDIO-2")
+        self.assertEqual(lines[0], "# QA report: PROJ-1, PROJ-2")
         self.assertEqual(lines[1], "ticket · 2026-11-23 · https://qa.example · build 1.42 · browser chrome")
-        self.assertIn("| STUDIO-1 — Speed limit form | ❌ FAIL | TC-2 failed (AC-2): 131 saved; BUG-1 HIGH | 1 / 1 / 0 | 1 |", r)
-        self.assertIn("| STUDIO-2 — Incident list | ⚠️ PASS WITH NOTES | TC-4 open question; BUG-2 LOW | 1 / 0 / 1 | 1 |", r)
-        self.assertIn("## STUDIO-1 — Speed limit form\n**Verdict: ❌ FAIL** — TC-2 failed (AC-2): 131 saved; BUG-1 HIGH", r)
+        self.assertIn("| PROJ-1 — Speed limit form | ❌ FAIL | TC-2 failed (AC-2): 131 saved; BUG-1 HIGH | 1 / 1 / 0 | 1 |", r)
+        self.assertIn("| PROJ-2 — Incident list | ⚠️ PASS WITH NOTES | TC-4 open question; BUG-2 LOW | 1 / 0 / 1 | 1 |", r)
+        self.assertIn("## PROJ-1 — Speed limit form\n**Verdict: ❌ FAIL** — TC-2 failed (AC-2): 131 saved; BUG-1 HIGH", r)
         self.assertIn("- AC-1 Saves 0-130 — ✅ PASS (TC-1)", r)
         self.assertIn("- AC-2 Rejects 131 — ❌ FAIL (TC-2)", r)
         self.assertIn("- AC-1 Sorted by date — ❓ QUESTION (TC-3, TC-4)", r)
@@ -729,16 +729,16 @@ class Report(Base):
         self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)
         self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | ✅ PASS | Saved | — |", r)
         self.assertIn("| TC-2 |  | AC-2 | Reject 131 | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) | — |", r)
-        self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | STUDIO-1 | "
+        self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | PROJ-1 | "
                       "[image](evidence/BUG-1.png) |", r)
-        self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | STUDIO-2 | — |", r)
+        self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | PROJ-2 | — |", r)
         self.assertIn("### Open questions (2)\n- Is 0 a valid speed? _(from /form)_\n"
                       "- TC-4: Order of ties unspecified _(from /list)_", r)
         self.assertIn("<details><summary>Other (1)</summary>\n\n- Keyboard only: out of time", r)
         self.assertIn("<details><summary>/form (run-form.json: COMPLETED, build 1.42) — boundary ❌, happy-path ✅</summary>\n\n"
                       "Explored the speed field.", r)
         self.assertIn("<details><summary>/list (run-list.json: COMPLETED, build 1.42)</summary>", r)
-        order = [r.index(h) for h in ("## Summary", "## Needs your action", "## STUDIO-1", "## STUDIO-2",
+        order = [r.index(h) for h in ("## Summary", "## Needs your action", "## PROJ-1", "## PROJ-2",
                                       "## Not tested", "## Exploration notes")]
         self.assertEqual(order, sorted(order))
 
@@ -747,7 +747,7 @@ class Report(Base):
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertEqual(r.count("⏸️ not run"), 4 + 3)  # every case, and every covered AC
-        self.assertIn("| STUDIO-1 — Speed limit form | ⏳ NOT STARTED | testing hasn't started yet | 0 / 0 / 2 | 0 |", r)
+        self.assertIn("| PROJ-1 — Speed limit form | ⏳ NOT STARTED | testing hasn't started yet | 0 / 0 / 2 | 0 |", r)
         self.assertIn("build not run yet", r)
         for absent in ("## Bugs", "## Exploration notes", "## Questions"):
             self.assertNotIn(absent, r)
@@ -773,9 +773,9 @@ class Report(Base):
         self.assertIn("## Exploration notes", r)
 
     def test_plan_kind(self):
-        d = self.rundir("2026-11-23-plan-STUDIO-1", plan={**PLAN, "kind": "plan"})
+        d = self.rundir("2026-11-23-plan-PROJ-1", plan={**PLAN, "kind": "plan"})
         r = report.render_report(d)
-        self.assertIn("| STUDIO-1 — Speed limit form | 2 | 2 |", r)
+        self.assertIn("| PROJ-1 — Speed limit form | 2 | 2 |", r)
         self.assertIn("| ID | AC | Case |\n|---|---|---|", r)
         self.assertNotIn("Status", r)
         self.assertNotIn("Verdict", r)
@@ -783,7 +783,7 @@ class Report(Base):
 
     def test_plan_questions_render(self):
         q = {**PLAN, "kind": "plan", "questions": ["Q1 [BLOCKING] Is 0 a valid speed?", "Q2 [LOW] Units?"]}
-        r = report.render_report(self.rundir("2026-11-23-plan-STUDIO-1", plan=q))
+        r = report.render_report(self.rundir("2026-11-23-plan-PROJ-1", plan=q))
         self.assertIn("## Questions\n- Q1 [BLOCKING] Is 0 a valid speed?\n- Q2 [LOW] Units?", r)
         d = self.rundir(plan={**q, "kind": "ticket"}, runs=[("form", RUN_FORM)])
         # r26: a run's follow-up on plan Q1 read as a second, unnumbered Q1 in one flat list: two labelled lists
@@ -793,8 +793,8 @@ class Report(Base):
         self.assertIn("## Exploration notes\nHeuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", r)
 
     def test_odd_field_types_never_crash(self):
-        t = [{"key": "STUDIO-1", "summary": "A", "acs": [{"id": "AC-1", "text": "x"}]}]
-        c = [{"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "t", "route": "/f", "steps": ["a"]}]
+        t = [{"key": "PROJ-1", "summary": "A", "acs": [{"id": "AC-1", "text": "x"}]}]
+        c = [{"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "t", "route": "/f", "steps": ["a"]}]
         plans = [{"kind": "ticket", "tickets": t, "cases": c, "env": {"url": 5}},
                  {"kind": "ticket", "tickets": t, "cases": c, "env": {"url": ["x"], "browser": {"a": 1}}},
                  {"kind": "ticket", "tickets": [{"key": ["a"]}, {"key": 12}], "cases": [{"id": ["x"], "ticket": 12}]},
@@ -826,8 +826,8 @@ class Report(Base):
 
     def test_text_cannot_break_the_markdown(self):
         plan = {"kind": "ticket", "title": "T\n## injected",
-                "tickets": [{"key": "STUDIO-1", "summary": "s\n# H1 | x", "acs": [{"id": "AC-1\n- x", "text": "t"}]}],
-                "cases": [{"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1\n- x", "title": "t", "route": "/f"}]}
+                "tickets": [{"key": "PROJ-1", "summary": "s\n# H1 | x", "acs": [{"id": "AC-1\n- x", "text": "t"}]}],
+                "cases": [{"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1\n- x", "title": "t", "route": "/f"}]}
         run = {"target": "/f", "status": "done\n# X", "build": "1\n## b",
                "cases": [{"id": "TC-1", "status": "FAIL", "bug": "BUG-9 | <img src=x>\nnew"}],
                "bugs": [{"hash": "ab|cd\nef", "title": "t", "route": "/f"}]}
@@ -836,13 +836,13 @@ class Report(Base):
         r = report.render_report(d)
         headings = [ln for ln in r.splitlines() if ln.startswith("#")]
         self.assertEqual(headings, ["# QA report: T ## injected", "## Needs your action", "### Bugs to file (1)",
-                                    "### Failed, blocked or not-run cases (1)", "## STUDIO-1 — s # H1 \\| x",
+                                    "### Failed, blocked or not-run cases (1)", "## PROJ-1 — s # H1 \\| x",
                                     "### Acceptance criteria", "### Test cases", "## Exploration notes"])
         self.assertIn("| ❌ FAIL | BUG-9 \\| &lt;img src=x> new |", r)  # not a link: not exactly BUG-n
         self.assertNotIn("](bugs/BUG-9", r)
         self.assertIn("| known ab\\|cd ef |", r)
         self.assertIn("- AC-1 - x t — ❌ FAIL (TC-1)", r)
-        self.assertIn("## STUDIO-1 — s # H1 \\| x", r)
+        self.assertIn("## PROJ-1 — s # H1 \\| x", r)
 
     def test_wrong_typed_run_fields_are_named_not_hidden(self):  # audit 2 r20
         plan = {"kind": "ticket", "tickets": [{"key": "T-1", "acs": [{"id": "AC-1", "text": "a"}]}],
@@ -855,8 +855,8 @@ class Report(Base):
 
     def test_hostile_text_stays_text(self):
         """XSS payloads, `<!--`, remote images, a leading ``` and `@@` in run text can't hide or rewire the report."""
-        plan = {"kind": "ticket", "title": "T <!-- x", "tickets": [{"key": "STUDIO-1", "acs": [{"id": "AC-1", "text": "a"}]}],
-                "cases": [{"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "<script>alert(1)</script>",
+        plan = {"kind": "ticket", "title": "T <!-- x", "tickets": [{"key": "PROJ-1", "acs": [{"id": "AC-1", "text": "a"}]}],
+                "cases": [{"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "<script>alert(1)</script>",
                            "route": "/f"}]}
         run = {"target": "/f", "status": "done", "notes": "```\nrest", "questions": ["q <details>"],
                "cases": [{"id": "TC-1", "status": "FAIL", "actual": "saw ![p](https://evil.example/t.png) [here](https://evil.example)"}],
@@ -876,14 +876,14 @@ class Report(Base):
         self.assertIn("saw ![p]\\(https://evil.example/t.png) [here]\\(https://evil.example)", r)  # links stay text
         self.assertIn("— other:", r)  # the coverage line is in the folded page title now
         self.assertIn("\n\\```<br>rest\n", r)
-        self.assertIn("| [BUG-1](bugs/BUG-1.md) | LOW |  | bad @@ title | /f | STUDIO-1 | [image](evidence/BUG-1.png) |", r)
+        self.assertIn("| [BUG-1](bugs/BUG-1.md) | LOW |  | bad @@ title | /f | PROJ-1 | [image](evidence/BUG-1.png) |", r)
         self.assertIn("| [image](evidence/shot%20%281%29.png) |", r)
         idx = (self.proj / "qa-out/README.md").read_text()
         self.assertIn("| [2026-11-23-odd name](2026-11-23-odd%20name/REPORT.md) |", idx)
 
     def test_index_newest_first(self):
-        a = self.rundir("2026-11-20-STUDIO-1", plan=PLAN, runs=[("form", RUN_FORM)])
-        b = self.rundir("2026-11-23-plan-STUDIO-9", plan={**PLAN, "kind": "plan"})
+        a = self.rundir("2026-11-20-PROJ-1", plan=PLAN, runs=[("form", RUN_FORM)])
+        b = self.rundir("2026-11-23-plan-PROJ-9", plan={**PLAN, "kind": "plan"})
         self.rundir("old-layout-slug")  # no REPORT.md, no plan: not listed
         (self.proj / "qa-out/form").mkdir()
         (self.proj / "qa-out/form/run.json").write_text("{}")
@@ -892,22 +892,22 @@ class Report(Base):
         idx = (self.proj / "qa-out/README.md").read_text()
         rows = [ln for ln in idx.splitlines() if ln.startswith("| 2026")]
         self.assertEqual(rows, [
-            "| 2026-11-23 | [2026-11-23-plan-STUDIO-9](2026-11-23-plan-STUDIO-9/REPORT.md) | plan | plan only (4 cases) | 0 |",
-            "| 2026-11-20 | [2026-11-20-STUDIO-1](2026-11-20-STUDIO-1/REPORT.md) | ticket | "
-            "STUDIO-1 ❌ FAIL, STUDIO-2 ⛔ BLOCKED | 1 |"])
+            "| 2026-11-23 | [2026-11-23-plan-PROJ-9](2026-11-23-plan-PROJ-9/REPORT.md) | plan | plan only (4 cases) | 0 |",
+            "| 2026-11-20 | [2026-11-20-PROJ-1](2026-11-20-PROJ-1/REPORT.md) | ticket | "
+            "PROJ-1 ❌ FAIL, PROJ-2 ⛔ BLOCKED | 1 |"])
         self.assertNotIn("old-layout", idx)
 
 
 class Inbox(Base):
-    ACLI = [{"key": "STUDIO-5", "fields": {"summary": "Old one", "status": {"name": "In Progress"},
+    ACLI = [{"key": "PROJ-5", "fields": {"summary": "Old one", "status": {"name": "In Progress"},
                                            "priority": {"name": "High"}, "updated": "2026-11-20T10:00:00.000+0000"}},
-            {"key": "STUDIO-7", "fields": {"summary": "Newer | pipe", "status": {"name": "To Do"},
+            {"key": "PROJ-7", "fields": {"summary": "Newer | pipe", "status": {"name": "To Do"},
                                            "priority": {"name": "Low"}, "updated": "2026-11-22T10:00:00.000+0000"}}]
 
     def test_shapes(self):
         flat = [{"key": "ops-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}]
         for data in (self.ACLI, {"issues": self.ACLI}, {"workItems": self.ACLI}, {"values": self.ACLI}):
-            self.assertEqual([x["key"] for x in report.inbox_items(data)], ["STUDIO-5", "STUDIO-7"])
+            self.assertEqual([x["key"] for x in report.inbox_items(data)], ["PROJ-5", "PROJ-7"])
         self.assertEqual(report.inbox_items(flat + [{"nokey": 1}, "junk"]),
                          [{"key": "OPS-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}])
         for bad in ({"x": 1}, "text", 5):
@@ -915,22 +915,20 @@ class Inbox(Base):
                 report.inbox_items(bad)
 
     def test_new_tracking_persists(self):
-        self.config(jiraKeyPrefix="STUDIO")
+        self.config(jiraKeyPrefix="PROJ")
         code, out, _ = cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))
         self.assertEqual(code, 0)
         rows = [ln for ln in out.splitlines() if ln.startswith("| ")][1:]
         self.assertIn("| New | Key | Summary | Status | Priority | Updated |", out)
-        self.assertEqual(rows, ["| NEW | STUDIO-7 | Newer \\| pipe | To Do | Low | 2026-11-22 |",
-                                "| NEW | STUDIO-5 | Old one | In Progress | High | 2026-11-20 |"])
+        self.assertEqual(rows, ["| NEW | PROJ-7 | Newer \\| pipe | To Do | Low | 2026-11-22 |",
+                                "| NEW | PROJ-5 | Old one | In Progress | High | 2026-11-20 |"])
         self.assertEqual(out.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7 5")
         self.assertEqual((self.proj / "qa-out/INBOX.md").read_text(), out)
         self.assertTrue(out.startswith("# Jira inbox\n"))
-        f = self.t / "search.json"
-        f.write_text(json.dumps({"issues": self.ACLI + [{"key": "OPS-9", "fields": {"summary": "Other",
-                                                                                     "updated": "2026-11-01"}}]}))
-        code, out, _ = cli("inbox", str(self.proj), "--file", str(f))  # a new process run would read the same DB
+        wrapped = {"issues": self.ACLI + [{"key": "OPS-9", "fields": {"summary": "Other", "updated": "2026-11-01"}}]}
+        code, out, _ = cli("inbox", str(self.proj), stdin=json.dumps(wrapped))  # an object with `issues` works too
         rows = [ln for ln in out.splitlines() if ln.startswith("| ")][1:]
-        self.assertEqual([r.split(" | ")[0:2] for r in rows], [["| NEW", "OPS-9"], ["| ", "STUDIO-7"], ["| ", "STUDIO-5"]])
+        self.assertEqual([r.split(" | ")[0:2] for r in rows], [["| NEW", "OPS-9"], ["| ", "PROJ-7"], ["| ", "PROJ-5"]])
         self.assertEqual(out.splitlines()[-1], "Next: /qa-sdet:qa-ticket OPS-9")
         code, out, _ = cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))
         self.assertEqual(out.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7 5")  # nothing new: top 3
@@ -952,8 +950,8 @@ class Inbox(Base):
 
     def test_duplicates_typo_project_deep_garbage_big_inbox(self):  # r11
         code, out, _ = cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI + self.ACLI[:1]))
-        self.assertIn("2 open, 2 new", out)  # STUDIO-5 listed twice is one ticket
-        self.assertEqual(sum(ln.count("STUDIO-5") for ln in out.splitlines() if ln.startswith("| ")), 1)
+        self.assertIn("2 open, 2 new", out)  # PROJ-5 listed twice is one ticket
+        self.assertEqual(sum(ln.count("PROJ-5") for ln in out.splitlines() if ln.startswith("| ")), 1)
         self.assertEqual(cli("inbox", str(self.t / "typo/p"), stdin="[]")[0], 2)
         self.assertFalse((self.t / "typo").exists())
         code, _, err = cli("inbox", str(self.proj), stdin="[" * 100000)
@@ -1209,16 +1207,16 @@ class Doctor(Base):
                           (dict(qaBaseUrl=5), "FIX  qaBaseUrl is a full URL"),
                           (dict(ssoHost="https://login.x.com/"), "FIX  ssoHost is a host name  -> just the host"),
                           (dict(ssoHost={"x": 1}), "FIX  ssoHost is a host name"),
-                          (dict(jiraKeyPrefix=["STUDIO"]), "FIX  jiraKeyPrefix is a Jira project key"),
-                          (dict(jiraKeyPrefix="STUDIO-1234"), "FIX  jiraKeyPrefix is a Jira project key")]:
+                          (dict(jiraKeyPrefix=["PROJ"]), "FIX  jiraKeyPrefix is a Jira project key"),
+                          (dict(jiraKeyPrefix="PROJ-1234"), "FIX  jiraKeyPrefix is a Jira project key")]:
             self.config(**{**good, **bad})
             out = self.doctor_out()
             self.assertIn(want, out, bad)
             self.assertNotIn("add the qaBaseUrl host to allowedHosts", out, bad)  # the wrong fix for a bad URL
-        self.config(**good, jiraKeyPrefix="studio-")
+        self.config(**good, jiraKeyPrefix="proj-")
         self.assertIn("ok   jiraKeyPrefix is a Jira project key", self.doctor_out())
         with self.assertRaisesRegex(core.BadInput, "jiraKeyPrefix .* must be a Jira project key"):
-            ops.expand_keys(["1234"], "STUDIO-1234")
+            ops.expand_keys(["1234"], "PROJ-1234")
         core.CONFIG.write_text("[1]")
         self.assertIn("must be one JSON object", self.doctor_out())
         core.CONFIG.write_text("{bad")
@@ -1325,14 +1323,14 @@ class Concurrency(Base):
         self.assertIn(d.name, (d.parent / "README.md").read_text())
 
 
-PLAN1 ={"kind": "ticket", "title": "STUDIO-1", "created": "2026-11-23T18:00:00Z",
+PLAN1 ={"kind": "ticket", "title": "PROJ-1", "created": "2026-11-23T18:00:00Z",
          "env": {"url": "https://qa.example", "browser": "chrome"},
-         "tickets": [{"key": "STUDIO-1", "summary": "Speed limit form", "fix_version": "3.5",
+         "tickets": [{"key": "PROJ-1", "summary": "Speed limit form", "fix_version": "3.5",
                       "fixed_note": "Speed no longer accepts 131.",
                       "acs": [{"id": "AC-1", "text": "Saves 0-130"}, {"id": "AC-2", "text": "Rejects 131"}]}],
-         "cases": [{"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "Save 130", "route": "/form",
+         "cases": [{"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "Save 130", "route": "/form",
                     "priority": "P1", "steps": ["Open form", "Type 130"], "expected": "Saved"},
-                   {"id": "TC-2", "ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
+                   {"id": "TC-2", "ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
                     "priority": "P1", "steps": ["Type 131"], "expected": "Error shown"}],
          "questions": ["Q1 [BLOCKING] Is 0 a valid speed?"]}
 RUN1 = {"mode": "ticket", "target": "/form", "build": "1.42", "status": "COMPLETED", "notes": "Explored.",
@@ -1347,17 +1345,17 @@ class Layout(Base):
     def render_run(self, runs, plan=PLAN1, templates=TEMPLATES):
         if templates is not None:
             self.config(releaseTemplates=templates)
-        d = self.rundir("2026-11-23-STUDIO-1", plan=plan, runs=runs)
+        d = self.rundir("2026-11-23-PROJ-1", plan=plan, runs=runs)
         report.write_report(d)
         return d, (d / "REPORT.md").read_text()
 
     def test_verdict_block_action_and_draft_for_a_pass(self):
         d, r = self.render_run([("form", RUN1)])
         self.assertIn("**Verdict: ✅ PASS** — all 2 cases passed\n", r)
-        self.assertIn("Jira comment draft: [jira-comment-STUDIO-1.md](jira-comment-STUDIO-1.md)", r)
+        self.assertIn("Jira comment draft: [jira-comment-PROJ-1.md](jira-comment-PROJ-1.md)", r)
         self.assertNotIn("## Summary", r)  # one ticket: no table
-        self.assertLess(r.index("## Needs your action"), r.index("## STUDIO-1"))  # actions come before the detail
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertLess(r.index("## Needs your action"), r.index("## PROJ-1"))  # actions come before the detail
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn("Passed on Release-A-3.5.0 and Release-B-3.5.0\n", draft)
         self.assertIn("Fixed: Speed no longer accepts 131.", draft)
         self.assertIn("TC-1 - PASS: Save 130\nTC-2 - PASS: Reject 131", draft)
@@ -1365,10 +1363,10 @@ class Layout(Base):
     def test_fail_has_no_draft_and_a_stale_draft_is_removed(self):
         runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL",
                                                                                   "actual": "131 saved"}]})]
-        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=runs)
-        (d / "jira-comment-STUDIO-1.md").write_text("old draft")
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=runs)
+        (d / "jira-comment-PROJ-1.md").write_text("old draft")
         report.write_report(d)
-        self.assertFalse((d / "jira-comment-STUDIO-1.md").exists())
+        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
         r = (d / "REPORT.md").read_text()
         self.assertIn("**Verdict: ❌ FAIL**", r)
         self.assertNotIn("Jira comment draft", r)
@@ -1378,7 +1376,7 @@ class Layout(Base):
                                                                                   "actual": "131 saved"}]})]
         _, r = self.render_run(runs)
         self.assertIn("### Open questions (1)\n- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)
-        self.assertIn("### Failed, blocked or not-run cases (1)\n- TC-2 ❌ FAIL (AC-2) — 131 saved · STUDIO-1", r)
+        self.assertIn("### Failed, blocked or not-run cases (1)\n- TC-2 ❌ FAIL (AC-2) — 131 saved · PROJ-1", r)
         self.assertNotIn("Nothing needs your action", r)
 
     def test_same_question_on_two_pages_is_one_line_and_resolved_ones_fold(self):
@@ -1400,7 +1398,7 @@ class Layout(Base):
         self.assertIn("**Expected:** Error shown", r)
 
     def test_case_image_is_linked_and_embedded_only_when_the_file_exists(self):
-        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         self.assertIn("| ✅ PASS | Saved | — |", report.render_report(d))
         (d / "evidence").mkdir(exist_ok=True)
         (d / "evidence" / "TC-1.png").write_bytes(b"png")
@@ -1410,34 +1408,34 @@ class Layout(Base):
         self.assertIn("1 evidence image(s)", r)
 
     def test_a_folder_named_like_a_case_image_is_not_one(self):  # audit pi-10
-        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         (d / "evidence" / "TC-1.png").mkdir(parents=True)
         r = report.render_report(d)
         self.assertIn("0 evidence image(s)", r)
         self.assertNotIn("![TC-1]", r)
 
     def test_build_check_uses_the_builds_of_the_tickets_own_runs(self):  # audit pi-5: another ticket's build hid it
-        plan = {**PLAN1, "tickets": PLAN1["tickets"] + [{"key": "STUDIO-2", "summary": "List", "fix_version": "3.4",
+        plan = {**PLAN1, "tickets": PLAN1["tickets"] + [{"key": "PROJ-2", "summary": "List", "fix_version": "3.4",
                                                           "fixed_note": "The list loads."}],
-                "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "STUDIO-2", "title": "List loads", "route": "/list"}]}
+                "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "PROJ-2", "title": "List loads", "route": "/list"}]}
         runs = [("form", {**RUN1, "build": "unknown"}),
                 ("list", {**RUN1, "target": "/list", "build": "3.4.0", "cases": [{"id": "TC-3", "status": "PASS"}]})]
         d, _ = self.render_run(runs, plan=plan)
-        self.assertIn("- Build: unknown in this run.", (d / "jira-comment-STUDIO-1.md").read_text())
-        self.assertNotIn("Build: unknown", (d / "jira-comment-STUDIO-2.md").read_text())
+        self.assertIn("- Build: unknown in this run.", (d / "jira-comment-PROJ-1.md").read_text())
+        self.assertNotIn("Build: unknown", (d / "jira-comment-PROJ-2.md").read_text())
 
     def test_draft_takes_one_passing_image_per_route(self):  # audit agy-16: one route and two passes proved neither
-        plan = {**PLAN1, "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "STUDIO-1", "ac": "AC-1", "title": "List",
+        plan = {**PLAN1, "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "PROJ-1", "ac": "AC-1", "title": "List",
                                                      "route": "/list"}]}
         runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "QUESTION", "notes": "Order?"},
                                             {"id": "TC-2", "status": "PASS"}]}),
                 ("list", {**RUN1, "target": "/list", "cases": [{"id": "TC-3", "status": "PASS"}]})]
-        d = self.rundir("2026-11-23-STUDIO-1", plan=plan, runs=runs)
+        d = self.rundir("2026-11-23-PROJ-1", plan=plan, runs=runs)
         for cid in ("TC-1", "TC-2", "TC-3"):
             (d / "evidence" / f"{cid}.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
         report.write_report(d)
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn(f"Paste this image: {d}/evidence/TC-2.png (/form)", draft)  # TC-1 is first, but no pass
         self.assertIn(f"Paste this image: {d}/evidence/TC-3.png (/list)", draft)
         self.assertNotIn("TC-1.png", draft)
@@ -1462,7 +1460,7 @@ class Layout(Base):
 
     def test_plan_only_lists_a_resolved_question_once(self):  # audit agy-8: once bare (looked open), once answered
         plan = {**PLAN1, "kind": "plan", "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h"}]}
-        r = report.render_report(self.rundir("2026-11-23-STUDIO-1", plan=plan))
+        r = report.render_report(self.rundir("2026-11-23-PROJ-1", plan=plan))
         self.assertEqual(r.count("Units?"), 1, r)
         self.assertIn("- Units? — answer: km/h", r)
 
@@ -1483,35 +1481,35 @@ class Layout(Base):
         plan = {**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": True}],
                 "cases": [{**c, "route": "/form\ninjected"} for c in PLAN1["cases"]]}
         d, r = self.render_run([("form", {**RUN1, "not_tested": [True, "Real gap"], "questions": [True]})], plan=plan)
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn("Passed on <release name>", draft)
         self.assertIn("screenshot for /form injected", draft)
         self.assertNotIn("- True", r)
         self.assertIn("Real gap", r)
         self.config(releaseTemplates=["Rel-\n{version}"])
-        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         report.write_report(d)
-        self.assertIn("Passed on Rel- 3.5.0\n", (d / "jira-comment-STUDIO-1.md").read_text())
+        self.assertIn("Passed on Rel- 3.5.0\n", (d / "jira-comment-PROJ-1.md").read_text())
 
     def test_draft_shows_one_image_per_route_and_no_markup(self):
-        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         (d / "evidence").mkdir(exist_ok=True)
         (d / "evidence" / "TC-1.png").write_bytes(b"png")
         (d / "evidence" / "TC-2.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
         report.write_report(d)
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertEqual(draft.count("Paste this image:"), 1)  # both cases are on /form: first passing one only
         self.assertIn(f"Paste this image: {d}/evidence/TC-1.png (/form)", draft)
         body = draft.split("---------- paste below ----------", 1)[1]
         self.assertNotRegex(body, r"[|<>*#]|!\[")  # plain text for Jira
 
     def test_missing_templates_or_fix_version_leave_placeholders(self):
-        d = self.rundir("2026-11-23-STUDIO-1", plan={**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": None,
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": None,
                                                                             "fixed_note": ""}]}, runs=[("form", RUN1)])
         self.config()  # no releaseTemplates at all
         report.write_report(d)
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn("Passed on <release name>", draft)
         self.assertIn("release names (set releaseTemplates in the qa-sdet config)", draft)
         self.assertIn("Fixed: <write one sentence: what was fixed>", draft)
@@ -1522,7 +1520,7 @@ class Layout(Base):
                                                                                   "notes": "Order unclear"}]})]
         d, r = self.render_run(runs)
         self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
-        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn("TC-2 - QUESTION: Reject 131", draft)
         self.assertIn("Notes: TC-2 open question", draft)
 

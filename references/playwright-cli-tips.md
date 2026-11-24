@@ -1,58 +1,42 @@
 # playwright-cli: cheap and fast
 
-Always use the one named session `playwright-cli -s=qa <cmd>`, so the browser stays open between commands.
+Every command starts `playwright-cli -s=qa <cmd>` (the allow rules match that shape). Start with `qa-mem browser-open '<url>'`, end with `close`. `goto` takes a full URL (`qaBaseUrl` + path): the guard checks the host, and a bare path like `/form` has none, so it is denied. Commands print the page status and a snapshot file path; `find` searches it; read snapshot files with `grep` or `head`. `--raw` prints only the value.
 
 | Need | Use | Avoid |
 |---|---|---|
-| Is X on the page? | `find 'Save'` / `find --regex '/error|invalid/i'` | full `snapshot` |
-| Act on element | cached locator from card directly: `click "getByRole('button', { name: 'Save' })"` | snapshot just to get a ref |
-| Need refs | `snapshot --depth=4`, then `snapshot <ref>` for the region | whole-page deep snapshot every step |
-| Stable locator to save | `generate-locator <ref>` | hand-written CSS |
-| Did it fail silently? | `console error`, `requests`, then `response-body <n>` / `request-body <n>` for one call; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | screenshots, `request <n>` / `response-headers <n>` (blocked: they print cookies) |
-| Bug evidence | box recipe below, `screenshot --filename='<out>/evidence/BUG-<n>.png'`, then `qa-mem annotate` (always pass `--filename`: the default location is `.playwright-cli/`) | screenshot per step |
-| See canvas/map | `screenshot --filename='<out>/.data/map-<n>.png'` | screenshots in `evidence/` (bug and case images only) |
-| Repro script | `recording-start` … `recording-stop` → paste into repro/*.spec.ts | rewriting steps by hand |
-| Read a value | `eval "document.querySelector('#x').textContent"` | snapshot + reading |
-| Many input values | one `--raw eval` loop in the page (recipe below) | one fill + one read command per value; `run-code` (blocked: it runs Node) |
-| Several steps in a row | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>" && playwright-cli -s=qa find 'Saved'` (each command still counts toward a budget; fewer turns make the run faster and cheaper) | one Bash call per command |
-| Fault injection | `route <pattern>`, `network-state-set offline` (needs --faults) | |
+| Is X on the page? | `find 'Save'`, `find --regex '/error|invalid/i'` | a full `snapshot` |
+| Act | a card locator directly: `click "getByRole('button', { name: 'Save' })"` | a snapshot just for a ref |
+| Structure, refs | `snapshot --depth=4`, then `snapshot <ref>`; a locator to keep: `generate-locator <ref>` | whole-page snapshots every step |
+| Silent failure | `console error`, `requests`, then `response-body <n>` / `request-body <n>` | `request <n>`, `response-headers <n>` (denied: cookies) |
+| Read a value | `--raw eval "document.querySelector('#x').textContent"`; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | snapshot + reading |
+| Many input values | one `--raw eval` loop (below) | a fill and a read per value; `run-code` (denied) |
+| Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"` (each still counts toward a budget) | one call per command |
 
-Session start: `qa-mem browser-open '<url>'` (opens `-s=qa` in the signed-in `main` profile with the config browser; it counts as one budgeted command).
-Keep `-s=qa` as the first argument of every command: the user's allow rules match that shape.
-`goto` takes a full URL (`qaBaseUrl` + path); relative paths are denied, so build the URL from the config.
-Session end: `playwright-cli -s=qa close`.
-
-Every command prints page status + a link to a snapshot file in `.playwright-cli/`; it does not inline the tree. `find` searches that snapshot. Read snapshot files with `grep`/`head` (they can be large). Add `--raw` when you only need a value (e.g. `--raw eval ...`).
-
-## Batch input values in one eval (runs in the page sandbox)
+Many values in one eval; repeat a suspicious one with real `fill` / `click` before calling it a bug (the recording needs them; its code goes into the repro spec):
 ```
-playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelector('[name=speed]'); const out = {};
-  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;  // works for React/Angular inputs
-  for (const v of ['129', '130', '131', '999']) { set.call(el, v); el.dispatchEvent(new Event('input', {bubbles: true}));
-    el.form.requestSubmit(); await new Promise(r => setTimeout(r, 300));
-    out[v] = document.querySelector('[role=status]')?.textContent; }
+playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelector('[name=speed]'), out = {};
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;  // React inputs too
+  for (const v of ['129', '131']) { set.call(el, v); el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.form.requestSubmit(); await new Promise(r => setTimeout(r, 300)); out[v] = document.querySelector('[role=status]')?.textContent; }
   return JSON.stringify(out); })()"
 ```
-Reproduce a suspicious value with real `fill`/`click` commands before calling it a bug: the recording and the repro spec need them.
 
-## Box for a case image in the app frame (not yet checked on a live page)
-When the app shell loads each page in a frame, the bug-image recipe below cannot see inside that frame. Find the frame's selector once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : '[name=' + f.name + ']').join(' ')"` (no frame: use the bug-image recipe). Then one eval reads the element through the frame and adds the frame's offset, so the box is in page coordinates (`run-code` would be simpler, but the guard denies it: it runs outside the page sandbox):
+## Evidence image (bug or case)
+A bug: after `recording-stop` (its toolbar shows in screenshots). A case: before you cancel any dialog. Run nothing between the eval and the screenshot.
 ```
-playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<selector from the lookup>');
-  const el = f.contentDocument.querySelector('<css of the element>'); el.scrollIntoView({block: 'center'});
+playwright-cli -s=qa --raw eval "(() => { const el = document.querySelector('<css>'); el.scrollIntoView({block: 'center'});
+  const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })()"
+playwright-cli -s=qa screenshot --filename='<out>/evidence/<BUG-n or TC-n>.png'
+qa-mem annotate '<out>/evidence/<BUG-n or TC-n>.png' --box <x,y,w,h> --label '<at most 80 chars>'
+```
+- `screenshot` saves the viewport in CSS pixels, the unit of `getBoundingClientRect()`: no `devicePixelRatio` factor, never `--hires` or `--full-page`. Always pass `--filename`.
+- The box is the element that shows the problem (the wrong value, the error text, the bad row). A second `--box` is allowed. The label sits by the first box, so that is the element it describes. Bug label: actual vs expected (`Saved at 131 km/h; max is 130`). Case label: `TC-<n> <STATUS>: <value you read>`.
+- `annotate` says Pillow is missing: keep the image, describe the spot in the draft, `annotated: false`.
+- **In-frame variant** (the app shell loads pages in an iframe, which the eval above can't see). Find the frame once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : '[name=' + f.name + ']').join(' ')"`. Then the eval adds the frame's offset:
+```
+playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<selector>');
+  const el = f.contentDocument.querySelector('<css>'); el.scrollIntoView({block: 'center'});
   const o = f.getBoundingClientRect(), r = el.getBoundingClientRect();
   return [o.x + f.clientLeft + r.x, o.y + f.clientTop + r.y, r.width, r.height].map(Math.round).join(','); })()"
-playwright-cli -s=qa screenshot --filename='<out>/evidence/TC-<n>.png'
-qa-mem annotate '<out>/evidence/TC-<n>.png' --box <x,y,w,h> --label 'TC-<n> <STATUS>: <value read>'
 ```
-`contentDocument` is null when the frame is on another origin: then keep the plain screenshot (no `annotate`). Not yet run against the QA app: check the first case before you rely on it, and keep the plain screenshot if the box is missing or wrong.
-
-## Box for a bug image (one eval, then screenshot, then annotate)
-```
-playwright-cli -s=qa --raw eval "(() => { const r = document.querySelector('<css of the element>').getBoundingClientRect();
-  return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })()"
-playwright-cli -s=qa screenshot --filename='<out>/evidence/BUG-<n>.png'
-qa-mem annotate '<out>/evidence/BUG-<n>.png' --box <x,y,w,h> --label '<what is wrong, ≤80 chars>'
-```
-`screenshot` saves the viewport in CSS pixels (no `--hires`, no `--full-page`), the same units as `getBoundingClientRect()`, so the box needs no `devicePixelRatio` factor.
-Pick the element that shows the problem (the field with the wrong value, the error text, the bad row). Scroll it into view before the eval (`scrollIntoView({block: 'center'})` in the same eval works), and run nothing between the eval and the screenshot.
+  A frame on another origin has no `contentDocument`: keep the plain screenshot. Not checked on the live app yet: keep the plain screenshot if the box looks wrong.

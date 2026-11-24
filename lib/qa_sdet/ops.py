@@ -17,27 +17,27 @@ KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+", re.ASCII)  # ASCII: Jira keys never h
 
 
 def expand_keys(args, prefix=None):
-    """['1234', 'ops-7,1250'] -> ['STUDIO-1234', 'OPS-7', 'STUDIO-1250'] (prefix from config jiraKeyPrefix)."""
+    """['1234', 'ops-7,1250'] -> ['PROJ-1234', 'OPS-7', 'PROJ-1250'] (prefix from config jiraKeyPrefix)."""
     prefix = str(prefix or "").strip().rstrip("-")
     prefix = prefix.upper() if prefix.isascii() else prefix
     out = []
     for tok in (t for a in args for t in re.split(r"[,\s]+", a) if t):
         if tok.isascii() and tok.isdigit():
             if not prefix:
-                raise core.BadInput(f"set jiraKeyPrefix in {core.CONFIG} (e.g. \"STUDIO\") to use bare numbers like {tok}, "
+                raise core.BadInput(f"set jiraKeyPrefix in {core.CONFIG} (e.g. \"PROJ\") to use bare numbers like {tok}, "
                                "or give full keys")
             if not re.fullmatch(r"[A-Z][A-Z0-9]+", prefix, re.ASCII):
-                raise core.BadInput(f"jiraKeyPrefix in {core.CONFIG} must be a Jira project key like \"STUDIO\" (got "
+                raise core.BadInput(f"jiraKeyPrefix in {core.CONFIG} must be a Jira project key like \"PROJ\" (got "
                                f"{core.short(prefix, 40)!r}); fix it, or give full keys")
             key = f"{prefix}-{tok}"
         else:
             key = tok.upper() if tok.isascii() else tok  # "ß-12".upper() is "SS-12": non-ASCII must fail, not morph
         if not KEY_RE.fullmatch(key):
-            raise core.BadInput(f"not a ticket number or key: {tok!r} (use 1234 or STUDIO-1234)")
+            raise core.BadInput(f"not a ticket number or key: {tok!r} (use 1234 or PROJ-1234)")
         if key not in out:
             out.append(key)
     if not out:
-        raise core.BadInput("give ticket numbers or keys, e.g. 1234 1250 or STUDIO-1234")
+        raise core.BadInput("give ticket numbers or keys, e.g. 1234 1250 or PROJ-1234")
     return out
 
 

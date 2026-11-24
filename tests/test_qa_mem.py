@@ -132,7 +132,7 @@ class QaMem(unittest.TestCase):
         for obj in ({"cookies": [{"name": "session", "value": sec}]}, {"cookies": {"session": sec}}, {"headers": [["Authorization", sec]]},
                     {"key": "password", "value": sec}, {"jwt": sec}):
             self.assertNotIn(sec, json.dumps(scrub.redact_json(obj)), obj)
-        for obj in ({"key": "STUDIO-1", "summary": "Bearer of bad news"}, {"name": "Speed limit", "value": "130"},
+        for obj in ({"key": "PROJ-1", "summary": "Bearer of bad news"}, {"name": "Speed limit", "value": "130"},
                     {"key": "speed", "value": "130"}, ["boundary", "pass"], {"notes": "the jwt cookies banner"}):
             self.assertEqual(scrub.redact_json(obj), obj)
 

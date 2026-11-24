@@ -129,7 +129,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "login-ok": "", "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
-    "inbox": "<project> [--file F]", "setup-permissions": "[--settings PATH] [--apply]",
+    "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }
 USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items())
 
@@ -212,11 +212,11 @@ def _main(argv):
         if code_ is not None:
             return code_
         if cmd == "inbox":
-            o = _opts(args, valued=("--file",))
+            o = _opts(args)
             if len(o["_"]) != 1:
-                raise core.BadInput("usage: qa-mem inbox <project> [--file F]")
+                raise core.BadInput("usage: qa-mem inbox <project>   (the acli JSON on stdin)")
             try:
-                data = json.loads(Path(o["--file"]).read_text() if o.get("--file") else sys.stdin.read())
+                data = json.loads(sys.stdin.read())
             except (OSError, ValueError, RecursionError) as e:  # RecursionError: garbage nested too deep
                 raise core.BadInput(f"inbox: can't read Jira JSON ({e})")
             items = report.inbox_items(data)  # bad input fails before the DB is opened

@@ -141,7 +141,7 @@ def doctor():
         if prefix not in (None, ""):  # optional: lets the user type ticket numbers without the project key
             line(isinstance(prefix, str) and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"),
                                                                re.ASCII)),
-                 "jiraKeyPrefix is a Jira project key", 'the letters before the ticket number: e.g. "jiraKeyPrefix": "STUDIO"')
+                 "jiraKeyPrefix is a Jira project key", 'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"')
         temps = cfg.get("releaseTemplates")
         if temps not in (None, []):  # optional: the Jira pass-comment draft fills {version} into these
             ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)

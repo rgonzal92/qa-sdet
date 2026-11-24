@@ -202,7 +202,7 @@ def _case_acs(c):
 
 
 def verdict(ticket, cases, bugs, started=True, known=()):
-    """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules in references/report.md);
+    """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet."""
     if not started:
         return "NOT STARTED", "testing hasn't started yet"
@@ -390,7 +390,7 @@ def _header(run_dir, kind, plan, runs):
     env = plan.get("env") if isinstance(plan.get("env"), dict) else {}
     renvs = [r["env"] for _, r in runs if isinstance(r.get("env"), dict)]
     renv = renvs[0] if renvs else {}
-    # plan.json is written before C0 picks the browser: what the runs used (e.g. the MCP fallback) wins
+    # plan.json is written before any browser opens: what the runs used wins
     used = sorted({str(e["browser"]) for e in renvs if e.get("browser")})
     m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
     date = str(plan.get("created") or "")[:10] or (m.group(0) if m else "")
@@ -744,7 +744,7 @@ def inbox_items(data):
         out.append({"key": str(it["key"]).upper(), "summary": core.short(" ".join(str(get("summary") or "").split()), 100),
                     "status": _name(get("status")), "priority": _name(get("priority")), "updated": str(get("updated") or "")})
     if data and not out:  # another JSON shape must not read as "no open tickets"
-        raise core.BadInput(f"inbox: none of the {len(data)} items has a Jira key (\"key\": \"STUDIO-1234\"); ask the search for "
+        raise core.BadInput(f"inbox: none of the {len(data)} items has a Jira key (\"key\": \"PROJ-1234\"); ask the search for "
                        "the key field")
     return out
 

@@ -4,7 +4,7 @@ description: Query the QA app memory (pages, facts, locators, coverage, known bu
 argument-hint: doctor | browsers | card <route|name> | search <terms> | bugs [STATUS] | hash <route> <symptom> | bug-status <hash> <STATUS> | stale <build> | where
 ---
 
-Run `qa-mem <subcommand> '<arg>' ...` for: $ARGUMENTS. Single-quote every argument, writing each `'` inside it as `'\''` (search terms can come from ticket text; a bare `'` would end the quoting and run the rest as a command), and show the output as-is (only if the shell says `qa-mem: command not found`, use `python3 ${CLAUDE_SKILL_DIR}/../../bin/qa-mem`). With no arguments, run `bugs` and `where`.
+Run `qa-mem <subcommand> '<arg>' ...` for: $ARGUMENTS. Single-quote every argument, writing each `'` inside it as `'\''` (search terms can come from ticket text; a bare `'` would end the quoting and run the rest as a command), and show the output as-is. With no arguments, run `bugs` and `where`.
 
 - The DB fills itself: the plugin hook ingests each run's `qa-out/<run>/.data/run-*.json` when an explorer finishes; `qa-mem` is its only interface.
 - Manual writes: `bug-status <hash> FILED|FIXED|INVALID|OPEN` (after filing in Jira, add the key to the draft). A FIXED bug that is seen again turns REGRESSED by itself.

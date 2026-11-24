@@ -1,0 +1,38 @@
+# plan.json and test design
+
+The skill writes `<run>/.data/plan.json`; `qa-mem report '<run>'` renders it.
+
+```json
+{
+  "kind": "ticket",
+  "title": "PROJ-1234, PROJ-1250",
+  "created": "2026-11-23T18:00:00Z",
+  "env": {"url": "<qaBaseUrl>", "browser": "<config browser>"},
+  "tickets": [{
+    "key": "PROJ-1234", "summary": "ticket title",
+    "acs": [{"id": "AC-1", "text": "as the ticket states it"}],
+    "plan": {"scope": "AC-1 speed limit", "approach": "UI, P1 first", "risks": ["Wrong limit saved: data error (TC-1)"],
+             "out_of_scope": ["Provoking a zones API error (needs --faults)"], "test_data": "role editor; qa-sdet-zone-10"},
+    "fix_version": "3.5", "fixed_note": "optional, one sentence"
+  }],
+  "cases": [{"id": "TC-1", "ticket": "PROJ-1234", "ac": "AC-1", "title": "Speed 131 is rejected", "route": "/form",
+             "priority": "P1", "technique": "BVA", "steps": ["Type 131 in Speed limit", "Click Save"],
+             "expected": "Error 'Max 130' shown; nothing saved"}],
+  "questions": ["Q1 [BLOCKING] Is 130 itself allowed?", {"text": "…", "status": "resolved", "answer": "…"}]
+}
+```
+`kind` is `ticket` (qa-ticket), `plan` (qa-plan) or `explore` (qa-explore). `created` is `date -u +%Y-%m-%dT%H:%M:%SZ`. `fix_version` and `fixed_note` are optional and fill the Jira pass-comment draft.
+
+## Ticket and plan
+- `acs`: only what the ticket states. A missing rule, an ambiguous word, an unclear role or state is a question: `Q1 [BLOCKING]`, `[HIGH]` or `[LOW]`. Done when every AC and question is numbered.
+- `plan`: scope by AC id; approach (levels, roles, pages, P1 first); risks with impact and covering cases; test_data (roles, `qa-sdet-` records, flags).
+- `out_of_scope`: checks only an API or unit test can prove (test at the cheapest level), and failures this run can't cause. Provoking an API error or an empty response needs `--faults`: write `Provoking a closures API error (needs --faults)`, not `API errors`; with `--faults` they are cases. It limits what the run causes, never what it judges: a failure the app shows on its own is still tested.
+
+## Cases
+- Ids TC-1..n across the run, unique, and never changed: a reused or reviewed plan keeps every id, a new case takes the next free number, a removed one leaves a gap.
+- `ac`: `AC-1`, or every AC the expected result checks (`AC-1, AC-2`). `route`: where the case starts (empty when unknown).
+- `priority`, exactly: **P1** AC core, money, safety, data loss; **P2** common variants; **P3** edge, cosmetic.
+- `technique`: EP (one case per valid and per invalid class), BVA (a-1, a, a+1, b-1, b, b+1), decision table, state transition (each valid transition once, key invalid ones), pairwise (3+ independent params), negative (stale data, double submit, past bugs from `qa-mem bugs`).
+- `steps`: one action each, concrete values, fields by label, setup first (`Save zone qa-sdet-zone-10 with speed 50`). One input value per case (131 and 1000 are two cases). No `if … otherwise`: a step this run can't do makes an out_of_scope item.
+- `expected`: the visible result that means pass, with its oracle (AC, label, invariant). Dates, times and numbers as the UI shows them, not as the code stores them; no format in the AC: check the UI or ask. A case on a situation the AC leaves open says `See Q1`.
+- Code is a hint, not a spec. `qa-mem code '<route>'` gives field labels and inputs; cite them as "(from code)". A code rule the AC doesn't state, or that differs (code max 120, AC 130), is a question: test with the AC's values and expected result.
