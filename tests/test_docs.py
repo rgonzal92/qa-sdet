@@ -84,7 +84,7 @@ class Docs(unittest.TestCase):
         self.assertIn(f"at most {ops.MARKER_HOURS * 60}", (ROOT / "references/common.md").read_text())
 
     def test_code_map_paths_reject_the_whole_file(self):
-        """ingest_codemap rejects a map with any row outside the scan; the docs must not say such rows are dropped
+        """apply_codemap rejects a map with any row outside the scan; the docs must not say such rows are dropped
         (a mapper would then leave them in), and a mapper must fix only its own out after a hook error."""
         for f in ("references/code-map.md", "agents/qa-mapper.md"):
             text = (ROOT / f).read_text()

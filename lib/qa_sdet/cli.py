@@ -1,7 +1,7 @@
 """qa-mem: compact SQLite memory of the app under test.
 
 Agents read it (card/search/bugs/hash/code). Knowledge is written only by `ingest`, which the plugin's
-Stop/SubagentStop hook runs on every changed qa-out/**/run.json, and by the code map: `codemap-scan` lists
+Stop/SubagentStop hook runs on every changed qa-out/<run>/.data/run-*.json, and by the code map: `codemap-scan` lists
 source files deterministically, the qa-mapper agent writes qa-out/init/code-map-<area>.json, and the same
 hook ingests it into the `codemap` table (hints from source, never requirements). The user's manual writes
 are `bug-status` and `stale`.
@@ -13,11 +13,12 @@ Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) ke
 import json
 import os
 import re
+import select
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from . import core
+from . import codemap, core, doctor, memory, ops, report, scan, scrub
 
 
 def _opts(args, flags=(), valued=(), multi=()):
@@ -60,17 +61,14 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd == "keys":
-        from . import ops
-        print(json.dumps(ops.expand_keys(args, ops.config().get("jiraKeyPrefix"))))
+        print(json.dumps(ops.expand_keys(args, core.config().get("jiraKeyPrefix"))))
     elif cmd == "rundir":
-        from . import ops
         o = _opts(args, valued=("--keys", "--route", "--label", "--prefix"))
         if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--route", "--label")) != 1:
             raise core.BadInput("usage: qa-mem rundir <project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]")
-        keys = ops.expand_keys([o["--keys"]], ops.config().get("jiraKeyPrefix")) if "--keys" in o else None
+        keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
         print(ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or "")))
     elif cmd == "marker":
-        from . import ops
         o = _opts(args[1:], flags=("--faults",), valued=("--budget", "--minutes"))
         if not args or args[0] not in ("start", "stop") or len(o["_"]) != 1:
             raise core.BadInput("usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>")
@@ -80,17 +78,12 @@ def wrapper_cmd(cmd, args):
             ops.marker_stop(o["_"][0])
             print("marker removed")
     elif cmd == "browser-open":
-        from . import ops
         return ops.browser_open(args)
     elif cmd == "login-ok":
-        from . import ops
-        if args:
-            raise core.BadInput("usage: qa-mem login-ok")
         ops.ensure_profile_dir()
         core._write(ops.signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
         print("sign-in recorded: qa-mem doctor now reports the profile as signed in")
     elif cmd == "prune":
-        from . import ops
         if len(args) not in (1, 2):
             raise core.BadInput("usage: qa-mem prune <project> [<run dir>]")
         if len(args) == 2 and not (Path(args[1]).is_dir() and Path(args[1]).resolve().parent.name == "qa-out"):
@@ -98,7 +91,6 @@ def wrapper_cmd(cmd, args):
         n = ops.prune(args[0], run=args[1] if len(args) == 2 else None)
         print(f"pruned {n} old snapshot files" if len(args) == 1 else f"pruned {n} snapshot and temp files of this run")
     elif cmd == "annotate":
-        from . import ops
         o = _opts(args, valued=("--label",), multi=("--box",))
         if len(o["_"]) != 1 or not o.get("--box") or not o.get("--label"):
             raise core.BadInput("usage: qa-mem annotate <png> --box x,y,w,h [--box ...] --label <text>")
@@ -109,12 +101,10 @@ def wrapper_cmd(cmd, args):
         else:
             print(f"annotated {png}")
     elif cmd == "report":
-        from . import report
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem report <run dir>")
         print(report.write_report(args[0]))
     elif cmd == "setup-permissions":
-        from . import doctor
         o = _opts(args, flags=("--apply",), valued=("--settings",))
         if o["_"]:
             raise core.BadInput("usage: qa-mem setup-permissions [--settings PATH] [--apply]")
@@ -142,13 +132,6 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "inbox": "<project> [--file F]", "setup-permissions": "[--settings PATH] [--apply]",
 }
 USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items())
-# Commands that read their arguments as plain words: an option there is a typo (`stale --help` must not set the build
-# to "--help"), so only these options pass. The others parse options with _opts, which rejects unknown ones; `hash`
-# takes a symptom, which may hold "--" ("shows -- instead of 50").
-PLAIN_ARGS = {"doctor": None, "browsers": None, "where": None, "init": None, "login-ok": None,  # None: no arguments
-              "card": (), "search": (), "bugs": (), "bug-status": (), "stale": (), "ingest": (),
-              "code": ("--repos",), "codemap-scan": ("--full", "--out"), "codemap-forget": (), "keys": (),
-              "prune": (), "report": (), "ingest-pending": ()}  # the hook's paths never start with --
 
 
 def usage_error(cmd, why=""):
@@ -159,7 +142,6 @@ def usage_error(cmd, why=""):
 def hook_input():
     """The hook's JSON on stdin (Claude Code sends it and closes stdin); {} when run by hand."""
     try:
-        import select
         # 2 s: on a loaded machine the payload can come late, and missing stop_hook_active forces an extra round
         if sys.stdin is None or sys.stdin.isatty() or not select.select([sys.stdin], [], [], 2.0)[0]:
             return {}
@@ -172,6 +154,9 @@ def hook_input():
 def main(argv):
     try:
         return _main(argv)
+    except core.BadInput as e:  # also the refusal of a pre-0.4 DB, from core.connect()
+        print(f"qa-mem: {e}", file=sys.stderr)
+        return 2
     except sqlite3.OperationalError as e:
         if "locked" not in str(e) and "busy" not in str(e):
             raise
@@ -192,20 +177,20 @@ def _main(argv):
         print(USAGE)
         return 2
     cmd, args = argv[0], argv[1:]
-    if cmd not in COMMANDS and cmd != "init":
+    if cmd not in COMMANDS:
         print(f"qa-mem: unknown command {cmd!r}\n{USAGE}", file=sys.stderr)
         return 2
     if any(a in ("-h", "--help") for a in args):
         return usage_error(cmd)
-    allowed = PLAIN_ARGS.get(cmd, ())
-    if cmd in PLAIN_ARGS and allowed is None and args:
+    if args and not COMMANDS[cmd]:
         return usage_error(cmd, f"{cmd} takes no arguments")
-    bad = next((a for a in args if cmd in PLAIN_ARGS and re.match(r"--[A-Za-z]", a) and a.split("=")[0] not in allowed),
-               None)
+    # an option the usage line doesn't list is a typo (`stale --bogus` must not set the build to "--bogus");
+    # `hash` takes a symptom, which may hold "--" ("shows -- instead of 50")
+    known = set(re.findall(r"--[a-z]+", COMMANDS[cmd]))
+    bad = next((a for a in args if cmd != "hash" and re.match(r"--[A-Za-z]", a) and a.split("=")[0] not in known), None)
     if bad:
         return usage_error(cmd, f"unknown option {bad}")
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
-        from . import memory
         for root in dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a):  # cwd + project dir
             try:
                 memory.ingest_pending(root)
@@ -221,14 +206,12 @@ def _main(argv):
             return 2
         return 0
     if cmd == "doctor":
-        from . import doctor
         return 1 if doctor.doctor() else 0
     try:
         code_ = wrapper_cmd(cmd, args)
         if code_ is not None:
             return code_
         if cmd == "inbox":
-            from . import ops, report
             o = _opts(args, valued=("--file",))
             if len(o["_"]) != 1:
                 raise core.BadInput("usage: qa-mem inbox <project> [--file F]")
@@ -239,7 +222,7 @@ def _main(argv):
             items = report.inbox_items(data)  # bad input fails before the DB is opened
             con = core.connect()
             try:
-                print(report.inbox(con, o["_"][0], items, ops.config().get("jiraKeyPrefix")), end="")
+                print(report.inbox(con, o["_"][0], items, core.config().get("jiraKeyPrefix")), end="")
             finally:
                 con.close()
             return 0
@@ -249,19 +232,16 @@ def _main(argv):
         print(f"qa-mem: {e}", file=sys.stderr)
         return 2
     if cmd == "browsers":  # what C1 offers when it asks which browser to use
-        from . import doctor
         for name, (ok, how) in doctor.installed_browsers().items():
             print(f"{name:8} {'installed' if ok else 'missing  '}  {how}")
         print("(firefox and webkit mean Playwright's own builds; a system Firefox can't be driven)")
         return 0
     if cmd == "hash" and len(args) >= 2:  # same normalisation as ingest, so draft and DB hashes match
-        from . import scrub
         print(core.bug_hash(core.norm_route(args[0]), core.cap(scrub.redact(" ".join(args[1:])))))
         return 0
-    if cmd in ("where", "init"):
+    if cmd == "where":
         print(core.db_path())
-        if cmd == "where":
-            return 0
+        return 0
     con = core.connect()
     try:
         return run_cmd(con, cmd, args)
@@ -270,16 +250,11 @@ def _main(argv):
 
 
 def run_cmd(con, cmd, args):
-    if cmd == "init":
-        pass
-    elif cmd == "card" and args:
-        from . import memory
+    if cmd == "card" and args:
         print(memory.card(con, " ".join(args)))
     elif cmd == "code":
-        from . import codemap
         print(codemap.code(con, " ".join(args)))
     elif cmd == "codemap-forget" and args:
-        from . import codemap
         n = codemap.codemap_forget(con, " ".join(args))
         if n is None:
             print(f"no mapped source folder '{' '.join(args)}'; give one exactly as `qa-mem code --repos` lists it",
@@ -287,7 +262,6 @@ def run_cmd(con, cmd, args):
             return 2
         print(f"removed {n} code-map rows for {' '.join(args)}")
     elif cmd == "codemap-scan":
-        from . import scan
         full, out, paths, it = False, "qa-out/init", [], iter(args)
         for a in it:
             if a == "--full":
@@ -303,10 +277,8 @@ def run_cmd(con, cmd, args):
             return 2
         print(json.dumps(scan.codemap_scan(con, paths, out, full), indent=1))
     elif cmd == "search" and args:
-        from . import memory
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs":
-        from . import memory
         status = args[0].upper() if args else "OPEN"
         if status not in core.STATUSES:
             print(f"unknown status '{args[0]}'; use one of {sorted(core.STATUSES)}")
@@ -328,7 +300,6 @@ def run_cmd(con, cmd, args):
                                "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount
         print(f"removed {hits[0]}: no run lists this bug any more" if gone else f"updated {hits[0]} -> {status}")
     elif cmd == "ingest" and args:
-        from . import memory, scrub
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:
             memory.ingest(con, scrub.redact_json(json.loads(Path(args[0]).read_text())), run_dir=Path(args[0]).resolve().parent,

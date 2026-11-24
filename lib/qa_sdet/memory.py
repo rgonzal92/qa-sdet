@@ -1,4 +1,6 @@
 """Ingest of run JSON, and the `card`, `search` and `bugs` readers."""
+import fcntl
+import hashlib
 import json
 import re
 import sqlite3
@@ -212,8 +214,8 @@ def check_report_fields(run):
 
 
 def ingest_pending(root):
-    """Scrub the qa-out tree, then ingest every run.json that changed since its last ingest. Never raises.
-    Touches nothing when root doesn't exist, and no DB when there is no run.json (the hook runs everywhere)."""
+    """Scrub the qa-out tree, then ingest every run file and code map that changed since its last ingest. Never raises.
+    Touches nothing when root doesn't exist, and no DB when there is nothing new (the hook runs everywhere)."""
     root = Path(root)
     if root.name != "qa-out":  # given qa-out/init or a run folder: its qa-out, where _pending looks
         root = next((p for p in root.parents if p.name == "qa-out"), root)
@@ -226,8 +228,7 @@ def ingest_pending(root):
     db = core.db_path()
     db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(db.with_suffix(".lock"), "w") as lock:
-        if core.fcntl:
-            core.fcntl.flock(lock, core.fcntl.LOCK_EX)  # Stop and SubagentStop may fire together; also guards migrations
+        fcntl.flock(lock, fcntl.LOCK_EX)  # Stop and SubagentStop may fire together
         con = core.connect()
         try:
             return _ingest_files(con, pending)
@@ -243,13 +244,11 @@ def _first_line(p):
 
 
 def _pending(root):
-    """[(file, bytes, mtime, sha1)] for run.json and code-map-*.json whose content changed since its last
+    """[(file, bytes, mtime, sha1)] for .data/run-*.json and code-map-*.json whose content changed since its last
     ingest, oldest first. Sentinels hold the sha1 of the file they cover, so clock skew or copied mtimes can't
     cause loops."""
-    import hashlib
     out = []
-    for f in [*root.rglob("run.json"), *root.glob("*/.data/run-*.json"),  # old layout, then run folders
-              *(root / "init").glob("code-map-*.json")]:  # code maps: qa-out/init only
+    for f in [*root.glob("*/.data/run-*.json"), *(root / "init").glob("code-map-*.json")]:  # run folders; code maps: qa-out/init only
         try:
             data, mtime = f.read_bytes(), f.stat().st_mtime
         except OSError:
@@ -273,7 +272,8 @@ def _ingest_files(con, pending):
         try:
             note = ""
             if f.name.startswith("code-map-"):
-                dropped = codemap.ingest_codemap(con, scrub.redact_json(json.loads(data)), f, ts)
+                cm = scrub.redact_json(json.loads(data))
+                dropped = codemap.apply_codemap(con, cm, codemap.load_scan(cm, f), ts)
                 note = f"dropped rows: {dropped}\n" if dropped else ""
             else:
                 ingest(con, scrub.redact_json(json.loads(data)), ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped

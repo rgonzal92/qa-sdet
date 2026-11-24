@@ -1,4 +1,4 @@
-"""The stored code map: ingest, card block, `code`, forget."""
+"""The stored code map: apply, card block, `code`, forget."""
 import json
 import os
 import re
@@ -21,17 +21,6 @@ def _route_pages_by_file(con, repo):
     return out
 
 
-def _route_pages(con):
-    return {r[0] for r in con.execute("SELECT DISTINCT page FROM codemap WHERE kind='route' AND area='frontend' AND page!='*'")}
-
-
-def _meta_set(con, key):
-    try:
-        return set(json.loads(core.meta(con, key) or "[]"))
-    except (ValueError, TypeError):  # TypeError: not a list of strings
-        return set()
-
-
 def _hashes(con, area, repo):
     """{file: sha1 of its content when last mapped} for one area of one repo."""
     try:
@@ -43,32 +32,6 @@ def _hashes(con, area, repo):
 
 def _set_hashes(con, area, repo, hashes):
     core.set_meta(con, f"codemap_hashes:{area}:{repo}", json.dumps(dict(sorted(hashes.items()))))
-
-
-def _set_meta_set(con, key, items):
-    core.set_meta(con, key, json.dumps(sorted(set(items))))
-
-
-def _resolve_routes(con):
-    """Once every frontend file of the current scan has landed: routes present at scan time and gone now are lost.
-    Rows other files put on them are orphans: drop them and list those files again (they land on the new path)."""
-    scanned = json.loads(core.meta(con, "codemap_scan_repos") or "[]")  # a folder not in this scan can't move routes now
-    if any(_meta_set(con, f"codemap_pending:frontend:{repo}") for repo in scanned):
-        return  # frontend chunks still pending: a route may just be on its way from another file
-    snapshot = core.meta(con, "codemap_routes_at_scan")
-    if not snapshot:
-        return
-    lost = set(json.loads(snapshot)) - _route_pages(con)
-    for page in lost:
-        for repo, area, src in con.execute("SELECT DISTINCT repo, area, src FROM codemap WHERE page=? AND kind!='route' "
-                                           "AND area IN ('frontend','tests')", (page,)).fetchall():
-            con.execute("DELETE FROM codemap WHERE page=? AND repo=? AND area=? AND src=?", (page, repo, area, src))
-            _set_meta_set(con, f"codemap_reread:{area}:{repo}", _meta_set(con, f"codemap_reread:{area}:{repo}") | {src})
-            h = _hashes(con, area, repo)  # its rows are gone: never "unchanged since mapped"
-            if h.pop(src, None) is not None:
-                _set_hashes(con, area, repo, h)
-    _set_meta_set(con, "codemap_lost", lost)
-    core.set_meta(con, "codemap_routes_at_scan", "")  # judged once per scan
 
 
 def _drop_code_only_pages(con):
@@ -86,11 +49,9 @@ def _row_src(repo, file):
     return rel[2:] if rel.startswith("./") else rel
 
 
-def ingest_codemap(con, cm, f, ts=None):
-    """Upsert qa-out/init/code-map-<area>.json (rows a qa-mapper wrote) using scan-<area>.json next to it for the
-    repos, commits and which files were read. Rows from re-read or deleted files replace their old rows. A map whose
-    rows mostly don't fit the scan (wrong repo or file paths) is rejected, so the mapper is told and nothing is lost."""
-    ts = ts or core.now()
+def load_scan(cm, f):
+    """The scan-<area>[-<n>].json next to code-map-<area>[-<n>].json `f` (the file the map `cm` was read from), checked
+    against the map: same scan_id and area. Raises ValueError."""
     if not isinstance(cm, dict):
         raise ValueError("code-map must be an object")
     area = cm.get("area")
@@ -109,6 +70,16 @@ def ingest_codemap(con, cm, f, ts=None):
                          "the map is from an older scan; map the current scan file")
     if scan.get("area") != area:
         raise ValueError(f"area {area!r} doesn't match {scan_path.name} ({scan.get('area')!r})")
+    return scan
+
+
+def apply_codemap(con, cm, scan, ts=None):
+    """Upsert the rows of a code map (a qa-mapper's, or one built in memory like the shell menu's), using its scan for
+    the repos, commits and which files were read. Rows from re-read or deleted files replace their old rows. A map
+    whose rows don't fit the scan (wrong repo or file paths) is rejected, so the mapper is told and nothing is lost.
+    Returns {reason: count} of the rows dropped."""
+    ts = ts or core.now()
+    area = cm.get("area")
     repos = {}
     for r in scan.get("repos") or []:
         path = r.get("path") if isinstance(r, dict) else None
@@ -139,10 +110,9 @@ def ingest_codemap(con, cm, f, ts=None):
     path_drops = dropped.get("unknown repo", 0) + dropped.get("file not in the scan", 0)
     if path_drops:  # rows that can't be placed would be lost for good (their files count as read): have them fixed
         bad = sorted({str(x.get("file")) for x in rows if not any(x is k[0] for k in kept)})[:5]
-        raise ValueError(f"{path_drops} of {len(rows)} rows have a repo or file that isn't in {scan_path.name} "
+        raise ValueError(f"{path_drops} of {len(rows)} rows have a repo or file that isn't in the scan file "
                          f"(e.g. {bad}); every row's repo and file must be one listed there, relative to repos[].path. "
                          "Only the mapper whose out= is this file fixes it; others ignore this")
-    lost = _meta_set(con, "codemap_lost")
     with con:
         for path, r in repos.items():
             if r.get("full"):
@@ -150,23 +120,18 @@ def ingest_codemap(con, cm, f, ts=None):
             else:
                 for rel in (r.get("files") or []) + (r.get("deleted") or []):
                     con.execute("DELETE FROM codemap WHERE repo=? AND area=? AND src=?", (path, area, rel))
-        pages, aimed_at_lost, placed = set(), {}, set()
-        routed_now = _route_pages(con) | {core.norm_route(str(x.get("page") or "")) for x, _, k, _, _ in kept if k == "route"}
+        pages, placed = set(), set()
         for x, repo, kind, label, src in kept:
             raw_page = str(x.get("page") or "*").strip()
             page = "*" if raw_page in ("*", "") else (core.norm_route(raw_page) or "/")
-            if kind != "route" and page in lost and page not in routed_now and area in ("frontend", "tests"):
-                aimed_at_lost.setdefault(repo, set()).add(src)  # placed with an old route list: read it again
-                dropped["on a removed route"] = dropped.get("on a removed route", 0) + 1
-                continue
             value = core.cap(x.get("value"))
             # a config row like 'jwt.secret' = '...' (redact_json keys on `name`; code-map rows use `label`)
             ident = re.split(r"[\s./:\[\]]+", label.strip())[-1] if label.strip() else ""
-            # only a bare literal: 'min 8, max 64', 'minLength=8' and 'POST /api/auth/reset-password' are the map itself
-            # only a bare token is a secret: 'min 8, max 64', 'string|min:8', 'digits:6', 'z.string().min(8)' are rules
+            # only a bare token is a secret (12+ letters and digits): 'min 8, max 64', 'string|min:8', 'digits:6',
+            # 'z.string().min(8)' and 'POST /api/auth/reset-password' are rules and endpoints, the map itself
             named = scrub.SECRET_NAME_RE.match(ident) or re.search(rf"(?i)\b(?:{scrub.SECRET_KEYS})\b", label)  # 'Mapbox API key'
-            if kind == "rule" and named and re.fullmatch(r"[A-Za-z0-9._~+-]{12,}", value.strip()) and re.search(r"\d", value) \
-                    and scrub._secret_looking(value) and not re.match(r"(?i)(min|max|len|required|pattern)", value.strip()):
+            if kind == "rule" and named and re.fullmatch(r"(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9._~+-]{12,}", value.strip()) \
+                    and not re.match(r"(?i)(min|max|len|required|pattern)", value.strip()):
                 value = "[REDACTED]"
             n, base_label = 2, label  # two rows of one file under one label: both kept
             while (page, kind, label, repo, src) in placed:
@@ -191,16 +156,9 @@ def ingest_codemap(con, cm, f, ts=None):
             hashes = {} if r.get("full") else {k: v for k, v in _hashes(con, area, path).items() if k not in gone}
             given = r.get("hashes") if isinstance(r.get("hashes"), dict) else {}
             hashes.update({rel: str(given.get(rel) or "") for rel in files})
-            for rel in aimed_at_lost.get(path, set()):
-                hashes.pop(rel, None)  # placed on a removed route: read it again next scan
             _set_hashes(con, area, path, hashes)
-            again = (_meta_set(con, f"codemap_reread:{area}:{path}") - files - gone) | aimed_at_lost.get(path, set())
-            _set_meta_set(con, f"codemap_reread:{area}:{path}", again)
-            pending = _meta_set(con, f"codemap_pending:{area}:{path}") - files - gone
-            _set_meta_set(con, f"codemap_pending:{area}:{path}", pending)
-            if not pending and core.COMMIT_RE.fullmatch(str(r.get("commit") or "")):  # every chunk of this area landed
+            if core.COMMIT_RE.fullmatch(str(r.get("commit") or "")):
                 core.set_meta(con, f"codemap_commit:{area}:{path}", r["commit"])
-        _resolve_routes(con)
         _drop_code_only_pages(con)
     return dropped
 
@@ -259,7 +217,7 @@ def _api_path(text):
     return _api_ref(text)[1]
 
 
-API_BASE_SEG_RE = core._LazyRe(r"api|rest|v\d+(\.\d+)?|[\w-]+-api|api-[\w-]+")
+API_BASE_SEG_RE = re.compile(r"api|rest|v\d+(\.\d+)?|[\w-]+-api|api-[\w-]+")
 
 
 def _same_endpoint(a, b):
@@ -325,8 +283,7 @@ def codemap_block(con, route, shown=None):
 
 
 def codemap_repos(con):
-    """[(repo, rows, exists)] for every source folder the code map knows (rows, or only bookkeeping such as a map
-    that never landed)."""
+    """[(repo, rows, exists)] for every source folder the code map knows (rows, or only bookkeeping: hashes, commit)."""
     counts = {r["repo"]: r["n"] for r in con.execute("SELECT repo, count(*) AS n FROM codemap GROUP BY repo")}
     for (key,) in con.execute("SELECT key FROM meta WHERE key LIKE 'codemap_%:%:%'"):
         repo = key.split(":", 2)[2]
@@ -347,8 +304,7 @@ def codemap_forget(con, repo):
         for key in known:
             n += con.execute("DELETE FROM codemap WHERE repo=?", (key,)).rowcount
             for a in CODEMAP_AREAS:
-                con.execute("DELETE FROM meta WHERE key IN (?,?,?,?)", (f"codemap_commit:{a}:{key}", f"codemap_hashes:{a}:{key}",
-                                                                       f"codemap_reread:{a}:{key}", f"codemap_pending:{a}:{key}"))
+                con.execute("DELETE FROM meta WHERE key IN (?,?)", (f"codemap_commit:{a}:{key}", f"codemap_hashes:{a}:{key}"))
         _drop_code_only_pages(con)
     return n
 

@@ -2,34 +2,28 @@
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
+import sysconfig
+import tempfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from . import core, ops
 
 
 def installed_browsers(names=core.BROWSERS):
     """{name: (installed, where or how to install)}. chrome and msedge are the system browsers (Playwright's
     channel paths); firefox and webkit are Playwright's own builds: a system Firefox can't be driven."""
-    import shutil
-    import subprocess
-    env = os.environ  # Windows roots in Playwright's own lookup order (playwright-core _createChromiumChannel)
-    roots = [r for r in (env.get("LOCALAPPDATA"), env.get("PROGRAMFILES"), env.get("PROGRAMFILES(X86)")) if r]
-    if env.get("HOMEDRIVE"):
-        roots += [env["HOMEDRIVE"] + r"\Program Files", env["HOMEDRIVE"] + r"\Program Files (x86)"]
-    system = {
-        "chrome": ("Google Chrome", ["/opt/google/chrome/chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-                   + [r + r"\Google\Chrome\Application\chrome.exe" for r in roots]),
-        "msedge": ("Microsoft Edge", ["/opt/microsoft/msedge/msedge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
-                   + [r + r"\Microsoft\Edge\Application\msedge.exe" for r in roots]),
-    }
+    system = {"chrome": ("Google Chrome", "/opt/google/chrome/chrome"), "msedge": ("Microsoft Edge", "/opt/microsoft/msedge/msedge")}
     pw, out = shutil.which("playwright-cli"), {}
     for name in names:
         if name in system:
-            label, paths = system[name]
-            hit = next((x for x in paths if os.path.isfile(x)), None)
-            out[name] = (bool(hit), hit or f"install {label} the usual way for this system")
+            label, path = system[name]
+            ok = os.path.isfile(path)
+            out[name] = (ok, path if ok else f"install {label} the usual way for this system")
             continue
         loc, why = None, "can't check: playwright-cli isn't working (npm i -g @playwright/cli), then install-browser " + name
         if pw:
@@ -49,39 +43,15 @@ def installed_browsers(names=core.BROWSERS):
 
 
 def pillow_fix():
-    """The install command that works here: pip refuses an OS-managed python3 (PEP 668: Debian/Ubuntu, Arch, Fedora,
-    Homebrew), so name the OS package instead."""
-    import shutil, sysconfig
+    """The install command that works here: pip refuses an OS-managed python3 (PEP 668, Ubuntu), so name the apt package."""
     if not os.path.exists(os.path.join(sysconfig.get_paths()["stdlib"], "EXTERNALLY-MANAGED")):
         return f"{sys.executable} -m pip install --user pillow"
-    for tool, cmd in (("brew", "brew install pillow"), ("apt-get", "sudo apt-get install python3-pil"),
-                      ("dnf", "sudo dnf install python3-pillow"), ("pacman", "sudo pacman -S python-pillow"),
-                      ("zypper", "sudo zypper install python3-Pillow")):
-        if shutil.which(tool):
-            return f"{cmd} (this python3 is OS-managed, so pip refuses)"
-    return f"install your OS's Pillow package for {sys.executable} (it is OS-managed, so pip refuses)"
-
-
-def claude_mcp_list():
-    """`claude mcp list` output, or None when Claude Code isn't callable (it health-checks each server)."""
-    import subprocess
-    try:
-        r = subprocess.run(["claude", "mcp", "list"], capture_output=True, encoding="utf-8", errors="replace",
-                           timeout=30)
-        return r.stdout if r.returncode == 0 or r.stdout.strip() else "FAILED"  # an error is not "no servers"
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT"  # a first `npx @playwright/mcp@latest` download can take this long
-    except OSError:
-        return None
+    return "sudo apt-get install python3-pil (this python3 is OS-managed, so pip refuses)"
 
 
 def doctor():
     """Setup check for a new machine. Prints one line per item; returns the number of problems.
-    Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 + 30 s) so a skill's Bash call never cuts it off."""
-    from urllib.parse import urlsplit
-    import shutil
-    import subprocess
-    import time
+    Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 s) so a skill's Bash call never cuts it off."""
     problems = 0
 
     def line(ok, what, fix=""):
@@ -90,59 +60,21 @@ def doctor():
         print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
 
     line(sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)")
+    cfg, cfg_err = {}, None
     try:
-        chosen = json.loads(core.CONFIG.read_text()).get("browser")
-    except (OSError, ValueError, AttributeError):
-        chosen = None
-    listing = []
-
-    def mcp_servers(*words):
-        """(connected, others) server names whose line mentions one of `words`. Names only: a line's command or URL can
-        carry keys. This script can't see the session's tools, so it asks `claude mcp list`."""
-        if not listing:
-            listing.append(claude_mcp_list())
-        hits = [ln.strip() for ln in ("" if listing[0] in (None, "TIMEOUT", "FAILED") else listing[0]).splitlines()
-                if ": " in ln and " - " in ln and "test-mcp" not in ln  # not the Playwright Test MCP
-                and (any(w in ln.split(": ", 1)[0].lower() for w in words)  # the server's name,
-                     or any(w in ln.lower() for w in words if "/" in w or "." in w))]  # or its package / URL
-        status = lambda ln: next((label for key, label in (("Connected", "connected"), ("Pending", "pending approval"),
-                                                            ("auth", "needs sign-in"), ("Failed", "failed to connect"))
-                                  if key in ln.rsplit(" - ", 1)[-1]), "not connected")  # fixed labels: error text can hold keys
-        connected = [ln.split(": ", 1)[0] for ln in hits if status(ln) == "connected"]
-        others = [f"{ln.split(': ', 1)[0]} ({status(ln)})" for ln in hits if status(ln) != "connected"]
-        return connected, others
-
-    pw, on_path, mcp_browser = shutil.which("playwright-cli"), bool(shutil.which("playwright-cli")), False
-    if pw:  # on PATH isn't enough: a broken install must fall back too
+        cfg = core.config(strict=True)
+    except (OSError, ValueError) as e:
+        cfg_err = e
+    chosen = cfg.get("browser")
+    pw = shutil.which("playwright-cli")
+    on_path = bool(pw)
+    if pw:  # on PATH isn't enough: a broken install must be fixed too
         try:
             pw = pw if subprocess.run([pw, "--version"], capture_output=True, timeout=15).returncode == 0 else None
         except (subprocess.TimeoutExpired, OSError):
             pw = None
-    if pw:
-        line(True, "playwright-cli runs (--version)")
-    else:
-        found, other = mcp_servers("playwright", "browser", "@playwright/mcp")
-        mcp_browser = bool(found)
-        unknown = [n for n in mcp_servers("")[0] if n not in found]  # connected servers this check can't classify
-        cli = "playwright-cli runs (--version)" if on_path else "playwright-cli on PATH"
-        cli_fix = "reinstall: npm i -g @playwright/cli" if on_path else "npm i -g @playwright/cli"
-        if mcp_browser:  # a working fallback: the CLI is a recommendation, not a problem
-            print(f"info {cli}: no, runs use the Playwright MCP instead (for qa-login and recordings: {cli_fix})")
-        else:
-            line(False, cli, cli_fix)
-        if listing[0] in (None, "TIMEOUT", "FAILED"):  # can't tell from here
-            why = ("`claude` not on PATH" if listing[0] is None else "`claude mcp list` failed; run it to see why"
-                   if listing[0] == "FAILED" else "`claude mcp list` timed out; run doctor again")
-            print(f"info fallback browser: couldn't list MCP servers ({why}); runs look for browser_* tools themselves")
-        elif mcp_browser or other or not unknown:
-            line(mcp_browser, "fallback browser: " + ("Playwright MCP " + ", ".join(found) if found else "a connected Playwright MCP"),
-                 ("connect or approve it in Claude Code (/mcp): " + ", ".join(other)) if other else
-                 f"claude mcp add playwright -- npx @playwright/mcp@latest --isolated --browser {chosen if chosen in core.BROWSERS else '<browser>'}"
-             + (f", then npx @playwright/mcp@latest install-browser {chosen}" if chosen in ("firefox", "webkit") else "")
-             + " (or install playwright-cli)")
-        else:  # this script sees names, not tools; runs check for a browser_navigate tool (common.md C0)
-            print("info fallback browser: none named playwright/browser; runs use any connected MCP with browser_* tools "
-                  f"(connected: {', '.join(unknown)})")
+    line(bool(pw), "playwright-cli runs (--version)" if on_path else "playwright-cli on PATH",
+         "reinstall: npm i -g @playwright/cli" if on_path else "npm i -g @playwright/cli")
     if pw:  # runs open the browser the user chose (config `browser`); C1 asks for it from what's installed
         if chosen is None:
             line(False, "config has browser (chrome, msedge, firefox or webkit)",
@@ -155,38 +87,23 @@ def doctor():
                 print(f"info browser {chosen}: {how}")
             else:
                 line(ok_b, f"browser {chosen} installed" + (f" ({how})" if ok_b else ""), how)
-    acli, ok = shutil.which("acli"), False
+    acli = shutil.which("acli")
     if acli:
         try:
             ok = subprocess.run([acli, "jira", "auth", "status"], capture_output=True, encoding="utf-8",
                                 errors="replace", timeout=30).returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
-    if acli and ok:
-        line(True, "acli signed in to Jira")
+        line(ok, "acli signed in to Jira", "acli jira auth login")
     else:
-        found, other = mcp_servers("atlassian", "jira", "mcp.atlassian.com", "mcp-atlassian")
-        if acli and found:  # a working fallback: signing in to acli is optional
-            print("info acli not signed in: runs use the Jira MCP (to use acli: acli jira auth login)")
-        elif acli:
-            line(False, "acli signed in to Jira", "acli jira auth login")
-        print(f"{'ok  ' if found else 'info'} Jira fallback: " + (
-            "couldn't list MCP servers; runs look for Jira read tools, else you paste tickets"
-            if listing[0] in (None, "TIMEOUT", "FAILED") else
-            "Atlassian/Jira MCP " + ", ".join(found) if found else
-            "Jira MCP not connected: " + ", ".join(other) + " (connect it in /mcp) or paste tickets" if other else
-            "no acli or Jira MCP: tickets are pasted (optional: install acli or connect the Atlassian MCP)"))
-    cfg, readable = {}, True
-    try:
-        cfg = json.loads(core.CONFIG.read_text())
-        line(isinstance(cfg, dict), f"config {core.CONFIG}", 'the file must be one JSON object: {"app": ..., "qaBaseUrl": ...}')
-    except (OSError, ValueError) as e:
-        readable = not os.path.exists(core.CONFIG)  # a broken file: its keys can't be judged
-        line(False, f"config {core.CONFIG} ({e.__class__.__name__})",
-             f"fix the JSON ({e})" if isinstance(e, ValueError) else
-             f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}" if isinstance(e, PermissionError) else
+        print("info no acli: tickets are pasted (optional: install acli)")
+    if cfg_err:
+        line(False, f"config {core.CONFIG} ({cfg_err.__class__.__name__})",
+             f"fix the JSON ({cfg_err})" if isinstance(cfg_err, ValueError) else
+             f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}" if isinstance(cfg_err, PermissionError) else
              "run any qa-sdet skill once; it asks for the values")
-    if isinstance(cfg, dict) and readable and (cfg or os.path.exists(core.CONFIG)):  # an existing `{}` still needs its keys named (os.path: Path.exists raises before 3.12)
+    else:
+        line(True, f"config {core.CONFIG}")
         missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost", "buildSource") if not cfg.get(k)]
         line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost, buildSource", f"add {missing}")
         bs = cfg.get("buildSource")
@@ -237,12 +154,11 @@ def doctor():
         line(False, "Pillow (annotated bug images need it)", pillow_fix())
     if os.path.isfile(ops.signed_in_stamp()) and os.path.isdir(ops.profile_dir()):
         line(True, "signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)")
-    elif mcp_browser:
-        print("info no signed-in profile: MCP runs ask you to sign in in the MCP's browser window")
     else:
         line(False, "signed-in browser profile", "run /qa-sdet:qa-login")
-    if os.path.lexists(core.CONFIG.with_name("qa-state.json")):  # never opened: it holds cookies
-        print("info old cookie file present: qa-setup can delete it")
+    old_state = core.CONFIG.with_name("qa-state.json")  # never opened: it holds cookies
+    if os.path.lexists(old_state):
+        line(False, f"old cookie file {old_state} (nothing uses it any more)", f"delete {old_state} yourself")
     try:
         con = core.connect()
         n_pages, n_rows = con.execute("SELECT count(DISTINCT page), count(*) FROM codemap").fetchone()
@@ -261,8 +177,10 @@ def doctor():
               + (f" ({len(paths)} source folders configured)" if paths else ""))
         line(core.db_path().parent.stat().st_mode & 0o077 == 0, "memory DB folder readable only by you",
              f"chmod 700 {core.db_path().parent}")
+    except core.BadInput as e:  # a DB from before 0.4
+        line(False, f"memory DB {core.db_path()}", str(e))
     except (OSError, sqlite3.Error) as e:
-        line(False, f"memory DB {core.db_path()} ({e})", "use a python3 whose sqlite3 has FTS5 (python.org or Homebrew builds do)"
+        line(False, f"memory DB {core.db_path()} ({e})", "use a python3 whose sqlite3 has FTS5 (the distro's python3 normally does)"
              if "fts5" in str(e).lower() else f"check you can write to {core.db_path().parent}")
     return problems
 
@@ -277,7 +195,6 @@ PERMISSION_RULES = [
     "Bash(acli jira auth status*)", "Bash(acli jira workitem view *)", "Bash(acli jira workitem search *)",
     "Bash(acli jira workitem comment list *)",  # C8 reads a ticket's comments too
     "Bash(playwright-cli kill-all*)", "Bash(playwright-cli close-all*)",  # cleanup after a stuck run (C4)
-    "mcp__playwright",  # the MCP fallback's tools; the guard still checks hosts, secrets and files on each call
     "Skill(qa-sdet:*)",
     # every skill/explorer reads it (hosts/URLs, no secrets). Read only: allowedHosts is the guard's trust root, so an
     # auto-allowed Edit/Write would let a prompt-injected agent widen it silently
@@ -286,59 +203,39 @@ PERMISSION_RULES = [
 
 
 def merge_permissions(path, stamp=None):
-    """Add missing PERMISSION_RULES to permissions.allow in a Claude Code settings file. Keeps every other key and the
-    existing order, backs the file up first, writes atomically with its mode. Returns the rules added."""
-    import tempfile
+    """Append the missing PERMISSION_RULES to permissions.allow of a Claude Code settings file; every other key stays.
+    Backs the file up first and writes atomically. A file that isn't usable JSON is refused untouched.
+    Returns the rules added."""
     path = Path(os.path.realpath(Path(path).expanduser()))  # a symlinked settings.json (dotfiles) stays a link
-    def no_constant(c):  # NaN / Infinity: Python reads them, Claude Code can't
-        raise ValueError(f"non-standard number {c}")
     try:
-        before = path.read_text(encoding="utf-8") if path.exists() else None
-        settings = json.loads(before, parse_constant=no_constant) if before is not None else {}
-    except (OSError, ValueError, RecursionError) as e:  # RecursionError: JSON nested thousands deep
-        raise core.BadInput(f"setup-permissions: {path} isn't valid JSON ({type(e).__name__}: {core.short(str(e), 120)}); "
-                       f"fix it first, nothing changed")
-    perms = settings.get("permissions", {}) if isinstance(settings, dict) else None
-    allow = perms.get("allow", []) if isinstance(perms, dict) else None
-    if not isinstance(allow, list):
-        raise core.BadInput(f"setup-permissions: {path} has no usable permissions.allow list; nothing changed")
-    same = lambda r: re.sub(r"\s*([()])\s*", r"\1", " ".join(str(r).split()))  # `Bash( qa-mem *)` is that rule too
-    have = {same(r) for r in allow}
-    added = [r for r in PERMISSION_RULES if same(r) not in have]
-    if not added:
-        return []
-    settings["permissions"] = {**perms, "allow": allow + added}
-    try:  # serialise first: nothing is touched when this fails (a lone surrogate can't be written as UTF-8)
-        text = json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
-        text.encode("utf-8")
-    except (ValueError, UnicodeEncodeError) as e:
-        raise core.BadInput(f"setup-permissions: {path} can't be written back as valid JSON ({e}); nothing changed")
-    if before is not None and not os.access(path, os.W_OK):
-        raise core.BadInput(f"setup-permissions: {path} is read-only; make it writable or add the rules by hand, "
-                       f"nothing changed")
-    mode = path.stat().st_mode & 0o7777 if before is not None else 0o600
+        old = path.read_text(encoding="utf-8") if path.exists() else None
+        settings = json.loads(old) if old is not None else {}
+        allow = settings.get("permissions", {}).get("allow", [])
+        if not isinstance(allow, list):
+            raise ValueError("permissions.allow is not a list")
+        added = [r for r in PERMISSION_RULES if r not in allow]
+        if not added:
+            return []
+        settings.setdefault("permissions", {})["allow"] = allow + added
+        data = (json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (OSError, ValueError, AttributeError, RecursionError) as e:  # not JSON, not an object, no allow list, too deep
+        raise core.BadInput(f"setup-permissions: {path} isn't valid JSON with a permissions.allow list "
+                            f"({type(e).__name__}: {core.short(str(e), 120)}); fix it first, nothing changed")
     tmp = None
     try:
-        if before is not None:
-            import shutil
-            base = f"{path.name}.bak-{stamp or datetime.now().strftime('%Y%m%d%H%M%S')}"
-            bak, n = path.with_name(base), 2
-            while bak.exists() or bak.is_symlink():  # two applies in one second: never overwrite the first backup
-                bak, n = path.with_name(f"{base}-{n}"), n + 1
-            shutil.copy2(path, bak)
         path.parent.mkdir(parents=True, exist_ok=True)
+        if old is not None:
+            bak = path.with_name(f"{path.name}.bak-{stamp or datetime.now().strftime('%Y%m%d%H%M%S')}")
+            while bak.exists():  # two applies in one second: keep the first backup
+                bak = bak.with_name(bak.name + "x")
+            shutil.copy2(path, bak)
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.chmod(tmp, mode)
-        # Claude Code may have saved the file meanwhile (/permissions, /config): never drop its edit
-        now_text = path.read_text(encoding="utf-8") if path.exists() else None
-        if now_text != before:
-            raise core.BadInput(f"setup-permissions: {path} changed while merging; run it again, nothing changed")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, path.stat().st_mode & 0o7777 if old is not None else 0o600)
         os.replace(tmp, path)
     except OSError as e:
-        raise core.BadInput(f"setup-permissions: can't write {path} ({e}); nothing changed")
-    finally:
         if tmp:
             Path(tmp).unlink(missing_ok=True)
+        raise core.BadInput(f"setup-permissions: can't write {path} ({e}); nothing changed")
     return added

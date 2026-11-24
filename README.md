@@ -71,7 +71,7 @@ qa-out/
     repro/BUG-1.spec.ts           Playwright spec that fails while the bug exists
     .data/                        machine files: plan.json, run-<page>.json, snapshots
 ```
-Each run gets a fresh folder. `qa-out/`, `.playwright-cli/` and `.playwright-mcp/` are kept out of git (via `.git/info/exclude`).
+Each run gets a fresh folder. `qa-out/` and `.playwright-cli/` are kept out of git (via `.git/info/exclude`).
 
 Project safety rules (optional): write them in `<project>/qa-rules.md`, one per line ("never click Confirm", "use only test device X"). Every explorer gets them as hard limits; a check they hold back is listed under Not tested, Safety rules.
 
@@ -117,7 +117,6 @@ Bash(acli jira workitem search *)
 Bash(acli jira workitem comment list *)
 Bash(playwright-cli kill-all*)
 Bash(playwright-cli close-all*)
-mcp__playwright
 Skill(qa-sdet:*)
 Read(~/.config/qa-sdet/config.json)
 ```
@@ -129,9 +128,9 @@ Both agents (the explorer and the `qa-init` code mapper) run on Haiku with high 
 ## Memory DB
 
 `~/.local/share/qa-sdet/<app>.db` (SQLite, WAL, FTS5). Tables: pages, facts, locators, coverage, bugs, runs, codemap. Capped per page at the freshest 100 facts, 60 locators and 400 coverage rows (2000 runs total); bugs are kept.
-Agents never write SQL: each explored page writes `qa-out/<run>/.data/run-<page>.json` (schema: `references/run-json.md`) and the plugin's `Stop`/`SubagentStop` hook ingests it. A file is ingested again only when its content changes. Bugs dedup by a hash of route + symptom; repeats bump `seen_count` once per run; a FIXED bug seen again becomes REGRESSED. Statuses: OPEN, FILED, FIXED, INVALID, REGRESSED. Run folders from older versions are still read.
+Agents never write SQL: each explored page writes `qa-out/<run>/.data/run-<page>.json` (schema: `references/run-json.md`) and the plugin's `Stop`/`SubagentStop` hook ingests it. A file is ingested again only when its content changes. Bugs dedup by a hash of route + symptom; repeats bump `seen_count` once per run; a FIXED bug seen again becomes REGRESSED. Statuses: OPEN, FILED, FIXED, INVALID, REGRESSED.
 Coverage from a run that couldn't read the build counts for 7 days, then the heuristic is retried.
-Code map (`/qa-sdet:qa-init`): `qa-mem codemap-scan` lists the source files deterministically (skipping `node_modules`, build output, lockfiles and minified bundles), one `qa-mapper` agent per area reads only those (a large area is split into chunks of about 40 files / 60k tokens, up to 6 mappers at a time), and the hook ingests their `qa-out/init/code-map-<area>[-<n>].json` into the `codemap` table. In a git repo only tracked and not-ignored files are read; links, very large files and secret stores (`.env*`, keys and certificates, `secrets.*`/`credentials.*`/`config.*` files, config modules holding credentials) never are. Re-runs read only files whose content changed (the whole frontend and tests when a router changed; a new file-routed page that reuses unchanged components gets their locators with `--full`). Code is never an oracle: a page that differs from the code is a question for you.
+Code map (`/qa-sdet:qa-init`): `qa-mem codemap-scan` lists the source files deterministically (skipping `node_modules`, build output, lockfiles and minified bundles), one `qa-mapper` agent per area reads only those (a large area is split into chunks of about 40 files / 60k tokens, up to 6 mappers at a time), and the hook ingests their `qa-out/init/code-map-<area>[-<n>].json` into the `codemap` table. In a git repo only tracked and not-ignored files are read; links, very large files and secret stores (`.env*`, keys and certificates, `secrets.*`/`credentials.*`/`config.*` files, config modules holding credentials) never are. Re-runs read only files whose content changed (the whole frontend and tests when a router changed; a new file-routed page that reuses unchanged components gets their locators with `--full`, and so does a page renamed inside its own one-route file: its old rows stay until then). Code is never an oracle: a page that differs from the code is a question for you.
 Manual: `qa-mem bugs`, `qa-mem bug-status <hash> FILED` (a prefix must match exactly one bug), `qa-mem stale <build>`, `qa-mem search "closure schedule"` (every word must match; `-word` excludes).
 
 ## Safety (hook: `hooks/guard.py`, PreToolUse on every tool)
@@ -155,8 +154,8 @@ Known limits: it checks command text, not intent. It doesn't read scripts on dis
 ## Privacy
 
 - **Login:** your QA login lives in the browser profile `~/.local/share/qa-sdet/profiles/main` (mode 700). Only the browser reads it; the guard blocks every other read. It lasts as long as the app's SSO session; then run `/qa-sdet:qa-login` again. `qa-mem browser-open` drops `PLAYWRIGHT_MCP_STORAGE_STATE`, so your personal cookies never enter the QA browser. To sign out for good (or reset a broken profile): `playwright-cli -s=qa close` and `playwright-cli -s=qa-login close`, then delete `~/.local/share/qa-sdet/profiles/` in your own terminal (the guard keeps Claude out of that folder); the next run asks for `/qa-sdet:qa-login`. Uninstalling the plugin leaves `~/.local/share/qa-sdet/` (login and memory DB) and `~/.config/qa-sdet/` in place: delete them yourself.
-- **Page snapshots:** playwright-cli and the MCP save page text under `<project>/.playwright-cli/` and `.playwright-mcp/` (kept out of git); each skill run deletes the ones older than 7 days.
-- **Reports:** ingest scrubs auth headers, cookies, tokens, URL credentials and secret-named values from the run folder's Markdown and text files, and the values of secret-named keys in JSON; repro specs only lose literal tokens, so they stay runnable. Screenshots can't be scrubbed: look before attaching them to a ticket.
+- **Page snapshots:** playwright-cli saves page text under `<project>/.playwright-cli/` (kept out of git); each skill run deletes the ones older than 7 days.
+- **Reports:** ingest scrubs auth and cookie header values, well-known token formats (JWT, GitHub, Slack, AWS, GitLab, Atlassian, `sk-` keys, private keys, `Bearer` tokens), URL credentials and token query parameters from the run folder's Markdown and text files, and the values of secret-named keys in JSON (a password written out in prose is not recognised: keep real passwords out of notes); repro specs only lose literal tokens, so they stay runnable. Screenshots can't be scrubbed: look before attaching them to a ticket.
 - **Source code:** `/qa-sdet:qa-init` reads it locally; secret files are never listed and mappers write `[secret]` instead of values.
 - **Playwright MCP fallback:** it runs with its own settings and cookies. Run it with `--isolated` (the login stays in memory until Claude Code restarts); without it the MCP keeps its login in its own profile (`~/.cache/ms-playwright-mcp/` on Linux), which you delete to sign it out; never attach it to your everyday browser (`--cdp-endpoint`, `--extension`).
 

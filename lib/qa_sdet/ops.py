@@ -3,7 +3,9 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,15 +13,7 @@ from . import core
 
 
 # ---------- v0.4 wrappers: ticket keys, run folders, run marker, browser, prune ----------
-KEY_RE = core._LazyRe(r"[A-Z][A-Z0-9]+-\d+", re.ASCII)  # ASCII: Jira keys never hold other digits
-
-
-def config():
-    try:
-        cfg = json.loads(core.CONFIG.read_text())
-        return cfg if isinstance(cfg, dict) else {}
-    except (OSError, ValueError):
-        return {}
+KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+", re.ASCII)  # ASCII: Jira keys never hold other digits
 
 
 def expand_keys(args, prefix=None):
@@ -69,7 +63,7 @@ def run_label(keys=None, route=None, label=None, prefix=""):
     return re.sub(r"[^A-Za-z0-9+._-]", "-", f"{prefix or ''}{text}")[:80]
 
 
-def git_exclude(project, entries=("qa-out/", ".playwright-cli/", ".playwright-mcp/")):
+def git_exclude(project, entries=("qa-out/", ".playwright-cli/")):
     """Keep run output out of commits: list it in the repo's info/exclude (works in worktrees and submodules)."""
     out = core._git(project, "rev-parse", "--git-path", "info/exclude")
     if not out or not out.strip():
@@ -164,7 +158,6 @@ def browser_cmd(session, headed, url, browser, profile):
 
 
 def browser_open(args):
-    import subprocess
     session, headed, url = "qa", False, None
     it = iter(args)
     for a in it:
@@ -178,15 +171,14 @@ def browser_open(args):
             url = a
     if session not in ("qa", "qa-login"):
         raise core.BadInput("browser-open: --session must be qa or qa-login")
-    browser = config().get("browser")
+    browser, where = None, f'set "browser" in {core.CONFIG}'
+    try:
+        browser = core.config(strict=True).get("browser")
+    except OSError:
+        where = f'{core.CONFIG} is missing; create it with a "browser" key'
+    except ValueError as e:
+        where = f"{core.CONFIG} isn't valid JSON ({e}); fix it"
     if browser not in core.BROWSERS:
-        try:
-            json.loads(core.CONFIG.read_text())
-            where = f'set "browser" in {core.CONFIG}'
-        except OSError:
-            where = f'{core.CONFIG} is missing; create it with a "browser" key'
-        except ValueError as e:
-            where = f"{core.CONFIG} isn't valid JSON ({e}); fix it"
         raise core.BadInput(f"browser-open: config browser must be one of {', '.join(core.BROWSERS)} (got {browser!r}): "
                        f"{where} (`qa-mem browsers` lists what's installed)")
     # every PLAYWRIGHT_MCP_* var (storage state, isolated, browser, user data dir…) would override the profile or break the launch
@@ -203,15 +195,22 @@ def browser_open(args):
         r = subprocess.run(browser_cmd(session, headed, url, browser, profile), env=env, capture_output=True, text=True,
                            errors="replace")
     except OSError as e:
-        raise core.BadInput(f"browser-open: can't run playwright-cli ({e}); npm i -g @playwright/cli")
+        print(f"browser tool failed: can't run playwright-cli ({e}); npm i -g @playwright/cli", file=sys.stderr)
+        return 2
     code_ = r.returncode if r.returncode >= 0 else 128 - r.returncode  # killed by signal N: exit 128+N like a shell
-    if "already in use" in f"{r.stdout}\n{r.stderr}":
+    text = f"{r.stderr or ''}\n{r.stdout or ''}"
+    # the category is the first stderr line, as the explorer and the skills report it
+    if "already in use" in text:
         # playwright-cli's hint (--isolated) would drop the sign-in; say what actually holds the profile
-        print(f"browser-open: Browser is already in use: another qa-sdet browser holds the main profile (a "
-              f"/qa-sdet:qa-login window not finished, or a run in another project folder). Close the other qa-sdet "
-              f"browser (or run `playwright-cli close-all` in that folder) and retry; never use --isolated, it has no "
-              f"login.", file=sys.stderr)
+        print("browser profile in use: another qa-sdet browser holds the main profile (a /qa-sdet:qa-login window not "
+              "finished, or a run in another project folder). Close the other qa-sdet browser (or run `playwright-cli "
+              "close-all` in that folder) and retry; never use --isolated, it has no login.", file=sys.stderr)
         code_ = code_ or 1
+    elif code_:
+        first = next((x.strip() for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")),
+                     f"playwright-cli exited {code_}")  # (not a Markdown heading such as "### Error")
+        kind = f"browser {browser} can't start" if browser in text.lower() else "browser tool failed"  # the error names it
+        print(f"{kind}: {core.short(first, 200)}", file=sys.stderr)
     sys.stdout.write(r.stdout or "")
     sys.stderr.write(r.stderr or "")
     return code_
@@ -233,20 +232,17 @@ def prune(project, days=7, t=None, run=None):
                     n += 1
             except OSError:
                 continue
-    for name in (".playwright-cli", ".playwright-mcp"):
-        top = Path(project) / name
-        if top.is_symlink() or not top.is_dir():
-            continue
-        for dirpath, _, files in os.walk(top):
-            for fn in files:
-                f = Path(dirpath) / fn
-                try:
-                    st = f.lstat()
-                    if stat.S_ISREG(st.st_mode) and (st.st_mtime < cutoff or (since is not None and st.st_mtime >= since)):
-                        f.unlink()
-                        n += 1
-                except OSError:
-                    continue
+    top = Path(project) / ".playwright-cli"
+    for dirpath, _, files in (os.walk(top) if top.is_dir() and not top.is_symlink() else ()):
+        for fn in files:
+            f = Path(dirpath) / fn
+            try:
+                st = f.lstat()
+                if stat.S_ISREG(st.st_mode) and (st.st_mtime < cutoff or (since is not None and st.st_mtime >= since)):
+                    f.unlink()
+                    n += 1
+            except OSError:
+                continue
     return n
 
 
@@ -313,7 +309,6 @@ def annotate(path, boxes, label):
     hiding the least of the boxes; a label taller than the image keeps the lines that fit, ending in …). Line width and font
     grow with the image (a HiDPI 2560px screenshot gets 2x), long labels wrap. Boxes are in the screenshot's
     pixels; a box wholly outside the image is refused. Returns False when Pillow is missing (image untouched)."""
-    import tempfile
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:

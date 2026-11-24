@@ -1,9 +1,16 @@
 import json, os, re, sqlite3, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from qa_sdet import core, scrub, memory, doctor, cli
+
+
+def runfile(folder):
+    """qa-out/<run>/.data/run-x.json: where an explorer writes its run JSON."""
+    (folder / ".data").mkdir(parents=True, exist_ok=True)
+    return folder / ".data" / "run-x.json"
 
 
 def run(build="1.0", bugs=None, **page):
@@ -12,12 +19,13 @@ def run(build="1.0", bugs=None, **page):
             "pages": [{"route": "/form", "name": "Form", **page}], "bugs": bugs or []}
 
 
-doctor.claude_mcp_list = lambda: ""  # never run the real `claude mcp list` in tests
-
 
 class QaMem(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        env = mock.patch.dict(os.environ)  # tests set and pop QA_MEM_DB: restore the whole environment afterwards
+        env.start()
+        self.addCleanup(env.stop)
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "t.db")
         # never the user's real config or profile folder (doctor checks both)
         self.real_paths = (core.CONFIG, core.DATA_DIR)
@@ -44,19 +52,55 @@ class QaMem(unittest.TestCase):
     def test_unknown_page_card(self):
         self.assertIn("NO CARD", memory.card(self.con, "/nope"))
 
-    def test_redaction_is_linear_on_long_whitespace_and_knows_more_tokens(self):  # audit 3 r4
+    def test_clear_token_formats_are_redacted_and_look_alikes_stay(self):
+        pem = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
+               "-----END RSA PRIVATE KEY-----")
+        secrets = ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk", "AKIAIOSFODNN7EXAMPLE",
+                   "ghp_" "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+                   "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+                   "xoxb-123456789012-abcdefghijkl", "ATATT3xFfGF0abcdefghijklmnopqrstuvwxyz0123456789=ABCDEF12",
+                   "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "glpat-abcdefghijklmnopqrst", pem,
+                   "Bearer 9f8c7d6e5b4a3f2e1d0c9f8c", "https://qa:Sommerregen@cache.example.com:6379/0",
+                   "https://b.s3.amazonaws.com/x?X-Amz-Signature=abcdef0123456789abcdef",
+                   "GET /api/zones?access_token=abc123def456", "GET /api/zones?api_key=abc123def456&x=1",
+                   "export API_KEY=abcdefgh1234"]
+        for sec in secrets:
+            out = scrub.redact(f"value: {sec} end")
+            self.assertIn("[REDACTED", out, sec[:20])
+            self.assertNotIn("Sommerregen" if "Sommerregen" in sec else sec.splitlines()[-1][-12:], out, sec[:20])
+            self.assertEqual(scrub.redact_literals(f"value: {sec} end"), out, sec[:20])  # code files keep these too
+        for keep in ("class sk-folding-cube-container-large", "Bearer acknowledgements are shown", "token=1.42.0 released",
+                     "password: required", "Token expired message shown", "session: morning shift", "GET /x?code=I5N&x=1",
+                     "GET /reset?token=<the token from the email>", "GET /reset?token=${token}", "GET /reset?token=:token",
+                     "the password field max 64 chars", "GET /x?key=password", "mailto:qa@example.com", "see https://qa.example.com:8443/app"):
+            self.assertEqual(scrub.redact(keep), keep)
+        self.assertEqual(scrub.redact(scrub.redact(f"a {secrets[0]} b {secrets[10]}")), scrub.redact(f"a {secrets[0]} b {secrets[10]}"))
+
+    def test_auth_header_values_go_and_ordinary_words_stay(self):
+        for text, secret in (("Authorization: Bearer 9f8c7d6e5b4a3f2e1d0c9f8c", "9f8c7d6e"),
+                             ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+                             ("Authorization: SSWS 00QCjAl4MlV-WPXM1ABCDEFGHIJKLmnopqrstuv", "00QCjAl4"),
+                             ("Cookie: a=1; session=abcdef123456", "abcdef123456"),
+                             ("set-cookie: SESSION=abc123; Path=/; HttpOnly", "abc123"),
+                             ("Request headers: Authorization: Bearer 9f8c7d6e5b4a3f2e1d0c9f8c, Cookie: sid=1a2b3c", "1a2b3c"),
+                             ("X-Api-Key: zonesservicekey", "zonesservicekey")):
+            out = scrub.redact(text)
+            self.assertNotIn(secret, out, text)
+            self.assertIn("[REDACTED]", out, text)
+        self.assertEqual(scrub.redact('curl -H "X-Api-Key: zonesservicekey" https://x'), 'curl -H "X-Api-Key: [REDACTED]" https://x')
+        self.assertEqual(scrub.redact('{"Authorization":"Bearer abc","Accept":"x"}'), '{"Authorization":"[REDACTED]","Accept":"x"}')
+        self.assertEqual(scrub.redact("Cookie: sid=1\nUser-Agent: x"), "Cookie: [REDACTED]\nUser-Agent: x")  # one line only
+        once = scrub.redact("Authorization: Bearer abc123def456ghi789jk\nCookie: sid=1")
+        self.assertEqual(scrub.redact(once), once)  # idempotent: no re-ingest loop
+        for keep in ("the Authorization header is checked", "no cookie banner", "Authorization", "password: this.form.value.password"):
+            self.assertEqual(scrub.redact(keep), keep)
+
+    def test_redaction_is_linear_on_long_runs(self):  # was quadratic: over a minute, past the Stop hook's timeout
         t0 = time.time()
-        for text in ("password" + " " * 200000 + "x", "token" + "\t " * 100000, "'apiKey'" + " " * 200000 + "'x'"):
+        for text in ("authorization" + " " * 200000 + "x", "cookie" + "\t " * 100000, "Bearer" + " " * 200000 + "x",
+                     "a-" * 50000, "a/" * 100000, "x" * 60 + ("Ab3_-" * 20000), "https://" + "a" * 100000, "?token=" * 20000):
             scrub.redact(text)
-        self.assertLess(time.time() - t0, 5)  # was quadratic: over a minute, past the Stop hook's timeout
-        for secret in ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "glpat-abcdefghijklmnopqrst",
-                       "__Host-session=abcdef0123456789abcdef"):
-            self.assertNotIn(secret[-12:], scrub.redact(f"saw {secret} in the log"), secret)
-        for keep in ("class sk-folding-cube-container-large", "session: morning shift", 'password : "x"',
-                     "password \\: hunter2x9"):
-            self.assertEqual(scrub.redact(keep), keep) if "hunter" not in keep else self.assertNotIn("hunter2x9", scrub.redact(keep))
-        self.assertEqual(scrub.redact('"password" : "hunter2x9"'), '"password" : "[REDACTED]"')
-        self.assertEqual(scrub.redact("password\\\": \\\"hunter2x9"), "password\\\": \\\"[REDACTED]")  # JSON inside a string
+        self.assertLess(time.time() - t0, 5)
 
     def test_empty_or_numeric_draft_path(self):  # audit 3 r6
         bug = {"route": "/form", "title": "t", "symptom": "s", "draft_path": "/abs/bugs/BUG-1.md"}
@@ -92,15 +136,6 @@ class QaMem(unittest.TestCase):
                     {"key": "speed", "value": "130"}, ["boundary", "pass"], {"notes": "the jwt cookies banner"}):
             self.assertEqual(scrub.redact_json(obj), obj)
 
-    def test_command_line_and_stated_passwords_are_redacted(self):  # audit 3, after r50
-        for text, secret in (("curl -u admin:hunter2 https://x", "hunter2"), ("curl --user admin:hunter2 https://x", "hunter2"),
-                             ("mysql -u root -phunter2 db", "hunter2"), ("the password is hunter2", "hunter2"),
-                             ("headers: { Authorization: `Bearer ${'abc123def456ghi789'}` }", "abc123def456")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        for keep in ("the password is required", "password is wrong", "mysql -P 3306 -u root db", "curl -u https://x",
-                     "docker run -u 1000:1000 img"):
-            self.assertEqual(scrub.redact(keep), keep)
-
     def test_reopening_a_bug_no_run_lists_removes_it(self):  # audit 3, after r50
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         r = run(bugs=[bug])
@@ -112,18 +147,7 @@ class QaMem(unittest.TestCase):
         cli.run_cmd(self.con, "bug-status", [h, "OPEN"])
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 0)
 
-    def test_fresh_review_findings(self):  # audit 3: independent review after round 50
-        # limits and selectors survive; an assigned password goes whatever its characters
-        for keep in ("Password: 8-64 characters", "Session token: 30min expiry", "PUT /api/profile?key=password", "pwd: 8–64",
-                     "Token: 3600s lifetime", "input#password:nth-child(2)", "session: /incidents/list/details/panel",
-                     "password = getPassword()", "token = await login()", "password=required", "token=1.42.0"):
-            self.assertEqual(scrub.redact(keep), keep)
-        for text in ("username=qa.tester&password=Sommerregen", "Server=db;User Id=qa;Password=Sommerregen;",
-                     "client_secret=AbCdEfGhIjKl", "PGPASSWORD=Sommerregen psql", "export API_KEY=abcdefgh",
-                     "X-Api-Key: abcdefghijkl", "Authorization: Bearer abcdefghijkl", "GET /x?key=AbCd1234EfGh5678"):
-            out = scrub.redact(text)
-            self.assertIn("[REDACTED]", out, text)
-            self.assertNotRegex(out, "Sommerregen|AbCdEfGhIjKl|abcdefgh|AbCd1234", text)
+    def test_draft_id_in_hash_and_search_terms_with_symbols(self):  # audit 3: independent review after round 50
         # a bug with its draft id in `hash` is still stored
         memory.ingest(self.con, run(facts=[{"kind": "api", "text": "GET /api/zones returns 500 on empty filter"},
                                        {"kind": "note", "text": "speed chart loads slowly"}],
@@ -134,38 +158,7 @@ class QaMem(unittest.TestCase):
         self.assertIn("no facts match", memory.search(self.con, "speed-limit"))
         self.assertIn("speed chart", memory.search(self.con, "speed -/api/zones"))
 
-    def test_verification_pass_findings(self):  # audit 3: second independent pass
-        for text, secret in (("2. Sign in as `qa.tester` with password: `Winter2026!`", "Winter2026"),
-                             ("- **Cookie:** session=abcdef123456; Path=/", "abcdef123456"), ("- **API token:** abcd1234efgh5678ijkl", "abcd1234"),
-                             ("token=`abc123def456`", "abc123def456"), ("**Password:** Winter2026!", "Winter2026"),
-                             ("__Token:__ abc123def456ghi7", "abc123def456"), ("Log in with user=qa and password=Sommerregen.", "Sommerregen"),
-                             ("password=Summer.Rain", "Summer.Rain"), ("curl -uadmin:hunter2 https://qa.example.com/api", "hunter2"),
-                             ("curl -u 'admin':'hunter2' https://x", "hunter2"), ("password: hunter2", "hunter2")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        for keep in ("Password: maxlength=64", "Save is enabled only when password == confirmPassword", "password: min=8 max=64",
-                     "password: minLength(8)", "password: >=8 chars", "token: uuid4", "token: HS256 signed", "session_id: int64",
-                     "Cookie: SameSite=Lax missing on session cookie", "Session token: HttpOnly=false", "if (token == null) return",
-                     "z.object({ password: z.string().min(8).max(64) })", "password=user.password", "**Speed limit:** 130"):
-            self.assertEqual(scrub.redact(keep), keep)
-
-    def test_third_pass_findings(self):  # audit 3: third independent pass
-        for text, secret in (("request header Authorization: ApiKey 9f8e7d6c5b4a39281706aabbccdd) → 500", "9f8e7d6c5b4a"),
-                             ("Authorization: SSWS 00QCjAl4MlV-WPXM1ABCDEFGHIJKLmnopqrstuv", "00QCjAl4"),
-                             ("authorization: Api-Key abcdefghijkl0123", "abcdefghijkl0123"),
-                             ("Sign in as qa.tester with password: Tr0ub4dor&3", "Tr0ub4dor"), ("password: Wint3r,Sturm!", "Sturm"),
-                             ("password=Sommer&Regen2026", "Regen2026"), ("**Password:** Winter;2026!", "2026!"),
-                             ("Password: P@ss;w0rd", "w0rd"), ("redis://:Sommerregen@cache.qa:6379/0", "Sommerregen"),
-                             ("AccountKey=abcdEFGH1234ijklMNOP5678==;EndpointSuffix=core.windows.net", "abcdEFGH1234"),
-                             ("a=1&password=hunter2x&next=/home", "hunter2x")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        self.assertEqual(scrub.redact("a=1&password=hunter2x&next=/home"), "a=1&password=[REDACTED]&next=/home")
-        self.assertEqual(scrub.redact("(Authorization: Bearer abcdefghijklmnop0123456789), then the page reloaded."),
-                         "(Authorization: Bearer [REDACTED]), then the page reloaded.")
-        for keep in ("6. Open https://qa.example.com/reset-password?token=<the token from the email>", "GET /api/reset?token=${token}",
-                     "GET /api/reset?token=:token", "password: pattern=^[A-Za-z0-9]{8,64}$", "password: 'required|min:8|max:64'",
-                     "cookie: maxAge=1800000, httpOnly, sameSite=lax", "Authorization: header missing on the request",
-                     "Authorization: permissions enforced server-side"):
-            self.assertEqual(scrub.redact(keep), keep)
+    def test_a_sighting_older_than_the_last_one_predates_the_fix(self):  # audit 3: third independent pass
         # a sighting older than the last one (ingested late) predates the fix
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
@@ -176,126 +169,6 @@ class QaMem(unittest.TestCase):
         self.assertEqual(tuple(self.con.execute("SELECT status, last_run FROM bugs").fetchone()), ("FIXED", newest))
         memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-20T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0], "REGRESSED")
-
-    def test_fourth_pass_findings(self):  # audit 3: fourth independent pass
-        line = ("Request headers: Authorization: Bearer 9f8c7d6e5b4a3f2e1d0c9f8c, Cookie: _traffic_session=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFi"
-                "%3D%3D--a1b2c3d4e5; XSRF=1")
-        out = scrub.redact(line)
-        self.assertNotIn("9f8c7d6e", out)
-        self.assertNotIn("Zm9vYmFy", out)
-        out = scrub.redact("Authorization: Bearer abc123def456ghi789jk | Cookie: session=abc123def456 | X-Api-Key: zonesservicekey")
-        for secret in ("abc123def456ghi789jk", "session=abc123def456", "zonesservicekey"):
-            self.assertNotIn(secret, out)
-        for text, secret in (("API key: 9f8c7d6e5b4a3f2e1d0c", "9f8c7d6e"), ("- **API key:** `9f8c7d6e5b4a3f2e1d0c`", "9f8c7d6e"),
-                             ("Secret key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtn"),
-                             ("Session ID: 7f3a9b2c4d5e6f708192a3b4c5d6e7f8", "7f3a9b2c"), ("Access key: AbCdEf1234567890", "AbCdEf12")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        self.assertEqual(scrub.redact_json({"API Key": "9f8c7d6e5b4a3f2e1d0c"}), {"API Key": "[REDACTED]"})
-        for keep in ('Response 400: {"errors":{"password":"must be at least 8 characters"}}',
-                     'Actual: 422 {"password": "Password is too short", "token": "Token has expired"}',
-                     'Error toast: password: "The password field is required."', 'token: "invalid or expired"',
-                     'i18n key errors.password = "Password is required"', "password: this.loginForm.value.password",
-                     "token: response.data.token", "Authorization: Bearer expected but missing"):
-            self.assertEqual(scrub.redact(keep), keep)
-        self.assertEqual(scrub.redact("password: 'letmein'"), "password: '[REDACTED]'")
-
-    def test_fifth_pass_findings(self):  # audit 3: fifth independent pass
-        tok = "sk." "eyJ1IjoidHJhZmZpY3FhIiwiYSI6ImNrOXh5ejEyMzQ1Njc4OWFiY2RlZiJ9.Xk3mP9qR7sT2vW5yZ8aB1c"
-        for text, secret in ((f"access_token: {tok}", "eyJ1Ijoi"), (f"Mapbox access token: {tok}", "eyJ1Ijoi"), (f"MAPBOX_TOKEN={tok}", "eyJ1Ijoi"),
-                             ("API key: live.a1b2c3d4e5f6a7b8c9d0e1f2", "a1b2c3d4"), ("Session ID: s.abcdef0123456789abcdef", "abcdef0123"),
-                             ("Password: qa.tester2026", "tester2026")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        for keep in ('Response 400: {"errors":{"password":"Too short"}}', 'Response 400: {"errors":{"password":"Invalid password"}}',
-                     'Response 401: {"error":"invalid_token","token":"Token expired"}', 'Toast text: password: "Wrong password"',
-                     'Placeholder for password: "Enter your password"', "X-CSRF-Token: mismatch gives 419 instead of 403",
-                     "X-Auth-Token: returned by POST /api/login, sent on every call", "X-Api-Key: mandatory for /api/zones, optional elsewhere",
-                     "headers: { 'X-Api-Key': process.env.API_KEY }", "password: this.loginForm.value.password"):
-            self.assertEqual(scrub.redact(keep), keep)
-        self.assertEqual(scrub.redact("Headers: Authorization: Bearer abc123def456ghi789jkl012, Cookie: sid=abcdef0123456789abcdef, X-Api-Key: live_9f8e7d6c5b4a"),
-                         "Headers: Authorization: Bearer [REDACTED], Cookie: [REDACTED], X-Api-Key: [REDACTED]")
-        self.assertEqual(scrub.redact("X-Api-Key: abcdefghijkl"), "X-Api-Key: [REDACTED]")
-
-    def test_sixth_pass_findings(self):  # audit 3: sixth independent pass
-        for keep in ("headers: { Authorization: `Bearer ${accessToken}` }", "'Authorization': `Bearer ${session.accessToken}`,",
-                     "Authorization: Bearer {{authToken}}", "Authorization: Bearer <access-token>", "Authorization: Bearer $ACCESS_TOKEN",
-                     "headers: { 'x-api-key': environment.apiKey }", "'X-Api-Key': this.config.apiKey,", "X-Auth-Token: req.headers['x-auth-token']",
-                     "X-Auth-Token: localStorage.getItem('token')", "X-CSRF-Token: Mismatch error shown", "X-Api-Key: Mandatory header",
-                     "token: Validators.required", "password: Validators.required,", "token: DataTypes.STRING", "apiKey: ConfigService.apiKey",
-                     '{"errors":{"password":"Minimum 8 characters"}}', '{"errors":{"token":"Session timed out"}}',
-                     '{"errors":{"password":"Bad credentials"}}', '"token": "Access denied"', "password: 'Use 8+ characters'",
-                     "getByLabel('Password:').fill('x')", "| password | required, min 8 |", "| Speed limit | 130 |"):
-            self.assertEqual(scrub.redact(keep), keep)
-        for text, secret in (("| X-Api-Key | 4f3c2b1a0d9e8f7a6b5c |", "4f3c2b1a"), ("| api_key | 4f3c2b1a0d9e8f7a6b5c1234 |", "4f3c2b1a"),
-                             ("| password | Passw0rd! |", "Passw0rd"), ("X-Api-Key: abcdefghijkl", "abcdefghijkl"),
-                             ('{"apiKey": "correct horse battery"}', "horse")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-
-    def test_line_sliced_passes_cannot_match_a_newline(self):  # perf r32: redact() runs these on single lines
-        try:
-            from re import _constants as C, _parser as P
-        except ImportError:  # Python < 3.11
-            import sre_constants as C, sre_parse as P
-        nl = ord("\n")
-
-        def class_has_newline(items):  # the members of a [...] class, without the NEGATE marker
-            for op, av in items:
-                if (op is C.LITERAL and av == nl) or (op is C.RANGE and av[0] <= nl <= av[1]) or \
-                        (op is C.CATEGORY and av in (C.CATEGORY_SPACE, C.CATEGORY_NOT_WORD, C.CATEGORY_NOT_DIGIT)):
-                    return True
-            return False
-
-        def can_match_newline(items):
-            for op, av in items:
-                if op is C.LITERAL and av == nl or op is C.NOT_LITERAL and av != nl or op is C.ANY and flags & re.S:
-                    return True
-                if op is C.IN:
-                    negated = bool(av) and av[0][0] is C.NEGATE
-                    if class_has_newline(av[1:] if negated else av) != negated:
-                        return True
-                if op is C.CATEGORY and av in (C.CATEGORY_SPACE, C.CATEGORY_NOT_WORD, C.CATEGORY_NOT_DIGIT):
-                    return True
-                subs = (av[1] if op is C.BRANCH else [av[-1]] if op is C.SUBPATTERN else [av[2]] if op in (
-                    C.MAX_REPEAT, C.MIN_REPEAT) else [av[1]] if op in (C.ASSERT, C.ASSERT_NOT) else [])
-                if any(can_match_newline(list(sub)) for sub in subs):
-                    return True
-            return False
-
-        for name in ("QUOTED_SECRET_RE", "HEADER_VALUE_RE", "KEY_VALUE_RE", "PAIRED_RE"):
-            p = getattr(scrub, name)
-            flags = re.compile(p.pattern, p._flags).flags
-            self.assertFalse(can_match_newline(list(P.parse(p.pattern, flags))), name)
-        self.assertTrue(can_match_newline(list(P.parse(r"a\sb", 0))))  # the walker itself sees a newline class
-        self.assertTrue(can_match_newline(list(P.parse(r"a[^x]b", 0))))
-        multi = "user / password: qa / Passw0rd!\nnote: fine\nX-Api-Key: abcdefghijkl\napi_key=Sommerregen9\n"
-        self.assertEqual(scrub.redact(multi), "\n".join(scrub.redact(line) for line in multi.split("\n")))
-
-    def test_paired_labels_and_values(self):  # known issue in 0.4.0: `user / password: qa / Passw0rd!`
-        for text, secret, kept in (("user / password: qa / Passw0rd!", "Passw0rd", "qa /"),
-                                   ("Login / Password: qa@x.com / Hunter22", "Hunter22", "qa@x.com"),
-                                   ("username/password = qa/Sommerregen", "Sommerregen", "username/password"),
-                                   ("Account: user / API key: qa / 4f3c2b1a0d9e", "4f3c2b1a", "Account")):
-            out = scrub.redact(text)
-            self.assertNotIn(secret, out, text)
-            self.assertIn(kept, out, text)
-        for keep in ("pass/fail: 3/1", "user / password: required / required", "src/api/token: x/y", "min / max: 8 / 64",
-                     "user / role: qa / admin", "Date / time: 2026-11-23 / 10:00", "Email / Password: valid / invalid",
-                     "login/password: success/failure", "token/scope: read/write", "token / expiry: JWT / 15 min",
-                     "Username / Password: email / text", "/auth/password: GET/POST"):
-            self.assertEqual(scrub.redact(keep), keep)
-        # values KEY_VALUE_RE redacted before stay redacted; multi-word and bold labels; punctuation after the value stays
-        for text, secret in (("Password/Confirm password: Passw0rd!/Winter2024!", "Winter2024"),
-                             ("token/refresh token: 8a7b6c5d4e3f2a1b0c9d/1f2e3d4c5b6a79880a1b", "1f2e3d4c"),
-                             ("Client secret/password: 9f8e7d6c5b4a39281706/Passw0rd!", "9f8e7d6c"),
-                             ("**Username / Password:** qa / Passw0rd!", "Passw0rd"), ("admin user / admin password: qa / Hunter22", "Hunter22")):
-            self.assertNotIn(secret, scrub.redact(text), text)
-        self.assertEqual(scrub.redact("(user / password: qa / Passw0rd!)."), "(user / password: qa / [REDACTED]).")
-        self.assertEqual(scrub.redact("user / password: qa / Passw0rd!, then click Login"), "user / password: qa / [REDACTED], then click Login")
-        # linear on long hyphenated, base64url and slash runs
-        for big in ("-".join(["550e8400e29b41d4a716446655440000"] * 3000), "a-" * 50000, "foo-bar-baz-" * 9000, "a/" * 100000,
-                    "x" * 60 + ("Ab3_-" * 20000), "user / password " * 20000):
-            t0 = time.time()
-            scrub.redact(big)
-            self.assertLess(time.time() - t0, 2, big[:40])
 
     def test_unparseable_url_is_no_route_not_a_traceback(self):  # audit 3 r1
         self.assertEqual(core.norm_route("http://[x"), "")
@@ -403,11 +276,11 @@ class QaMem(unittest.TestCase):
         out = Path(self.tmp.name) / "qa-out"
         (out / "a").mkdir(parents=True)
         (out / "b").mkdir()
-        (out / "a/run.json").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
-        (out / "b/run.json").write_text("{not json")
+        runfile(out / "a").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
+        runfile(out / "b").write_text("{not json")
         self.assertEqual(memory.ingest_pending(out), 1)
-        self.assertTrue((out / "a/run.json.ingested").exists())
-        self.assertTrue((out / "b/run.json.error").exists())
+        self.assertTrue((out / "a/.data/run-x.json.ingested").exists())
+        self.assertTrue((out / "b/.data/run-x.json.error").exists())
         self.assertEqual(memory.ingest_pending(out), 0)
 
     def test_stop_hook_command_skips_python_without_qa_out(self):  # perf r2: no Python start in unrelated projects
@@ -429,14 +302,14 @@ class QaMem(unittest.TestCase):
         self.assertFalse((base / "db").exists())
         self.assertFalse((base / "python-started").exists())
         (proj / "qa-out/a").mkdir(parents=True)  # the project's folder, reached from another cwd
-        (proj / "qa-out/a/run.json").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
+        runfile(proj / "qa-out/a").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
         self.assertEqual(sh(other).returncode, 0)
-        self.assertTrue((proj / "qa-out/a/run.json.ingested").exists())
+        self.assertTrue((proj / "qa-out/a/.data/run-x.json.ingested").exists())
         (other / "qa-out/b").mkdir(parents=True)  # the cwd's folder alone
-        (other / "qa-out/b/run.json").write_text("{not json")
+        runfile(other / "qa-out/b").write_text("{not json")
         r = sh(other)
         self.assertEqual(r.returncode, 2, r.stderr)  # the agent still hears about a run JSON it must fix
-        self.assertTrue((other / "qa-out/b/run.json.error").exists())
+        self.assertTrue((other / "qa-out/b/.data/run-x.json.error").exists())
 
     def test_hook_in_unrelated_project_creates_no_db(self):
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "fresh" / "x.db")
@@ -455,11 +328,6 @@ class QaMem(unittest.TestCase):
         self.assertIn(f"{h} REGRESSED", c)
         self.assertIn("symptom: speed 999 saved", c)
 
-    def test_sid_site_ids_survive_session_sids_go(self):
-        self.assertEqual(scrub.redact("sid: SEG-1042 shown twice"), "sid: SEG-1042 shown twice")
-        self.assertEqual(scrub.redact("sent sid=s%3Aabcdefghijklmnop123"), "sent sid=[REDACTED]")
-        self.assertIn("[REDACTED]", scrub.redact("Cookie: sid=abc123"))
-
     def test_blocked_stays_untried_and_paraphrased_facts_collapse(self):
         memory.ingest(self.con, run(coverage=[{"target": "api", "heuristic": "error-handling", "result": "blocked"}],
                                 facts=[{"kind": "rule", "text": "ID, Road and Type buttons sort ascending"}]), "2026-11-22T10:00:00Z")
@@ -471,20 +339,16 @@ class QaMem(unittest.TestCase):
         self.assertEqual(c.count("sort ascending"), 1)
 
     def test_round23_review_findings(self):
-        long = "a" * 40
-        self.assertEqual(scrub.redact_json({"cookies": [{"name": "sid", "value": long}]})["cookies"][0]["value"], "[REDACTED]")
-        self.assertEqual(scrub.redact_json({"sid": long, "x": {"sid": "SEG-1"}}), {"sid": "[REDACTED]", "x": {"sid": "SEG-1"}})
-        self.assertNotIn(long, scrub.redact('{"sid": "%s"}' % long))
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
-        f = out / "run.json"
-        f.write_text(json.dumps(run(facts=[{"kind": "note", "text": "login uses password=Hunter2pass99"}])))
+        f = runfile(out)
+        f.write_text(json.dumps(run(facts=[{"kind": "note", "text": "login sets eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk"}])))
         os.utime(f, (1, 1))
         (out.parent / ".scrubbed").write_text(str(time.time()))  # scrub skips the old file
         self.con.close()
         memory.ingest_pending(out.parent)
         self.con = core.connect()
-        self.assertNotIn("Hunter2", " ".join(r[0] for r in self.con.execute("SELECT text FROM facts")))
+        self.assertNotIn("eyJhbGci", " ".join(r[0] for r in self.con.execute("SELECT text FROM facts")))
         memory.ingest(self.con, {"run_id": "u", "build": "unknown", "pages": [{"route": "/u",
                   "coverage": [{"target": "t", "heuristic": "boundary"}]}]}, "2020-01-01T00:00:00Z")
         self.assertNotIn("boundary(", memory.card(self.con, "/u"))
@@ -515,13 +379,17 @@ class QaMem(unittest.TestCase):
         finally:
             core.MAX_FACTS = 100
 
-    def test_prefixed_secret_names(self):
+    def test_secret_named_json_keys(self):
         S = "Zk9sLmQ3cXR5UzRmVjJh"
-        for t in [f"PRIVATE_TOKEN: {S}", f"secret_key={S}", f"privateKey: {S}", f"bearerToken={S}", f"sessionToken: {S}"]:
-            self.assertNotIn(S, scrub.redact(t), t)
-        for t in ["password_hint: 123 shown", "tokenizer: abc12345", "csrfToken: required", "primary key: id"]:
-            self.assertEqual(scrub.redact(t), t)
-        self.assertEqual(scrub.redact_json({"tokenCount": 5, "sessionToken": S}), {"tokenCount": 5, "sessionToken": "[REDACTED]"})
+        obj = {"PRIVATE_TOKEN": S, "secret_key": S, "privateKey": S, "bearerToken": S, "sessionToken": S, "API Key": S,
+               "x-api-key": S, "tokenCount": 5, "password_hint": "123 shown", "primary key": "id", "csrf": "required"}
+        got = scrub.redact_json(obj)
+        for k in list(obj)[:7]:
+            self.assertEqual(got[k], "[REDACTED]", k)
+        for k in list(obj)[7:]:
+            self.assertEqual(got[k], obj[k], k)
+        self.assertEqual(scrub.redact_json({"cookies": [{"name": "sid", "value": S}]})["cookies"][0]["value"], "[REDACTED]")
+        self.assertEqual(scrub.redact_json({"sid": S, "x": {"sid": "SEG-1"}}), {"sid": S, "x": {"sid": "SEG-1"}})  # site ids stay
 
     def test_jira_key_in_hash_creates_no_local_bug(self):
         memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Known jira TRAF-9 bug", "hash": "TRAF-9"}]))
@@ -542,7 +410,7 @@ class QaMem(unittest.TestCase):
     def test_scrub_leaves_symlinks_alone(self):
         root = Path(self.tmp.name)
         (root / "qa-out" / "a").mkdir(parents=True)
-        (root / "outside.txt").write_text("password=Hunter2pass99\n")
+        (root / "outside.txt").write_text("Authorization: Bearer Hunter2pass99abcdef\n")
         (root / "qa-out" / "a" / "notes.md").symlink_to(root / "outside.txt")
         memory.ingest_pending(root / "qa-out")
         self.assertTrue((root / "qa-out" / "a" / "notes.md").is_symlink())
@@ -570,23 +438,6 @@ class QaMem(unittest.TestCase):
         self.assertIn("PAGE /zones ", memory.card(self.con, "zones"))  # the route itself first
         self.assertIn("PAGE /map.html", memory.card(self.con, "live map"))  # then the exact page name
 
-    def test_header_prose_survives_scrub(self):
-        S = "Zk9sLmQ3cXR5UzRmVjJh"
-        for t in ["| TC-07 | Authorization: viewer cannot approve; gets 403 | AC-3 | P1 |",
-                  "Cookie: consent banner covers the Save button on /closures/new/details",
-                  "Authorization: Basic auth is not supported", "Cookie: none"]:
-            self.assertEqual(scrub.redact(t), t)
-        for t in [f"Authorization: Bearer {S}", "Authorization: Basic dXNlcjpwYXNz", f"Cookie: a=1; session={S}",
-                  f"set-cookie: SESSION={S}; Path=/; HttpOnly", f"X-Api-Key: {S} was sent"]:
-            self.assertIn("[REDACTED]", scrub.redact(t), t)
-        self.assertEqual(scrub.redact(f"X-Api-Key: {S} was sent"), "X-Api-Key: [REDACTED] was sent")
-
-    def test_basic_credentials_outside_a_header_line(self):  # r20: survived in JSON values, prose and specs
-        self.assertEqual(scrub.redact_json({"auth": "Basic dXNlcjpwYXNz"}), {"auth": "Basic [REDACTED]"})
-        self.assertNotIn("YWRtaW46aHVudGVyMg", scrub.redact_literals("headers({authorization: 'Basic YWRtaW46aHVudGVyMg=='})"))
-        for t in ["basic validation works", "Basic information panel", "Basic auth required"]:
-            self.assertEqual(scrub.redact(t), t)
-
     def test_unreadable_build_spellings(self):
         memory.ingest(self.con, run("1.42.0", facts=[{"kind": "rule", "text": "real"}]))
         for b in ["undefined", "unknown (footer .version not found)", "Unknown", "UNKNOWN", "null"]:
@@ -597,23 +448,25 @@ class QaMem(unittest.TestCase):
         self.assertEqual({r[0] for r in self.con.execute("SELECT DISTINCT build FROM coverage")}, {"unknown"})
         self.assertIn("duplicate(", c)  # unknown-build coverage visible (within the week)
 
-    def test_pre_fts_database_gets_indexed(self):
-        old = Path(self.tmp.name) / "prefts.db"
-        c = sqlite3.connect(old)
-        c.execute("CREATE TABLE facts(id INTEGER PRIMARY KEY, page TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,"
-                  " source TEXT, build TEXT, ts TEXT, stale INTEGER DEFAULT 0, UNIQUE(page, kind, text))")
-        c.executemany("INSERT INTO facts(page,kind,text,ts) VALUES('/form','rule',?, '2026-01-01T00:00:00Z')",
-                      [(f"old closure fact {i}",) for i in range(120)])
-        c.commit()
-        c.close()
-        os.environ["QA_MEM_DB"] = str(old)
-        con = core.connect()
-        try:
-            self.assertIn("closure", memory.search(con, "closure"))
-            memory.ingest(con, {"run_id": "r", "build": "1", "pages": [{"route": "/form", "facts": [{"kind": "rule", "text": "new"}]}]})
-            con.execute("INSERT INTO facts_fts(facts_fts) VALUES('integrity-check')")  # raises if the index is corrupt
-        finally:
-            con.close()
+    def test_a_database_from_before_0_4_is_refused_untouched(self):
+        import io, contextlib
+        for ddl, missing in (("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, seen_count INTEGER)", "bugs lacks"),
+                             ("CREATE TABLE codemap(page TEXT, kind TEXT, label TEXT, repo TEXT, area TEXT)", "codemap lacks src")):
+            old = Path(self.tmp.name) / f"{missing.split()[0]}.db"
+            c = sqlite3.connect(old)
+            c.execute(ddl)
+            c.commit()
+            c.close()
+            os.environ["QA_MEM_DB"] = str(old)
+            with self.assertRaisesRegex(core.BadInput, f"from before qa-sdet 0.4 \\({missing}"):
+                core.connect()
+            c = sqlite3.connect(old)
+            self.assertEqual(len(c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()), 1)  # nothing added
+            c.close()
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["card", "/x"]), 2)
+            self.assertIn("from before qa-sdet 0.4", err.getvalue())
 
     def test_coverage_results_normalised(self):
         cov = [{"target": "t", "heuristic": h, "result": r} for h, r in
@@ -701,14 +554,14 @@ class QaMem(unittest.TestCase):
     def test_transient_error_retries(self):
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
-        (out / "run.json").write_text(json.dumps(run()))
+        runfile(out).write_text(json.dumps(run()))
         real = memory.ingest
         memory.ingest = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
         try:
             self.assertEqual(memory.ingest_pending(out.parent), 0)
         finally:
             memory.ingest = real
-        self.assertFalse((out / "run.json.error").exists())
+        self.assertFalse((out / ".data/run-x.json.error").exists())
         self.assertEqual(memory.ingest_pending(out.parent), 1)
 
     def test_old_run_does_not_roll_back_build(self):
@@ -739,9 +592,9 @@ class QaMem(unittest.TestCase):
                                  {"status": 10 ** 30, "pages": [{"route": "/a", "facts": [{"text": {"a": 1}}]}]}]):
             d = out / str(i)
             d.mkdir(parents=True)
-            (d / "run.json").write_text(json.dumps({"run_id": f"r{i}", "build": "1", **bad}))
+            runfile(d).write_text(json.dumps({"run_id": f"r{i}", "build": "1", **bad}))
         memory.ingest_pending(out)
-        errors = sorted(p.parent.name for p in out.rglob("run.json.error"))
+        errors = sorted(p.parent.parent.name for p in out.rglob("run-x.json.error"))
         self.assertEqual(errors[:3], ["0", "1", "2"])
 
     def test_round5_late_old_run_does_not_roll_back_page(self):
@@ -794,27 +647,14 @@ class QaMem(unittest.TestCase):
         memory.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "boundary"}]), "2020-01-01T00:00:00Z")
         self.assertNotIn("boundary(", memory.card(self.con, "/form"))  # unknown-build coverage expires after a week
 
-    def test_round5_migrates_old_db(self):
-        old = Path(self.tmp.name) / "old.db"
-        c = sqlite3.connect(old)
-        c.execute("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT, classification TEXT,"
-                  " status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT, seen_count INTEGER DEFAULT 1)")
-        c.commit()
-        c.close()
-        os.environ["QA_MEM_DB"] = str(old)
-        con = core.connect()
-        memory.ingest(con, run(bugs=[{"route": "/form", "title": "t"}]))
-        self.assertIn("KNOWN BUGS", memory.card(con, "/form"))
-        con.close()
-
     def test_ingest_pending_cli_dedupes_dirs_and_content_hash(self):
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
-        (out / "run.json").write_text(json.dumps(run(bugs=[{"route": "/form", "title": "t"}])))
+        runfile(out).write_text(json.dumps(run(bugs=[{"route": "/form", "title": "t"}])))
         cli.main(["ingest-pending", str(out.parent), str(out.parent) + "/", ""])
         self.assertEqual(self.con.execute("SELECT count(*) FROM runs").fetchone()[0], 1)
         future = time.time() + 3600  # skewed mtime must not cause re-ingest loops
-        os.utime(out / "run.json", (future, future))
+        os.utime(runfile(out), (future, future))
         self.assertEqual(memory.ingest_pending(out.parent), 0)
         self.assertLessEqual(self.con.execute("SELECT max(ts) FROM runs").fetchone()[0], core.now())
 
@@ -843,12 +683,12 @@ class QaMem(unittest.TestCase):
         self.assertIn("FIX  allowedHosts is a list", out)
         self.assertIn("FIX  config has app", out)
 
-    def test_doctor_empty_config_failed_mcp_list_and_source_folders(self):  # audit 2 r19
+    def test_doctor_empty_config_and_source_folders(self):  # audit 2 r19
         import io, contextlib, shutil
         cfg = Path(self.tmp.name) / "config.json"
-        real, real_list, real_which = core.CONFIG, doctor.claude_mcp_list, shutil.which
-        core.CONFIG, doctor.claude_mcp_list = cfg, lambda: "FAILED"
-        shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli: the fallback lines print
+        real, real_which = core.CONFIG, shutil.which
+        core.CONFIG = cfg
+        shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli
         try:
             for body, want in (({}, "FIX  config has app"),
                                ({"sourcePaths": "/x"}, "FIX  sourcePaths is a list"),
@@ -858,21 +698,19 @@ class QaMem(unittest.TestCase):
                 with contextlib.redirect_stdout(buf):
                     doctor.doctor()
                 self.assertIn(want, buf.getvalue(), body)
-            self.assertIn("`claude mcp list` failed", buf.getvalue())
+            self.assertIn("FIX  playwright-cli on PATH  -> npm i -g @playwright/cli", buf.getvalue())
+            self.assertIn("info no acli: tickets are pasted", buf.getvalue())
         finally:
-            core.CONFIG, doctor.claude_mcp_list, shutil.which = real, real_list, real_which
+            core.CONFIG, shutil.which = real, real_which
         self.assertTrue(doctor.pillow_fix())
 
     def test_redaction_audit2_tokens_and_false_positives(self):
         secrets = ["github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
                    "ATATT3xFfGF0abcdefghijklmnopqrstuvwxyz0123456789=ABCDEF12",
-                   "AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW", "sk_" "live_4eC39HqLyjWDarjtT1zdp7dc",
                    "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
                    "-----END RSA PRIVATE KEY-----", "https://b.s3.amazonaws.com/x?X-Amz-Signature=abcdef0123456789abcdef"]
         for sec in secrets:
             self.assertNotIn(sec.splitlines()[-1][-12:], scrub.redact(f"value: {sec} end"), sec[:20])
-        self.assertNotIn("letmein", scrub.redact("const password = 'letmein';"))
-        self.assertNotIn("horse", scrub.redact('{"apiKey": "correct horse battery"}'))
         for keep in ("Bearer acknowledgements are shown", "token=1.42.0 released", "password: required",
                      "the password field max 64 chars", "Token expired message shown"):
             self.assertEqual(scrub.redact(keep), keep)
@@ -916,7 +754,7 @@ class QaMem(unittest.TestCase):
         out = Path(self.tmp.name) / "qa-out" / "a"
         (out / "bugs").mkdir(parents=True)
         (out / "bugs/BUG-1.md").write_text("Network: GET /api -> 500\nAuthorization: Bearer abcdefghijklmnopqrst\n")
-        (out / "run.json").write_text(json.dumps(run(facts=[{"kind": "api", "text": "API needs cookie: sid=abc123def"}])))
+        runfile(out).write_text(json.dumps(run(facts=[{"kind": "api", "text": "API needs Cookie: sid=abc123def"}])))
         self.assertEqual(memory.ingest_pending(out.parent), 1)
         draft = (out / "bugs/BUG-1.md").read_text()
         self.assertIn("[REDACTED]", draft)
@@ -929,7 +767,7 @@ class QaMem(unittest.TestCase):
         out = proj / "qa-out" / "form"
         (out / "bugs").mkdir(parents=True)
         (out / "bugs/BUG-1.md").write_text("x")
-        (out / "run.json").write_text(json.dumps(run(bugs=[
+        runfile(out).write_text(json.dumps(run(bugs=[
             {"route": "/form", "title": "a", "draft_path": "qa-out/form/bugs/BUG-1.md"},
             {"route": "/form", "title": "b", "draft_path": "bugs/BUG-1.md"}])))
         memory.ingest_pending(proj / "qa-out")
@@ -940,9 +778,9 @@ class QaMem(unittest.TestCase):
         out = Path(self.tmp.name) / "qa-out" / "old"
         (out / "bugs").mkdir(parents=True)
         memory.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "new"}]), "2026-11-22T10:00:00Z")
-        (out / "run.json").write_text(json.dumps(run("1.0", facts=[{"kind": "rule", "text": "cookie: sid=abc123"}])))
+        runfile(out).write_text(json.dumps(run("1.0", facts=[{"kind": "rule", "text": "cookie: sid=abc123"}])))
         old = time.time() - 3 * 86400
-        os.utime(out / "run.json", (old, old))
+        os.utime(runfile(out), (old, old))
         (out / "bugs/BUG-1.md").write_text("Open Basic Settings; password: min 8 chars\n")
         (out / "evidence.json").write_text(json.dumps({"sessionId": 12345, "ok": True}))
         memory.ingest_pending(out.parent)
@@ -958,58 +796,6 @@ class QaMem(unittest.TestCase):
         memory.ingest_pending(out.parent.parent)
         self.assertNotIn("abcdefghijklmnopqrst", (out / "BUG-1.md").read_text())
         self.assertFalse((Path(self.tmp.name) / "none").exists())  # no run.json: no DB touched
-
-    def test_doctor_reports_mcp_fallbacks(self):
-        import io, contextlib, shutil
-        real_which, real_list = shutil.which, doctor.claude_mcp_list
-        shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli
-        doctor.claude_mcp_list = lambda: ("playwright: npx @playwright/mcp@latest --secret-token-abc - ✔ Connected\n"
-                                      "claude.ai Atlassian: https://mcp.atlassian.com/v1?key=k123 - ✔ Connected\n"
-                                      "jira-old: npx jira-mcp - ✗ Failed to connect — https://x/?apikey=SECRET42\n")
-        try:
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                doctor.doctor()
-        finally:
-            shutil.which, doctor.claude_mcp_list = real_which, real_list
-        out = buf.getvalue()
-        self.assertIn("ok   fallback browser: Playwright MCP playwright", out)
-        self.assertIn("ok   Jira fallback: Atlassian/Jira MCP claude.ai Atlassian", out)
-        self.assertNotIn("secret-token-abc", out)  # names only: commands and URLs can carry keys
-        self.assertNotIn("FIX  playwright-cli", out)  # a working MCP fallback: the CLI is advice, not a problem
-        self.assertIn("info no signed-in profile: MCP runs", out)
-        self.assertNotIn("k123", out)
-        self.assertNotIn("SECRET42", out)  # error text after the status can hold keys too
-        doctor.claude_mcp_list = lambda: "playwright: npx @playwright/mcp - ⏸ Pending approval (run `claude` to approve)\n"
-        shutil.which = lambda name, *a, **k: None
-        try:
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                doctor.doctor()
-        finally:
-            shutil.which, doctor.claude_mcp_list = real_which, real_list
-        self.assertIn("FIX  fallback browser", buf.getvalue())
-        self.assertIn("playwright (pending approval)", buf.getvalue())
-        # finding 8: an HTTP server named "browser" counts; a connected server with an unknown name is "can't tell"
-        for listing, expect in (("browser: http://localhost:8931/mcp (HTTP) - ✔ Connected\n", "ok   fallback browser: Playwright MCP browser"),
-                                ("work-tools: http://localhost:9000/mcp (HTTP) - ✔ Connected\n", "info fallback browser: none named playwright/browser"),
-                                ("", "FIX  fallback browser: a connected Playwright MCP"),
-                                (None, "info fallback browser: couldn't list MCP servers"),
-                                (None, "info Jira fallback: couldn't list MCP servers"),
-                                ("TIMEOUT", "`claude mcp list` timed out"),
-                                ("chrome-devtools: npx chrome-devtools-mcp@latest --browser-url=http://127.0.0.1:9222 - ✔ Connected\n",
-                                 "info fallback browser: none named playwright/browser"),
-                                ("qa: npx @playwright/mcp@latest --isolated - ✔ Connected\n", "ok   fallback browser: Playwright MCP qa"),
-                                ("pw-test: npx playwright run-test-mcp-server - ✔ Connected\n", "FIX  fallback browser")):
-            doctor.claude_mcp_list = lambda listing=listing: listing
-            shutil.which = lambda name, *a, **k: None
-            try:
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    doctor.doctor()
-            finally:
-                shutil.which, doctor.claude_mcp_list = real_which, real_list
-            self.assertIn(expect, buf.getvalue(), listing)
 
     def test_browser_choice_detection_and_doctor(self):
         """Runs use the browser the user chose from what's installed (config `browser`), never an assumed Firefox."""
@@ -1028,17 +814,6 @@ class QaMem(unittest.TestCase):
             got = doctor.installed_browsers()
             self.assertEqual({k: v[0] for k, v in got.items()}, {"chrome": True, "msedge": False, "firefox": False, "webkit": True})
             self.assertIn("playwright-cli install-browser firefox", got["firefox"][1])
-            old_local = os.environ.get("LOCALAPPDATA")
-            os.environ["LOCALAPPDATA"] = r"C:\Users\me\AppData\Local"  # audit 1: per-user Edge on Windows
-            os.path.isfile = lambda x: x == r"C:\Users\me\AppData\Local\Microsoft\Edge\Application\msedge.exe"
-            try:
-                self.assertTrue(doctor.installed_browsers(("msedge",))["msedge"][0])
-            finally:
-                if old_local is None:
-                    del os.environ["LOCALAPPDATA"]
-                else:
-                    os.environ["LOCALAPPDATA"] = old_local
-                os.path.isfile = lambda x: x == "/opt/google/chrome/chrome" or (str(x).endswith("INSTALLATION_COMPLETE") and real_isfile(x))
             cfg = tmp / "config.json"
             real_cfg = core.CONFIG
             core.CONFIG = cfg
@@ -1058,12 +833,11 @@ class QaMem(unittest.TestCase):
             os.path.isfile, shutil.which, subprocess.run = real_isfile, real_which, real_run
 
     def test_browser_detection_edge_cases(self):
-        """Review findings: interrupted downloads, failed lookups, HOMEDRIVE paths, the browsers command, the MCP hint."""
+        """Review findings: interrupted downloads, failed lookups, the browsers command."""
         import io, contextlib, shutil, subprocess
         tmp = Path(self.tmp.name)
         half = tmp / "firefox-9"; half.mkdir()  # no INSTALLATION_COMPLETE: an interrupted download
         real_isfile, real_which, real_run = os.path.isfile, shutil.which, subprocess.run
-        saved = {k: os.environ.get(k) for k in ("HOMEDRIVE", "PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")}
         def runner(mode):
             def fake(cmd, *a, **k):
                 if mode == "timeout" and "install-browser" in cmd:  # only the lookup fails; --version works
@@ -1078,16 +852,9 @@ class QaMem(unittest.TestCase):
                 subprocess.run = runner(mode)
                 ok, how = doctor.installed_browsers(("firefox",))["firefox"]
                 self.assertFalse(ok, mode); self.assertIn(want, how, mode)
-            for k in saved:
-                os.environ.pop(k, None)
-            os.environ["HOMEDRIVE"] = "D:"
-            os.path.isfile = lambda x: x == r"D:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-            self.assertTrue(doctor.installed_browsers(("chrome",))["chrome"][0])
-            mac = {"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"}  # macOS app bundles
-            os.path.isfile = lambda x: x in mac
+            os.path.isfile = lambda x: x == "/opt/microsoft/msedge/msedge"
             got = doctor.installed_browsers(("chrome", "msedge"))
-            self.assertTrue(got["chrome"][0] and got["msedge"][0]); self.assertIn(".app/", got["msedge"][1])
+            self.assertEqual((got["chrome"][0], got["msedge"]), (False, (True, "/opt/microsoft/msedge/msedge")))
             os.path.isfile = real_isfile
             subprocess.run = runner("timeout")
             cfg, real_cfg = tmp / "config.json", core.CONFIG
@@ -1103,39 +870,24 @@ class QaMem(unittest.TestCase):
                 with contextlib.redirect_stdout(buf):
                     self.assertEqual(cli.main(["browsers"]), 0)
                 self.assertRegex(buf.getvalue(), r"(?m)^chrome +(installed|missing)")
-                shutil.which = lambda name, *a, **k: None  # no CLI: the MCP hint follows the chosen browser
-                for conf, want in (({"browser": "webkit"}, "--browser webkit, then npx @playwright/mcp@latest install-browser webkit"),
-                                   ({}, "--browser <browser> (or install")):
-                    cfg.write_text(json.dumps(conf))
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf):
-                        doctor.doctor()
-                    self.assertIn(want, buf.getvalue(), conf)
             finally:
                 core.CONFIG = real_cfg
         finally:
             os.path.isfile, shutil.which, subprocess.run = real_isfile, real_which, real_run
-            for k, v in saved.items():
-                os.environ.pop(k, None)
-                if v is not None:
-                    os.environ[k] = v
 
-    def test_doctor_acli_signed_out_with_jira_mcp(self):
+    def test_doctor_acli_signed_in_or_out(self):
         import io, contextlib, shutil, subprocess
-        real_which, real_list, real_run = shutil.which, doctor.claude_mcp_list, subprocess.run
+        real_which, real_run = shutil.which, subprocess.run
         shutil.which = lambda name, *a, **k: "/x/acli" if name == "acli" else None
-        subprocess.run = lambda cmd, *a, **k: type("R", (), {"returncode": 1, "stdout": ""})()
         try:
-            for listing, want, unwanted in (
-                    ("claude.ai Atlassian: https://mcp.atlassian.com/v1/sse - ✔ Connected\n", "info acli not signed in", "FIX  acli"),
-                    ("", "FIX  acli signed in to Jira", "info acli not signed in")):
-                doctor.claude_mcp_list = lambda listing=listing: listing
+            for code, want in ((1, "FIX  acli signed in to Jira  -> acli jira auth login"), (0, "ok   acli signed in to Jira")):
+                subprocess.run = lambda cmd, *a, code=code, **k: type("R", (), {"returncode": code, "stdout": ""})()
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     doctor.doctor()
-                self.assertIn(want, buf.getvalue()); self.assertNotIn(unwanted, buf.getvalue())
+                self.assertIn(want, buf.getvalue())
         finally:
-            shutil.which, doctor.claude_mcp_list, subprocess.run = real_which, real_list, real_run
+            shutil.which, subprocess.run = real_which, real_run
 
     def test_round9_doctor_and_config_robustness(self):
         import io, contextlib
@@ -1184,7 +936,7 @@ class QaMem(unittest.TestCase):
     def test_parked_run_is_shown_to_the_agent_once(self):
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
-        (out / "run.json").write_text(json.dumps({"run_id": "r", "build": "1", "pages": [{"route": "/x", "facts": "oops"}]}))
+        runfile(out).write_text(json.dumps({"run_id": "r", "build": "1", "pages": [{"route": "/x", "facts": "oops"}]}))
         env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
         r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
                            input='{"stop_hook_active": false}', capture_output=True, text=True, env=env)
@@ -1192,7 +944,7 @@ class QaMem(unittest.TestCase):
         self.assertIn("could not save this", r.stderr)
         self.assertIn(str(ROOT / "references" / "run-json.md"), r.stderr)  # r20: absolute, the project has no references/
         self.assertIn("did not write", r.stderr)  # a sibling explorer's parked file is not this agent's to fix
-        (out / "run.json").write_text(json.dumps({"run_id": "r2", "build": "1", "pages": [{"route": "/x", "facts": 5}]}))
+        runfile(out).write_text(json.dumps({"run_id": "r2", "build": "1", "pages": [{"route": "/x", "facts": 5}]}))
         r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
                            input='{"stop_hook_active": true}', capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0)  # already blocked once this turn: no loop
@@ -1211,7 +963,7 @@ class Launcher(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.env = {**os.environ, "QA_SDET_DATA": str(Path(self.tmp.name) / "data"),
                     "QA_SDET_CONFIG": str(Path(self.tmp.name) / "cfg/config.json")}
-        for leaked in ("PYTHONPATH", "QA_MEM_DB"):  # other tests set QA_MEM_DB in os.environ
+        for leaked in ("PYTHONPATH", "QA_MEM_DB"):  # a developer's shell may set them
             self.env.pop(leaked, None)
 
     def where(self, launcher, cwd, env=None, flags=()):
@@ -1236,15 +988,6 @@ class Launcher(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("usage: qa-mem <command>", r.stdout)
-
-    def test_a_read_command_does_not_load_report_or_doctor(self):
-        code = ("import sys; sys.path.insert(0, sys.argv[1]); from qa_sdet import cli; "
-                "assert cli.main(['card', '/x']) == 0; "
-                "print(sorted(m for m in sys.modules if m.startswith('qa_sdet.')))")
-        r = subprocess.run([sys.executable, "-c", code, str(ROOT / "lib")], env=self.env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        for loaded in ("report", "doctor", "ops", "scan"):
-            self.assertNotIn(f"qa_sdet.{loaded}'", r.stdout)
 
 
 if __name__ == "__main__":

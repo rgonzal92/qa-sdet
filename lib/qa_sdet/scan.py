@@ -1,4 +1,5 @@
 """Source classifier, `codemap-scan` and the shell menu."""
+import hashlib
 import json
 import os
 import re
@@ -17,36 +18,33 @@ TEMPLATE_SUFFIXES = {".cshtml", ".razor", ".erb", ".jsp", ".twig", ".hbs", ".njk
 BACKEND_SUFFIXES = {".py", ".java", ".kt", ".cs", ".go", ".rb", ".php"}
 SPEC_SUFFIXES = {".yaml", ".yml", ".json"}
 # Never read: secret stores and keys (source files are judged on content; literal secrets are scrubbed at ingest).
-SECRET_FILE_RE = core._LazyRe(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
+SECRET_FILE_RE = re.compile(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
                             r"properties|ini|toml|txt|xml)$|^credentials?\.(json|xml|ya?ml|ini|toml|txt)$|"
                             r"^id_(rsa|ed25519|ecdsa|dsa)|^\.(npmrc|netrc|pgpass|pypirc|dockercfg)$|^appsettings\.\w+\.json$|"
                             r"^secrets?\.(py|rb|php|go|java|kt|cs)$|^credentials?\.(py|rb|php|go)$|^wp-config\.php$")
-GENERATED_FILE_RE = core._LazyRe(r"(?i)\.min\.(js|css)$|\.map$|^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
+GENERATED_FILE_RE = re.compile(r"(?i)\.min\.(js|css)$|\.map$|^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
                                r"composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock)$|\.(bundle|chunk)\.js$|\.d\.ts$|"
                                r"\.generated\.|\.g\.(ts|cs)$")
 TEST_WORDS = {"test", "tests", "spec", "specs", "cypress", "playwright", "selenium", "pageobject", "pageobjects", "pom"}
-TEST_NAME_RE = core._LazyRe(r"(?i)\.(spec|test|cy|e2e|po)\.\w+$")
-UNIT_TEST_RE = core._LazyRe(r"(?i)\.(spec|test)\.\w+$|(^|/)test_\w+\.py$|\b(describe|it|test)\(\s*['\"`]|import\s+pytest|"
+TEST_NAME_RE = re.compile(r"(?i)\.(spec|test|cy|e2e|po)\.\w+$")
+UNIT_TEST_RE = re.compile(r"(?i)\.(spec|test)\.\w+$|(^|/)test_\w+\.py$|\b(describe|it|test)\(\s*['\"`]|import\s+pytest|"
                           r"@Test\b|\[Fact\]|\[Test\]")
-TESTS_RE = core._LazyRe(r"get_by_(test_id|role|label|text|placeholder|alt_text|title)\(|GetBy(TestId|Role|Label|Text|Placeholder|"
+TESTS_RE = re.compile(r"get_by_(test_id|role|label|text|placeholder|alt_text|title)\(|GetBy(TestId|Role|Label|Text|Placeholder|"
                       r"AltText|Title)\(|\.Locator\(|By\.(ID|CSS_SELECTOR|XPATH|NAME|CLASS_NAME|LINK_TEXT)\b|"
                       r"By\.(Id|CssSelector|XPath|Name|ClassName|LinkText)\(|\[FindsBy|"
                       r"getBy(TestId|Role|Label|Text|Placeholder|AltText|Title)\(|page\.(locator|fill|click|check|type|"
                       r"selectOption)\(|\.locator\(|cy\.(get|findBy\w+|contains)\(|By\.(id|css|cssSelector|xpath|name|"
                       r"className|linkText|tagName)\(|@FindBy\(|\$\$?\(['\"`]|data-testid|data-test|data-cy")
-# The (?=[...]) in front of the next four: every match starts with one of those characters, so re skips other positions
-# without trying each alternative there (codemap-scan ~30% faster). test_codemap derives the sets from the patterns.
-TESTS_IMPORT_RE = core._LazyRe(r"(?=[bcfipruw])(?:" r"""from\s+['"]@playwright/test['"]|require\(\s*['"]@playwright/test|from\s+['"]cypress|"""
+TESTS_IMPORT_RE = re.compile(r"""from\s+['"]@playwright/test['"]|require\(\s*['"]@playwright/test|from\s+['"]cypress|"""
                              r"""\bcy\.(visit|get)\(|^from\s+selenium|^import\s+org\.openqa\.selenium|webdriverio|"""
                              r"""from\s+['"]@testing-library|\bbrowser\.\$\(|^from\s+playwright\.(sync_api|async_api)|"""
                              r"""^using\s+(Microsoft\.Playwright|OpenQA\.Selenium)|^import\s+com\.microsoft\.playwright|"""
-                             r"""^(from|import)\s+behave\b|pytest_bdd)""", re.M)
-PO_CLASS_RE = core._LazyRe(r"\bclass\s+\w*(Page|Screen|Po|PO)(Object)?\b")
-PO_CALL_RE = core._LazyRe(r"\bpage\.getBy\w+\(|\.locator\(|\bGetBy(Role|TestId|Label|Text|Placeholder|AltText|Title)\(|"
+                             r"""^(from|import)\s+behave\b|pytest_bdd""", re.M)
+PO_CLASS_RE = re.compile(r"\bclass\s+\w*(Page|Screen|Po|PO)(Object)?\b")
+PO_CALL_RE = re.compile(r"\bpage\.getBy\w+\(|\.locator\(|\bGetBy(Role|TestId|Label|Text|Placeholder|AltText|Title)\(|"
                         r"\.Locator\(|FindElement\(By\.|@FindBy\(|\bget_by_(role|test_id|label|text|placeholder|alt_text|"
                         r"title)\(|\bcy\.get\(")  # not repository calls (GetByIdAsync, get_by_email)
-BACKEND_RE = core._LazyRe(
-    r"(?=[\-.@AFR\[abcefgmpqrsuv])(?:"
+BACKEND_RE = re.compile(
     r"@(Get|Post|Put|Patch|Delete|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|Controller|"
     r"RestController|Path|GET|POST|PUT|DELETE|PATCH)\b|"                      # Spring, Nest, JAX-RS
     r"\b(router|app|server|fastify|v1|api_router|blueprint)\.(get|post|put|patch|delete|route)\(\s*['\"`]/|"  # express-ish
@@ -62,49 +60,49 @@ BACKEND_RE = core._LazyRe(
     r"Rails\.application\.routes|\bresources\s+:|\bvalidates\s+:|params\.require\(|"                 # Rails
     r"Route::(get|post|put|patch|delete|resource|apiResource)\(|extends\s+FormRequest|->validate\(\[|"    # Laravel
     r"\bmodels\.\w+Field\(|forms\.ModelForm|\bmarshmallow\b|\brouting\s*\{|"                          # Django, Ktor
-    r"\b(body|query|param|check)\(\s*['\"][\w.]+['\"]\s*\)\s*\.(is\w+|not\w*|matches|exists))")
-FRONTEND_RE = core._LazyRe(r"\bpath\s*:\s*['\"`]|<Route\b|createBrowserRouter|createHashRouter|RouterModule|\bRoutes\b|"
+    r"\b(body|query|param|check)\(\s*['\"][\w.]+['\"]\s*\)\s*\.(is\w+|not\w*|matches|exists)")
+FRONTEND_RE = re.compile(r"\bpath\s*:\s*['\"`]|<Route\b|createBrowserRouter|createHashRouter|RouterModule|\bRoutes\b|"
                          r"createRouter\(|vue-router|data-testid|data-test=|data-cy|aria-label|formControlName|"
                          r"Validators\.|\bv-model|\bng-model|\byup\.|\bz\.(object|string|number)|useForm\(|register\(|"
                          r"\b(required|maxLength|minLength|pattern)\b|\b(min|max)=|\bfetch\(|\baxios\b|HttpClient|\$http|"
                          r"\buseQuery\(|\bapiClient\b|['\"`]/api/|<template\b|@Component\(|export\s+default\s+defineComponent|"
                          r"\b\w*(api|http|client|request)\w*\.(get|post|put|patch|delete)\s*(<[^()]*?>)?\s*\(")  # api.post<Z>('/zones')
-PAGE_DIR_RE = core._LazyRe(r"(^|/)(app|pages|routes|views|screens)/")  # file-system routing (Next, Nuxt, SvelteKit, Remix)
-UI_SIGNAL_RE = core._LazyRe(r"export\s+((async\s+)?function|const|let)\s+(load|loader|action|generateMetadata|"
+PAGE_DIR_RE = re.compile(r"(^|/)(app|pages|routes|views|screens)/")  # file-system routing (Next, Nuxt, SvelteKit, Remix)
+UI_SIGNAL_RE = re.compile(r"export\s+((async\s+)?function|const|let)\s+(load|loader|action|generateMetadata|"
                           r"getServerSideProps|getStaticProps)\b|['\"]use client['\"]|@Component\(|defineComponent|<template\b")
-UI_TAG_RE = core._LazyRe(r"<[A-Za-z][\w.-]*[\s/>]")  # a tag; in .ts it would be a generic (Promise<Zone>)
-NOISE_FILE_RE = core._LazyRe(r"(?i)\.(stories|story|fixtures?|mocks?)\.\w+$|(^|/)(__mocks__|mocks|__fixtures__|test-utils|"
+UI_TAG_RE = re.compile(r"<[A-Za-z][\w.-]*[\s/>]")  # a tag; in .ts it would be a generic (Promise<Zone>)
+NOISE_FILE_RE = re.compile(r"(?i)\.(stories|story|fixtures?|mocks?)\.\w+$|(^|/)(__mocks__|mocks|__fixtures__|test-utils|"
                            r"testing)/|(^|/)setupTests\.\w+$")
-BACKEND_WEAK_RE = core._LazyRe(r"\b(openapi|swagger)\b|\bJoi\.|\bcelebrate\(|\bpydantic\b")  # backend languages only
-SERVER_SIGNAL_RE = core._LazyRe(r"(?=[(@Dkmnrs])(?:" r"\bmongoose\.(Schema|model)\b|new\s+Schema\(|sequelize\.define|\bDataTypes\.|@(Column|Entity|"
+BACKEND_WEAK_RE = re.compile(r"\b(openapi|swagger)\b|\bJoi\.|\bcelebrate\(|\bpydantic\b")  # backend languages only
+SERVER_SIGNAL_RE = re.compile(r"\bmongoose\.(Schema|model)\b|new\s+Schema\(|sequelize\.define|\bDataTypes\.|@(Column|Entity|"
                               r"PrimaryGeneratedColumn)\b|@prisma/client|\bknex\.schema|\(\s*req\s*,\s*res\b|\breq\.(body|params|query)\b|"
-                              r"module\.exports\s*=\s*\{?\s*\w*(Controller|Service|Model|Repository))")
-SCHEMA_RE = core._LazyRe(r"(?=[Jfmvyz])(?:" r"from\s+['\"](zod|yup|joi|class-validator|valibot|superstruct)['\"]|\bz\.object\(|\byup\.object\(|"
-                       r"\bJoi\.object\(|\bmarshmallow\b|validate:\")")
-PAGE_SIGNAL_RE = core._LazyRe(r"\.goto\(|GotoAsync\(|GoToUrl\(|cy\.visit\(|\bnavigate(To)?\(|driver\.get\(|browser\.url\(|"
+                              r"module\.exports\s*=\s*\{?\s*\w*(Controller|Service|Model|Repository)")
+SCHEMA_RE = re.compile(r"from\s+['\"](zod|yup|joi|class-validator|valibot|superstruct)['\"]|\bz\.object\(|\byup\.object\(|"
+                       r"\bJoi\.object\(|\bmarshmallow\b|validate:\"")
+PAGE_SIGNAL_RE = re.compile(r"\.goto\(|GotoAsync\(|GoToUrl\(|cy\.visit\(|\bnavigate(To)?\(|driver\.get\(|browser\.url\(|"
                             r"\bclass\s+\w*(Page|Screen|Po|PO|Component|Dialog|Modal|Form|Panel|Section|Widget)(Object)?\b|"
                             r"(?i:(^|/)(pages|pom|po|steps?|page-?objects?|e2e|cypress|playwright)/)")
-SPEC_VERSION_RE = core._LazyRe(r"(?m)^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d|[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d")
-CONFIG_FILE_RE = core._LazyRe(r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|properties)$|(^|/)docker-compose[\w.-]*\.ya?ml$|"
+SPEC_VERSION_RE = re.compile(r"(?m)^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d|[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d")
+CONFIG_FILE_RE = re.compile(r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|properties)$|(^|/)docker-compose[\w.-]*\.ya?ml$|"
                             r"(^|/)values[\w.-]*\.ya?ml$|"
                             r"\.tfvars$|(^|/)config\.(json|ya?ml)$|(^|/)(next|nuxt|vite|vue|svelte|astro|remix|webpack)\.config\.\w+$|"
                             r"(^|/)environments?/environment[\w.-]*\.ts$|(^|/)(config|configuration|settings|secrets?|"
                             r"credentials?)\.(js|ts|mjs|cjs)$|(^|/)config/(default|production|development|staging|local|test|"
                             r"custom-environment-variables)[\w.-]*\.(js|ts|mjs|cjs)$")
-SECRET_CONTENT_RE = core._LazyRe(r"(?m)^\s*(SECRET_KEY|INSTALLED_APPS|DATABASES)\s*=|class\s+\w+\(\s*BaseSettings\s*\)|"
+SECRET_CONTENT_RE = re.compile(r"(?m)^\s*(SECRET_KEY|INSTALLED_APPS|DATABASES)\s*=|class\s+\w+\(\s*BaseSettings\s*\)|"
                                r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[a-z][\w+.-]*://[^\s:/'\"@]+:[^\s@'\"/]+@")
 # Django settings, pydantic settings, keys, connection URIs with a password (mongodb://user:pass@host)
-CONFIG_SECRET_RE = core._LazyRe(r"(?i)\b(secret\w*|pass(word|wd|phrase)?|pwd|private_?key\w*|api_?key\w*|\w*token)['\"]?\s*[:=]\s*"
+CONFIG_SECRET_RE = re.compile(r"(?i)\b(secret\w*|pass(word|wd|phrase)?|pwd|private_?key\w*|api_?key\w*|\w*token)['\"]?\s*[:=]\s*"
                               r"['\"][^'\"\s]{6,}['\"]")  # in a config/ folder: a literal credential
-SERVER_ROUTE_PATH_RE = core._LazyRe(r"(^|/)(pages/api/|app/(.*/)?route\.(ts|js)$|[^/]*\+server\.(ts|js)$|server/(api|routes|"
+SERVER_ROUTE_PATH_RE = re.compile(r"(^|/)(pages/api/|app/(.*/)?route\.(ts|js)$|[^/]*\+server\.(ts|js)$|server/(api|routes|"
                                   r"middleware)/)")
-SERVER_ROUTE_RE = core._LazyRe(r"export\s+(async\s+)?(function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b|defineEventHandler\(|"
+SERVER_ROUTE_RE = re.compile(r"export\s+(async\s+)?(function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b|defineEventHandler\(|"
                              r"NextApiRequest|\(\s*req\b[^,)]*,\s*res\b")
-JSX_RE = core._LazyRe(r"<[A-Z][\w.]*[\s/>]|return\s*\(?\s*<(div|form|input|button|table|section|main|ul|span|a)[\s>]")
-STRONG_UI_RE = core._LazyRe(r"<[A-Z][\w.]*[\s/>]|<(div|form|input|button|table|select|textarea)\b|<template\b|@Component\(|"
+JSX_RE = re.compile(r"<[A-Z][\w.]*[\s/>]|return\s*\(?\s*<(div|form|input|button|table|section|main|ul|span|a)[\s>]")
+STRONG_UI_RE = re.compile(r"<[A-Z][\w.]*[\s/>]|<(div|form|input|button|table|select|textarea)\b|<template\b|@Component\(|"
                           r"['\"]use client['\"]")
-STRONG_UI_TS_RE = core._LazyRe(r"<template\b|@Component\(|['\"]use client['\"]")  # .ts can't hold JSX: <Zone> is a generic
-ROUTER_ENTRY_RE = core._LazyRe(r"\bpath\s*:\s*['\"`]|<Route\b")  # two or more in a file: it is a router
+STRONG_UI_TS_RE = re.compile(r"<template\b|@Component\(|['\"]use client['\"]")  # .ts can't hold JSX: <Zone> is a generic
+ROUTER_ENTRY_RE = re.compile(r"\bpath\s*:\s*['\"`]|<Route\b")  # two or more in a file: it is a router
 PKG_CONTAINERS = {"packages", "apps", "services", "libs", "modules", "projects"}
 SCAN_MAX_BYTES = 400_000  # bigger files are generated or data, not hand-written source
 
@@ -163,9 +161,6 @@ def _shell_menu(rel, text):
         and not CONFIG_SECRET_RE.search(text) and not SPEC_VERSION_RE.search(text[:4000])
 
 
-SHELL_MAP_CHUNK = 0  # the shell menu's map and scan: chunk 0 is never a mapper's (mappers use 1..n, however many)
-
-
 def _shell_nav_routes(nav, parent, lines, rel):
     """(page, label, module id, url, line) for every menu item with a module, children included."""
     out = []
@@ -182,11 +177,9 @@ def _shell_nav_routes(nav, parent, lines, rel):
     return out
 
 
-def _write_shell_menu(con, out_dir, repos, stamp):
-    """The app shell's menu maps shell page paths to module page paths. Code writes
-    its route rows, not a mapper: a mapper can fail to write them, and a full re-map deletes its rows. Never raises."""
-    import hashlib
-    out_dir = Path(out_dir)
+def _apply_shell_menu(con, repos):
+    """The app shell's menu maps shell page paths to module page paths. Code writes its route rows, in memory and
+    straight into the DB, not a mapper: a mapper can fail to write them, and a full re-map deletes its rows. Never raises."""
     for repo, head, candidates, _routers in repos:
         for rel, (area, _size, h) in candidates.items():
             if area != "shell":
@@ -202,26 +195,17 @@ def _write_shell_menu(con, out_dir, repos, stamp):
             if not found and not con.execute("SELECT 1 FROM codemap WHERE repo=? AND area='frontend' AND src=? LIMIT 1",
                                               (repo, rel)).fetchone():
                 continue  # (a menu that lost all its modules still ingests: its old rows go; the frontend keeps them)
-            scan_id = f"shell-{stamp}"
-            scan_file = out_dir / f"scan-frontend-{SHELL_MAP_CHUNK}.json"
-            map_file = out_dir / f"code-map-frontend-{SHELL_MAP_CHUNK}.json"
-            cm = scrub.redact_json({"scan_id": scan_id, "area": "frontend", "rows": [  # as _ingest_files does for a mapper's
+            cm = scrub.redact_json({"area": "frontend", "rows": [  # as the hook does for a mapper's
                 {"repo": repo, "page": page, "kind": "route", "label": label,
                  "value": f"module {mid} at {url}"[:300], "file": f"{rel}:{ln}"}
                 for page, label, mid, url, ln in found]})
-            scan_file.write_text(json.dumps({"scan_id": scan_id, "area": "frontend", "repos": [
+            scan = {"area": "frontend", "repos": [
                 # its hash: without it the next scan sees a changed multi-route file and re-maps frontend in full
-                {"path": repo, "commit": head or "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]},
-                indent=1))
-            map_file.write_text(json.dumps(cm, indent=1))
-            done = map_file.with_name(map_file.name + ".ingested")
-            done.unlink(missing_ok=True)
+                {"path": repo, "commit": head or "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]}
             try:
-                with con:
-                    codemap.ingest_codemap(con, cm, map_file, core.now())
-                done.write_text(f"{hashlib.sha1(map_file.read_bytes()).hexdigest()}\n{core.now()}\n")
+                codemap.apply_codemap(con, cm, scan, core.now())
             except (ValueError, sqlite3.Error) as e:
-                print(f"qa-mem: shell menu not ingested: {e}", file=sys.stderr)
+                print(f"qa-mem: shell menu not applied: {e}", file=sys.stderr)
 
 
 def _ui_file(name):
@@ -293,12 +277,11 @@ CHUNK_FILES, CHUNK_TOKENS = 40, 60_000  # what one qa-mapper can read well; bigg
 def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_FILES, chunk_tokens=CHUNK_TOKENS):
     """List the source files each qa-mapper must read and write qa-out/init/scan-<area>[-<n>].json (one per mapper).
     Incremental by content: per area and repo, a file is listed when its content differs from what was last mapped
-    (new, edited, uncommitted) or when an earlier scan listed it and its map never landed, or its rows were orphaned
-    by a removed route. Files with
+    (new, edited, uncommitted), which also lists files whose map never landed. Files with
     rows that are gone or no longer this area's are listed as deleted. When a router (a file defining several routes)
     changed or a route file is gone, frontend and tests are mapped in full (rows elsewhere sit on routes that may have
-    moved). Areas with nothing to read are settled here. Returns a summary dict for the skill."""
-    import hashlib
+    moved). A page renamed inside its own one-route file isn't noticed: its old rows stay until `--full`. Areas with
+    nothing to read are settled here. Returns a summary dict for the skill."""
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,10 +347,6 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
         if stored and any(rel not in stored or (len(by_file.get(rel, ())) == 1 and stored[rel] != candidates[rel][2])
                           for rel in routers):
             routes_moved = True
-    old_snap = core.meta(con, "codemap_routes_at_scan")  # an unresolved snapshot (a frontend that never fully landed) merges
-    core.set_meta(con, "codemap_routes_at_scan", json.dumps(sorted(codemap._route_pages(con) | set(json.loads(old_snap) if old_snap else []))))
-    core.set_meta(con, "codemap_lost", "[]")
-    core.set_meta(con, "codemap_scan_repos", json.dumps([r[0] for r in repos]))
     areas = {a: [] for a in codemap.CODEMAP_AREAS}
     for repo, head, candidates, _ in repos:
         for a in codemap.CODEMAP_AREAS:
@@ -375,8 +354,6 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             keep = set(mine) | ({rel for rel, (ar, _, _) in candidates.items() if ar == "shell"} if a == "frontend" else set())
             stored = codemap._hashes(con, a, repo)
             had = {r[0] for r in con.execute("SELECT DISTINCT src FROM codemap WHERE repo=? AND area=?", (repo, a))} | set(stored)
-            # orphaned by a removed route, or listed by an earlier scan whose map never landed: read again
-            forced = codemap._meta_set(con, f"codemap_reread:{a}:{repo}") | codemap._meta_set(con, f"codemap_pending:{a}:{repo}")
             if full or not had or (routes_moved and a in ("frontend", "tests")):
                 # with a shell menu, replaced file by file (files + deleted cover the rest): its code-written rows stay
                 entry = {"path": repo, "commit": head, "full": keep == set(mine), "files": sorted(mine),
@@ -384,15 +361,17 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             else:
                 summary["incremental"] = True
                 entry = {"path": repo, "commit": head, "full": False,
-                         "files": sorted(rel for rel, (_, h) in mine.items() if stored.get(rel) != h or rel in forced),
+                         "files": sorted(rel for rel, (_, h) in mine.items() if stored.get(rel) != h),
                          # renamed away, deleted, reverted out, or no longer this area's: their rows must go
                          "deleted": sorted(rel for rel in had if rel not in keep)}
             entry["hashes"] = {rel: mine[rel][1] for rel in entry["files"]}
             entry["sizes"] = {rel: mine[rel][0] for rel in entry["files"]}
             entry["bytes"] = sum(entry["sizes"].values())
-            with con:
-                codemap._set_meta_set(con, f"codemap_pending:{a}:{repo}", entry["files"])  # cleared as maps land
-                if not entry["files"]:  # nothing for a mapper: settle it now so cards don't say "behind" forever
+            if entry["files"]:  # listed, not yet mapped: no stored hash, so a map that never lands lists them again
+                with con:
+                    codemap._set_hashes(con, a, repo, {k: v for k, v in stored.items() if k not in entry["files"]})
+            else:  # nothing for a mapper: settle it now so cards don't say "behind" forever
+                with con:
                     if entry["full"]:
                         con.execute("DELETE FROM codemap WHERE repo=? AND area=?", (repo, a))
                     for rel in entry["deleted"]:
@@ -401,12 +380,10 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                         core.set_meta(con, f"codemap_commit:{a}:{repo}", head)
                     codemap._set_hashes(con, a, repo, {} if entry["full"] else
                                 {k: v for k, v in stored.items() if k not in entry["deleted"]})
-                    codemap._set_meta_set(con, f"codemap_reread:{a}:{repo}", [])
-                    entry["settled"] = True
+                entry["settled"] = True
             areas[a].append(entry)
-    _write_shell_menu(con, out_dir, repos, stamp)  # before routes are judged: a menu's renamed path is a lost route
+    _apply_shell_menu(con, repos)
     with con:
-        codemap._resolve_routes(con)  # all frontend settled here: judge orphans now
         codemap._drop_code_only_pages(con)
     for a, entries in areas.items():
         chunks = _chunk(entries, chunk_files, chunk_tokens)

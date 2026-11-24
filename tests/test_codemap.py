@@ -1,12 +1,12 @@
 """Code map (/qa-sdet:qa-init): scan, ingest, card block, `code`, search. Hints from source, never requirements."""
 import json, os, shutil, subprocess, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT / "lib"))
-from qa_sdet import core, codemap, scan as scan_mod, memory, doctor, cli
-doctor.claude_mcp_list = lambda: ""
+from qa_sdet import core, codemap, scan as scan_mod, memory, cli
 FIX = ROOT / "tests/fixture-src"
 
 
@@ -32,6 +32,9 @@ class CodeMap(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ)  # restore QA_MEM_DB (and the rest) afterwards
+        env.start()
+        self.addCleanup(env.stop)
         os.environ["QA_MEM_DB"] = str(self.dir / "t.db")
         self.con = core.connect()
         self.out = self.dir / "qa-out" / "init"
@@ -45,7 +48,8 @@ class CodeMap(unittest.TestCase):
         return scan_mod.codemap_scan(self.con, [str(p) for p in paths], self.out, full, stamp)
 
     def test_root_and_home_are_refused_not_walked(self):
-        out = self.scan("/", "~")
+        with mock.patch.dict(os.environ, HOME=str(self.dir)):  # a real folder, whatever HOME the run has
+            out = self.scan("/", "~")
         self.assertEqual(out["total_files"], 0)
         self.assertEqual(len(out["skipped"]), 2)
         self.assertTrue(all("too broad" in x for x in out["skipped"]), out["skipped"])
@@ -79,39 +83,6 @@ class CodeMap(unittest.TestCase):
         self.assertFalse(s["incremental"])
         self.assertGreater(s["tokens"], 0)
         self.assertTrue(s["areas"]["tests"]["needs_mapper"])
-
-    def test_lookaheads_cover_every_first_character(self):  # perf r12: editing one of these patterns must update its (?=[...])
-        try:
-            from re import _constants as C, _parser as P
-        except ImportError:  # Python < 3.11
-            import sre_constants as C, sre_parse as P
-
-        def first(items):  # the characters a match can start with; None: could be any
-            for op, av in items:
-                if op is C.AT:  # ^, \b: zero-width
-                    continue
-                if op is C.LITERAL:
-                    return {chr(av)}
-                if op is C.SUBPATTERN:
-                    return first(list(av[-1]))
-                if op is C.BRANCH:
-                    sets = [first(list(alt)) for alt in av[1]]
-                    return None if None in sets else set().union(*sets)
-                if op is C.IN and all(o in (C.LITERAL, C.RANGE) for o, _ in av):
-                    return {chr(a) for o, a in av if o is C.LITERAL} | {
-                        chr(c) for o, a in av if o is C.RANGE for c in range(a[0], a[1] + 1)}
-                if op in (C.MAX_REPEAT, C.MIN_REPEAT) and av[0] >= 1:
-                    return first(list(av[2]))
-                return None
-            return None
-
-        for name in ("TESTS_IMPORT_RE", "BACKEND_RE", "SERVER_SIGNAL_RE", "SCHEMA_RE"):
-            p = getattr(scan_mod, name)
-            items = list(P.parse(p.pattern, p._flags))
-            self.assertIs(items[0][0], C.ASSERT, name)
-            starts = first(items[1:])
-            self.assertIsNotNone(starts, name)
-            self.assertLessEqual(starts, first(list(items[0][1][1])), name)
 
     def test_classify_source(self):
         c = scan_mod.classify_source
@@ -187,7 +158,7 @@ class CodeMap(unittest.TestCase):
             {"repo": fe, "page": "/form.html", "kind": "rule", "label": "speed", "value": "min 0, max 130",
              "file": "src/components/SpeedZoneForm.jsx:8"},
             {"repo": fe, "page": "/index.html", "kind": "api", "label": "incidents",
-             "value": "GET api/incidents.json api_key=fixture-key-1234567890abcdef", "file": "src/api/client.js:2"},
+             "value": "GET api/incidents.json?api_key=fixture-key-1234567890abcdef", "file": "src/api/client.js:2"},
             {"repo": fe, "page": "*", "kind": "locator", "label": "Save", "value": "getByRole('button')",
              "file": "src/components/SpeedZoneForm.jsx:1"},  # page * is for backend rows: dropped, said so
             {"repo": fe, "page": "/form.html", "kind": "bogus", "label": "x", "value": "y",
@@ -422,7 +393,7 @@ class CodeMap(unittest.TestCase):
                                     "file": "routes/zones.js:1"}])
         self.assertEqual(memory.ingest_pending(self.out), 1)
 
-    def test_renamed_menu_path_drops_rows_left_on_the_old_path(self):  # audit pi-1: judged before the menu landed
+    def test_renamed_menu_path_remaps_the_tests_in_full(self):  # audit pi-1: a changed multi-route file moves routes
         ui = git_repo(self.dir / "ui", {"public/config.json": json.dumps(self.SHELL_NAV), "e2e/home.spec.ts":
                                         "import { test } from '@playwright/test';\n"
                                         "test('home', async ({ page }) => { await page.getByRole('button').click(); });\n"})
@@ -435,10 +406,33 @@ class CodeMap(unittest.TestCase):
         nav["nav"][0]["key"] = "start"
         (ui / "public/config.json").write_text(json.dumps(nav))
         git(ui, "commit", "-qam", "rename")
-        self.scan(ui, stamp="s2")
+        self.scan(ui, stamp="s2")  # the menu holds several routes and changed: the tests are mapped in full
+        t = json.loads((self.out / "scan-tests.json").read_text())["repos"][0]
+        self.assertEqual((t["full"], t["files"]), (True, ["e2e/home.spec.ts"]))
+        self.write_map("tests", [{"page": "/start", "kind": "locator", "label": "Open", "value": "getByRole('button')",
+                                  "file": "e2e/home.spec.ts:2"}])
+        self.ingest_all()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/home'").fetchone()[0], 0)
-        self.assertEqual(json.loads(core.meta(self.con, "codemap_lost")), ["/home"])
-        self.assertEqual(self.scan(ui, stamp="s3")["areas"]["tests"]["files"], 1)  # the spec is read again
+        self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/start' AND area='tests'").fetchone()[0], 1)
+
+    def test_a_page_renamed_inside_its_own_one_route_file_keeps_stale_rows_until_full(self):  # accepted loss
+        ui = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/zones' }]",
+                                        "e2e/zones.spec.ts": "import { test } from '@playwright/test';\n"
+                                                             "test('z', async ({ page }) => { await page.goto('/zones'); await page.getByRole('row').click(); });\n"})
+        self.scan(ui)
+        self.write_map("frontend", [{"page": "/zones", "kind": "route", "label": "Zones", "value": "Z", "file": "src/routes.js:1"}])
+        self.write_map("tests", [{"page": "/zones", "kind": "locator", "label": "Row", "value": "getByRole('row')",
+                                  "file": "e2e/zones.spec.ts:2"}])
+        self.ingest_all()
+        (ui / "src/routes.js").write_text("export const routes = [{ path: '/areas' }]")
+        git(ui, "commit", "-qam", "rename")
+        s = self.scan(ui, stamp="s2")
+        self.assertEqual((s["areas"]["frontend"]["files"], s["areas"]["tests"]["files"]), (1, 0))  # no full re-map
+        self.write_map("frontend", [{"page": "/areas", "kind": "route", "label": "Areas", "value": "A", "file": "src/routes.js:1"}])
+        self.ingest_all()
+        self.assertIn("Row", codemap.code(self.con, "/zones"))  # stale until `qa-init --full`
+        s = self.scan(ui, full=True, stamp="s3")
+        self.assertEqual(s["areas"]["tests"]["files"], 1)
 
     def test_a_menu_route_never_pushes_locators_off_a_full_page(self):  # audit pi-4
         ui = git_repo(self.dir / "ui", {"src/Main.jsx": "const Main = () => <form/>;\n"})
@@ -470,7 +464,7 @@ class CodeMap(unittest.TestCase):
             {"nav": [{"key": "home", "title": "Home", "module": {"url": f"/m/home?sig={token}"}}]})})
         self.scan(ui)
         self.assertNotIn(token, json.dumps(self.routes()))
-        self.assertNotIn(token, (self.out / f"code-map-frontend-{scan_mod.SHELL_MAP_CHUNK}.json").read_text())
+        self.assertEqual(sorted(p.name for p in self.out.glob("*-0.json*")), [])  # the menu is applied in memory: no files
 
     def test_an_api_spec_with_menu_like_properties_is_not_a_menu(self):  # audit pi-7
         spec = json.dumps({"openapi": "3.0.0", "paths": {"/api/settings": {}}, "components": {"schemas": {"S": {
@@ -529,7 +523,7 @@ class CodeMap(unittest.TestCase):
                                      "file": "src/Form.jsx:1"}])
         memory.PARKED.clear()
         memory.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(any("isn't in scan-frontend.json" in p for p in memory.PARKED), memory.PARKED)
+        self.assertTrue(any("isn't in the scan file" in p for p in memory.PARKED), memory.PARKED)
         memory.PARKED.clear()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 2)  # nothing lost
 
@@ -702,57 +696,6 @@ class CodeMap(unittest.TestCase):
         self.assertIsNone(codemap.find_page(self.con, "/zones"))
         self.assertEqual(codemap.find_page(self.con, "speed zones")["route"], "/speed-zones")
 
-    def test_orphans_from_shared_files_are_read_again(self):
-        """A page object with rows on a removed route and on a surviving one is still listed again."""
-        ui = git_repo(self.dir / "ui", {"src/pages/zones.jsx": "export default function Zones() { return <b/> }",
-                                        "src/pages/home.jsx": "export default function Home() { return <b/> }"})
-        e2e = git_repo(self.dir / "e2e", {"pages/App.ts": "import { test } from '@playwright/test'; class AppPage { "
-                                                          "open() { page.goto('/') } row = page.getByRole('row') }"})
-        self.scan(ui, e2e)
-        self.write_map("frontend", [
-            {"repo": str(ui), "page": "/zones", "kind": "route", "label": "Zones", "value": "Z", "file": "src/pages/zones.jsx:1"},
-            {"repo": str(ui), "page": "/home", "kind": "route", "label": "Home", "value": "H", "file": "src/pages/home.jsx:1"}])
-        self.write_map("tests", [
-            {"repo": str(e2e), "page": "/zones", "kind": "locator", "label": "Row", "value": "#r", "file": "pages/App.ts:1"},
-            {"repo": str(e2e), "page": "/home", "kind": "locator", "label": "Nav", "value": "#n", "file": "pages/App.ts:2"}])
-        self.ingest_all()
-        (ui / "src/pages/zones.jsx").unlink()
-        git(ui, "commit", "-qam", "drop page")
-        s2 = self.scan(ui, e2e, stamp="s2")
-        self.write_map("frontend", [{"repo": str(ui), "page": "/home", "kind": "route", "label": "Home", "value": "H",
-                                     "file": "src/pages/home.jsx:1"}])
-        if (self.out / "code-map-tests.json").exists():
-            (self.out / "code-map-tests.json").unlink()
-        tests_scan = self.out / "scan-tests.json"
-        tests_scan.unlink()  # the tests mapper never finished
-        self.ingest_all()
-        self.assertNotIn("Row", codemap.code(self.con, "/zones"))
-        self.assertIn("Nav", codemap.code(self.con, "/home"))
-        self.scan(ui, e2e, stamp="s3")
-        self.assertIn("pages/App.ts", (self.out / "scan-tests.json").read_text())  # orphaned or never landed: read again
-
-    def test_lost_route_orphans_are_dropped_and_reread(self):
-        ui = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/zones' }]"})
-        e2e = git_repo(self.dir / "e2e", {"pages/Zones.ts": "import { test } from '@playwright/test'; class ZonesPage { "
-                                                            "open() { page.goto('/zones') } row = page.getByRole('row') }"})
-        self.scan(ui, e2e)
-        self.write_map("frontend", [{"repo": str(ui), "page": "/zones", "kind": "route", "label": "Zones", "value": "Z",
-                                     "file": "src/routes.js:1"}])
-        self.write_map("tests", [{"repo": str(e2e), "page": "/zones", "kind": "locator", "label": "Row",
-                                  "value": "getByRole('row')", "file": "pages/Zones.ts:1"}])
-        self.ingest_all()
-        (ui / "src/routes.js").write_text("export const routes = []")
-        git(ui, "commit", "-qam", "drop route")
-        self.scan(ui, e2e, stamp="s2")
-        self.write_map("frontend", [])
-        f = self.out / "code-map-tests.json"
-        if f.exists():
-            f.unlink()  # the tests mapper hasn't finished yet
-        self.ingest_all()
-        self.assertNotIn("Row", codemap.code(self.con, "/zones"))
-        self.scan(ui, e2e, stamp="s3")
-        self.assertIn("pages/Zones.ts", (self.out / "scan-tests.json").read_text())  # read again, to land on the new route
-
     def test_any_misplaced_row_parks_the_map(self):
         repo = git_repo(self.dir / "ui", {"src/A.jsx": "<b data-testid='a'/>"})
         self.scan(repo)
@@ -895,16 +838,16 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(sorted(r[0] for r in self.con.execute("SELECT label FROM codemap WHERE kind='locator'")),
                          ["src/C0.jsx", "src/C1.jsx"])
 
-    def test_a_chunk_that_never_lands_is_listed_again_and_holds_the_commit(self):
+    def test_a_chunk_that_never_lands_is_listed_again(self):
         repo = git_repo(self.dir / "ui", {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(4)})
         s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=2, chunk_tokens=10**9)
         mappers = self.map_chunks(s, lambda f: [{"page": "/c", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}])
         Path(mappers[1]["out"]).unlink()  # the second mapper never wrote its map
         self.ingest_all()
-        self.assertIsNone(self.con.execute("SELECT value FROM meta WHERE key LIKE 'codemap_commit:frontend:%'").fetchone())
         s2 = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=10, chunk_tokens=10**9)
         listed = json.loads(Path(s2["areas"]["frontend"]["mappers"][0]["scan_file"]).read_text())["repos"][0]["files"]
-        self.assertTrue({"src/C2.jsx", "src/C3.jsx"} <= set(listed))  # no commit was recorded: the missing chunk comes back
+        self.assertTrue({"src/C2.jsx", "src/C3.jsx"} <= set(listed))  # never hashed: the missing chunk comes back
+        self.assertFalse({"src/C0.jsx", "src/C1.jsx"} & set(listed))
 
     def test_map_for_the_wrong_area_is_rejected(self):
         self.scan(FIX / "frontend", FIX / "backend")
@@ -925,34 +868,6 @@ class CodeMap(unittest.TestCase):
         self.write_map("frontend", rows)
         self.ingest_all()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/big' AND kind='route'").fetchone()[0], 1)
-
-    def test_rows_aimed_at_a_removed_route_are_held_back_and_reread(self):
-        ui = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/old' }, { path: '/home' }]"})
-        e2e = git_repo(self.dir / "e2e", {"pages/Old.ts": "import { test } from '@playwright/test'; class OldPage { "
-                                                          "open() { page.goto('/old') } r = page.getByRole('row') }"})
-        self.scan(ui, e2e)
-        self.write_map("frontend", [{"repo": str(ui), "page": p, "kind": "route", "label": p, "value": "X",
-                                     "file": "src/routes.js:1"} for p in ("/old", "/home")])
-        self.write_map("tests", [])
-        self.ingest_all()
-        (ui / "src/routes.js").write_text("export const routes = [{ path: '/home' }, { path: '/new' }]")
-        git(ui, "commit", "-qam", "move")
-        self.scan(ui, e2e, stamp="s2")
-        self.write_map("frontend", [{"repo": str(ui), "page": p, "kind": "route", "label": p, "value": "X",
-                                     "file": "src/routes.js:1"} for p in ("/home", "/new")])
-        self.ingest_all()  # frontend landed: /old is lost
-        self.write_map("tests", [{"repo": str(e2e), "page": "/old", "kind": "locator", "label": "Row", "value": "#r",
-                                  "file": "pages/Old.ts:1"}])  # a mapper that used the old route list
-        self.ingest_all()
-        self.assertNotIn("/old", json.dumps([dict(r) for r in self.con.execute("SELECT page FROM codemap")]))
-        self.assertIn("on a removed route", (self.out / "code-map-tests.json.ingested").read_text())
-        self.scan(ui, e2e, stamp="s3")
-        self.assertIn("pages/Old.ts", (self.out / "scan-tests.json").read_text())
-        self.write_map("tests", [{"repo": str(e2e), "page": "/old", "kind": "locator", "label": "Row", "value": "#r",
-                                  "file": "pages/Old.ts:1"}])  # the page object really still opens /old
-        self.ingest_all()
-        self.assertIn("Row", codemap.code(self.con, "/old"))  # kept on the second read, no endless re-read
-        self.assertEqual(self.scan(ui, e2e, stamp="s4")["total_files"], 0)
 
     def test_a_page_file_edit_does_not_remap_everything(self):
         repo = git_repo(self.dir / "ui", {"src/pages/zones.jsx": "export default function Zones() { return <b/> }",
@@ -1048,18 +963,16 @@ class CodeMap(unittest.TestCase):
         self.assertIsNone(codemap.find_page(self.con, "/old"))
         self.assertIn(str(clone), codemap.code(self.con, "--repos"))  # listed, so the skill can offer to forget it
 
-    def test_an_unresolved_snapshot_is_merged_not_overwritten(self):
-        repo = git_repo(self.dir / "ui", {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(3)} |
-                        {"src/routes.js": "export const routes = [{ path: '/a' }, { path: '/b' }]"})
-        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10**6)
-        self.map_chunks(s, lambda f: [{"page": p, "kind": "route", "label": p, "value": "X", "file": f + ":1"}
-                                      for p in ("/a", "/b")] if "rout" in f else
-                        [{"page": "/a", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}])
-        self.ingest_all()
-        self.con.execute("INSERT OR REPLACE INTO meta VALUES('codemap_routes_at_scan', '[\"/a\", \"/b\", \"/gone\"]')")
-        self.con.commit()  # as if a scan's frontend never fully landed while /gone still existed
-        self.scan(repo, stamp="s2")
-        self.assertIn("/gone", self.con.execute("SELECT value FROM meta WHERE key='codemap_lost'").fetchone()[0])
+    def test_removed_orphan_route_bookkeeping_is_deleted_once(self):
+        keys = ("codemap_routes_at_scan", "codemap_lost", "codemap_scan_repos", "codemap_reread:frontend:/r",
+                "codemap_pending:tests:/r")
+        keep = ("codemap_hashes:frontend:/r", "codemap_commit:frontend:/r", "build")
+        with self.con:
+            for k in keys + keep:
+                core.set_meta(self.con, k, "x")
+        self.con.close()
+        self.con = core.connect()
+        self.assertEqual(sorted(r[0] for r in self.con.execute("SELECT key FROM meta")), sorted(keep))
 
     def test_classification_round_four(self):
         c = scan_mod.classify_source
@@ -1081,7 +994,7 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(codemap._api_ref("fetch('/api/zones/' + id + '/detours')"), ("", "api/zones/:id/detours"))
 
     # ---- review round 5 ----
-    def test_a_full_remap_chunk_that_never_lands_is_listed_again(self):
+    def test_a_remap_chunk_that_never_lands_is_listed_again_on_the_next_scan(self):
         files = {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(3)}
         files["src/routes.js"] = "export const routes = [{ path: '/zones', c: A }, { path: '/map', c: B }]"
         repo = git_repo(self.dir / "ui", files)
@@ -1101,9 +1014,8 @@ class CodeMap(unittest.TestCase):
         self.ingest_all()
         s3 = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s3", chunk_files=10, chunk_tokens=10**9)
         listed = json.loads(Path(s3["areas"]["frontend"]["mappers"][0]["scan_file"]).read_text())["repos"][0]["files"]
-        self.assertTrue({"src/C0.jsx", "src/C1.jsx"} <= set(listed))
-        self.assertIsNone(self.con.execute("SELECT 1 FROM meta WHERE key LIKE 'codemap_commit:frontend:%' AND value LIKE ?",
-                                           ((core._git(repo, "rev-parse", "HEAD") or "").strip(),)).fetchone())
+        self.assertTrue({"src/C0.jsx", "src/C1.jsx"} <= set(listed), listed)
+        self.assertNotIn("src/routes.js", listed)  # the chunk that landed is settled
 
     def test_classification_round_five(self):
         c = scan_mod.classify_source

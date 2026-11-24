@@ -1,32 +1,16 @@
 """Config, the DB connection and schema, constants, and helpers the other modules share."""
+import fcntl
+import hashlib
 import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-
-
-# hashlib, subprocess, tempfile and urllib.parse are imported in the functions that use them (~10 ms of start-up):
-# card, bugs and marker need none of them, a Stop hook with nothing new only hashlib
-
-try:
-    import fcntl
-except ImportError:  # shortcut: no file lock on Windows; fine while one session runs QA at a time
-    fcntl = None
-
-
-class _LazyRe:
-    """re.compile on first use: compiling all ~66 patterns costs ~11 ms of start-up, and most runs (a Stop hook with
-    nothing new, card, marker) use few or none of them. After first use the pattern's methods sit on the instance."""
-    def __init__(self, pattern, flags=0):
-        self.pattern, self._flags = pattern, flags
-
-    def __getattr__(self, name):
-        rx = re.compile(self.pattern, self._flags)
-        self.__dict__.update((n, getattr(rx, n)) for n in ("search", "match", "fullmatch", "findall", "finditer", "sub", "split"))
-        return getattr(rx, name)
+from urllib.parse import urlsplit
 
 
 CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
@@ -35,7 +19,7 @@ MAX_TEXT = 300
 MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
 UNKNOWN = "unknown"
 STATUSES = {"OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"}
-BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli / Playwright MCP --browser values
+BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli --browser values
 VISIBLE = ("OPEN", "FILED", "REGRESSED")  # bugs the explorer must know about
 # Must match the IDs in references/heuristics.md.
 HEURISTICS = [
@@ -76,8 +60,27 @@ CREATE INDEX IF NOT EXISTS codemap_page ON codemap(page, kind);
 """
 
 
+# meta keys of the removed orphan-route bookkeeping of the code map
+STALE_META = ("(key IN ('codemap_routes_at_scan', 'codemap_lost', 'codemap_scan_repos') "
+              "OR key LIKE 'codemap_reread:%' OR key LIKE 'codemap_pending:%')")
+
+
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def config(strict=False):
+    """The config file as a dict. strict=False: {} when it is missing or broken. strict=True: raises OSError (missing,
+    unreadable) or ValueError (not JSON, or not one JSON object) so the caller can say what is wrong."""
+    try:
+        cfg = json.loads(CONFIG.read_text())
+        if not isinstance(cfg, dict):
+            raise ValueError('the file must be one JSON object: {"app": ..., "qaBaseUrl": ...}')
+    except (OSError, ValueError):
+        if strict:
+            raise
+        return {}
+    return cfg
 
 
 def db_path():
@@ -85,10 +88,10 @@ def db_path():
         return Path(os.environ["QA_MEM_DB"])
     app = "default"
     try:
-        app = str(json.loads(CONFIG.read_text()).get("app") or app)
+        app = str(config(strict=True).get("app") or app)
     except FileNotFoundError:
         pass
-    except (ValueError, OSError, AttributeError) as e:
+    except (ValueError, OSError) as e:
         print(f"qa-mem: ignoring unreadable {CONFIG}: {e}", file=sys.stderr)
     return DATA_DIR / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', app)}.db"
 
@@ -98,22 +101,16 @@ def connect():
     p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # app facts and bugs: owner only
     con = sqlite3.connect(p, timeout=10)
     con.row_factory = sqlite3.Row
-    old = {r[1] for r in con.execute("PRAGMA table_info(codemap)")}
-    if old and "src" not in old:  # a code map from before rows were keyed by file: re-derivable, so rebuild it
-        con.execute("DROP TABLE codemap")
-        con.execute("DELETE FROM meta WHERE key LIKE 'codemap_%'")
-        con.commit()
+    for table, cols in (("bugs", {"last_run", "symptom"}), ("codemap", {"src"})):  # no migrations: refuse a pre-0.4 DB
+        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if have and not cols <= have:
+            con.close()
+            raise BadInput(f"{p} is from before qa-sdet 0.4 ({table} lacks {', '.join(sorted(cols - have))}): move it "
+                           "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again")
     con.executescript(SCHEMA)
-    cols = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
-    for col in ("last_run", "symptom"):  # migrations for DBs made by older versions
-        if col not in cols:
-            con.execute(f"ALTER TABLE bugs ADD COLUMN {col} TEXT")
-    # facts_fts reads its text from `facts`, so count what is actually indexed (its docsize shadow table):
-    # facts from before the index existed must be indexed, or a later delete corrupts it.
-    if con.execute("SELECT count(*) FROM facts").fetchone()[0] != con.execute(
-            "SELECT count(*) FROM facts_fts_docsize").fetchone()[0]:
-        con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
-        con.commit()
+    if con.execute(f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1").fetchone():  # one-time clean-up (read first: no write lock)
+        with con:
+            con.execute(f"DELETE FROM meta WHERE {STALE_META}")
     return con
 
 
@@ -128,7 +125,6 @@ def txt(v, field):
 
 def norm_route(r):
     """'/form.html', 'http://host/form.html?x=1', '/form.html/' -> '/form.html'. Keeps SPA hash routes (#/..., #!/...)."""
-    from urllib.parse import urlsplit
     r = str(r or "").strip()
     if not r:
         return ""
@@ -143,7 +139,7 @@ def norm_route(r):
     return path + (f"#{bang}{frag}" if frag else "")
 
 
-ID_SEGMENT = _LazyRe(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
+ID_SEGMENT = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
                         r":\w+|\{\w+\}|\[\.{0,3}\w+\]|<[^/>]+>|\$\{[^}/]*\}", re.I)  # route params: :id, {id}, [id], <id>
 
 
@@ -162,7 +158,6 @@ def norm(s):
 
 
 def bug_hash(route, symptom):
-    import hashlib
     return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode()).hexdigest()[:12]
 
 
@@ -207,7 +202,7 @@ def case_status(v):
     """'pass', 'Not run', 'not-run' -> PASS / NOT_RUN; None when it isn't one of CASE_STATUSES."""
     s = re.sub(r"[\s-]+", "_", str(v or "").strip().upper())
     return s if s in CASE_STATUSES else None
-COMMIT_RE = _LazyRe(r"[0-9a-f]{40}([0-9a-f]{24})?")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 
 GIT_SLOW = []
@@ -215,7 +210,6 @@ GIT_SLOW = []
 
 def _git(repo, *args, timeout=30):
     """git output (text) or None. Paths stay unquoted (core.quotePath=false) so non-ASCII names round-trip."""
-    import subprocess
     try:
         r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args], capture_output=True,
                            encoding="utf-8", errors="surrogateescape", timeout=timeout)  # a file name may not be UTF-8
@@ -247,7 +241,6 @@ def _strs(obj, key):
 
 def _write(path, text):
     """Atomic write via a fresh temp file (O_EXCL): a planted `.<name>.tmp` link can't redirect it outside qa-out."""
-    import tempfile
     path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

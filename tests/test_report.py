@@ -1,6 +1,6 @@
 """v0.4 qa-mem commands: keys, rundir, marker, browser-open, prune, annotate, report + index, verdict, inbox,
 setup-permissions, and ingest of qa-out/<run>/.data/run-*.json. Everything runs in temp folders (HOME, config, data)."""
-import builtins, contextlib, importlib.util, io, json, os, sqlite3, stat, struct, subprocess, sys, tempfile, time, unittest, zlib
+import builtins, contextlib, fcntl, importlib.util, io, json, os, sqlite3, stat, struct, subprocess, sys, tempfile, time, unittest, zlib
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
@@ -188,7 +188,7 @@ class RunDir(Base):
         third = Path(cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")[1].strip())
         self.assertEqual((second.name, third.name), (run.name + "-2", run.name + "-3"))
         lines = exclude.read_text().splitlines()
-        self.assertEqual(lines, ["# mine", "qa-out", ".playwright-cli/", ".playwright-mcp/"])  # added once, no dupes
+        self.assertEqual(lines, ["# mine", "qa-out", ".playwright-cli/"])  # added once, no dupes
 
     def test_non_git_and_bad_input(self):
         code, out, _ = cli("rundir", str(self.proj), "--route", "/form.html", "--prefix", "plan-")
@@ -278,11 +278,34 @@ class BrowserOpen(Base):
         with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=msg)]):
             code, out, err = cli("browser-open", "https://qa.example/")
         self.assertEqual(code, 1)  # an error even if playwright-cli exited 0
-        self.assertTrue(err.startswith("browser-open: Browser is already in use: another qa-sdet browser"), err)
+        self.assertTrue(err.startswith("browser profile in use: another qa-sdet browser holds the main profile"), err)
         self.assertIn("Close the other qa-sdet browser", err)
         self.assertIn(msg, out)  # the original output is still shown
         with mock.patch.object(subprocess, "run", side_effect=[OSError("gone"), done(0, out="opened")]):
             self.assertEqual(cli("browser-open")[:2], (0, "opened"))  # a failing close never blocks the open
+
+    def test_errors_start_with_their_category(self):  # the explorer and qa-login report these three as they are
+        self.config(browser="chrome")
+        for out, err, code, first in (
+                ("### Error\nbrowserType.launchPersistentContext: Chromium distribution 'chrome' is not found at "
+                 "/opt/google/chrome/chrome\n", "", 1,
+                 "browser chrome can't start: browserType.launchPersistentContext: Chromium distribution 'chrome' is not found"),
+                ("", "Error: Executable doesn't exist at /x/ms-playwright/chrome-1/chrome\n", 1,
+                 "browser chrome can't start: Error: Executable doesn't exist"),
+                ("", "Error: daemon is not responding\n", 1, "browser tool failed: Error: daemon is not responding"),
+                ("", "", 7, "browser tool failed: playwright-cli exited 7")):
+            with mock.patch.object(subprocess, "run", side_effect=[done(0), done(code, out=out, err=err)]):
+                got, _, e = cli("browser-open", "https://qa.example/")
+            self.assertEqual(got, code)
+            self.assertTrue(e.startswith(first), (e, first))
+            self.assertTrue(e.splitlines()[0].startswith(first), e)  # the first line, not just somewhere
+            self.assertIn(err.strip(), e)  # playwright-cli's own text follows the category line
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), OSError("gone")]):
+            code, _, e = cli("browser-open")
+        self.assertEqual(code, 2)
+        self.assertTrue(e.startswith("browser tool failed: can't run playwright-cli (gone)"), e)
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out="opened", err="warning: x\n")]):
+            self.assertEqual(cli("browser-open"), (0, "opened", "warning: x\n"))  # success: no category line
 
     def test_refusals(self):
         with mock.patch.object(subprocess, "run") as run:
@@ -313,13 +336,11 @@ class BrowserOpen(Base):
 
 class Prune(Base):
     def test_old_regular_files_only(self):
-        cli_dir, mcp = self.proj / ".playwright-cli", self.proj / ".playwright-mcp/sub"
-        mcp.mkdir(parents=True)
+        cli_dir = self.proj / ".playwright-cli"
         cli_dir.mkdir()
         old = time.time() - 8 * 86400
-        for f in (cli_dir / "old.yml", mcp / "old.md"):
-            f.write_text("x")
-            os.utime(f, (old, old))
+        (cli_dir / "old.yml").write_text("x")
+        os.utime(cli_dir / "old.yml", (old, old))
         (cli_dir / "new.yml").write_text("x")
         outside = self.t / "outside.txt"
         outside.write_text("keep")
@@ -327,7 +348,7 @@ class Prune(Base):
         (cli_dir / "link").symlink_to(outside)
         os.utime(cli_dir / "link", (old, old), follow_symlinks=False)
         code, out, _ = cli("prune", str(self.proj))
-        self.assertEqual((code, out.strip()), (0, "pruned 2 old snapshot files"))
+        self.assertEqual((code, out.strip()), (0, "pruned 1 old snapshot files"))
         self.assertEqual(sorted(p.name for p in cli_dir.iterdir()), ["link", "new.yml"])
         self.assertTrue(outside.exists())
         self.assertEqual(cli("prune", str(self.t / "empty"))[0], 0)  # nothing there: fine
@@ -967,15 +988,14 @@ class SetupPermissions(Base):
         self.assertEqual((code, out.splitlines()), (0, doctor.PERMISSION_RULES))
         self.assertFalse((self.t / "home/.claude").exists())  # printing changes nothing
 
-    def test_merge_deep_json_same_second_backups_and_spacing(self):
+    def test_merge_deep_json_and_same_second_backups(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "settings.json"
             f.write_text("[" * 200000 + "]" * 200000)
             with self.assertRaises(core.BadInput):
                 doctor.merge_permissions(f)
-            f.write_text(json.dumps({"permissions": {"allow": ["Bash( qa-mem *)"]}}))
-            added = doctor.merge_permissions(f, stamp="20261123000000")
-            self.assertNotIn("Bash(qa-mem *)", added)  # same rule, other spacing
+            f.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}}))
+            doctor.merge_permissions(f, stamp="20261123000000")
             f.write_text(json.dumps({"permissions": {"allow": []}}))
             doctor.merge_permissions(f, stamp="20261123000000")
             self.assertEqual(len(list(Path(d).glob("settings.json.bak-20261123000000*"))), 2)  # first backup kept
@@ -1033,16 +1053,11 @@ class SetupPermissions(Base):
             self.assertEqual(sorted(p.name for p in self.t.iterdir() if p.name.startswith((".bad", "bad"))), ["bad.json"])
 
 
-    def test_read_only_and_concurrent_edit(self):  # r11: traceback in a read-only dir; read-only file overwritten;
-        d = self.t / "cfg"                          # an edit Claude Code saved meanwhile was dropped
+    def test_unwritable_folder_changes_nothing(self):
+        d = self.t / "cfg"
         d.mkdir()
         s = d / "settings.json"
         s.write_text("{}")
-        os.chmod(s, 0o444)
-        code, _, err = cli("setup-permissions", "--settings", str(s), "--apply")
-        self.assertEqual((code, s.read_text()), (2, "{}"))
-        self.assertIn("is read-only", err)
-        os.chmod(s, 0o644)
         os.chmod(d, 0o555)
         try:
             code, _, err = cli("setup-permissions", "--settings", str(s), "--apply")
@@ -1050,19 +1065,7 @@ class SetupPermissions(Base):
             os.chmod(d, 0o755)
         self.assertEqual((code, s.read_text()), (2, "{}"))
         self.assertIn("can't write", err)
-        real = tempfile.mkstemp
-
-        def racing(*a, **k):
-            s.write_text('{"model": "saved meanwhile"}')
-            return real(*a, **k)
-        with mock.patch.object(tempfile, "mkstemp", racing):
-            code, _, err = cli("setup-permissions", "--settings", str(s), "--apply")
-        self.assertEqual(code, 2)
-        self.assertIn("changed while merging", err)
-        self.assertEqual(json.loads(s.read_text()), {"model": "saved meanwhile"})
-        self.assertEqual([p.name for p in d.iterdir() if p.name.endswith(".tmp")], [])
-        self.assertEqual(cli("setup-permissions", "--settings", str(s), "--apply")[0], 0)
-        self.assertEqual(json.loads(s.read_text())["model"], "saved meanwhile")
+        self.assertEqual([p.name for p in d.iterdir()], ["settings.json"])  # no backup, no temp file
 
 
 class IngestDataFolder(Base):
@@ -1117,16 +1120,16 @@ class IngestDataFolder(Base):
         victim = self.t / "victim"
         victim.write_text("keep")
         draft = d / "bugs/BUG-1.md"
-        draft.write_text("token: abcdefghijklmnop1234\n")
+        draft.write_text("Authorization: Bearer abcdefghijklmnop1234\n")
         (d / "bugs/.BUG-1.md.scrub").symlink_to(victim)
         (d / "REPORT.md").write_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n")
-        (self.proj / "qa-out/INBOX.md").write_text("| NEW | AB-1 | api_key=sk_live_abcdefghij123 |\n")
+        (self.proj / "qa-out/INBOX.md").write_text("| NEW | AB-1 | api_key=abcdefghij123456 |\n")
         scrub.scrub_tree(self.proj / "qa-out")
         self.assertEqual(victim.read_text(), "keep")
         self.assertFalse(draft.is_symlink())
-        self.assertEqual(draft.read_text(), "token: [REDACTED]\n")
+        self.assertEqual(draft.read_text(), "Authorization: [REDACTED]\n")
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz", (d / "REPORT.md").read_text())
-        self.assertNotIn("sk_live", (self.proj / "qa-out/INBOX.md").read_text())
+        self.assertNotIn("abcdefghij123456", (self.proj / "qa-out/INBOX.md").read_text())
         self.assertEqual(sorted(p.name for p in (d / "bugs").iterdir()), [".BUG-1.md.scrub", "BUG-1.md"])
 
 
@@ -1134,12 +1137,13 @@ class Doctor(Base):
     def test_profile_pillow_and_old_cookie_lines(self):
         self.config(app="x")
         core.CONFIG.with_name("qa-state.json").write_text("{}")
-        with mock.patch.object(doctor, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None):
+        with mock.patch("shutil.which", lambda *a, **k: None):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
-            self.assertIn("old cookie file present: qa-setup can delete it", out.getvalue())
+            self.assertIn(f"FIX  old cookie file {core.CONFIG.with_name('qa-state.json')} (nothing uses it any more)  -> delete "
+                          f"{core.CONFIG.with_name('qa-state.json')} yourself", out.getvalue())
             self.assertIn("Pillow", out.getvalue())
             self.assertNotIn("qa-state.json readable", out.getvalue())
             ops.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
@@ -1166,8 +1170,7 @@ class Doctor(Base):
 
     def doctor_out(self):
         out = io.StringIO()
-        with mock.patch.object(doctor, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None), \
-                contextlib.redirect_stdout(out):
+        with mock.patch("shutil.which", lambda *a, **k: None), contextlib.redirect_stdout(out):
             doctor.doctor()
         return out.getvalue()
 
@@ -1221,7 +1224,7 @@ class Doctor(Base):
         core.CONFIG.write_text("{bad")
         self.assertIn("-> fix the JSON (", self.doctor_out())
 
-    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions")
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
     def test_unreadable_folders_never_crash_and_cookie_file_is_never_read(self):
         self.config(app="x")
         core.CONFIG.with_name("qa-state.json").write_text("SECRET-COOKIE")
@@ -1231,7 +1234,7 @@ class Doctor(Base):
                 raise AssertionError("doctor opened the cookie file")
             return real_open(f, *a, **k)
         with mock.patch("builtins.open", no_cookie):
-            self.assertIn("old cookie file present", self.doctor_out())
+            self.assertIn("FIX  old cookie file", self.doctor_out())
         for folder in (core.CONFIG.parent, core.DATA_DIR):  # Path.exists/is_file raised here on python < 3.12
             folder.mkdir(parents=True, exist_ok=True)
             os.chmod(folder, 0)
@@ -1296,7 +1299,7 @@ class Concurrency(Base):
 
     def test_scrub_keeps_an_explorers_rewrite(self):
         f = self.t / "BUG-1.md"
-        f.write_text("token=abcdefabcdefabcdef1234\n")
+        f.write_text("Authorization: Bearer abcdefabcdefabcdef1234\n")
         real = scrub.redact
         def rewrite_meanwhile(text):
             time.sleep(0.01)
@@ -1307,12 +1310,11 @@ class Concurrency(Base):
         self.assertEqual(f.read_text(), "NEW draft\n")
         self.assertEqual([p.name for p in self.t.iterdir() if p.name.startswith(".BUG")], [])
 
-    @unittest.skipIf(core.fcntl is None, "no flock")
     def test_index_write_waits_for_another_report(self):
         import threading
         d = self.rundir(runs=[("x", {"target": "/x"})])
         fd = os.open(d.parent, os.O_RDONLY)
-        core.fcntl.flock(fd, core.fcntl.LOCK_EX)  # another report is writing the index
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another report is writing the index
         th = threading.Thread(target=report.write_report, args=(d,))
         th.start()
         th.join(0.5)

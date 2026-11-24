@@ -1,9 +1,12 @@
 """REPORT.md, the Jira draft, the run index and `inbox`."""
+import fcntl
+import html
 import json
 import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 from . import core, scrub, ops
 
 
@@ -271,7 +274,6 @@ def paragraph(v):
 def summary_text(v):
     """Text for a <details><summary> line: that line is an HTML block, where Markdown escapes (`\\|`) show as typed,
     so it gets HTML escaping only (no tags, entities as text) and one line."""
-    import html
     return html.escape(" ".join(str(v if v is not None else "").split()), quote=False)
 
 
@@ -326,7 +328,6 @@ CASE_RESULT_WORD = {"PASS": "PASS", "FAIL": "FAIL", "BLOCKED": "BLOCKED", "NOT_R
 
 def _evidence_file(run_dir, cid):
     """evidence/TC-<n>.png (relative, URL-quoted) when the case image exists, else ''. Only TC-style ids."""
-    from urllib.parse import quote
     cid = str(cid or "")
     if not re.fullmatch(r"[A-Za-z]+-\d+", cid):
         return ""
@@ -402,7 +403,6 @@ def _header(run_dir, kind, plan, runs):
 
 
 def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file"):
-    from urllib.parse import quote
     out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
@@ -538,14 +538,6 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds):
     return "\n".join(lines) + "\n"
 
 
-def _config_dict():
-    try:
-        data = json.loads(core.CONFIG.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
 def render_report_parts(run_dir, cfg=None):
     """(REPORT.md text, {draft file name: text}). Drafts exist for PASS and PASS WITH NOTES tickets only."""
     run_dir = Path(run_dir)
@@ -556,7 +548,7 @@ def render_report_parts(run_dir, cfg=None):
     keys = [t["key"] for t in tickets]
     cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs)
     with_status = kind != "plan"
-    cfg = _config_dict() if cfg is None else cfg
+    cfg = core.config() if cfg is None else cfg
     drafts, vmap = {}, {}
     if tickets and with_status:
         for t in tickets:
@@ -687,7 +679,6 @@ def run_summary(run_dir):
 
 def render_index(qa_out):
     """qa-out/README.md: every run folder with a REPORT.md or a plan, newest first."""
-    from urllib.parse import quote
     qa_out = Path(qa_out)
     runs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink()
             and ((p / "REPORT.md").exists() or (p / ".data" / "plan.json").exists())]
@@ -724,14 +715,12 @@ def write_report(run_dir):
                 old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one
     # rendered before the other run's REPORT.md existed, and that run would vanish from the index.
-    fd = os.open(run_dir.parent, os.O_RDONLY) if core.fcntl else None  # the qa-out folder itself: no lock file left behind
+    fd = os.open(run_dir.parent, os.O_RDONLY)  # the qa-out folder itself: no lock file left behind
     try:
-        if fd is not None:
-            core.fcntl.flock(fd, core.fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_EX)
         core._write(run_dir.parent / "README.md", render_index(run_dir.parent))
     finally:
-        if fd is not None:
-            os.close(fd)
+        os.close(fd)
     return run_dir / "REPORT.md"
 
 
@@ -741,7 +730,7 @@ def _name(v):
 
 
 def inbox_items(data):
-    """acli/Jira MCP search JSON (a list, or {issues|workItems|values: [...]}) -> [{key, summary, status, priority, updated}]."""
+    """acli search JSON (a list, or {issues|workItems|values: [...]}) -> [{key, summary, status, priority, updated}]."""
     if isinstance(data, dict):
         data = next((data[k] for k in ("issues", "workItems", "values") if isinstance(data.get(k), list)), None)
     if not isinstance(data, list):
