@@ -78,6 +78,15 @@ class Launcher(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("usage: qa-mem <command>", r.stdout)
 
+    def test_a_read_command_does_not_load_report_or_doctor(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); from qa_sdet import cli; "
+                "assert cli.main(['card', '/x']) == 0; "
+                "print(sorted(m for m in sys.modules if m.startswith('qa_sdet.')))")
+        r = subprocess.run([sys.executable, "-c", code, str(ROOT / "lib")], env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for loaded in ("report", "doctor", "ops", "scan"):
+            self.assertNotIn(f"qa_sdet.{loaded}'", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

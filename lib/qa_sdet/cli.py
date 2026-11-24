@@ -18,7 +18,7 @@ import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from . import codemap, core, doctor, memory, ops, report, scan, scrub
+from . import codemap, core, memory, scrub  # the rest load in the commands that use them (start-up time)
 
 
 def _opts(args, flags=(), valued=(), multi=()):
@@ -60,6 +60,9 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
+    if cmd not in ("keys", "rundir", "marker", "browser-open", "login-ok", "prune", "annotate", "report", "setup-permissions"):
+        return None
+    from . import ops
     if cmd == "keys":
         print(json.dumps(ops.expand_keys(args, core.config().get("jiraKeyPrefix"))))
     elif cmd == "rundir":
@@ -103,8 +106,10 @@ def wrapper_cmd(cmd, args):
     elif cmd == "report":
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem report <run dir>")
+        from . import report
         print(report.write_report(args[0]))
     elif cmd == "setup-permissions":
+        from . import doctor
         o = _opts(args, flags=("--apply",), valued=("--settings",))
         if o["_"]:
             raise core.BadInput("usage: qa-mem setup-permissions [--settings PATH] [--apply]")
@@ -206,12 +211,14 @@ def _main(argv):
             return 2
         return 0
     if cmd == "doctor":
+        from . import doctor
         return 1 if doctor.doctor() else 0
     try:
         code_ = wrapper_cmd(cmd, args)
         if code_ is not None:
             return code_
         if cmd == "inbox":
+            from . import report
             o = _opts(args)
             if len(o["_"]) != 1:
                 raise core.BadInput("usage: qa-mem inbox <project>   (the acli JSON on stdin)")
@@ -232,6 +239,7 @@ def _main(argv):
         print(f"qa-mem: {e}", file=sys.stderr)
         return 2
     if cmd == "browsers":  # what C1 offers when it asks which browser to use
+        from . import doctor
         for name, (ok, how) in doctor.installed_browsers().items():
             print(f"{name:8} {'installed' if ok else 'missing  '}  {how}")
         print("(firefox and webkit mean Playwright's own builds; a system Firefox can't be driven)")
@@ -275,6 +283,7 @@ def run_cmd(con, cmd, args):
         if not paths:
             print("give the source folder(s) to scan, e.g. qa-mem codemap-scan ~/work/traffic-ui ~/work/traffic-api")
             return 2
+        from . import scan
         print(json.dumps(scan.codemap_scan(con, paths, out, full), indent=1))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
