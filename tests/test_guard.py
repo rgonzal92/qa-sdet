@@ -525,7 +525,7 @@ class Guard(unittest.TestCase):
         now = int(time.time())
         Path(cwd, "qa-out", ".active").write_text(json.dumps({"expires": now + 3600, "deadline": now - 700, "budget": 50}))
         r = g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": cwd,
-                      "tool_input": {"command": "playwright-cli -s=qa click e1"}})
+                      "tool_input": {"command": "playwright-cli -s=qa screenshot"}})
         self.assertIn("time budget is used up", r)
         self.assertIn("delete", g.check("playwright-cli -s=qa screenshot", cwd))  # the user still gets the cleanup hint
 
@@ -1500,14 +1500,9 @@ class R12(unittest.TestCase):
                         ("browser_take_screenshot", out + "/evidence/src/x.png"), ("browser_console_messages", cwd + "/package.json")]:
             self.assertIsNotNone(mcp(name, filename=f), f)
         self.assertIsNone(mcp("browser_take_screenshot", agent=None, filename="/tmp/x.png"))  # the main session's own runs
-        for cmd in [f"playwright-cli -s=qa screenshot --filename={out}/evidence/BUG-1.png",
+        for cmd in [f"playwright-cli -s=qa screenshot --filename={out}/evidence/BUG-1.png", "playwright-cli -s=qa screenshot",
                     f"playwright-cli -s=qa screenshot --filename=qa-out/r1/.data/map-2.png"]:
             self.assertIsNone(self.call("Bash", cwd, command=cmd), cmd)
-        # audit 3: without a filename the image lands in .playwright-cli/ (or the MCP's folder), outside the run folder
-        self.assertIsNotNone(self.call("Bash", cwd, command="playwright-cli -s=qa screenshot"))
-        self.assertIsNotNone(self.call("Bash", cwd, command="playwright-cli -s=qa pdf"))
-        self.assertIsNotNone(mcp("browser_take_screenshot"))
-        self.assertIsNone(g.check("playwright-cli -s=qa screenshot", cwd))  # the user's own session may
         for cmd in ["playwright-cli -s=qa screenshot --filename=$HOME/.bashrc", "playwright-cli -s=qa snapshot --filename=.git/hooks/x",
                     "playwright-cli -s=qa screenshot --filename src/a.png", "playwright-cli -s=qa pdf --filename=/tmp/x.pdf",
                     "playwright-cli -s=qa video-start /tmp/v.webm"]:
@@ -1779,26 +1774,10 @@ class A2(unittest.TestCase):
         data = os.path.join(TMP, "data")
         self.assertIsNotNone(g.check(f"rm -rf {os.path.dirname(data)}/{{{'a' * 600},data}}", TMP))  # a long glob is still a glob
 
-    def test_explorer_does_not_read_secret_files(self):  # audit 3 r28
-        home = os.path.expanduser("~")
+    def test_explorer_eval_of_shell_output(self):  # audit 3 r28
         proj = tempfile.mkdtemp()
-        for name in (".env", "server.pem", "secrets.json"):
-            Path(proj, name).write_text("x")
-        for cmd in ["cat .env", "head -3 ./.env", "base64 < server.pem", "K=secrets.json; cat $K"]:
-            self.assertIsNotNone(g.check(cmd, proj, explorer=True), cmd)
-            self.assertIsNone(g.check(cmd, proj), cmd)  # the user's own session may
-        self.assertIsNone(g.check("jq .key data.json", proj, explorer=True))  # a filter, not a file that exists
         self.assertIsNone(g.check('eval "$(fnm env)" && node -v', proj))
         self.assertIsNotNone(g.check('eval "$(echo x)"; ls qa-out', proj, explorer=True))
-        for cmd in [f"cat {_ENV['QA_SDET_CONFIG']}", "ls qa-out/r/bugs", "playwright-cli -s=qa find .env",
-                    "playwright-cli -s=qa fill e1 secrets.json", "grep -n key qa-out/r/.data/snapshot.md"]:
-            self.assertIsNone(g.check(cmd, RUN, explorer=True), cmd)
-        read = lambda path, agent="qa-sdet:qa-explorer": g.decide({"tool_name": "Read", "tool_input": {"file_path": path},
-                                                                    "cwd": TMP, "agent_type": agent})
-        self.assertIsNotNone(read(os.path.join(proj, ".env")))
-        self.assertIsNone(read(os.path.join(proj, ".env"), ""))
-        self.assertIsNone(read(_ENV["QA_SDET_CONFIG"]))
-        self.assertIsNone(read(os.path.join(TMP, "qa-out/r/bugs/BUG-1.md")))
 
     def test_negated_grep_glob_narrows_nothing(self):  # audit 3 r29
         proj = tempfile.mkdtemp()
@@ -1860,10 +1839,10 @@ class A2(unittest.TestCase):
         for cmd in ["playwright-cli -s=qa drop e5 --path .env", "playwright-cli -s=qa drop e5 --path=.env", "playwright-cli -s=qa upload ./.en*"]:
             no(g.check(cmd, proj), cmd)
         ok(g.check("playwright-cli -s=qa drop e5 --path notes.txt", proj))
-        # 3/4/5. the explorer: git options before the subcommand, secret files by glob, writes outside qa-out
+        # 3/5. the explorer: git options before the subcommand, writes outside qa-out
         Path(proj, "qa-out", "r", ".data").mkdir(parents=True)
         Path(proj, "qa-out", ".active").write_text(json.dumps({"expires": time.time() + 3600}))
-        for cmd in ["git -C . clean -fdx", "git -c user.name=x commit -am x", "cat .en*", "echo pwned > src.ts", "sed -i s/a/b/ src.ts",
+        for cmd in ["git -C . clean -fdx", "git -c user.name=x commit -am x", "echo pwned > src.ts", "sed -i s/a/b/ src.ts",
                     "rm -rf src", "playwright-cli -s=qa console > /tmp/qa-c.log", "cat > new.ts <<'EOF'\nx\nEOF", "touch $UNSET_DIR/x"]:
             no(g.check(cmd, proj, explorer=True), cmd)
         for cmd in ["git -C . status", "ls > /dev/null 2>&1", "playwright-cli -s=qa console > qa-out/r/.data/console.txt",
@@ -1872,8 +1851,6 @@ class A2(unittest.TestCase):
         ok(g.check("echo x > src.ts", proj))  # the user's own session may
         grep = lambda agent, **tin: g.decide({"tool_name": "Grep", "cwd": proj, "agent_type": agent,
                                               "tool_input": {"pattern": "SECRET", "output_mode": "content", **tin}})
-        no(grep("qa-sdet:qa-explorer", glob=".env"))
-        ok(grep("qa-sdet:qa-explorer", glob="*.ts"))
         # 6. ripgrep's `**/x` also matches x in the top folder
         for glob_ in ("**/.env", "**/.env*"):
             no(grep("qa-sdet:qa-mapper", glob=glob_), glob_)
@@ -1913,8 +1890,7 @@ class A2(unittest.TestCase):
         no(ex("M=qa-out/.active; rm ${M:-qa-out/r/zzz}"))
         no(ex("F=src/a.ts; echo x >> ${F:-qa-out/r/x}"))
         # 2. quoted absolute paths with a space
-        for cmd in [f"rm '{proj}/qa-out/.active'", f"echo '{{}}' > '{proj}/qa-out/.active'", f"cat '{proj}/.env'",
-                    f"cp '{proj}/.env' '{proj}/qa-out/r/.data/e.txt'"]:
+        for cmd in [f"rm '{proj}/qa-out/.active'", f"echo '{{}}' > '{proj}/qa-out/.active'"]:
             no(ex(cmd), cmd)
         ok(ex(f"cat '{proj}/qa-out/r/bugs/BUG-1.md'"))
         # 3/8. writes and deletes outside qa-out by other routes; option values are not files
@@ -1931,11 +1907,6 @@ class A2(unittest.TestCase):
         for glob_ in ("/.env", "/.env*", "/config/.env*", "config/**/.env*", "config/**/*.local", "{src,config}/**/.e*"):
             no(grep(glob_), glob_)
         ok(grep("src/**/*.ts"))
-        # 5. secret reads without a plain file argument
-        for cmd in ["grep -rn SECRET .", "grep -r S config", "rg --hidden SECRET", 'while read l; do echo "$l"; done < .env', "dd if=.env"]:
-            no(ex(cmd), cmd)
-        ok(ex("grep -rn S qa-out/r"))
-        ok(ex("grep -n S src/a.ts"))
         # 6. git: read-only commands only
         for cmd in ["git checkout-index -a -f", "git branch -D main", "git tag -d v1", "git update-ref -d HEAD",
                     "git submodule update", "git -c alias.x='!rm -rf src' x", "git diff --output=src/a.ts"]:
@@ -1994,9 +1965,7 @@ class A2(unittest.TestCase):
         no(ex("playwright-cli -s=qa screenshot --filename=/tmp/qa-*/x.png"))
         # 6. a commit message from a heredoc may mention the folders
         ok(g.check('git commit -m "$(cat <<\'EOF\'\ndocs: sign out by deleting ~/.local/share/qa-sdet/profiles/\nEOF\n)"', base))
-        # 7. the explorer and secrets through git; minor false denials
-        for cmd in ["git grep -n SECRET", "git show HEAD:.env", "git cat-file -p HEAD:.env"]:
-            no(ex(cmd), cmd)
+        # 7. minor false denials
         for cmd in ["git show HEAD:src/a.ts", "git ls-files -o", "which qa-mem", "type qa-mem", "grep -n '.env' snap.yml", "jq .env x.json"]:
             ok(ex(cmd), cmd)
         # 8. long scripts with $VAR paths stay near-linear

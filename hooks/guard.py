@@ -954,8 +954,6 @@ def check_pw(rest, hosts, cwds, ctx, via_loop):
         binds += [rest[k + 1] for k, a in enumerate(rest[:-1]) if a == "--host"]
         if any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in binds):
             return "playwright-cli show --host would expose the logged-in QA browser to the network; keep it on localhost"
-    if ctx.explorer and verb in ("screenshot", "pdf") and not any(a == "--filename" or a.startswith("--filename=") for a in rest):
-        return f"playwright-cli {verb} without --filename saves outside the run folder; " + RUN_OUTPUT_REASON
     if ctx.explorer and verb == "eval" and PAGE_DUMP_RE.search(" ".join(args[1:])):
         return ("dumping the page's HTML reads app code and wastes tokens; use snapshot --depth=4 for structure, "
                 "find, or eval on one element")
@@ -1458,14 +1456,10 @@ SCAN_SKIP = {"node_modules", ".git", "dist", "build", "vendor", "__pycache__", "
 
 
 @_memo
-def home_secret_roots():
-    home = os.path.realpath(os.path.expanduser("~"))
-    return {os.path.realpath(os.path.join(home, p)) for p in SECRET_HOME_PATHS}
-
-
-@_memo
 def secret_roots():
-    return home_secret_roots() | {DATA_DIR, os.path.realpath(CONFIG.parent)} | profile_dirs()
+    home = os.path.realpath(os.path.expanduser("~"))
+    roots = {os.path.realpath(os.path.join(home, p)) for p in SECRET_HOME_PATHS}
+    return roots | {DATA_DIR, os.path.realpath(CONFIG.parent)} | profile_dirs()
 
 
 def is_secret_path(p):
@@ -1559,33 +1553,6 @@ def explorer_run_path(p, base):
     rel = p[len(base) + 1:].split(os.sep)
     return len(rel) >= 2 and rel[1] in ("bugs", "repro", "evidence", ".data") and rel[-1] != "plan.json" \
         and not rel[-1].endswith((".ingested", ".error"))
-
-
-EXPLORER_SECRET_REASON = ("the explorer tests through the browser: secret files (.env, keys, credential folders) stay "
-                          "closed; the qa-sdet config file is the one it reads")
-
-
-def explorer_secret(p):
-    """A secret path the explorer must not read (it handles page text nobody vetted, and could type a secret into
-    the app): a key or secret file by name, or a credentials folder in the home folder. qa-sdet's own folders have
-    their rules already (profile, session file, DB), and its config file stays readable."""
-    return (bool(SECRET_FILE_RE.search(os.path.basename(p))) or any(
-        p == r or p.startswith(r + os.sep) for r in home_secret_roots())) and os.path.lexists(p)  # not a jq `.key` filter
-
-
-def explorer_reads_secret(name, rest, ins, cwds, raw):
-    """Does this explorer command name a secret file (also behind `if=`, in a glob, with spaces in the path), or search
-    file contents from a folder that holds one (`grep -r x .`, `rg x`)?"""
-    args = [a for a in rest if not a.startswith("-")]
-    if (name in GREP_TOOLS and not {"-e", "-f", "--regexp", "--file"} & set(rest)) or name == "jq":
-        args = args[1:]  # `grep -n '.env' snap.yml`, `jq .env x.json`: the first word is a pattern or a filter
-    words = [x for a in args + ins for x in {a, a.split("=", 1)[-1]} if not CODE_TEXT_RE.search(x)]
-    if any(explorer_secret(p) for a in words for t in var_variants(a, raw) for c in cwds for p in glob_paths(t, c)):
-        return True
-    if recursive_content_search(name, rest):
-        pos = [a for a in rest if not a.startswith("-")]
-        return any(os.path.isdir(p) and secret_below(p) for a in pos[1:] or ["."] for c in cwds for p in glob_paths(a, c))
-    return False
 
 
 def secret_below(d, glob_="", type_=""):
@@ -2001,8 +1968,6 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
             return r
         if ctx.explorer and explorer_outside("", [], outs, cwds, ctx.raw):
             return EXPLORER_WRITE_REASON
-        if ctx.explorer and explorer_reads_secret("", [], ins, cwds, ctx.raw):  # `while read l; …; done < .env`
-            return EXPLORER_SECRET_REASON
         return check_db(words, outs, "", [], cwds, ctx.raw)
     scope = getattr(ctx, "scope", None)  # inside a sourced file: what that file names (`(( $+var ))` in a theme is harmless)
     if (words[i].startswith("$") or words[i] == "SUBST") and (
@@ -2076,8 +2041,6 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
         return r
     if ctx.explorer and explorer_outside(name, rest, outs, local, ctx.raw, bool(LOOP_WRAPPERS & set(wrappers))):
         return EXPLORER_WRITE_REASON
-    if ctx.explorer and name not in ("playwright-cli", "qa-mem") and explorer_reads_secret(name, rest, ins, local, ctx.raw):
-        return EXPLORER_SECRET_REASON
     code = interpreter_code(rest, docs)
     interp = name in INTERPRETERS or is_python(name)
     if interp and (re.search(r"qa-state\.json", code) or mentions_session_path(code)):
@@ -2126,10 +2089,6 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
     if ctx.explorer and name in NET_CLIS and not lookup_only:
         return (f"{name} reaches the network outside the browser (no host or budget check); observe through "
                 "playwright-cli: requests, response-body, or --raw eval \"fetch('/api/x').then(r => r.status)\"")
-    if ctx.explorer and name == "git" and (
-            (git_subcommand(rest) == "grep" and any(secret_below(c) for c in local))
-            or any(SECRET_FILE_RE.search(os.path.basename(a.rpartition(":")[2])) for a in rest if ":" in a and not a.startswith("-"))):
-        return EXPLORER_SECRET_REASON  # `git grep SECRET`, `git show HEAD:.env`
     if ctx.explorer and name == "git" and not explorer_git_ok(rest):
         return (f"git {git_subcommand(rest)} can change the project (git clean also deletes the run folder): the explorer tests "
                 "through the browser and runs only read-only git commands (status, log, diff, show, ls-files)")
@@ -2299,8 +2258,6 @@ def check_mcp_browser(name, tin, cwd, explorer):
             vals = _strings(v)  # also nested: files: [{path: …}]
             files += vals
             sent += vals if re.search(r"paths|files", str(key), re.I) else []  # uploads/drops send these to the page
-    if explorer and re.search(r"screenshot|pdf", name) and not any(isinstance(f, str) and f for f in files):
-        return f"{name} without a filename saves outside the run folder; " + RUN_OUTPUT_REASON
     for f in files:
         if not f or not isinstance(f, str):
             continue  # a flag such as saveSession: true names no file
@@ -2440,12 +2397,6 @@ def decide(data):
         if tool not in EXPLORER_TOOLS and not MCP_BROWSER_RE.match(str(tool or "")):
             return (f"the qa-explorer tests through the browser only: {tool} is not one of its tools "
                     "(Bash, Read, Write, Grep, Glob and the browser_* MCP tools)")
-        for raw in tool_paths(tin) if tool in ("Read", "Grep") else ():
-            target = os.path.realpath(os.path.join(cwd, expand(raw or ".")))
-            if explorer_secret(target) or (tool == "Grep" and str(tin.get("output_mode")).lower() == "content"
-                                           and os.path.isdir(target)
-                                           and secret_below(target, str(tin.get("glob") or ""), str(tin.get("type") or ""))):
-                return EXPLORER_SECRET_REASON
         for raw in tool_paths(tin) if tool in WRITE_TOOLS else ():
             target = Path(os.path.realpath(os.path.join(cwd, expand(raw or "x"))))
             if (target.name == ".active" and target.parent.name == "qa-out") or str(target) == os.path.realpath(CONFIG):

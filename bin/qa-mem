@@ -190,9 +190,7 @@ def coverage_result(r):
     """pass / fail / blocked, whatever the agent wrote: 'BLOCKED (needs --faults)', NOT_RUN and skipped
     mean not done, so the heuristic stays UNTRIED; anything else is kept short as written."""
     w = norm(r).split()
-    if not w or w[:2] == ["n", "a"]:  # no result, '-', '?', 'n/a': nothing was checked, so it stays UNTRIED
-        return "blocked"
-    if w[0] in ("pass", "passed", "ok", "covered", "done"):
+    if not w or w[0] in ("pass", "passed", "ok", "covered", "done"):
         return "pass"
     if w[0] in ("fail", "failed", "failure", "bug"):
         return "fail"

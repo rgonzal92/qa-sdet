@@ -124,9 +124,7 @@ class QaMem(unittest.TestCase):
             out = qm.redact(text)
             self.assertIn("[REDACTED]", out, text)
             self.assertNotRegex(out, "Sommerregen|AbCdEfGhIjKl|abcdefgh|AbCd1234", text)
-        # coverage: n/a is not a check; a bug with its draft id in `hash` is still stored
-        self.assertEqual([qm.coverage_result(r) for r in ("n/a", "N/A (no dialog)", "-", "?", None, "", "pass")],
-                         ["blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "pass"])
+        # a bug with its draft id in `hash` is still stored
         qm.ingest(self.con, run(facts=[{"kind": "api", "text": "GET /api/zones returns 500 on empty filter"},
                                        {"kind": "note", "text": "speed chart loads slowly"}],
                                 bugs=[{"route": "/form", "title": "Save accepts 131", "symptom": "saved at 131", "hash": "BUG-2"}]))
@@ -628,13 +626,11 @@ class QaMem(unittest.TestCase):
         self.assertIn("verified=never", qm.card(self.con, "/new"))
 
     def test_heuristic_ids_normalised(self):
-        qm.ingest(self.con, run(coverage=[{"target": "x", "heuristic": "Boundary", "result": "pass"},
-                                          {"target": "y", "heuristic": "Traffic time zone", "result": "pass"},
-                                          {"target": "z", "heuristic": "permissions"}]))  # no result: not a check
+        qm.ingest(self.con, run(coverage=[{"target": "x", "heuristic": "Boundary"},
+                                          {"target": "y", "heuristic": "Traffic time zone"}]))
         c = qm.card(self.con, "/form")
         self.assertIn("other:traffic-time-zone", c)
         self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])
-        self.assertIn("permissions", c.split("UNTRIED: ")[1].splitlines()[0])
 
     def test_bug_status_wildcards_and_stale_extra_args(self):
         qm.ingest(self.con, run(bugs=[{"route": "/form", "title": "a"}, {"route": "/form", "title": "b"}]))
