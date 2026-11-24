@@ -114,12 +114,13 @@ class Docs(unittest.TestCase):
         self.assertEqual(block.strip().splitlines(), qm.PERMISSION_RULES)
 
     def test_readme_safety_and_privacy_match_guard(self):
-        """r12/r19: the guard's newer rules (explorer needs a marker, browser output only in evidence/ and .data/,
-        secret uploads, mapper secret reads) and how to delete the persistent login must reach the user."""
+        """r12/r19, loosened: the guard's rules (no limits without a marker, the explorer's few extra ones, secret
+        uploads, mapper secret reads, the denial log) and how to delete the persistent login must reach the user."""
         text = (ROOT / "README.md").read_text()
         safety = text.split("## Safety", 1)[1].split("## Privacy", 1)[0]
-        for s in ("need an active marker", "`<run>/evidence/` and `<run>/.data/`", "browser_file_upload",
-                  "`playwright-cli upload`", "no reads or content searches of secret files", "`.env*`"):
+        for s in ("Without a marker nothing is counted or limited", "changing the qa-sdet config", "browser_file_upload",
+                  "`playwright-cli upload`", "no reads or content searches of secret files", "`.env*`",
+                  "guard-denials.log", "approves itself"):
             self.assertIn(s, safety)
         privacy = text.split("## Privacy", 1)[1].split("## Self-test", 1)[0]
         self.assertIn("then delete `~/.local/share/qa-sdet/profiles/` in your own terminal", privacy)

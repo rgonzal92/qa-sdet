@@ -225,50 +225,46 @@ class Guard(unittest.TestCase):
         self.deny("R=\"location.href='https://evil.com'\"; playwright-cli -s=qa eval \"$R\"")
         self.deny("A=create; acli jira workitem $A --summary x")
 
-    def test_marker_in_milliseconds_is_malformed(self):
+    def test_malformed_marker_is_no_run(self):  # loosened: a broken marker no longer stops the run, nothing is counted
         cwd = tempfile.mkdtemp()
         Path(cwd, "qa-out").mkdir()
         ms = int(time.time() * 1000)
         Path(cwd, "qa-out", ".active").write_text(json.dumps({"expires": ms + 7200000, "deadline": ms, "budget": 5}))
-        r = g.check("playwright-cli -s=qa goto http://localhost:1/a", cwd)
-        self.assertIn("epoch seconds", r or "")
+        self.assertIsNone(g.check("playwright-cli -s=qa goto http://localhost:1/a", cwd))
+        self.assertEqual(g.read_marker(cwd), (None, None))
 
-    def test_explorer_cannot_touch_run_marker(self):
+    def test_explorer_leaves_only_the_config_alone(self):  # loosened: the run marker and the project are no longer off limits
+        cfg = os.environ["QA_SDET_CONFIG"]
         for at in ("qa-explorer", "qa-sdet:qa-explorer"):
-            self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": at, "cwd": TMP,
-                                           "tool_input": {"file_path": f"{TMP}/qa-out/.active", "content": "{}"}}))
-            self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": at, "cwd": TMP,
-                                           "tool_input": {"command": "rm -f qa-out/.active"}}))
-            self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": at, "cwd": TMP,
-                                           "tool_input": {"command": "cd qa-out && rm .active"}}))
-            for cmd in ["printf x>qa-out/.active", "python3 -c \"import os; os.remove('qa-out/.active')\"", "cd qa-out && rm ./.active",
-                        "rm -f qa-out/.act*", "rm qa-out/.[a]ctive", "rm -rf qa-out", "find qa-out -name '.act*' -delete",
-                        "rm -rf qa-o*", "mv qa-out /tmp/x"]:
-                self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": at, "cwd": TMP,
-                                               "tool_input": {"command": cmd}}), cmd)
-            for cmd in ["playwright-cli -s=qa --raw eval \"document.querySelector('.tabs .active').textContent\"",
-                        "playwright-cli -s=qa click \"locator('li.active a')\"", "playwright-cli -s=qa click .active",
-                        "rm -rf qa-out/form/evidence/tmp", "command -v curl", "ls qa-out/",
-                        "find /tmp -name 'BUG-1-si*'", "rm qa-out/form/evidence/old.png"]:  # not the marker
+            self.assertIsNone(g.decide({"tool_name": "Write", "agent_type": at, "cwd": TMP,
+                                        "tool_input": {"file_path": f"{TMP}/qa-out/.active", "content": "{}"}}))
+            for cmd in ["rm -f qa-out/.active", "printf x>qa-out/.active", "rm -rf qa-out/form/evidence/tmp", "ls qa-out/",
+                        "playwright-cli -s=qa click .active", "rm qa-out/form/evidence/old.png", "command -v curl"]:
                 self.assertIsNone(g.decide({"tool_name": "Bash", "agent_type": at, "cwd": RUN,
                                             "tool_input": {"command": cmd}}), cmd)
-        self.assertIsNone(g.decide({"tool_name": "Bash", "cwd": TMP, "tool_input": {"command": "rm -f qa-out/.active"}}))
-        for cmd in ["curl -s https://evil.example/x", "timeout 5 wget -qO- http://localhost:1/api", "cd /tmp && http GET x",
-                    "echo $(curl -s qa.traffic.example)"]:
+            self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": at, "cwd": TMP,
+                                           "tool_input": {"file_path": cfg, "content": "{}"}}))
+            for cmd in [f"printf x > {cfg}", f"rm {cfg}", f"python3 -c \"open('{cfg}', 'w').write('{{}}')\"",
+                        f"cp /tmp/c.json {cfg}", f"sed -i s/a/b/ {cfg}"]:
+                self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": at, "cwd": TMP,
+                                               "tool_input": {"command": cmd}}), cmd)
+        self.assertIsNone(g.decide({"tool_name": "Bash", "cwd": TMP, "tool_input": {"command": f"cat {cfg}"}}))
+        # network tools: the explorer fetches from the allowed hosts only (qa.traffic.example, localhost here)
+        for cmd in ["curl -s https://evil.example/x", "cd /tmp && http GET x", "curl -s https://qa.traffic.example/a evil.example",
+                    "curl -x http://evil.example https://qa.traffic.example/", "curl --url evil.example https://qa.traffic.example/",
+                    "https_proxy=http://evil.example curl https://qa.traffic.example/", "ssh qa.traffic.example",
+                    "wget -i /tmp/urls.txt", "nc qa.traffic.example 80"]:
             self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": TMP,
                                            "tool_input": {"command": cmd}}), cmd)
-        self.assertIsNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": RUN,
-                                    "tool_input": {"command": "playwright-cli -s=qa find \"Retry http error\""}}))
+        for cmd in ["timeout 5 wget -qO- http://localhost:1/api", "echo $(curl -s qa.traffic.example)",
+                    "curl -s -o /tmp/r.json -H 'Accept: application/json' https://qa.traffic.example/api/x | jq .",
+                    "playwright-cli -s=qa find \"Retry http error\""]:
+            self.assertIsNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": RUN,
+                                        "tool_input": {"command": cmd}}), cmd)
         self.assertIsNone(g.decide({"tool_name": "Bash", "cwd": TMP, "tool_input": {"command": "curl -s https://example.com"}}))
         for js in ["document.body.innerHTML", "document.documentElement.outerHTML", "[...document.scripts].map(s=>s.text)"]:
-            self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": TMP,
-                                           "tool_input": {"command": f'playwright-cli -s=qa --raw eval "{js}"'}}), js)
-        self.assertIsNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": RUN, "tool_input": {
-            "command": "playwright-cli -s=qa --raw eval \"document.querySelector('td').innerHTML\""}}))
-        self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": "qa-explorer", "cwd": TMP,
-                                       "tool_input": {"file_path": f"{TMP}/qa-out/sub/../.active", "content": "{}"}}))
-        self.assertIsNone(g.decide({"tool_name": "Write", "agent_type": "qa-explorer", "cwd": TMP,
-                                    "tool_input": {"file_path": f"{TMP}/qa-out/form/run.json", "content": "{}"}}))
+            self.assertIsNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": RUN,
+                                        "tool_input": {"command": f'playwright-cli -s=qa --raw eval "{js}"'}}), js)
 
     def test_code_words_and_shell_globs(self):
         sess = tempfile.mkdtemp()  # a session file directly in the working folder
@@ -451,7 +447,7 @@ class Guard(unittest.TestCase):
                     "cat > qa-out/form/bugs/BUG-2.md <<'EOF'\nThe page's document.body.innerHTML is never read by the test.\nEOF"]:
             self.assertIsNone(ex(cmd), cmd)
         for cmd in ["rm qa-out/.act*", "echo x > qa-out/.active", "playwright-cli -s=qa --raw eval \"document.body.innerHTML\""]:
-            self.assertIsNotNone(ex(cmd), cmd)
+            self.assertIsNone(ex(cmd), cmd)  # loosened: the marker isn't guarded, the page's HTML may be read
 
     def test_review4_acli_hyphenated_reads(self):
         for cmd in ["acli jira board list-sprints --id 7", "acli jira sprint list-workitems --sprint 3 --json"]:
@@ -484,9 +480,7 @@ class Guard(unittest.TestCase):
                     "cat qa-out/.active"]:
             self.assertIsNone(ex(cmd), cmd)
         for cmd in ["find qa-out -name '.act*' -exec rm {} +", "find qa-out -delete", "python3 -c \"import os; os.remove('qa-out/.active')\""]:
-            r = ex(cmd)
-            self.assertIsNotNone(r, cmd)
-            self.assertNotIn("budget", r)  # must not read like the run is over
+            self.assertIsNone(ex(cmd), cmd)  # loosened: the explorer cleans up like the main agent
 
     def test_review5_xpath_is_not_a_url(self):
         for js in ["document.evaluate('//button[text()=\"Save\"]', document, null, 9, null).singleNodeValue?.disabled",
@@ -611,10 +605,13 @@ class Guard(unittest.TestCase):
         self.deny(f"playwright-cli -s=qa click e1 && rm -rf {TMP}/data", cwd)
         self.assertEqual(used(), 1)  # denied commands spend nothing
         active.write_text(json.dumps({"expires": time.time() + 600, "budget": "150 (default)"}))
-        self.deny("playwright-cli -s=qa click e1", cwd)  # malformed marker: fail closed
+        self.allow("playwright-cli -s=qa click e1", cwd)  # loosened: a malformed marker is no run (not counted)
+        self.assertEqual(json.loads(active.read_text()).get("used"), None)
         active.write_text(json.dumps({"budget": 5}))
-        self.deny("playwright-cli -s=qa click e1", cwd)  # no expires: malformed
+        self.allow("playwright-cli -s=qa click e1", cwd)  # no expires: malformed, no run
         self.allow("ls", cwd)
+        active.write_text(json.dumps({"expires": time.time() + 600}))  # a run without a budget: loops are fine
+        self.allow("for i in 1 2 3; do playwright-cli -s=qa click e$i; done", cwd)
         active.write_text(json.dumps({"expires": time.time() + 600, "budget": 1000}))
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(16) as ex:
@@ -762,7 +759,10 @@ class Guard(unittest.TestCase):
         self.assertIsNone(mcp(ev, function="() => Object.keys(localStorage)"))
         self.assertIsNotNone(mcp(ev, function="() => fetch('https://evil.com/x')"))
         self.assertIsNone(mcp(ev, function="() => document.body.innerHTML.length"))
-        self.assertIsNotNone(mcp(ev, agent="qa-sdet:qa-explorer", function="() => document.body.innerHTML"))
+        self.assertIsNone(mcp(ev, agent="qa-sdet:qa-explorer", function="() => document.body.innerHTML"))  # loosened
+        self.assertIsNone(mcp(ev, function="() => document.cookie.length"))  # a length reads no value
+        self.assertIsNone(mcp(ev, function="() => document.body.innerText.includes('cookie')"))
+        self.assertIsNone(mcp(ev, function="() => [...document.querySelectorAll('a[href^=\"https://docs.example.org/\"]')].length"))
         self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", paths=[os.path.expanduser("~/.config/qa-sdet/qa-state.json")]))
         self.assertIsNotNone(mcp("mcp__playwright__browser_take_screenshot", filename=os.environ["QA_SDET_DATA"] + "/x.png"))
         self.assertIsNotNone(mcp("mcp__playwright__browser_route", pattern="**"))  # no --faults marker
@@ -801,7 +801,7 @@ class Guard(unittest.TestCase):
         sess = os.path.join(os.path.dirname(os.environ["QA_SDET_CONFIG"]), "qa-state.json")
         for key in ("path", "file", "outputPath", "saveAs", "filePath"):
             self.assertIsNotNone(mcp("mcp__playwright__browser_pdf_save", **{key: sess}), key)
-            self.assertIsNotNone(mcp("mcp__playwright__browser_pdf_save", **{key: RUN + "/qa-out/.active"}), key)
+            self.assertIsNotNone(mcp("mcp__playwright__browser_pdf_save", **{key: os.environ["QA_SDET_CONFIG"]}), key)
         self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", files=[os.path.dirname(sess)]))
         self.assertIsNone(mcp("mcp__playwright__browser_pdf_save", path=RUN + "/qa-out/form/evidence/page.pdf"))
         # audit pass 18: flags in file-like fields, numbers in code tools, a custom MCP profile folder
@@ -841,18 +841,16 @@ class Guard(unittest.TestCase):
                     "jira_link_to_epic", "jira_remove_issue_link", "jira_create_sprint", "jira_delete_issue",
                     "confluence_add_label"):
             self.assertIsNotNone(mcp("mcp__atlassian__" + bad), bad)
-        # R4 the explorer's allowlist
+        # R4 (loosened) the explorer has the main session's tools; Jira writes stay blocked for it too
         for tool in ("mcp__claude_ai_Gmail__send_message", "mcp__claude_ai_Atlassian__getJiraIssue", "WebFetch",
-                     "Agent", "Skill", "SendUserFile", "Edit"):
-            self.assertIsNotNone(mcp(tool, agent=ex), tool)
-        for tool in ("Glob", "ToolSearch", "TodoWrite"):
+                     "Agent", "Skill", "SendUserFile", "Edit", "Glob", "ToolSearch", "TodoWrite"):
             self.assertIsNone(mcp(tool, agent=ex), tool)
+        self.assertIsNotNone(mcp("mcp__claude_ai_Atlassian__createJiraIssue", agent=ex))
         self.assertIsNone(mcp("mcp__pw__browser_snapshot", agent=ex))
         self.assertIsNone(mcp("mcp__claude_ai_Gmail__send_message"))  # the main session is the user's
-        # R7 marker through file arguments; R8 relative paths escaping the MCP's output folder
-        self.assertIsNotNone(mcp("mcp__playwright__browser_take_screenshot", filename="qa-out/.active"))
-        self.assertIsNotNone(mcp("mcp__playwright__browser_snapshot", filename=TMP + "/qa-out/.active"))
-        self.assertIsNotNone(mcp("mcp__playwright__browser_snapshot", filename="../../x.md"))
+        # R7, R8 (loosened) output files may go anywhere but the config, the DB folder and the session
+        self.assertIsNone(mcp("mcp__playwright__browser_take_screenshot", filename="qa-out/.active"))
+        self.assertIsNone(mcp("mcp__playwright__browser_snapshot", filename="../../x.md"))
         self.assertIsNone(mcp("mcp__playwright__browser_snapshot", filename=TMP + "/qa-out/form/snap.md"))
         self.assertIsNone(mcp("mcp__playwright__browser_snapshot", filename="snap.md"))
         # R23 the MCP's browser profile holds the QA login; symlinked marker folders; uploading a session folder
@@ -866,9 +864,7 @@ class Guard(unittest.TestCase):
         cwd = tempfile.mkdtemp()
         Path(cwd, "qa-out").mkdir()
         os.symlink(Path(cwd, "qa-out"), Path(cwd, "x"))
-        self.assertIsNotNone(mcp("mcp__playwright__browser_evaluate", cwd=cwd, agent=ex, function="() => 1", filename=cwd + "/x/.active"))
-        self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": ex, "cwd": cwd,
-                                       "tool_input": {"file_path": cwd + "/x/.active", "content": "{}"}}))
+        self.assertIsNone(mcp("mcp__playwright__browser_evaluate", cwd=cwd, agent=ex, function="() => 1", filename=cwd + "/x/.active"))
         # the user's cookie jar under ~/.config, as in real use (this module moves the qa-sdet config to a temp folder,
         # so without it the result hung on whether the developer's shell set the variable)
         with mock.patch.dict(os.environ, {"PLAYWRIGHT_MCP_STORAGE_STATE": os.path.expanduser("~/.config/qa-t/state.json")}):
@@ -895,7 +891,7 @@ class Guard(unittest.TestCase):
         bad = tempfile.mkdtemp()
         Path(bad, "qa-out").mkdir()
         Path(bad, "qa-out/.active").write_text("{oops")
-        self.assertIsNotNone(g.decide({**nav, "cwd": bad}))  # malformed marker: fail closed
+        self.assertIsNone(g.decide({**nav, "cwd": bad}))  # loosened: a malformed marker is no run
         # R24 narrower secret tools; route_list; get_config; ownerDocument.cookie
         call = lambda name, **tin: g.decide({"tool_name": "mcp__playwright__" + name, "tool_input": tin, "cwd": RUN})
         for ok in ("browser_cookie_set", "browser_cookie_delete", "browser_cookie_clear", "browser_localstorage_set",
@@ -999,7 +995,7 @@ class Guard(unittest.TestCase):
         self.assertIsNotNone(call("browser_navigate", url="https://evil.com"))
         self.assertEqual(json.loads(active.read_text())["used"], 2)
         active.write_text("{bad")
-        self.assertIsNotNone(call("browser_snapshot"))  # malformed marker: fail closed
+        self.assertIsNone(call("browser_snapshot"))  # loosened: a malformed marker is no run, nothing counted
 
     def test_unrelated_commands_pass(self):
         self.allow("git status && npm test")
@@ -1163,10 +1159,10 @@ class V04(unittest.TestCase):
                 "rundir . --keys STUDIO-1", "prune .", "codemap-scan src", "codemap-forget src", "bug-status abcd FIXED",
                 "stale /x", "ingest x.json", "ingest-pending qa-out", "forget /x", "--help", "bugs", "login-ok"]
         proj = tempfile.mkdtemp()
-        for sub in subs:
-            self.deny(f"python3 {Q} {sub}", proj, explorer=True)
-            self.allow(f"python3 {Q} {sub}", proj)  # the main session runs them all
-            self.deny(f"qa-mem {sub}", proj, explorer=True)
+        for sub in subs:  # loosened: the explorer runs them all, like the main session
+            self.allow(f"python3 {Q} {sub}", proj, explorer=True)
+            self.allow(f"python3 {Q} {sub}", proj)
+            self.allow(f"qa-mem {sub}", proj, explorer=True)
             self.allow(f"qa-mem {sub}", proj)
         for cmd in [f"/usr/bin/python3 {Q} marker stop {TMP}", f"python3.12 -I {Q} marker stop .", f"env -u X python3 {Q} marker stop .",
                     f"{Q} marker stop .", f"./bin/qa-mem marker stop .", f"bash -c 'python3 {Q} marker stop .'",
@@ -1176,7 +1172,7 @@ class V04(unittest.TestCase):
                     f"cp {Q} /tmp/q && python3 /tmp/q marker stop .", f"ln -s {Q} /tmp/q", f"S=marker; python3 {Q} $S stop .",
                     f"QM={Q}; python3 $QM marker stop .", f"echo marker stop . | xargs python3 {Q}", f"alias q='python3 {Q}'",
                     f"q() {{ python3 {Q} \"$@\"; }}; q marker stop ."]:
-            self.deny(cmd, explorer=True)
+            self.assertEqual(bool(g.check(cmd, TMP, explorer=True)), bool(g.check(cmd, TMP)), cmd)  # the main session's rules
 
     def test_qamem_browser_open_hosts_and_budget(self):
         Q, cwd = self.Q, tempfile.mkdtemp()
@@ -1291,7 +1287,7 @@ class V04(unittest.TestCase):
                     f"python3 < {Q}", f"cat {Q} > /tmp/q && python3 /tmp/q marker stop .", f"cat {Q} | python3 - marker stop .",
                     f"dd if={Q} of=/tmp/q", f"tee /tmp/q < {Q}", f"install -m 755 {Q} /tmp/q", f"base64 {Q}",
                     f"uv run {Q} browser-open https://evil.com", f"python3 - browser-open https://evil.com < {Q}", f"sh {Q} prune ."]:
-            self.deny(cmd, explorer=True)
+            self.assertEqual(bool(g.check(cmd, TMP, explorer=True)), bool(g.check(cmd, TMP)), cmd)  # loosened: the main session's rules
         for cmd in [f"uv run {Q} browser-open https://evil.com", f"python3 - browser-open https://evil.com < {Q}",
                     f"poetry run python3 {Q} browser-open https://evil.com"]:
             self.deny(cmd)  # the main session too: these skip the host check and the budget
@@ -1313,27 +1309,17 @@ class V04(unittest.TestCase):
             self.allow(f"python3 {Q} browser-open --headed --session qa https://qa.traffic.example/", explorer=explorer)
         self.allow(f"python3 {Q} browser-open --headed --session qa-login https://qa.traffic.example/")
 
-    def test_explorer_write_allowlist(self):
+    def test_explorer_writes_like_the_main_session(self):  # loosened: no write allowlist; the config stays off limits
         d = self.run_dir()
-        ok = [f"{d}/bugs/BUG-1.md", f"{d}/repro/BUG-1.spec.ts", f"{d}/.data/run-form.json", f"{d}/.data/run-STUDIO-1+form_2.json",
-              f"{d}/.data/run-api-v1.2-zones.json", f"{d}/.data/snapshot.md", f"{TMP}/qa-out/form/run.json", f"{TMP}/qa-out/STUDIO-1/form/run.json",
-              f"{TMP}/qa-out/form/reports/explore-form-20261123-0101.md", f"{TMP}/qa-out/form/bugs/BUG-2.md",
-              f"{TMP}/qa-out/form/repro/BUG-2.spec.ts", f"qa-out/{d.name}/bugs/BUG-3.md"]
-        for p in ok:
+        for p in [f"{d}/bugs/BUG-1.md", f"{d}/.data/run-form.json", f"{d}/REPORT.md", f"{d}/.data/plan.json",
+                  f"{TMP}/src/app.js", f"{TMP}/qa-out/.active", f"{d}/evidence/BUG-1.png"]:
             self.assertIsNone(self.tool("Write", True, file_path=p, content="x"), p)
-        self.assertIsNotNone(self.tool("Edit", True, file_path=ok[2], old_string="a", new_string="b"))  # not its tool
-        bad = [f"{d}/REPORT.md", f"{TMP}/qa-out/README.md", f"{TMP}/qa-out/INBOX.md", f"{d}/.data/plan.json",
-               f"{d}/.data/run-form.json.ingested", f"{d}/.data/run-form.json.error", f"{d}/.data/run.json",
-               f"{d}/evidence/BUG-1.png", f"{d}/bugs/x.sh", f"{d}/bugs/../../../x.md", f"{d}/.data/x/run-a.json",
-               f"{TMP}/src/app.js", "~/.bashrc", f"{TMP}/.claude/settings.json", f"{TMP}/qa-out/.active",
-               f"{tempfile.mkdtemp()}/qa-out/r/bugs/BUG-1.md", f"{TMP}/qa-out/.inbox.json", f"{TMP}/qa-out/init/code-map-frontend.json"]
-        for p in bad:
-            self.assertIsNotNone(self.tool("Write", True, file_path=p, content="x"), p)
-            self.assertIsNotNone(self.tool("Edit", True, file_path=p, old_string="a", new_string="b"), p)
-        os.symlink("/etc", f"{d}/bugs/etc")
-        self.assertIsNotNone(self.tool("Write", True, file_path=f"{d}/bugs/etc/x.md", content="x"))
-        for p in bad[:4] + [f"{TMP}/src/app.js"]:
-            self.assertIsNone(self.tool("Write", file_path=p, content="x"), p)  # main session: unchanged
+            self.assertIsNone(self.tool("Edit", True, file_path=p, old_string="a", new_string="b"), p)
+        cfg = os.environ["QA_SDET_CONFIG"]
+        self.assertIsNotNone(self.tool("Write", True, file_path=cfg, content="{}"))
+        self.assertIsNotNone(self.tool("Edit", True, file_path=cfg, old_string="a", new_string="b"))
+        self.assertIsNotNone(self.tool("Write", True, file_path=os.path.join(g.DATA_DIR, "x.db"), content="x"))
+        self.assertIsNotNone(self.tool("Write", file_path=os.path.join(g.DATA_DIR, "x.db"), content="x"))  # nobody writes the DB
 
     def test_audit_r2_profile_bypasses(self):
         """Round-2 audit: paths built at runtime, file lists piped to readers, symlinks made in the same call,
@@ -1388,15 +1374,17 @@ class V04(unittest.TestCase):
                     "ln -s `command -v qa-mem` /tmp/q", "bash -s <<<'qa-mem marker stop .'", ". /dev/stdin <<<'qa-mem marker stop .'",
                     "source <(echo 'qa-mem marker stop .')", "echo 'qa-mem marker stop .' | bash",
                     "qa-mem browser-open --session qa-login https://qa.traffic.example/", "qa-mem browser-open --session=qa-login"]:
-            self.deny(cmd, explorer=True)
+            self.assertEqual(bool(g.check(cmd, TMP, explorer=True)), bool(g.check(cmd, TMP)), cmd)  # loosened: the main session's rules
         s, py = Path(b, "s.sh"), Path(b, "x.py")
         s.write_text("playwright-cli -s=qa goto https://evil.com\n")
         self.deny(f"bash {s}")  # a script written in an earlier call is read and checked
         self.deny(f"sh < {s}")
         s.write_text("qa-mem marker stop .\n")
-        self.deny(f"bash {s}", explorer=True)
+        self.assertEqual(bool(g.check(f"bash {s}", TMP, explorer=True)), bool(g.check(f"bash {s}", TMP)))  # loosened: as main
         py.write_text("import os; os.system('qa-mem marker stop .')\n")
-        self.deny(f"python3 {py}", explorer=True)
+        self.allow(f"python3 {py}", explorer=True)
+        py.write_text("import os; os.system('acli jira workitem create --summary x')\n")
+        self.deny(f"python3 {py}", explorer=True)  # a Jira write from a script stays blocked for it
         s.write_text("ls\n")
         for cmd in [f"bash {s}", "echo hi | bash", f"ls {TMP}/qa-out/*", f"python3 {Q} card /form",
                     "qa-mem browser-open 'https://qa.traffic.example/x'"]:
@@ -1454,30 +1442,22 @@ class R12(unittest.TestCase):
         q = SourceFileLoader("qamem12", str(ROOT / "bin/qa-mem")).load_module()
         self.assertEqual(g.SECRET_FILE_RE.pattern, q.SECRET_FILE_RE.pattern)
 
-    def test_explorer_cannot_forge_or_lose_the_marker(self):
+    def test_explorer_marker_is_no_gate(self):  # loosened: the marker counts a budget when there is one; it stops nothing
         cwd = self.project({"expires": time.time() + 600, "budget": 5, "used": 4})
-        for cmd in ["echo '{}' | dd of=qa-out/.active", "exec 3<>qa-out/.active", "exec 3>qa-out/.active",
-                    "echo x >&qa-out/.active", "cat <>qa-out/.active", "cp -r /tmp/e/. qa-out/", "cp /tmp/e/.active qa-out",
-                    "cp -t qa-out /tmp/e/.active", "install -t qa-out /tmp/e/.active", "rsync /tmp/e/.active qa-out/",
-                    "tar xf /tmp/m.tar -C qa-out", "tar -xf /tmp/m.tar", "unzip -o /tmp/m.zip", "7z x /tmp/m.7z -oqa-out",
-                    "python3 -c 'import os; os.chdir(\"qa-out\"); open(\".active\", \"w\")'",
-                    "ln -s ~/.bashrc qa-out/.active.lock", "rm qa-out/.active.lock",
-                    f"cp /tmp/c.json {os.path.dirname(os.environ['QA_SDET_CONFIG'])}/"]:
-            self.assertIsNotNone(self.call("Bash", cwd, command=cmd), cmd)
-        for cmd in ["cp /tmp/a.png qa-out/r1/evidence/", "tar xf /tmp/m.tar -C qa-out/r1/.data", "tar cf qa-out/r1/.data/m.tar qa-out/r1/bugs",
-                    "echo x >&2", "cat qa-out/.active"]:
+        for cmd in ["echo '{}' | dd of=qa-out/.active", "rm qa-out/.active.lock", "tar xf /tmp/m.tar -C qa-out", "echo x >&2",
+                    "cp /tmp/a.png qa-out/r1/evidence/", "cat qa-out/.active"]:
             self.assertIsNone(self.call("Bash", cwd, command=cmd), cmd)
-        # Deleting or moving the marker (rmtree, git clean -x, ...) can't lift the limits: no marker, no browser.
-        Path(cwd, "qa-out", ".active").unlink()
+        cfg_dir = os.path.dirname(os.environ["QA_SDET_CONFIG"])
+        for cmd in [f"cp /tmp/c.json {cfg_dir}/", f"echo '{{}}' | dd of={os.environ['QA_SDET_CONFIG']}"]:
+            self.assertIsNotNone(self.call("Bash", cwd, command=cmd), cmd)  # the config (allowedHosts): still
+        Path(cwd, "qa-out", ".active").unlink()  # no marker: the browser works, nothing is counted
         for cmd in ["playwright-cli -s=qa click e1", "qa-mem browser-open https://qa.traffic.example/"]:
-            self.assertIn("no active run marker", self.call("Bash", cwd, command=cmd), cmd)
-        self.assertIn("no active run marker", self.call("mcp__playwright__browser_click", cwd, ref="e1"))
-        self.assertIsNone(self.call("Bash", cwd, command="playwright-cli -s=qa close"))  # it can still finish
-        self.assertIsNone(self.call("mcp__playwright__browser_tabs", cwd, action="close"))
-        self.assertIsNone(self.call("Bash", cwd, agent=None, command="playwright-cli -s=qa click e1"))  # the main session
-        self.assertIsNone(self.call("mcp__playwright__browser_click", cwd, agent=None, ref="e1"))
+            self.assertIsNone(self.call("Bash", cwd, command=cmd), cmd)
+        self.assertIsNone(self.call("mcp__playwright__browser_click", cwd, ref="e1"))
+        self.assertIsNotNone(self.call("mcp__playwright__browser_navigate", cwd, url="https://evil.com"))  # hard lines: always
+        self.assertIsNotNone(self.call("Bash", cwd, command="playwright-cli -s=qa goto https://evil.com"))
         Path(cwd, "qa-out", ".active").write_text(json.dumps({"expires": time.time() - 1}))  # expired
-        self.assertIn("no active run marker", self.call("Bash", cwd, command="playwright-cli -s=qa click e1"))
+        self.assertIsNone(self.call("Bash", cwd, command="playwright-cli -s=qa click e1"))
 
     def test_budget_zero_is_unlimited_and_counts(self):
         cwd = self.project({"expires": time.time() + 600, "budget": 0, "used": 7})
@@ -1497,26 +1477,22 @@ class R12(unittest.TestCase):
             pass  # the hook's crash fallback denies; either way the file is untouched
         self.assertEqual(victim.read_text(), "keep me\n", r)
 
-    def test_explorer_browser_output_stays_in_the_run_folder(self):
+    def test_explorer_browser_output_goes_anywhere_but_guarded_files(self):  # loosened: no run-folder rule
         cwd = self.project({"expires": time.time() + 600})
         out = os.path.join(cwd, "qa-out", "r1")
-        os.symlink(os.path.join(cwd, "src"), os.path.join(out, "evidence", "src"))
         mcp = lambda name, agent="qa-sdet:qa-explorer", **tin: self.call("mcp__playwright__" + name, cwd, agent, **tin)
-        for name, f in [("browser_take_screenshot", out + "/evidence/BUG-1.png"), ("browser_take_screenshot", out + "/.data/map-1.png"),
-                        ("browser_snapshot", out + "/.data/snapshot.md")]:
+        for name, f in [("browser_take_screenshot", out + "/evidence/BUG-1.png"), ("browser_snapshot", out + "/.data/snapshot.md"),
+                        ("browser_take_screenshot", cwd + "/src/a.png"), ("browser_take_screenshot", "shot.png"),
+                        ("browser_pdf_save", "/tmp/x.pdf"), ("browser_console_messages", cwd + "/console.txt")]:
             self.assertIsNone(mcp(name, filename=f), f)
-        for name, f in [("browser_take_screenshot", os.path.expanduser("~/.bashrc")), ("browser_take_screenshot", cwd + "/src/app.js"),
-                        ("browser_take_screenshot", out + "/REPORT.md"), ("browser_take_screenshot", "shot.png"),
-                        ("browser_snapshot", cwd + "/.git/hooks/pre-commit"), ("browser_pdf_save", "/tmp/x.pdf"),
-                        ("browser_take_screenshot", out + "/evidence/src/x.png"), ("browser_console_messages", cwd + "/package.json")]:
-            self.assertIsNotNone(mcp(name, filename=f), f)
-        self.assertIsNone(mcp("browser_take_screenshot", agent=None, filename="/tmp/x.png"))  # the main session's own runs
+        cfg, db = os.environ["QA_SDET_CONFIG"], os.path.join(g.DATA_DIR, "x.png")
+        for f in (cfg, db):
+            self.assertIsNotNone(mcp("browser_take_screenshot", filename=f), f)
         for cmd in [f"playwright-cli -s=qa screenshot --filename={out}/evidence/BUG-1.png", "playwright-cli -s=qa screenshot",
-                    f"playwright-cli -s=qa screenshot --filename=qa-out/r1/.data/map-2.png"]:
-            self.assertIsNone(self.call("Bash", cwd, command=cmd), cmd)
-        for cmd in ["playwright-cli -s=qa screenshot --filename=$HOME/.bashrc", "playwright-cli -s=qa snapshot --filename=.git/hooks/x",
                     "playwright-cli -s=qa screenshot --filename src/a.png", "playwright-cli -s=qa pdf --filename=/tmp/x.pdf",
                     "playwright-cli -s=qa video-start /tmp/v.webm"]:
+            self.assertIsNone(self.call("Bash", cwd, command=cmd), cmd)
+        for cmd in [f"playwright-cli -s=qa screenshot --filename={db}", f"D={g.DATA_DIR}; playwright-cli -s=qa pdf --filename=$D/x.pdf"]:
             self.assertIsNotNone(self.call("Bash", cwd, command=cmd), cmd)
 
     def test_uploads_never_send_secrets(self):
@@ -1539,9 +1515,8 @@ class R18(unittest.TestCase):
         cwd = self.project({"expires": time.time() + 600})
         for slug in ("zonas-señales", "api-v1.2-zones", "zones~new", "se%C3%B1ales", "init-crawl"):
             self.assertIsNone(self.call("Write", cwd, file_path=f"{cwd}/qa-out/r1/.data/run-{slug}.json", content="{}"), slug)
-        for bad in ("qa-out/r1/.data/x/run-a.json", "qa-out/r1/.data/run-a.json.error", "qa-out/r1/.data/run-.json",
-                    "qa-out/r1/evidence/run-a.json", "qa-out/.active"):
-            self.assertIsNotNone(self.call("Write", cwd, file_path=f"{cwd}/{bad}", content="{}"), bad)
+        for other in ("qa-out/r1/.data/x/run-a.json", "qa-out/r1/evidence/run-a.json", "qa-out/.active"):
+            self.assertIsNone(self.call("Write", cwd, file_path=f"{cwd}/{other}", content="{}"), other)  # loosened
 
     def test_mapper_grep_type_narrows_like_a_glob(self):
         cwd = self.project()
@@ -1600,7 +1575,8 @@ class R25(unittest.TestCase):
         now = time.time()
         late = self.project({"expires": now + 3600, "deadline": now - 5})
         spent = self.project({"expires": now + 3600, "budget": 2, "used": 2})
-        for cwd in (bare, late, spent):
+        self.assertIsNone(self.call("Bash", bare, command="playwright-cli -s=qa snapshot"))  # loosened: no marker, no stop
+        for cwd in (late, spent):
             r = self.call("Bash", cwd, command="playwright-cli -s=qa snapshot")
             self.assertIn("<out>/.data/run-<slug>.json", r, cwd)
             self.assertNotIn(" run.json", r)
@@ -1657,9 +1633,11 @@ class A2(unittest.TestCase):
         self.assertIsNotNone(d(tool_name="NotebookEdit", tool_input={"file_path": "/tmp/d.ipynb",
                                                                      "notebook_path": f"{prof}/x.ipynb"}))
         self.assertIsNotNone(d(tool_name="Write", agent_type="qa-sdet:qa-explorer", tool_input=["/srv/app/x.ts"]))
-        for at in ("qa-sdet:qa-explorer ", "QA-SDET:QA-EXPLORER", " qa-explorer"):
+        for at in ("qa-sdet:qa-explorer ", "QA-SDET:QA-EXPLORER", " qa-explorer"):  # still the explorer: the config is off limits
             self.assertIsNotNone(d(tool_name="Write", agent_type=at,
-                                   tool_input={"file_path": "/srv/app/src/index.ts", "content": "x"}), at)
+                                   tool_input={"file_path": os.environ["QA_SDET_CONFIG"], "content": "x"}), at)
+            self.assertIsNone(d(tool_name="Write", agent_type=at,
+                                tool_input={"file_path": "/srv/app/src/index.ts", "content": "x"}), at)  # loosened
         self.assertIsNone(d(tool_name="Read", tool_input={"file_path": os.path.join(TMP, "notes.txt")}))
 
     def test_unknown_launchers_ansi_c_quotes_and_more_shells(self):
@@ -1715,7 +1693,7 @@ class A2(unittest.TestCase):
             Path(proj, "qa-out").mkdir()
             for bad in ('"budget": Infinity', '"deadline": NaN', '"used": -1000, "budget": 10'):
                 Path(proj, "qa-out/.active").write_text('{"expires": %d, %s}' % (time.time() + 3600, bad))
-                self.assertIsNotNone(g.read_marker(proj)[2], bad)
+                self.assertEqual(g.read_marker(proj), (None, None), bad)  # loosened: malformed is no run, not an error
 
     def test_trap_strings_tool_names_in_caps_and_encoded_hosts(self):  # audit 3 r1
         for cmd in ["trap 'acli jira workitem create --summary x' EXIT", 'trap "playwright-cli -s=qa goto https://evil.com" INT',
@@ -1739,13 +1717,13 @@ class A2(unittest.TestCase):
             self.assertIsNone(g.check(cmd, TMP), cmd)
 
     def test_explorer_marker_in_a_variable_or_a_script_made_in_the_same_command(self):  # audit 3 r9
-        for cmd in ["X=qa-out/.active; rm $X", "cat > /tmp/qa-s.sh <<'EOF'\nrm qa-out/.active\nEOF\nbash /tmp/qa-s.sh",
-                    "echo 'echo {} > ~/.config/qa-sdet/config.json' > /tmp/qa-s2.sh; sh /tmp/qa-s2.sh",
-                    "printf 'import os\\nos.remove(\"qa-out/.active\")' > /tmp/qa-s3.py; python3 /tmp/qa-s3.py",
-                    f"python3 -c \"open('{_ENV['QA_SDET_CONFIG']}', 'w')\""]:
-            self.assertIsNotNone(g.check(cmd, TMP, explorer=True), cmd)
-        for cmd in ["X=qa-out/r/.data/map-1.png; rm $X", "cat qa-out/.active"]:
-            self.assertIsNone(g.check(cmd, TMP, explorer=True), cmd)
+        for cmd in ["echo 'echo {} > ~/.config/qa-sdet/config.json' > /tmp/qa-s2.sh; sh /tmp/qa-s2.sh",
+                    f"python3 -c \"open('{_ENV['QA_SDET_CONFIG']}', 'w')\"", f"X={_ENV['QA_SDET_CONFIG']}; rm $X"]:
+            self.assertIsNotNone(g.check(cmd, TMP, explorer=True), cmd)  # the config: still off limits
+        for cmd in ["X=qa-out/r/.data/map-1.png; rm $X", "cat qa-out/.active", "X=qa-out/.active; rm $X",
+                    "cat > /tmp/qa-s.sh <<'EOF'\nrm qa-out/.active\nEOF\nbash /tmp/qa-s.sh",
+                    "printf 'import os\\nos.remove(\"qa-out/.active\")' > /tmp/qa-s3.py; python3 /tmp/qa-s3.py"]:
+            self.assertIsNone(g.check(cmd, TMP, explorer=True), cmd)  # loosened: the marker isn't guarded
 
     def test_route_options_before_the_verb_delete_data_and_mcp_header_options(self):  # audit 3 r10
         for cmd in ["playwright-cli -s=qa --status 500 route '**'", "playwright-cli -s=qa --body x --content-type text/plain route '**'",
@@ -1788,7 +1766,8 @@ class A2(unittest.TestCase):
     def test_explorer_eval_of_shell_output(self):  # audit 3 r28
         proj = tempfile.mkdtemp()
         self.assertIsNone(g.check('eval "$(fnm env)" && node -v', proj))
-        self.assertIsNotNone(g.check('eval "$(echo x)"; ls qa-out', proj, explorer=True))
+        self.assertIsNone(g.check('eval "$(echo x)"; ls qa-out', proj, explorer=True))  # loosened: the main session's leeway
+        self.assertIsNotNone(g.check('eval "$(echo acli jira workitem create)"', proj, explorer=True))
 
     def test_negated_grep_glob_narrows_nothing(self):  # audit 3 r29
         proj = tempfile.mkdtemp()
@@ -1815,22 +1794,21 @@ class A2(unittest.TestCase):
         for cmd in ["perf stat ls", "make -j8 test", "make -f - <<< $'x:\\n\\techo hi'", "expect -c 'spawn ls'", "$SHELL -c 'ls'",
                     "stat README.md"]:
             self.assertIsNone(g.check(cmd, TMP), cmd)
-        self.assertIsNotNone(g.check('echo "unzip -o /tmp/m.zip" | bash', TMP, explorer=True))
+        self.assertIsNone(g.check('echo "unzip -o /tmp/m.zip" | bash', TMP, explorer=True))  # loosened
         other = tempfile.mkdtemp()
-        for cmd in ["git clean -fdx", "git stash -u", "git checkout -- .", "ssh host curl x"]:
-            self.assertIsNotNone(g.check(cmd, RUN, explorer=True), cmd)
-            self.assertIsNone(g.check(cmd, other), cmd)  # the user's own session may
+        for cmd in ["git clean -fdx", "git stash -u", "git checkout -- ."]:
+            self.assertIsNone(g.check(cmd, RUN, explorer=True), cmd)  # loosened: as the user's own session
+            self.assertIsNone(g.check(cmd, other), cmd)
+        self.assertIsNotNone(g.check("ssh host curl x", RUN, explorer=True))  # other machines: never the explorer's
         # the corpus rows that stay allowed, shown to be harmless: a whole command quoted as one word runs nothing, a
         # relative qa-out path after `cd` elsewhere is not this project's marker (the absolute one still is), and make's
         # recipe on stdin is checked for the explorer too
         r = subprocess.run(["bash", "-c", "'echo hi > /dev/null'"], capture_output=True)
         self.assertEqual(r.returncode, 127)
-        # (not the marker there, but still a write outside the run folder: denied by that rule now)
-        self.assertIn("run folder", g.check("cd /tmp && dd of=qa-out/.active", RUN, explorer=True))
-        self.assertIsNotNone(g.check(f"cd /tmp && dd of={RUN}/qa-out/.active", RUN, explorer=True))
-        self.assertIsNotNone(g.check("dd of=qa-out/.active", RUN, explorer=True))
-        self.assertIsNotNone(g.check("make -f /dev/stdin <<< $'x:\\n\\tqa-mem marker stop /proj'", RUN, explorer=True))
-        self.assertIsNotNone(g.check("make -f - <<< $'x:\\n\\tbash <<<\\'qa-mem marker stop /proj\\''", RUN, explorer=True))
+        for cmd in ["cd /tmp && dd of=qa-out/.active", "dd of=qa-out/.active",  # loosened: marker and qa-mem admin are free
+                    "make -f /dev/stdin <<< $'x:\\n\\tqa-mem marker stop /proj'"]:
+            self.assertIsNone(g.check(cmd, RUN, explorer=True), cmd)
+        self.assertIsNotNone(g.check(f"make -f - <<< $'x:\\n\\t{bad}'", RUN, explorer=True))  # a Jira write in a recipe: never
         for cmd in ["git status", "git log -3", "echo hi | bash", f"playwright-cli -s=qa screenshot --filename={RUN}/qa-out/r/evidence/BUG-1.png"]:
             self.assertIsNone(g.check(cmd, RUN, explorer=True), cmd)
         self.assertIsNone(g.check("echo 'ls -la' | bash", TMP))
@@ -1855,7 +1833,7 @@ class A2(unittest.TestCase):
         Path(proj, "qa-out", ".active").write_text(json.dumps({"expires": time.time() + 3600}))
         for cmd in ["git -C . clean -fdx", "git -c user.name=x commit -am x", "echo pwned > src.ts", "sed -i s/a/b/ src.ts",
                     "rm -rf src", "playwright-cli -s=qa console > /tmp/qa-c.log", "cat > new.ts <<'EOF'\nx\nEOF", "touch $UNSET_DIR/x"]:
-            no(g.check(cmd, proj, explorer=True), cmd)
+            ok(g.check(cmd, proj, explorer=True), cmd)  # loosened: the explorer writes like the main session
         for cmd in ["git -C . status", "ls > /dev/null 2>&1", "playwright-cli -s=qa console > qa-out/r/.data/console.txt",
                     "rm qa-out/r/.data/map-1.png", "mkdir -p qa-out/r/evidence", "sed -n 1,5p src.ts", "grep -c x src.ts"]:
             ok(g.check(cmd, proj, explorer=True), cmd)
@@ -1898,17 +1876,17 @@ class A2(unittest.TestCase):
         ex = lambda cmd: g.check(cmd, proj, explorer=True)
         # 1. ${X:-default} with X assigned in the command
         no(g.check(f"X={data}; rm -rf ${{X:-/tmp/none}}", TMP))
-        no(ex("M=qa-out/.active; rm ${M:-qa-out/r/zzz}"))
-        no(ex("F=src/a.ts; echo x >> ${F:-qa-out/r/x}"))
+        ok(ex("M=qa-out/.active; rm ${M:-qa-out/r/zzz}"))  # loosened: the marker and the project aren't guarded
+        ok(ex("F=src/a.ts; echo x >> ${F:-qa-out/r/x}"))
         # 2. quoted absolute paths with a space
         for cmd in [f"rm '{proj}/qa-out/.active'", f"echo '{{}}' > '{proj}/qa-out/.active'"]:
-            no(ex(cmd), cmd)
+            ok(ex(cmd), cmd)
         ok(ex(f"cat '{proj}/qa-out/r/bugs/BUG-1.md'"))
         # 3/8. writes and deletes outside qa-out by other routes; option values are not files
         for cmd in ["find . -name '*.ts' | xargs rm -f", "git ls-files -z | xargs -0 rm -f", "find src -type f -delete",
                     "sort -o src/a.ts src/a.ts", "tar xf qa-out/r/.data/a.tar -C src", "unzip -o qa-out/r/.data/a.zip -d src",
                     "tar czf /tmp/qa-x.tgz src", "awk -i inplace '{print}' src/a.ts", "echo x > /dev/shm/qa-x", "cp qa-out/r/.data/x /dev/shm/"]:
-            no(ex(cmd), cmd)
+            ok(ex(cmd), cmd)  # loosened
         for cmd in ["chmod 644 qa-out/r/bugs/BUG-1.md", "truncate -s 0 qa-out/r/.data/x", "touch -d yesterday qa-out/r/.data/x",
                     "echo done >/dev/stderr", "ls > /dev/null", "find qa-out/r/.data -name '*.tmp' -delete", "sort qa-out/r/.data/x"]:
             ok(ex(cmd), cmd)
@@ -1921,7 +1899,7 @@ class A2(unittest.TestCase):
         # 6. git: read-only commands only
         for cmd in ["git checkout-index -a -f", "git branch -D main", "git tag -d v1", "git update-ref -d HEAD",
                     "git submodule update", "git -c alias.x='!rm -rf src' x", "git diff --output=src/a.ts"]:
-            no(ex(cmd), cmd)
+            ok(ex(cmd), cmd)  # loosened: any git, as the main session
         for cmd in ["git stash list", "git config --get user.name", "git worktree list", "git branch", "git log -3", "git diff"]:
             ok(ex(cmd), cmd)
         # 7. a qa-mem path given to a file tool is a file
@@ -1953,7 +1931,7 @@ class A2(unittest.TestCase):
         ex = lambda cmd: g.check(cmd, proj, explorer=True)
         # 1. option values are per tool
         for cmd in ["rm -r src", "rm -d src", "install -d /tmp/qa-newdir", "touch -m src/a.ts"]:
-            no(ex(cmd), cmd)
+            ok(ex(cmd), cmd)  # loosened: the explorer writes like the main session
         ok(ex("truncate -s 0 qa-out/r/.data/x"))
         # 2. $'\\0' no longer crashes the check
         no(g.check(f"find . -print0 | while IFS= read -r -d $'\\0' f; do echo \"$f\"; done; rm -rf {data}", TMP))
@@ -1973,7 +1951,7 @@ class A2(unittest.TestCase):
         png = f"{proj}/qa-out/r/evidence/BUG-1.png"
         ok(ex(f"playwright-cli -s=qa screenshot --filename='{png}'"))
         ok(ex(f"qa-mem annotate '{png}' --box 1,2,3,4 --label 'x'"))
-        no(ex("playwright-cli -s=qa screenshot --filename=/tmp/qa-*/x.png"))
+        ok(ex("playwright-cli -s=qa screenshot --filename=/tmp/qa-*/x.png"))  # loosened: output anywhere
         # 6. a commit message from a heredoc may mention the folders
         ok(g.check('git commit -m "$(cat <<\'EOF\'\ndocs: sign out by deleting ~/.local/share/qa-sdet/profiles/\nEOF\n)"', base))
         # 7. minor false denials
@@ -2020,7 +1998,7 @@ class A2(unittest.TestCase):
                     f"echo '[]' > '{proj}/qa-out/.inbox.json'", f"cp '{out}/.data/x.json' '{proj}/qa-out/init/code-map-frontend.json'",
                     f"rm -rf '{proj}/qa-out/other-run'", f"rm -rf '{out}'", "chmod --reference src/a.ts src/b.ts",
                     "chown --reference=src/a.ts src/b.ts"]:
-            no(ex(cmd), cmd)
+            ok(ex(cmd), cmd)  # loosened: the explorer writes like the main session
         for cmd in [f"playwright-cli -s=qa console > '{out}/.data/console.txt'", f"rm -f '{out}/.data/map-1.png'", f"mkdir -p '{out}/evidence'",
                     f"OUT='{out}'; playwright-cli -s=qa screenshot --filename=\"${{OUT}}/evidence/BUG-1.png\"",
                     f"OUT='{out}'; qa-mem annotate \"${{OUT}}/evidence/BUG-1.png\" --box 1,2,3,4 --label x"]:
@@ -2046,7 +2024,7 @@ class A2(unittest.TestCase):
         for cmd in ["chrt 0 bash -c 'acli jira workitem create --summary x'", "firejail bash <<< 'acli jira workitem create --summary x'",
                     "echo 'acli jira workitem create --summary x' | bash"]:
             no(g.check(cmd, base), cmd)
-        no(g.check("chrt -i 0 bash <<<'qa-mem marker stop /proj'", base, explorer=True))
+        ok(g.check("chrt -i 0 bash <<<'qa-mem marker stop /proj'", base, explorer=True))  # loosened: qa-mem admin is its own too
         # 4. `$HOME` and a variable set in the command in a sourced path; a file that isn't there runs nothing
         env = dict(os.environ, HOME=base)
         Path(base, ".bashrc").write_text("export A=1\n")
@@ -2065,8 +2043,8 @@ class A2(unittest.TestCase):
         out = f"{proj}/qa-out/r"
         ok(g.check(f"mkdir -p {out}/{{bugs,repro,evidence,.data}}", proj, explorer=True))
         ok(g.check(f"mkdir -p '{out}'", proj, explorer=True))
-        no(g.check(f"mkdir -p {out}/{{bugs,../../src}}", proj, explorer=True))
-        no(g.check(f"rm -rf '{out}'", proj, explorer=True))
+        ok(g.check(f"mkdir -p {out}/{{bugs,../../src}}", proj, explorer=True))  # loosened
+        ok(g.check(f"rm -rf '{out}'", proj, explorer=True))
 
     def test_sixth_pass_findings(self):  # audit 3: sixth independent pass (regressions from the fifth-pass fixes)
         ok, no = self.assertIsNone, self.assertIsNotNone
@@ -2076,10 +2054,10 @@ class A2(unittest.TestCase):
         Path(proj, "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600}))
         out = f"{proj}/qa-out/r"
         # 1. the explorer writing a script and running it in the same command: the file isn't there yet, so it can't be read
+        no(g.check("""echo 'import os; os.system("acli jira workitem create --summary x")' > z.py && python3 z.py""", proj, explorer=True))
         for cmd in [f"cat > {out}/.data/x.py <<'EOF'\nimport os\nos.system('qa-mem marker stop .')\nEOF\npython3 {out}/.data/x.py",
-                    """echo 'import os; os.system("acli jira workitem create --summary x")' > z.py && python3 z.py""",
                     f"python3 -c \"open('{out}/.data/x.sh','w').write(chr(113)+'a-mem marker stop .')\"; bash {out}/.data/x.sh"]:
-            no(g.check(cmd, proj, explorer=True), cmd)
+            ok(g.check(cmd, proj, explorer=True), cmd)  # loosened: qa-mem admin is its own too
         Path(out, ".data/ok.py").write_text("print(1)\n")
         ok(g.check(f"python3 {out}/.data/ok.py", proj, explorer=True))
         # 2. a shell behind an unknown launcher reading its script from a pipe or a heredoc
@@ -2088,7 +2066,7 @@ class A2(unittest.TestCase):
                     "chrt 0 sh -s <<'EOF'\nacli jira workitem create --summary x\nEOF",
                     "chrt 0 bash <<'EOF'\nacli jira workitem create --summary x\nEOF"]:
             no(g.check(cmd, base), cmd)
-        no(g.check("chrt 0 bash <<'EOF'\nqa-mem marker stop .\nEOF", proj, explorer=True))
+        ok(g.check("chrt 0 bash <<'EOF'\nqa-mem marker stop .\nEOF", proj, explorer=True))  # loosened
         for cmd in ["brew install bash && qa-mem doctor", "chrt 0 bash <<'EOF'\necho hi\nEOF\nqa-mem doctor"]:
             ok(g.check(cmd, base), cmd)
 
@@ -2190,10 +2168,13 @@ class A2(unittest.TestCase):
         for sub in ("bugs", "evidence"):
             (out / sub).mkdir(parents=True, exist_ok=True)
         bug, shot = out / "bugs/BUG-1.md", out / "evidence/TC-1.png"
-        for cmd in [f"echo {{}} > ${{X:-{g.CONFIG}}} # X={bug}", f"rm ${{X:-{RUN}/qa-out/.active}} # X={bug}",
-                    f"echo x > ${{X:-{RUN}/README.md}} # X+={bug}", f"echo x > ${{X:={RUN}/README.md}} # X={bug}",
-                    f"playwright-cli -s=qa screenshot --filename=${{X:-/tmp/evil.png}} # X={shot}",
-                    f"X={bug}; echo x > ${{X:+{RUN}/README.md}}"]:  # X is set: the shell writes README.md
+        no(g.check(f"echo {{}} > ${{X:-{g.CONFIG}}} # X={bug}", RUN, explorer=True))  # the explorer and the config
+        no(g.check(f"X=1; echo {{}} > ${{X:+{g.CONFIG}}}", RUN, explorer=True))  # X is set: the shell writes the config
+        sess = os.path.join(os.path.dirname(os.environ["QA_SDET_CONFIG"]), "qa-state.json")
+        for cmd in [f"cat ${{X:-{sess}}} # X={bug}", f"rm -rf ${{X:-{g.DATA_DIR}}} # X+=/tmp/qa-x",
+                    f"cat ${{X:={sess}}} # X={bug}", f"X={bug}; cat ${{X:+{sess}}}",  # X is set: the shell reads the session
+                    f"playwright-cli -s=qa screenshot --filename=${{X:-{g.DATA_DIR}/x.png}} # X={shot}"]:
+            no(g.check(cmd, RUN), cmd)
             no(g.check(cmd, RUN, explorer=True), cmd)
         no(g.check(f"playwright-cli -s=qa open --profile=${{P:-/tmp/evil}} # P={sorted(g.main_profiles())[0]}", RUN))
         ok(g.check(f"X={shot}; playwright-cli -s=qa screenshot --filename=$X", RUN, explorer=True))
@@ -2216,6 +2197,106 @@ class A2(unittest.TestCase):
         with mock.patch.object(g, "DATA_DIR", home + "/.local/share/qa-sdet"):
             self.assertTrue(g.mentions_data_dir("rm -rf ~/.local/share/qa-sdet"))
             self.assertFalse(g.mentions_data_dir("rm -rf ~/.local/share/other"))
+
+
+class Loosened(unittest.TestCase):
+    """The loosened guard: what stopped runs passes, the hard lines (Jira writes, other hosts, session secrets, the
+    config) still hold for every agent, checked calls are approved, and every denial is logged."""
+
+    def hook(self, d, script="pretooluse.py", project=""):
+        return subprocess.run([sys.executable, str(ROOT / "hooks" / script)], capture_output=True, text=True,
+                              input=json.dumps(d), env={**os.environ, **_ENV, "CLAUDE_PROJECT_DIR": project}).stdout
+
+    def test_former_stops_now_pass(self):
+        import shlex
+        for js in ["document.body.innerHTML.length", "document.body.innerHTML", "document.cookie.length",
+                   "Object.keys(localStorage)", "document.body.innerText.includes('cookie')",
+                   "[...document.querySelectorAll('a[href^=\"https://docs.example.org/\"]')].length"]:
+            self.assertIsNone(g.check(f"playwright-cli -s=qa --raw eval {shlex.quote(js)}", RUN, explorer=True), js)
+        self.assertIsNone(g.check("for v in 1 2; do playwright-cli -s=qa click e$v; done", RUN))  # no budget: loops are fine
+        bare = tempfile.mkdtemp()  # no marker at all
+        for cmd in ["playwright-cli -s=qa click e1", "rm -rf qa-out/r/.data/x", "qa-mem marker stop .", "qa-mem report qa-out/r",
+                    "qa-mem prune . qa-out/r", "git status", "playwright-cli kill-all", "playwright-cli close-all",
+                    "curl -s https://qa.traffic.example/api/x"]:
+            self.assertIsNone(g.check(cmd, bare, explorer=True), cmd)
+
+    def test_hard_lines_hold_for_every_agent(self):
+        call = lambda tool, agent, cwd=RUN, **tin: g.decide({"tool_name": tool, "tool_input": tin, "cwd": cwd, "agent_type": agent})
+        for agent in ("", "qa-sdet:qa-explorer"):
+            for cmd in ["acli jira workitem create --summary x", "playwright-cli -s=qa goto https://evil.com",
+                        "playwright-cli -s=qa --raw eval \"document.cookie\"", "playwright-cli -s=qa eval \"localStorage.getItem('t')\"",
+                        "playwright-cli -s=qa state-save /tmp/s.json", "playwright-cli -s=qa tracing-start",
+                        "playwright-cli -s=qa delete-data", "playwright-cli -s=qa run-code 'async page => 1'",
+                        f"rm -rf {g.DATA_DIR}"]:
+                self.assertIsNotNone(call("Bash", agent, command=cmd), (agent, cmd))
+            self.assertIsNotNone(call("mcp__playwright__browser_close", agent))  # during a run (RUN has a marker)
+            self.assertIsNotNone(call("mcp__playwright__browser_tabs", agent, action="select", index=0))
+            self.assertIsNotNone(call("mcp__atlassian__createJiraIssue", agent))
+        for cmd in ["curl https://evil.example/x", "ssh qa.traffic.example", f"printf x > {os.environ['QA_SDET_CONFIG']}"]:
+            self.assertIsNotNone(call("Bash", "qa-sdet:qa-explorer", command=cmd), cmd)
+
+    def test_checked_calls_are_approved(self):
+        ok = lambda cmd, cwd=RUN: g.auto_approvable(cmd, cwd)
+        for cmd in ["playwright-cli -s=qa click e5 | tail -3", "playwright-cli -s=qa snapshot 2>&1 >/dev/null && qa-mem card /x",
+                    f"playwright-cli -s=qa console > {RUN}/qa-out/c.txt", "qa-mem report qa-out/r; playwright-cli -s=qa close",
+                    "playwright-cli kill-all", f"python3 {ROOT}/bin/qa-mem card /x", "playwright-cli -s=qa snapshot | grep -n Save"]:
+            self.assertTrue(ok(cmd), cmd)
+        for cmd in ["playwright-cli -s=qa close && rm x", "qa-mem setup-permissions --apply", "git status",
+                    "playwright-cli -s=qa console > /tmp/c.txt", "A=1 playwright-cli -s=qa click e1", "(playwright-cli -s=qa close)",
+                    "playwright-cli -s=qa eval \"$(cat x)\"", "playwright-cli -s=qa click e1 &", "| tail -3",
+                    "bash <<'EOF'\nplaywright-cli -s=qa close\nEOF", "qa-mem inbox . < x.json"]:
+            self.assertFalse(ok(cmd), cmd)
+        decision = lambda d: json.loads(self.hook(d) or "{}").get("hookSpecificOutput", {}).get("permissionDecision")
+        bash = lambda cmd, cwd=RUN, **kw: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": cwd, **kw}
+        self.assertEqual(decision(bash("playwright-cli -s=qa click e5 | tail -3")), "allow")
+        self.assertEqual(decision(bash("playwright-cli -s=qa goto https://evil.com | tail -3")), "deny")  # checks come first
+        self.assertIsNone(decision(bash("git status")))  # not ours: Claude Code decides
+        # MCP browser calls: approved when the browser rules ran (the explorer, or a run), not the user's everyday browser
+        snap = {"tool_name": "mcp__playwright__browser_snapshot", "tool_input": {}}
+        self.assertTrue(g.auto_approve({**snap, "cwd": RUN}))
+        self.assertFalse(g.auto_approve({**snap, "cwd": TMP}))
+        self.assertTrue(g.auto_approve({**snap, "cwd": TMP, "agent_type": "qa-sdet:qa-explorer"}))
+
+    def test_denials_are_logged_masked_and_capped(self):
+        proj = tempfile.mkdtemp()
+        cmd = "curl -H 'Authorization: Bearer abc.def' 'https://u:pw123@x.example/?token=s3cr3t' && acli jira workitem create"
+        self.assertIn("deny", self.hook({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": proj,
+                                         "agent_type": "qa-sdet:qa-explorer"}, project=proj))
+        log = Path(proj, "qa-out/guard-denials.log")
+        when, layer, agent, reason, call = log.read_text().rstrip("\n").split("\t")
+        self.assertEqual((layer, agent), ("guard", "qa-explorer"))
+        self.assertIn("curl to non-allowlisted host", reason)
+        for secret in ("abc.def", "pw123", "s3cr3t"):
+            self.assertNotIn(secret, call)
+            self.assertNotIn(secret, reason)  # a reason that quotes the URL is masked too
+        log.write_text("x\n" * 120000)  # past the cap
+        g.log_denial({"tool_name": "Bash", "tool_input": {"command": "x"}, "cwd": proj}, "again")
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), g.DENIAL_LOG_LINES)
+        self.assertIn("again", lines[-1])
+        other = tempfile.mkdtemp()  # no project named and no qa-out there: nothing is created
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": ""}):
+            g.log_denial({"tool_name": "Bash", "tool_input": {"command": "x"}, "cwd": other}, "x")
+            g.log_denial({"tool_name": "Bash", "tool_input": {"command": "x"}, "cwd": "/proc/1/nope"}, "x")  # never raises
+        self.assertFalse(Path(other, "qa-out").exists())
+        victim = Path(tempfile.mkdtemp(), "bashrc")
+        victim.write_text("keep\n")
+        log.unlink()
+        os.symlink(victim, log)  # a planted link is not written through
+        g.log_denial({"tool_name": "Bash", "tool_input": {"command": "x"}, "cwd": proj}, "x")
+        self.assertEqual(victim.read_text(), "keep\n")
+
+    def test_claude_code_denials_are_logged_when_they_concern_qa_sdet(self):
+        proj, other = tempfile.mkdtemp(), tempfile.mkdtemp()
+        denied = lambda cmd, cwd, **kw: {"hook_event_name": "PermissionDenied", "tool_name": "Bash", "cwd": cwd,
+                                         "tool_input": {"command": cmd}, "reason": "[Irreversible Local Destruction]", **kw}
+        self.hook(denied("playwright-cli -s=qa close", proj), "denied.py", project=proj)
+        line = Path(proj, "qa-out/guard-denials.log").read_text()
+        self.assertIn("\tclaude-code\tmain\t[Irreversible Local Destruction]\tplaywright-cli -s=qa close", line)
+        self.hook(denied("rm -rf /tmp/build", other), "denied.py", project=other)  # not ours: no qa-out made there
+        self.assertFalse(Path(other, "qa-out").exists())
+        self.hook(denied("rm -rf /tmp/build", other, agent_type="qa-sdet:qa-explorer"), "denied.py", project=other)
+        self.assertIn("\tqa-explorer\t", Path(other, "qa-out/guard-denials.log").read_text())
 
 
 if __name__ == "__main__":

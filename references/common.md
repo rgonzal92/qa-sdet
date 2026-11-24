@@ -38,8 +38,8 @@ Route slug = route without the leading `/` and file extension; other `/` become 
 ## C4. Run marker (enforced by the guard hook)
 Before each explorer: `qa-mem marker start '<project>' [--budget N] [--minutes M] [--faults]`, passing only the flags the user gave. Without `--budget`/`--minutes` the run has no command or time limit: it goes until the explorer is done. Both apply per explorer: per route in qa-explore and qa-ticket, to the whole crawl in qa-init `--crawl` (one explorer). `--minutes` is at most 480 (the marker lasts 8 h; a larger value exits 2): if the user gave more, pass 480 and say so.
 While the marker exists the guard counts every playwright-cli command and Playwright MCP `browser_*` call, denies commands past a set budget or deadline (`close` always works), and allows `route`/`network-state-set` only with `--faults`.
-After each explorer, also on errors: with `browser=cli`, `playwright-cli -s=qa close` (the explorer closes it too, but in auto mode a sub-agent's command can be denied: allow rules don't apply to sub-agents), then `qa-mem marker stop '<project>'`.
-When the skill run ends: `qa-mem prune '<project>'` (drops page snapshots older than 7 days; they hold page data and pile up).
+After each explorer, also on errors: with `browser=cli`, `playwright-cli -s=qa close` (the explorer closes it too; this is the backup when it couldn't), and if `close` hangs, `playwright-cli kill-all` (it ends only Playwright's browsers), then `qa-mem marker stop '<project>'`.
+After the last report of the run: `qa-mem prune '<project>' '<run>'` (drops this run's temp files: its page snapshots, `.data/snapshot*.md` and map screenshots, and snapshots older than 7 days; they hold page data and pile up). Evidence, drafts, repro specs and the JSON files stay.
 
 ## C5. Card
 Run `qa-mem card <route>` and keep its printed output verbatim to pass on. Its `FROM CODE` block (after `/qa-sdet:qa-init`) holds hints from the source: locators to try, rules for boundary ideas, endpoints; never requirements.

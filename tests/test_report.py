@@ -236,8 +236,8 @@ class Marker(Base):
         guard = SourceFileLoader("guard_r7", str(ROOT / "hooks/guard.py")).load_module()
         cli("marker", "start", str(self.proj), "--minutes", "480", "--budget", "0")
         with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=""):
-            path, marker, error = guard.read_marker(str(self.proj))
-        self.assertEqual((error, marker["budget"]), (None, 0))
+            path, marker = guard.read_marker(str(self.proj))
+        self.assertEqual(marker["budget"], 0)  # read as a run (a malformed one would be no run at all)
         code, _, err = cli("marker", "start", str(self.proj), "--minutes", "5000")
         self.assertEqual(code, 2)
         self.assertIn("at most 480", err)
@@ -330,6 +330,24 @@ class Prune(Base):
         self.assertEqual(sorted(p.name for p in cli_dir.iterdir()), ["link", "new.yml"])
         self.assertTrue(outside.exists())
         self.assertEqual(cli("prune", str(self.t / "empty"))[0], 0)  # nothing there: fine
+        # with the run folder: this run's temp files go, what the report needs stays
+        d = self.proj / "qa-out" / "2026-11-24-r"
+        for rel in (".data/plan.json", ".data/run-form.json", ".data/snapshot.md", ".data/map-1.png", "evidence/TC-1.png",
+                    "bugs/BUG-1.md", "repro/BUG-1.spec.ts", "REPORT.md"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text("x")
+        start = time.time() - 600
+        os.utime(d / ".data/plan.json", (start, start))  # the run began here
+        before = time.time() - 3600
+        os.utime(cli_dir / "new.yml", (before, before))  # a snapshot from an earlier run
+        (cli_dir / "during.yml").write_text("x")
+        code, out, _ = cli("prune", str(self.proj), str(d))
+        self.assertEqual((code, out.strip()), (0, "pruned 3 snapshot and temp files of this run"))
+        self.assertEqual(sorted(p.name for p in cli_dir.iterdir()), ["link", "new.yml"])
+        self.assertEqual(sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()),
+                         [".data/plan.json", ".data/run-form.json", "REPORT.md", "bugs/BUG-1.md", "evidence/TC-1.png",
+                          "repro/BUG-1.spec.ts"])
+        self.assertEqual(cli("prune", str(self.proj), str(self.t))[0], 2)  # not a run folder
 
 
 def white_png(w, h):

@@ -136,14 +136,17 @@ REDIRECT_RE = re.compile(r"^(\d*)(>>?|<<?<?)(.*)$", re.S)
 GUARDED_TOOLS_RE = re.compile(r"(?<![.\w])playwright-cli|@playwright/cli|\bacli\b|(?<![\w.-])qa-mem(?![\w-])")  # not .playwright-cli/
 POS_PARAM_RE = _LazyRe(r"^\$(\{?[@*]\}?|\{?[1-9]\}?)$")  # exactly "$@", $1: a wrapper passing its args through ('$100' is data)
 SCHEMELESS_URL_RE = _LazyRe(r"[\"'`(]\s*//([a-z0-9][a-z0-9.-]*)", re.I)  # '//host/path' in JS
-PAGE_DUMP_RE = _LazyRe(r"(documentElement|document\.body|document\.head|\bdocument)\s*\.\s*(outer|inner)HTML"
-                          r"|XMLSerializer|document\.scripts|querySelectorAll\(\s*['\"`]script")
 NOT_A_PATH_RE = re.compile(r"[\s()'\"=;`|<>]")  # page JS/CSS in an argument, not a file path
 CODE_TEXT_RE = _LazyRe(r"[()'\"=;`|<>\n]")  # like NOT_A_PATH_RE, but a path may hold spaces ('/home/me/my proj/.env')
 GLOB_RE = re.compile(r"[*?\[{]")
 NET_CLIS = {"curl", "wget", "http", "https", "xh", "httpie", "nc", "ncat", "netcat", "telnet", "socat", "aria2c", "ssh", "scp",
             "sftp", "ftp",
             "lynx", "w3m", "links", "elinks"}
+HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh", "httpie", "aria2c"}  # the explorer may fetch from allowedHosts
+# their options that send the request elsewhere, or read URLs or options from a file the guard doesn't see
+HTTP_REROUTE_OPTS = {"-x", "--proxy", "--preproxy", "--resolve", "--connect-to", "--doh-url", "-K", "--config",
+                     "--unix-socket", "--abstract-unix-socket"}
+WGET_FILE_OPTS = {"-i", "--input-file", "-e", "--execute"}  # wget only (curl -i/-e: headers, referer)
 GREP_TOOLS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "zgrep"}
 ARCHIVERS = {"tar", "bsdtar", "zip", "7z", "7za", "rsync", "rclone", "cpio", "pax"}
 COPY_TOOLS = {"cp", "mv", "rsync", "scp", "install", "ln"}
@@ -171,7 +174,6 @@ LIST_READER_OPTS = {"-T", "--files-from", "-@", "--names-stdin"}  # tar -T -, rs
 STDIN_SCRIPT_TOOLS = {"sqlite3", "duckdb", "awk", "gawk", "mawk", "nawk", "busybox", "ed", "ex"}
 CODE_TEXT_OK = {"git", "gh"}  # commit messages / PR bodies that mention the profile folder
 PY_VALUE_OPTS = {"-W", "-X", "-Q", "--check-hash-based-pycs"}
-QAMEM_EXPLORER_OK = {"card", "hash", "code", "search", "annotate", "browser-open"}
 QAMEM_VALUE_OPTS = {"browser-open": {"--session"}, "annotate": {"--box", "--label"}}  # as qa-mem parses them
 # Other places playwright-cli takes its browser from (playwright-core resolveCLIConfigForCLI / configFromEnv):
 # env vars, a config file (--config, ./.playwright/cli.config.json, ~/.playwright/cli.config.json), a real browser.
@@ -181,24 +183,21 @@ EXPORTERS = {"export", "declare", "typeset", "readonly", "local"}
 PW_SOURCE_OPTS = {"--config", "--extension", "--cdp", "--endpoint"}  # a config file or someone else's browser
 CLI_CONFIG_RE = _LazyRe(r"cli\.config\.json")
 QAMEM_RUNNERS = {"uv", "uvx", "poetry", "pipx", "pdm", "hatch", "rye", "conda", "mamba", "micromamba", "pixi"}
-# The explorer always runs under its skill's marker; without one (deleted, moved, expired) its budget, deadline
-# and faults setting would be gone, so its browser commands stop.
-NO_RUN = ("no active run marker (<project>/qa-out/.active is missing or expired): the explorer's browser commands "
-          "run only inside the calling skill's run; close the browser, write <out>/.data/run-<slug>.json (out = <project>/qa-out/<run>) and return to the caller")
-MARKER_CODE_RE = _LazyRe(r"(?<![\w-])\.active(?:\.lock)?\b|\.config/+qa-sdet|qa-sdet/+config\.json|QA_SDET_CONFIG|"
+# The config holds allowedHosts, the browser's trust root: the explorer (it reads app pages) never changes it.
+CONFIG_CODE_RE = _LazyRe(r"\.config/+qa-sdet|qa-sdet/+config\.json|QA_SDET_CONFIG|"
                             + re.escape(str(CONFIG)))  # the config where QA_SDET_CONFIG puts it, too
-QAMEM_NAME_OK = {"test", "[", "[[", "which", "type", "whereis"}  # the explorer may check qa-mem exists, nothing that prints or copies it
+CONFIG_REASON = ("the qa-sdet config holds allowedHosts, the browser's allowlist: read it if you like, but leave it "
+                 "unchanged and carry on testing")
+# run from code or a script the explorer wrote, their hosts and Jira writes can't be checked
+HARD_TOOL_RE = _LazyRe(r"(?<![.\w])playwright-cli|@playwright/cli|\bacli\b")
 
 
 class Ctx:
     """State for one tool call: the active run marker and what the command would spend."""
     def __init__(self, cwd, explorer=False):
-        self.explorer = explorer  # the qa-explorer subagent: observes the app through the browser only
-        self.marker_path, self.marker, self.marker_error = read_marker(cwd)
-        self.marker_files = {realpath(os.path.join(b, "qa-out", ".active"))
-                             for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
-        self.marker_files |= {m + ".lock" for m in self.marker_files}
-        self.marker_files.add(realpath(CONFIG))  # the explorer leaves the allowlist alone too
+        self.explorer = explorer  # the qa-explorer subagent: the main agent's rules, and it leaves the config alone
+        self.marker_path, self.marker = read_marker(cwd)
+        self.config_files = {realpath(CONFIG)}
         self.spend = 0
         self.raw = ""
         self.loop = False  # a playwright-cli call runs inside a loop / xargs / watch: can't be counted
@@ -585,7 +584,8 @@ def _touches_db(path, cwds, parent_counts):
 # ---------- run marker and budget ----------
 
 def read_marker(cwd):
-    """(path, marker, error) of the active run. An expired marker counts as no run; a malformed one is an error."""
+    """(path, marker) of the active run, or (None, None). An expired or malformed marker counts as no run: nothing is
+    counted or limited, and nothing stops because of it."""
     for base in dict.fromkeys(filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))):
         path = Path(base) / "qa-out" / ".active"
         if not path.exists():
@@ -603,11 +603,11 @@ def read_marker(cwd):
                     raise ValueError(f"{key} must be a number of 0 or more")
             if marker.get("faults") not in (None, True, False):
                 raise ValueError("faults must be true or false")
-        except (OSError, ValueError, TypeError, KeyError) as e:
-            return path, None, f"{path} is malformed ({e}); rewrite it per common.md C4"
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
         if expires > time.time():
-            return path, marker, None
-    return None, None, None
+            return path, marker
+    return None, None
 
 
 def spend_budget(path, n, explorer=False):
@@ -1013,10 +1013,7 @@ def check_pw(rest, hosts, cwds, ctx, via_loop):
         binds += [rest[k + 1] for k, a in enumerate(rest[:-1]) if a == "--host"]
         if any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in binds):
             return "playwright-cli show --host would expose the logged-in QA browser to the network; keep it on localhost"
-    if ctx.explorer and verb == "eval" and PAGE_DUMP_RE.search(" ".join(args[1:])):
-        return ("dumping the page's HTML reads app code and wastes tokens; use snapshot --depth=4 for structure, "
-                "find, or eval on one element")
-    if verb == "eval" and (SECRET_JS.search(" ".join(args[1:])) or storage_value_read(" ".join(args[1:]))):
+    if verb == "eval" and secret_js(" ".join(args[1:])):
         return ("playwright-cli eval reading cookies or web storage values blocked (they hold session tokens); "
                 "to check what a page stores, read key names: Object.keys(localStorage)")
     if verb == "state-save":
@@ -1028,8 +1025,6 @@ def check_pw(rest, hosts, cwds, ctx, via_loop):
         sent = verb in ("upload", "drop") and (f in args[1:] or f in dropped)
         if sent and secret_upload(f, cwds):
             return SECRET_UPLOAD_REASON
-        if ctx.explorer and not sent and verb != "state-load" and not run_output_ok(f, cwds, ctx.raw):
-            return RUN_OUTPUT_REASON
         if touches_db(f, cwds, False, ctx.raw):  # `D=<data dir>; … --filename=$D/x.png` too
             return "playwright-cli writing into the qa-sdet memory DB directory is blocked"
         if verb != "state-load" and is_session_ref(f, cwds, ctx.raw):
@@ -1178,25 +1173,6 @@ def evidence_png(path, cwds, raw=""):
     return True
 
 
-def run_output_ok(path, cwds, raw=""):
-    """Is the path a file directly in <project>/qa-out/<run>/evidence/ or <run>/.data/ (links and ../ resolved)?
-    The explorer saves screenshots, snapshots and other browser output only there."""
-    if not isinstance(path, str) or not path:
-        return False
-    for t in var_variants(path, raw):
-        t = expand(t)
-        if "$" in t or "SUBST" in t or (GLOB_RE.search(t) and not literal_path(t, cwds)):  # (after `${OUT}` is filled in)
-            return False
-        for c in cwds:
-            d = os.path.dirname(realpath(os.path.join(c, t)))
-            if os.path.basename(d) not in ("evidence", ".data") or os.path.dirname(os.path.dirname(d)) not in qa_bases({c}):
-                return False
-    return True
-
-
-RUN_OUTPUT_REASON = ("the explorer saves browser output only in its run folder: <out>/evidence/BUG-<n>.png for bug "
-                     "images, <out>/evidence/TC-<n>.png for case images, <out>/.data/ for map screenshots and snapshots "
-                     "(absolute paths, out = <project>/qa-out/<run>)")
 SECRET_UPLOAD_REASON = ("uploading this file would hand a secret (key, .env, credentials, qa-sdet data or config) to the "
                         "app; upload a test file you made for the run")
 
@@ -1216,16 +1192,8 @@ def check_qamem(args, ctx, cwds, hosts, via_loop):
     sub = args[0] if args else ""
     if "$" in sub or "SUBST" in sub:
         return "the qa-mem subcommand comes from the shell ($VAR, $(...)); spell it out"
-    if ctx.explorer and ((not sub and via_loop) or (sub and sub not in QAMEM_EXPLORER_OK)):
-        return (f"qa-mem {sub or '(from xargs)'} belongs to the calling skill; the explorer runs only qa-mem "
-                f"{', '.join(sorted(QAMEM_EXPLORER_OK))}")
     pos = qamem_positionals(sub, args[1:])
     if sub == "browser-open":
-        sessions = [a.split("=", 1)[1] if "=" in a else (args[k + 2] if k + 2 < len(args) else "")
-                    for k, a in enumerate(args[1:]) if a == "--session" or a.startswith("--session=")]
-        if ctx.explorer and any(x != "qa" for x in sessions):
-            return ("qa-mem browser-open --session qa-login is the sign-in window (it clears the sign-in record); "
-                    "the explorer opens its own session: qa-mem browser-open '<target>'")
         for url in pos:
             if not host_ok(url, hosts):
                 return f"qa-mem browser-open to non-allowlisted host: {url} (allowed: {sorted(hosts)})"
@@ -1261,6 +1229,21 @@ def storage_value_read(js):
             continue  # the word inside a string literal, e.g. innerText.includes('localStorage'); not window['localStorage']
         return True
     return False
+
+
+_TEXT_SEARCH_END_RE = _LazyRe(r"(\.(includes|indexOf|lastIndexOf|startsWith|endsWith|match|search|split)\s*\(|[!=]==?)\s*$")
+
+
+def secret_js(js):
+    """Page JS that reads cookie or web-storage values. A length (`document.cookie.length`) or the word searched for
+    in page text (`body.innerText.includes('cookie')`, `x === 'cookie'`) reads no value."""
+    for m in SECRET_JS.finditer(js):
+        if "ookie" in m.group(0) and re.match(r"\s*\.\s*length\b", js[m.end():m.end() + 40]):
+            continue
+        if re.fullmatch(r"['\"`]cookie['\"`]", m.group(0)) and _TEXT_SEARCH_END_RE.search(js[max(0, m.start() - 40):m.start()]):
+            continue
+        return True
+    return storage_value_read(js)
 
 
 def is_acli_read(word):
@@ -1331,7 +1314,9 @@ def compared_only(js, pos, url):
     (`a.href.startsWith('https://docs.x/')`, `=== 'https://...'`)."""
     if url.startswith(XML_NAMESPACES):
         return True
-    return re.search(r"(\.(startsWith|endsWith|includes|indexOf|lastIndexOf)\s*\(|[!=]==?)\s*['\"`]$", js[max(0, pos - 40):pos]) is not None
+    before = js[max(0, pos - 40):pos]  # also a CSS attribute selector: a[href^="https://docs.x/"] matches, fetches nothing
+    return re.search(r"(\.(startsWith|endsWith|includes|indexOf|lastIndexOf)\s*\(|[!=]==?)\s*['\"`]$", before) is not None \
+        or re.search(r"\[\s*[\w:-]+\s*[~|^$*]?=\s*['\"`]?$", before) is not None
 
 
 def interpreter_code(rest, docs):
@@ -1357,9 +1342,8 @@ def acli_head(rest):
 
 
 def touches_marker(name, rest, outs, cwds, markers, raw=""):
-    """Would this command change or remove the run marker? Paths, globs, and folders that contain it."""
-    reason = ("the run marker and the qa-sdet config belong to the calling skill and the user: read them if you like, "
-              "but leave them unchanged and carry on testing")
+    """Would this command change or remove one of these files (the config)? Paths, globs, and folders that contain it."""
+    reason = CONFIG_REASON
     opts = set(rest)
     removes_folders = (name in ("mv", "rmdir", "trash", "trash-put", "gio")  # only these can take the folder with them
                        or (name == "rm" and any(re.match(r"^-[a-zA-Z]*[rR]", a) or a == "--recursive" for a in rest))
@@ -1543,84 +1527,6 @@ RG_TYPES = {"js": "*.{cjs,js,jsx,mjs,vue}", "ts": "*.{cts,mts,ts,tsx}", "vue": "
             "graphql": "*.{graphql,graphqls}", "protobuf": "*.proto", "md": "*.{md,mdx,markdown}"}
 
 
-EXPLORER_WRITERS = {"cp", "tee", "install", "ln", "rsync", "dd", "truncate", "touch", "mkdir", "chmod", "chown"}
-EXPLORER_WRITE_REASON = ("the explorer changes files only in its run folder's bugs/, repro/, evidence/ and .data/ "
-                         "(<project>/qa-out/<run>/…); plan.json, reports and the rest of the project are the user's")
-
-
-EXPLORER_VALUE_OPTS = {"truncate": {"-s", "--size", "-r", "--reference"}, "touch": {"-d", "-t", "-r", "--date", "--reference"},
-                       "install": {"-m", "-o", "-g", "--mode", "--owner", "--group"}}  # `truncate -s 0 f`; but `rm -r dir` and `touch -m f` take none
-
-
-def explorer_outside(name, rest, outs, cwds, raw, via_loop=False):
-    """Does this explorer command write, change or remove a file outside <project>/qa-out (or /dev/null)?"""
-    writer = name in REMOVERS | EXPLORER_WRITERS
-    inplace = (name in INPLACE_EDITORS and any(re.match(r"^-[a-zA-Z]*i", a) or a.startswith("--in-place") for a in rest)) or (
-        name in ("awk", "gawk") and "inplace" in rest)
-    if via_loop and (writer or inplace):
-        return True  # `find … | xargs rm`: the files come from the pipe
-    targets = list(outs) + [m.group(1) for x in rest if (m := re.search(r">>?([^\s>]+)$", x)) and not x.startswith(">")]
-    pos, skip = [], False
-    for a in rest:  # positionals, without the values of `truncate -s 0`, `touch -d yesterday`, `chmod --reference f`
-        if skip:
-            skip = False
-        elif a.startswith("-"):
-            skip = a in EXPLORER_VALUE_OPTS.get(name, ())
-        else:
-            pos.append(a)
-    if name == "dd":
-        targets += [a[3:] for a in rest if a.startswith("of=")]
-    elif name in ("cp", "install", "ln", "rsync"):
-        targets += pos[-1:] + [rest[k + 1] for k, a in enumerate(rest[:-1]) if a in ("-t", "--target-directory")]
-    elif name in ("chmod", "chown"):  # the first word is the mode or the owner, unless --reference gives them
-        targets += pos if any(a.startswith("--reference") for a in rest) else pos[1:]
-    elif writer:
-        targets += pos
-    elif inplace:
-        targets += [a for a in pos for c in cwds if os.path.lexists(os.path.join(c, expand(a)))]  # files, not the script
-    elif name == "find":
-        progs = {prog_name((shlex.split(x) or [""])[0]) for x in find_exec(rest)}
-        if "-delete" in rest or progs & (REMOVERS | EXPLORER_WRITERS | INPLACE_EDITORS):
-            roots = []
-            for a in rest:
-                if a.startswith("-") or a in ("(", "!"):
-                    break
-                roots.append(a)
-            targets += roots or ["."]
-    elif extracts(name, rest):
-        targets.append(extract_dir(name, rest))
-    elif name in ("tar", "bsdtar"):  # creating an archive: the file after f
-        targets += [rest[k + 1] for k, a in enumerate(rest[:-1]) if re.match(r"^-?[A-Za-z]*f$", a) and (k == 0 or a.startswith("-"))]
-        targets += [a.split("=", 1)[1] for a in rest if a.startswith("--file=")]
-    elif name in ("zip", "7z", "7za"):
-        targets += pos[1:2] if name != "zip" else pos[:1]
-    elif name == "sort":
-        targets += [rest[k + 1] for k, a in enumerate(rest[:-1]) if a == "-o"] + [a.split("=", 1)[1] for a in rest if a.startswith("--output=")]
-    bases = qa_bases(cwds)
-    for a in targets:
-        for t in [alt for v in var_variants(a, raw) for alt in brace_alts(expand(v))]:  # `mkdir -p <out>/{bugs,repro}`
-            if "$" in t or "SUBST" in t:
-                return True
-            for c in cwds:
-                plain = os.path.normpath(os.path.join(c, t))  # before links are followed: /dev/stderr links into /proc
-                if plain in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty") or plain.startswith("/dev/fd/"):
-                    continue
-                p = realpath(plain)
-                if not any(explorer_run_path(p, b) or (name == "mkdir" and os.path.dirname(p) == b) for b in bases):
-                    return True  # (mkdir of the run folder itself is fine: it only makes what is missing)
-    return False
-
-
-def explorer_run_path(p, base):
-    """<qa-out>/<run>/{bugs,repro,evidence,.data}[/…]: the run's own files, not plan.json, a report, the index or the run
-    folder itself (the same set the Write tool gets)."""
-    if not p.startswith(base + os.sep):
-        return False
-    rel = p[len(base) + 1:].split(os.sep)
-    return len(rel) >= 2 and rel[1] in ("bugs", "repro", "evidence", ".data") and rel[-1] != "plan.json" \
-        and not rel[-1].endswith((".ingested", ".error"))
-
-
 def secret_below(d, glob_="", type_=""):
     """Does a content search from folder d reach a secret (a secret folder inside it, or a secret-named file the
     glob, or else the ripgrep type, can select)? Fails closed on huge trees."""
@@ -1750,16 +1656,11 @@ def check(cmd, cwd, ctx=None, depth=0, explorer=False):
     if top and not reason and ctx.pw_env and ctx.runs_pw:
         reason = ("setting PLAYWRIGHT_MCP_* / PWTEST_* variables changes which browser or profile playwright-cli uses; "
                   "open the browser with qa-mem browser-open [<url>] and no extra variables")
-    if top and not reason and ctx.spend and ctx.explorer and not ctx.marker_path:
-        return NO_RUN
-    if top and not reason and ctx.spend and ctx.marker_path:
-        if ctx.marker_error:
-            return ctx.marker_error
-        if ctx.marker:
-            if ctx.loop:
-                return ("playwright-cli in a loop, xargs or watch can't be counted against the run budget; "
-                        "run commands one by one, or batch input values in one eval")
-            reason = spend_budget(ctx.marker_path, ctx.spend, ctx.explorer)
+    if top and not reason and ctx.spend and ctx.marker:  # no run (no marker, an expired or a malformed one): no limits
+        if ctx.loop and float(ctx.marker.get("budget") or 0):  # (without a budget a loop has nothing to count against)
+            return ("playwright-cli in a loop, xargs or watch can't be counted against the run budget; "
+                    "run commands one by one, or batch input values in one eval")
+        reason = spend_budget(ctx.marker_path, ctx.spend, ctx.explorer)
     return reason
 
 
@@ -1767,7 +1668,7 @@ def _check(cmd, cwd, ctx, depth, carried=()):
     if depth > 4:  # deeper is not read: that matters only when something guarded is in play
         whole = (getattr(ctx, "scope", None) or ctx.raw or cmd)[:200000]  # in a sourced rc file: that file, not the caller
         deep = (GUARDED_ANY_RE.search(cmd) or GUARDED_TOOLS_RE.search(whole) or mentions_data_dir(whole)
-                or mentions_data_dir(cmd) or mentions_session_path(whole) or ctx.explorer)
+                or mentions_data_dir(cmd) or mentions_session_path(whole))
         return "nested shell too deep to verify" if deep else None
     cmd = re.sub(r"\\\n", "", cmd)  # line continuations: bash joins the lines (`play\<newline>wright-cli`)
     if len(cmd) - len(cmd.rstrip("\\")) & 1:  # a lone backslash at the very end: bash drops it, shlex refuses the command
@@ -1830,7 +1731,7 @@ def read_script(path, cwds, raw="", strict=False):
 
 def shell_script_texts(name, rest, seg, ins, cwds, docs, ctx):
     """(scripts a shell run without -c reads, why the rest is unknown: None | "file" | "stdin")."""
-    raw, strict = scope_text(ctx), ctx.explorer
+    raw, strict = scope_text(ctx), False  # (the explorer too: the main agent's leeway for a missing sourced file)
     if name == "busybox":
         name, rest = rest[0], rest[1:]
     here = []  # here-strings: `bash <<<'cmd'` (split_redirects drops them)
@@ -1903,15 +1804,14 @@ UNKNOWN_SCRIPT_REASON = ("a shell reading its script from a pipe, a variable or 
 
 def unknown_script_matters(unknown, ctx, mentions_guarded):
     """A script the guard can't read, in a command that names something guarded: a guarded tool, the memory DB folder,
-    the session files, or (the explorer) the run marker, the config, the qa-out folder, or a tool that writes files
-    (an archive unpacked here could carry a forged marker)."""
+    the session files, or (the explorer) the config."""
     scope = getattr(ctx, "scope", None)  # inside a script file: what that file names, not the command that sourced it
     if scope is not None:
         return bool(GUARDED_ANY_RE.search(scope) or mentions_data_dir(scope) or mentions_session_path(scope))
     text = ctx.raw if unknown == "file" else split_heredocs(ctx.raw)[0]
     return bool((mentions_guarded if unknown == "file" else GUARDED_TOOLS_RE.search(text))
                 or mentions_data_dir(ctx.raw) or mentions_session_path(ctx.raw)
-                or (ctx.explorer and (MARKER_CODE_RE.search(ctx.raw) or "qa-out" in ctx.raw or WRITER_WORD_RE.search(ctx.raw))))
+                or (ctx.explorer and CONFIG_CODE_RE.search(ctx.raw)))
 
 
 def scope_text(ctx):
@@ -1946,47 +1846,44 @@ def eval_setup_only(rest, ctx):
         GUARDED_ANY_RE.search(x) or mentions_data_dir(x) or mentions_session_path(x) for x in values)
 
 
-def git_subcommand(rest):
-    """`clean` from `git -C . -c a=b clean -fdx`: the first word that is neither an option nor an option's value."""
-    skip = False
-    for a in rest:
-        if skip:
-            skip = False
-        elif a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix"):
-            skip = True
-        elif not a.startswith("-"):
-            return a
-    return ""
+PROXY_ENV_RE = _LazyRe(r"(?i)\b(https?|all|ftp)_proxy\s*=")
+HOSTISH_RE = _LazyRe(r"(?i)(localhost|[\w-]+(\.[\w-]+)*\.[a-z]{2,})(:\d+)?(/\S*)?")
+# curl/wget options whose next word is a value (a file, header, data), not a host; any other word is checked as one
+HTTP_VALUE_OPTS = {"-o", "-O", "-d", "-H", "-X", "-u", "-A", "-e", "-b", "-c", "-F", "-T", "-w", "-m", "-r", "-C", "-D",
+                   "-E", "-P", "-U", "-t", "-a", "--output", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+                   "--header", "--request", "--user", "--user-agent", "--referer", "--cookie", "--cookie-jar", "--form",
+                   "--upload-file", "--write-out", "--max-time", "--connect-timeout", "--range", "--dump-header", "--cert",
+                   "--cacert", "--key", "--output-document", "--directory-prefix", "--post-data", "--post-file",
+                   "--password", "--tries", "--timeout"}
 
 
-EXPLORER_GIT_READS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "blame", "describe", "grep", "cat-file",
-                      "shortlog", "rev-list", "version", "help", "whatchanged", "name-rev", "merge-base", ""}
-
-
-def explorer_git_ok(rest):
-    """Read-only git for the explorer: the commands above, plus `stash list`, `config --get`, `worktree list`, `remote -v`
-    and listing branches or tags. Never an alias defined on the command line (`-c alias.x='!cmd'`)."""
-    if any(re.match(r"alias\.", a) for a in rest):
-        return False
-    sub = git_subcommand(rest)
-    after = rest[rest.index(sub) + 1:] if sub in rest else []
-    pos = [a for a in after if not a.startswith("-")]
-    if sub in EXPLORER_GIT_READS:  # `git diff --output=file` writes one
-        return not (sub in ("diff", "log", "show") and any(a.startswith("--output") for a in after))
-    if sub in ("stash", "worktree"):
-        return pos[:1] == ["list"]
-    if sub == "config":
-        return bool({"--get", "--get-all", "--list", "-l", "--get-regexp"} & set(after))
-    if sub in ("branch", "tag", "remote"):
-        return not pos and not any(re.match(r"^-[a-zA-Z]*[dDmMcCf]", a) or a.startswith(("--delete", "--move", "--copy", "--force"))
-                                   for a in after)
-    return False
+def explorer_net(name, rest, raw):
+    """Deny reason for a network tool the explorer runs, or None: an HTTP client may fetch from the allowed hosts
+    (an API check), nothing else reaches out. shortcut: a proxy set in ~/.curlrc or ~/.wgetrc by an earlier command
+    isn't seen; check for one in curl/wget calls if the explorer is ever found writing those files."""
+    if name not in HTTP_CLIENTS:
+        return (f"{name} reaches other machines outside the browser; the explorer fetches only from the QA app "
+                "(the browser, or curl/wget to an allowed host)")
+    opts = HTTP_REROUTE_OPTS | (WGET_FILE_OPTS if name in ("wget", "aria2c") else set())
+    if any(a.split("=", 1)[0] in opts for a in rest) or PROXY_ENV_RE.search(raw):
+        return f"{name} with a proxy, a resolve override or an option file can send the request elsewhere; call the URL directly"
+    hosts, urls = allowed_hosts(), URL_RE.findall(" ".join(rest))
+    for k, a in enumerate(rest):  # bare hosts too (`curl -s qa.example/api`, `curl --url evil.example`)
+        if not a.startswith("-") and not (k and rest[k - 1] in HTTP_VALUE_OPTS) \
+                and not URL_RE.search(a) and HOSTISH_RE.fullmatch(a):
+            urls.append(a)
+    if not urls:
+        return f"{name} without a URL the guard can check; pass the full URL (https://<allowed host>/…)"
+    for u in urls:
+        if not host_ok(u, hosts):
+            return f"{name} to non-allowlisted host: {u} (allowed: {sorted(hosts)}); the explorer fetches only from the QA app"
+    return None
 
 
 def check_scripts(texts, unknown, here, ctx, depth, mentions_guarded, from_file=False):
     for body in texts:
         old = getattr(ctx, "scope", None)
-        ctx.scope = body if from_file and not ctx.explorer else old  # (the explorer gets no such leeway)
+        ctx.scope = body if from_file else old
         try:
             if r := _check(body, here, ctx, depth + 1):
                 return r
@@ -2062,10 +1959,8 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
         return ("playwright-cli reads its browser and profile from .playwright/cli.config.json; the explorer leaves "
                 "that file alone (reading it is fine)")
     if i is None:  # bare redirection, e.g. `: > file`, `exec 3>file`
-        if ctx.explorer and (r := touches_marker("", [], outs, cwds, ctx.marker_files, ctx.raw)):
+        if ctx.explorer and (r := touches_marker("", [], outs, cwds, ctx.config_files, ctx.raw)):
             return r
-        if ctx.explorer and explorer_outside("", [], outs, cwds, ctx.raw):
-            return EXPLORER_WRITE_REASON
         return check_db(words, outs, "", [], cwds, ctx.raw)
     scope = getattr(ctx, "scope", None)  # inside a sourced file: what that file names (`(( $+var ))` in a theme is harmless)
     if (words[i].startswith("$") or words[i] == "SUBST") and (
@@ -2137,10 +2032,8 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
         if any(is_session_ancestor(a, local) for a in targets[1:] or ["."]):  # first positional is the pattern
             return ("a recursive content search from this folder would read the saved browser session; "
                     "search a narrower folder, or list matching files with -l")
-    if ctx.explorer and name != "playwright-cli" and (r := touches_marker(name, rest, outs, local, ctx.marker_files, ctx.raw)):
+    if ctx.explorer and name != "playwright-cli" and (r := touches_marker(name, rest, outs, local, ctx.config_files, ctx.raw)):
         return r
-    if ctx.explorer and explorer_outside(name, rest, outs, local, ctx.raw, bool(LOOP_WRAPPERS & set(wrappers))):
-        return EXPLORER_WRITE_REASON
     code = interpreter_code(rest, docs)
     interp = name in INTERPRETERS or is_python(name)
     if interp and (re.search(r"qa-state\.json", code) or mentions_session_path(code)):
@@ -2163,35 +2056,28 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                                                       any(re.search(r"\bacli\b", a) for a in rest)):
         return ("run acli directly (acli jira workitem view/search ...), not from inline code: "
                 "Jira stays read-only and only a command-position acli is checked")  # os.system('acli ... create')
-    if ctx.explorer and interp and (GUARDED_TOOLS_RE.search(code) or
-                                    (stdin_script and any(GUARDED_TOOLS_RE.search(d) for d in docs))):
-        return "the explorer runs playwright-cli, acli and qa-mem directly (qa-mem <subcommand>), not from inline code"
+    # the explorer reads app pages that may steer it: playwright-cli or acli run from code escape the host and Jira checks
+    if ctx.explorer and interp and (HARD_TOOL_RE.search(code) or
+                                    (stdin_script and any(HARD_TOOL_RE.search(d) for d in docs))):
+        return "the explorer runs playwright-cli and acli directly, not from inline code (hosts and Jira writes couldn't be checked there)"
     if ctx.explorer and interp and not code and qamem_args(name, rest, local) is None and (sw := script_word(rest)):
-        text = read_script(sw, local, ctx.raw, strict=True)  # a script file the explorer wrote that runs a guarded tool or edits the marker
-        if (text is None and (GUARDED_TOOLS_RE.search(ctx.raw) or MARKER_CODE_RE.search(ctx.raw))) or \
-                (text and (GUARDED_TOOLS_RE.search(text) or MARKER_CODE_RE.search(text))):
-            return "the explorer runs playwright-cli, acli and qa-mem directly (qa-mem <subcommand>), not from a script file"
-    if ctx.explorer and name in COPY_TOOLS and any(is_qamem(a, local) or (expanded(a) and "qa-mem" in ctx.raw) for a in rest):
-        return "the explorer runs qa-mem from the plugin; copies or links of it are blocked"
+        text = read_script(sw, local, ctx.raw, strict=True)  # a script file the explorer wrote that runs the browser or edits the config
+        if (text is None and (HARD_TOOL_RE.search(ctx.raw) or CONFIG_CODE_RE.search(ctx.raw))) or \
+                (text and (HARD_TOOL_RE.search(text) or CONFIG_CODE_RE.search(text))):
+            return ("the explorer runs playwright-cli and acli directly and leaves the qa-sdet config alone, not from a "
+                    "script file (none of them could be checked there)")
     if qamem_args(name, rest, local) is None and any(is_qamem(a, local) and not (name in SHELLS and re.search(r"\s", a))
                                               for a in words[i:] + ins):  # (a `bash -c 'script'` string is checked below)
         if interp or name in QAMEM_RUNNERS or name in SHELLS:  # `uv run qa-mem`, `python3 - x < qa-mem`
             return "run qa-mem as python3 <plugin>/bin/qa-mem <subcommand> (other launchers skip its checks)"
-        if ctx.explorer and name not in QAMEM_NAME_OK:  # `cat qa-mem > /tmp/q`, `dd if=qa-mem`, `tee x < qa-mem`
-            return "the explorer runs qa-mem from the plugin (python3 <refs>/../bin/qa-mem <subcommand>); copies, reads and other launchers are blocked"
     if (qargs := qamem_args(name, rest, local)) is not None and (
             r := check_qamem(qargs, ctx, local, allowed_hosts(), bool(LOOP_WRAPPERS & set(wrappers)))):
         return r
-    if ctx.explorer and interp and MARKER_CODE_RE.search(" ".join(rest)):  # python -c "os.remove(...)"
-        return ("the run marker belongs to the calling skill: read it if you like, but leave it unchanged and carry on "
-                "testing (use cat to read it)")
+    if ctx.explorer and interp and CONFIG_CODE_RE.search(" ".join(rest)):  # python -c "open(<config>, 'w')"
+        return CONFIG_REASON
     lookup_only = "command" in wrappers and bool({"-v", "-V"} & set(words[:i]))  # `command -v curl` runs nothing
-    if ctx.explorer and name in NET_CLIS and not lookup_only:
-        return (f"{name} reaches the network outside the browser (no host or budget check); observe through "
-                "playwright-cli: requests, response-body, or --raw eval \"fetch('/api/x').then(r => r.status)\"")
-    if ctx.explorer and name == "git" and not explorer_git_ok(rest):
-        return (f"git {git_subcommand(rest)} can change the project (git clean also deletes the run folder): the explorer tests "
-                "through the browser and runs only read-only git commands (status, log, diff, show, ls-files)")
+    if ctx.explorer and name in NET_CLIS and not lookup_only and (r := explorer_net(name, rest, ctx.raw)):
+        return r
     r = None
     via_loop = bool(LOOP_WRAPPERS & set(wrappers))
     if name in (".", "source") and not rest:
@@ -2203,7 +2089,7 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                 break
         else:  # `bash <<EOF`, `sh -s <<EOF`, `bash <<<'..'`, `bash x.sh`, `bash < x.sh`, `... | bash`
             texts, unknown = shell_script_texts(name, rest, seg, ins, local, docs, ctx)
-            if not relaunch and not texts and unknown == "stdin" and not rest and not ctx.explorer and \
+            if not relaunch and not texts and unknown == "stdin" and not rest and \
                     not STDIN_FEED_RE.search(split_heredocs(scope_text(ctx))[0]):
                 unknown = None  # `brew install bash`: found by the launcher re-check, nothing after it and nothing piped in
             # `source ~/.zshrc`: a file on disk, read as its own scope (its `. "$NVM_DIR/nvm.sh"` names nothing guarded)
@@ -2218,14 +2104,10 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
         r = check_scripts(lines, unknown, here, ctx, depth, mentions_guarded)
     elif name in ("at", "batch"):  # `at now <<< 'cmd'`: the job is a shell script on stdin
         r = check_scripts(*shell_script_texts(name, rest, seg, ins, local, docs, ctx), here, ctx, depth, mentions_guarded)
-    elif name == "eval" and not ctx.explorer and rest and all(expanded(a) for a in rest) and eval_setup_only(rest, ctx):
+    elif name == "eval" and rest and all(expanded(a) for a in rest) and eval_setup_only(rest, ctx):
         r = None  # `eval "$(fnm env)"`, `eval "$__conda_setup"`: environment setup; what it prints names no guarded tool
     elif name == "eval":
         r = _check(unmark(" ".join(rest)), here, ctx, depth + 1)
-        # the explorer only (page text may steer it): `eval "$(echo 'dd of=qa-out/.active')"`. The user's own session
-        # keeps `eval "$(fnm env)" && playwright-cli …`
-        if not r and ctx.explorer and any(expanded(a) for a in rest) and unknown_script_matters("stdin", ctx, mentions_guarded):
-            r = UNKNOWN_SCRIPT_REASON
     elif name == "trap":  # `trap 'cmd' EXIT` runs cmd later
         r = _check(unmark(next((a for a in rest if not a.startswith("-")), "")), here, ctx, depth + 1)
     elif name == "watch":
@@ -2261,12 +2143,8 @@ MCP_WRITE_WORDS = {"create", "edit", "update", "delete", "remove", "transition",
                    "move", "upload", "post", "put", "patch", "write", "set", "clone", "restore", "replace", "publish",
                    "rank", "invoke", "run", "execute", "send", "import", "bulk", "upsert", "modify", "change"}
 MCP_BUDGET_FREE = {"browser_install", "browser_tab_close", "browser_tab_list"}
-# The explorer inherits every tool (an agent's `tools:` list can't name "any server's browser_*"), so its
-# allowlist lives here: working tools plus housekeeping; other MCPs (mail, Jira, docs) stay out of a test run.
 MAPPER_TOOLS = {"Read", "Grep", "Glob", "LS", "Write", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
                 "TaskList"}
-EXPLORER_TOOLS = {"Bash", "Read", "Write", "Grep", "Glob", "LS", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate",
-                  "TaskGet", "TaskList", "TaskOutput", "BashOutput", "TaskStop", "KillShell", "KillBash"}
 MCP_SECRET_TOOL_RE = _LazyRe(r"(cookie|(local|session)storage)s?_(list|get)|storage_state|request_headers|"
                                 r"response_headers|get_config")  # set/delete/clear print nothing; config holds headers
 
@@ -2293,7 +2171,7 @@ def check_mcp(tool, tin, cwd, explorer):
     name = tool[len("mcp__"):].rpartition("__")[2]
     if MCP_BROWSER_RE.match(tool):
         if not explorer:
-            path, marker, _ = read_marker(cwd)
+            path, marker = read_marker(cwd)
             if path is None or (marker and marker.get("deadline")
                                 and time.time() > float(marker["deadline"]) + 600):
                 return None  # no run (or one left behind by an interrupted skill): the user's everyday browser
@@ -2342,10 +2220,7 @@ def check_mcp_browser(name, tin, cwd, explorer):
     else:  # elsewhere only code-carrying fields; typed text (browser_type, fill_form) is test data
         js = " ".join(str(tin.get(k) or "") for k in ("function", "code", "url"))  # a URL can carry script too
     if js.strip():
-        if explorer and PAGE_DUMP_RE.search(js):
-            return ("dumping the page's HTML reads app code and wastes tokens; use browser_snapshot for structure, "
-                    "browser_find, or browser_evaluate on one element")
-        if SECRET_JS.search(js) or storage_value_read(js):
+        if secret_js(js):
             return ("browser_evaluate reading cookies or web storage values blocked (they hold session tokens); "
                     "to check what a page stores, read key names: Object.keys(localStorage)")
         hosts_ = [h for h in SCHEMELESS_URL_RE.findall(js) if "." in h or h.lower() == "localhost"]
@@ -2364,28 +2239,19 @@ def check_mcp_browser(name, tin, cwd, explorer):
             continue  # a flag such as saveSession: true names no file
         if f in sent and secret_upload(f, cwds):
             return SECRET_UPLOAD_REASON
-        if explorer and f not in sent and not run_output_ok(f, cwds):
-            return RUN_OUTPUT_REASON
         if touches_db(f, cwds, False):
             return f"{name} writing into the qa-sdet memory DB directory is blocked"
         if is_session_ref(f, cwds):
             return "the saved browser session holds live cookies; it stays out of the browser tools"
         target = Path(realpath(os.path.join(cwd, expand(f))))  # realpath: a symlinked folder is the same
-        if (target.name in (".active", ".active.lock") and target.parent.name == "qa-out") or \
-                str(target) == realpath(CONFIG):  # a JSON result over config.json would widen allowedHosts
-            return "the run marker and the qa-sdet config are not output files; save files under the run's out folder"
+        if str(target) == realpath(CONFIG):  # a JSON result over config.json would widen allowedHosts
+            return "the qa-sdet config is not an output file; save files under the run's out folder"
         if f in sent and is_session_ancestor(f, cwds):
             return f"{name} would send a folder that holds the saved browser session"
-        if not os.path.isabs(expand(f)) and ".." in Path(f).parts:
-            return f"{name}: a relative path with .. can land outside the run folder; pass an absolute path under <out>"
     if name not in MCP_BUDGET_FREE and not (name == "browser_tabs" and tin.get("action") in ("list", "close")):
-        path, marker, error = read_marker(cwd)
-        if error:
-            return error
-        if marker:
+        path, marker = read_marker(cwd)
+        if marker:  # no run: nothing counted
             return spend_budget(path, 1, explorer)
-        if explorer:
-            return NO_RUN
     return None
 
 
@@ -2431,23 +2297,102 @@ def deny(reason):
     }}))
 
 
+APPROVE_FILTERS = {"head", "tail", "grep"}
+
+
+def auto_approvable(cmd, cwd):
+    """Only playwright-cli, qa-mem (not setup-permissions --apply: it edits Claude Code's settings) and head/tail/grep
+    filters, joined by ; && || |, writing only to /dev/null or into qa-out: having checked it, the guard approves it."""
+    cmd, docs = split_heredocs(cmd)
+    bodies, cmd = substitutions(normalize(cmd))
+    if docs or bodies:
+        return False
+    try:
+        toks = tokens(cmd)
+    except ValueError:
+        return False
+    segs, seg = [], []
+    for tok in toks + [";"]:
+        if tok and set(tok) <= set(PUNCT):
+            if tok not in (";", "&&", "||", "|") or not seg and tok != ";":
+                return False  # subshells, background jobs, a pipe with nothing before it
+            if seg:
+                segs.append(seg)
+            seg = []
+        else:
+            seg.append(tok)
+    bases = qa_bases({cwd})
+    for seg in segs:
+        words, outs, ins = split_redirects(seg)
+        if ins or not words or "$" in words[0] or re.match(r"^[A-Za-z_]\w*=", words[0]):
+            return False
+        for o in map(unmark, outs):
+            if o not in ("/dev/null", "/dev/stdout", "/dev/stderr") and ("$" in o or not any(
+                    os.path.realpath(os.path.join(cwd, expand(o))).startswith(b + os.sep) for b in bases)):
+                return False
+        name = prog_name(words[0])
+        if name != "playwright-cli" and name not in APPROVE_FILTERS:
+            q = qamem_args(name, words[1:], {cwd})
+            if q is None or (q[:1] == ["setup-permissions"] and "--apply" in q):
+                return False
+    return bool(segs)
+
+
+def auto_approve(data):
+    """Approve a call the guard checked: a Bash command per auto_approvable, or an MCP browser call the browser rules
+    were applied to (the explorer's always; the main session's only during a run, the rest is its everyday browser)."""
+    tool, tin = str(data.get("tool_name") or ""), data.get("tool_input")
+    cwd = str(data.get("cwd") or os.getcwd())
+    if MCP_BROWSER_RE.match(tool):
+        if agent_role(data) == "qa-explorer":
+            return True
+        marker = read_marker(cwd)[1]
+        return bool(marker) and not (marker.get("deadline") and time.time() > float(marker["deadline"]) + 600)
+    return tool == "Bash" and isinstance(tin, dict) and auto_approvable(str(tin.get("command") or ""), cwd)
+
+
+_MASKS = [(re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+\s+)?[^\s'\"]+"), r"\1[masked]"),
+          (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 [masked]"),
+          (re.compile(r"(?i)\b(token|password|passwd|pwd|secret|api[_-]?key|access[_-]?token)(\s*[=:]\s*)[^\s'\"&]+"), r"\1\2[masked]"),
+          (re.compile(r"://[^\s/:@'\"]+:[^\s/@'\"]+@"), "://[masked]@")]
+DENIAL_LOG_LINES = 1000
+
+
+def mask(text):
+    for rx, rep in _MASKS:
+        text = rx.sub(rep, text)
+    return text
+
+
+def log_denial(data, reason, layer="guard"):
+    """One line per denial in <project>/qa-out/guard-denials.log: time, layer (guard / claude-code), agent, reason and
+    the call, secrets masked, the newest 1000 lines kept. Never raises: a log it can't write changes no decision."""
+    try:
+        tin = data.get("tool_input")
+        what = (str(tin.get("command")) if data.get("tool_name") == "Bash" and isinstance(tin, dict) and "command" in tin
+                else f"{data.get('tool_name')} {json.dumps(tin, ensure_ascii=False, default=str)[:600]}")
+        line = "\t".join([time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), layer, agent_role(data) or "main",
+                          " ".join(mask(str(reason)).split()), " ".join(mask(what).split())[:300]]) + "\n"
+        project = os.environ.get("CLAUDE_PROJECT_DIR")  # Claude Code names the project: its qa-out is made if missing
+        folder = Path(project or str(data.get("cwd") or os.getcwd()), "qa-out")
+        if project:
+            folder.mkdir(exist_ok=True)
+        elif not folder.is_dir():
+            return  # no project named: never a new qa-out in whatever folder this ran from (/tmp, a test run)
+        log = folder / "guard-denials.log"
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o644)  # not through a planted link
+        with os.fdopen(fd, "a", encoding="utf-8", errors="replace") as f:
+            f.write(line)
+        if log.stat().st_size > 200_000:
+            keep = log.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[-DENIAL_LOG_LINES:]
+            tmp = log.with_name(f".{log.name}.{os.getpid()}")
+            tmp.write_text("".join(keep), encoding="utf-8")
+            os.replace(tmp, log)
+    except Exception:  # noqa: BLE001 - logging is best effort
+        pass
+
+
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-
-
-def explorer_write_ok(target, cwd):
-    """Run files the explorer may write under <project>/qa-out: new layout <run>/bugs/*.md, <run>/repro/*.spec.ts,
-    <run>/.data/run-*.json, <run>/.data/snapshot.md; old layout **/run.json, **/reports/*.md, **/bugs/, **/repro/."""
-    for base in qa_bases({cwd}):
-        if not target.startswith(base + os.sep):
-            continue
-        rel = target[len(base) + 1:].split(os.sep)
-        name, parent = rel[-1], (rel[-2] if len(rel) > 1 else "")
-        if (parent in ("bugs", "reports") and name.endswith(".md")) or (parent == "repro" and name.endswith(".spec.ts")) \
-                or (name == "run.json" and len(rel) > 1 and ".data" not in rel):
-            return True
-        if parent == ".data" and len(rel) == 3 and (name == "snapshot.md" or re.fullmatch(r"run-[^/\\]+\.json", name)):  # any C3 slug (unicode, %, ~)
-            return True
-    return False
 
 
 PATH_KEYS = ("file_path", "notebook_path", "path")  # every key a file tool may take its path from
@@ -2495,17 +2440,10 @@ def decide(data):
                         secret_below(target, str(tin.get("glob") or ""), str(tin.get("type") or "")):
                     return ("a content search from this folder would print secret files (.env, keys); pass a glob or "
                             "type for source files, a narrower path, or use files_with_matches and Read the source file")
-    if is_explorer:  # the budget it runs under isn't its own
-        if tool not in EXPLORER_TOOLS and not MCP_BROWSER_RE.match(str(tool or "")):
-            return (f"the qa-explorer tests through the browser only: {tool} is not one of its tools "
-                    "(Bash, Read, Write, Grep, Glob and the browser_* MCP tools)")
-        for raw in tool_paths(tin) if tool in WRITE_TOOLS else ():
-            target = Path(realpath(os.path.join(cwd, expand(raw or "x"))))
-            if (target.name == ".active" and target.parent.name == "qa-out") or str(target) == realpath(CONFIG):
-                return "the run marker belongs to the calling skill: read it if you like, but leave it unchanged and carry on testing"
-            if not explorer_write_ok(str(target), cwd):
-                return ("the explorer writes only its run files: <out>/bugs/BUG-<n>.md, <out>/repro/BUG-<n>.spec.ts, "
-                        "<out>/.data/run-<slug>.json and <out>/.data/snapshot.md (out = <project>/qa-out/<run>)")
+    if is_explorer and tool in WRITE_TOOLS:  # it reads app pages: the browser's allowlist stays the user's
+        for raw in tool_paths(tin):
+            if realpath(os.path.join(cwd, expand(raw or "x"))) == realpath(CONFIG):
+                return CONFIG_REASON
     if tool in WRITE_TOOLS | {"Glob"}:
         for raw in tool_paths(tin):
             if tool == "Glob":  # the pattern up to its first `**`, joined to the search path
@@ -2572,11 +2510,21 @@ def main():
                   if GUARDED_ANY_RE.search(text) or mentions_data_dir(text) or mentions_session_path(text, folders=True)
                   or MCP_BROWSER_RE.match(str(data.get("tool_name") or ""))
                   or MCP_JIRA_RE.match(str(data.get("tool_name") or ""))
-                  or agent_role(data) in ("qa-explorer", "qa-mapper") else None)  # restricted agents fail closed
+                  or agent_role(data) == "qa-mapper" else None)  # the mapper (source reader only) fails closed
+    approve = False
+    if not reason:
+        try:
+            approve = auto_approve(_clean(data))
+        except Exception:  # noqa: BLE001 - when in doubt, Claude Code's own permission check decides
+            approve = False
     if hasattr(signal, "SIGALRM"):
         signal.alarm(0)  # checked in time: the alarm must not fire later (in a process that goes on, such as a test run)
     if reason:
         deny(reason)
+        log_denial(data, reason)
+    elif approve:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                 "permissionDecisionReason": "qa-sdet guard: checked"}}))
     return 0
 
 

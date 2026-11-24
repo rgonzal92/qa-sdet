@@ -39,17 +39,15 @@ evil = {"nav": "playwright-cli -s=qa goto https://evil.com", "nav2": "playwright
         "profsubst": f"cat $(printf %s {D}/profiles/main/Default/Cookies)", "profxargs": f"find {D} -name Cookies | xargs base64",
         "proflink": f"ln -s {D} /tmp/q", "profgit": f"git -C {D} add -A",
         "annotdash": "python3 /p/bin/qa-mem annotate --box 1,1,2,2 --label x -/../../o/qa-out/r/evidence/a.png"}
-# Only the explorer is denied these; the main session runs them.
-explorer_evil = {"marker": "python3 /p/bin/qa-mem marker stop /proj", "perm": "/usr/bin/python3 -I /p/bin/qa-mem setup-permissions --apply",
-                 "rundir": "python3.12 /p/bin/qa-mem rundir /proj --keys STUDIO-1", "direct": "/p/bin/qa-mem prune /proj",
-                 "uv": "uv run python3 /p/bin/qa-mem marker stop /proj", "poetry": "poetry run /p/bin/qa-mem marker stop /proj",
-                 "stdin": "python3 - marker stop /proj < /p/bin/qa-mem", "devstdin": "python3 /dev/stdin marker stop . < /p/bin/qa-mem",
-                 "catcopy": "cat /p/bin/qa-mem > /tmp/q", "pipe": "echo qa-mem marker stop . | sh",
-                 "herestr": "bash <<<'qa-mem marker stop /proj'", "lnsub": "ln -s $(command -v qa-mem) /tmp/q", "cliconf": "printf x > .playwright/cli.config.json",
-                 # r12: forging the run marker (budget 0 = unlimited, faults) or planting its lock file
-                 "ddof": "dd of=qa-out/.active", "rw": "exec 3<>qa-out/.active", "dupfile": "echo x >&qa-out/.active",
-                 "cpdir": "cp -r /tmp/e/. qa-out/", "cpinto": "cp /tmp/e/.active qa-out", "untar": "tar xf /tmp/m.tar -C qa-out",
-                 "unzip": "unzip -o /tmp/m.zip", "lock": "ln -s /etc/passwd qa-out/.active.lock"}
+# Only the explorer is denied these (it reads app pages that may steer it): the config, which holds allowedHosts,
+# and playwright-cli's own config file.
+CFG = _ENV["QA_SDET_CONFIG"]
+explorer_evil = {"cliconf": "printf x > .playwright/cli.config.json", "cfg": f"printf x > {CFG}", "cfgcp": f"cp /tmp/c.json {CFG}",
+                 "cfgtee": f"echo '{{}}' | tee {CFG}", "unzip": "unzip -o /tmp/m.zip"}  # (the test folder holds the config)
+# Loosened: the main session's commands are the explorer's too (qa-mem admin, the run marker, its own files).
+explorer_free = {"marker": "python3 /p/bin/qa-mem marker stop /proj", "rundir": "python3.12 /p/bin/qa-mem rundir /proj --keys STUDIO-1",
+                 "direct": "/p/bin/qa-mem prune /proj", "catcopy": "cat /p/bin/qa-mem > /tmp/q", "herestr": "bash <<<'qa-mem marker stop /proj'",
+                 "ddof": "dd of=qa-out/.active", "dupfile": "echo x >&qa-out/.active", "untar": "tar xf /tmp/m.tar -C qa-out"}
 prefixes = ["", "timeout 5 ", "env A=1 ", "nohup ", "sudo -u x ", "command ", "time ", "nice -n 5 ", "A=1 B=2 ", "stdbuf -o0 ",
             # audit 2: launchers the guard has no name for (it checks every guarded word after one)
             "chrt -i 0 ", "firejail ", "faketime 2020 "]
@@ -72,9 +70,12 @@ class BypassCorpus(unittest.TestCase):
     def test_every_wrapped_forbidden_command_is_denied(self):
         self.assertEqual(run(), [])
 
-    def test_every_wrapped_skill_only_qa_mem_command_is_denied_to_the_explorer(self):
+    def test_every_wrapped_hard_line_is_denied_to_the_explorer(self):
         self.assertEqual(run(explorer_evil, explorer=True), [])
-        self.assertIsNone(g.check(explorer_evil["marker"], str(T)))  # the main session may
+        self.assertEqual(run(evil, explorer=True), [])  # every hard line holds for it as for the main session
+        for name, cmd in explorer_free.items():
+            self.assertEqual(bool(g.check(cmd, str(T), explorer=True)), bool(g.check(cmd, str(T))), name)
+        self.assertIsNone(g.check(explorer_evil["cfg"], str(T)))  # the main session edits the config (with the user's yes)
 
 
 if __name__ == "__main__":

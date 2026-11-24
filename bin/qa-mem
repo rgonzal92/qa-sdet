@@ -2344,9 +2344,22 @@ def browser_open(args):
     return code_
 
 
-def prune(project, days=7, t=None):
-    """Delete page snapshots older than `days` (regular files only; links are never followed). Returns the count."""
-    cutoff, n = (time.time() if t is None else t) - days * 86400, 0
+def prune(project, days=7, t=None, run=None):
+    """Delete page snapshots older than `days` (regular files only; links are never followed). With a run folder also
+    that run's temp files: <run>/.data/snapshot*.md and map-*.png, and the snapshots taken since the run began (its
+    oldest file). Evidence, bug drafts, repro specs, the JSON files and REPORT.md stay. Returns the count."""
+    cutoff, n, since = (time.time() if t is None else t) - days * 86400, 0, None
+    if run is not None:
+        stamps = [os.lstat(os.path.join(d, fn)).st_mtime for d, _, fs in os.walk(run) for fn in fs]
+        since = min(stamps) if stamps else None
+        data = Path(run) / ".data"
+        for f in [*data.glob("snapshot*.md"), *data.glob("map-*.png")] if data.is_dir() and not data.is_symlink() else []:
+            try:
+                if stat.S_ISREG(f.lstat().st_mode):
+                    f.unlink()
+                    n += 1
+            except OSError:
+                continue
     for name in (".playwright-cli", ".playwright-mcp"):
         top = Path(project) / name
         if top.is_symlink() or not top.is_dir():
@@ -2356,7 +2369,7 @@ def prune(project, days=7, t=None):
                 f = Path(dirpath) / fn
                 try:
                     st = f.lstat()
-                    if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                    if stat.S_ISREG(st.st_mode) and (st.st_mtime < cutoff or (since is not None and st.st_mtime >= since)):
                         f.unlink()
                         n += 1
                 except OSError:
@@ -3333,6 +3346,8 @@ PERMISSION_RULES = [
     "Bash(command -v playwright-cli*)",
     "Bash(acli jira auth status*)", "Bash(acli jira workitem view *)", "Bash(acli jira workitem search *)",
     "Bash(acli jira workitem comment list *)",  # C8 reads a ticket's comments too
+    "Bash(playwright-cli kill-all*)", "Bash(playwright-cli close-all*)",  # cleanup after a stuck run (C4)
+    "mcp__playwright",  # the MCP fallback's tools; the guard still checks hosts, secrets and files on each call
     "Skill(qa-sdet:*)",
     # every skill/explorer reads it (hosts/URLs, no secrets). Read only: allowedHosts is the guard's trust root, so an
     # auto-allowed Edit/Write would let a prompt-injected agent widen it silently
@@ -3464,9 +3479,12 @@ def wrapper_cmd(cmd, args):
         _write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
         print("sign-in recorded: qa-mem doctor now reports the profile as signed in")
     elif cmd == "prune":
-        if len(args) != 1:
-            raise BadInput("usage: qa-mem prune <project>")
-        print(f"pruned {prune(args[0])} old snapshot files")
+        if len(args) not in (1, 2):
+            raise BadInput("usage: qa-mem prune <project> [<run dir>]")
+        if len(args) == 2 and not (Path(args[1]).is_dir() and Path(args[1]).resolve().parent.name == "qa-out"):
+            raise BadInput(f"prune: not a run folder (qa-out/<run>/): {args[1]}")
+        n = prune(args[0], run=args[1] if len(args) == 2 else None)
+        print(f"pruned {n} old snapshot files" if len(args) == 1 else f"pruned {n} snapshot and temp files of this run")
     elif cmd == "annotate":
         o = _opts(args, valued=("--label",), multi=("--box",))
         if len(o["_"]) != 1 or not o.get("--box") or not o.get("--label"):
@@ -3504,7 +3522,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "codemap-scan": "[--full] [--out DIR] <source folder>...", "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
-    "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "login-ok": "", "prune": "<project>",
+    "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "login-ok": "", "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
     "inbox": "<project> [--file F]", "setup-permissions": "[--settings PATH] [--apply]",
 }

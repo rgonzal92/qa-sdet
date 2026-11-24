@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "PermissionDenied": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/denied.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "qa-sdet:qa-explorer|qa-explorer|qa-sdet:qa-mapper|qa-mapper",
