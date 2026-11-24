@@ -19,10 +19,14 @@ class QaMem(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "t.db")
+        # never the user's real config or profile folder (doctor checks both)
+        self.real_paths = (qm.CONFIG, qm.DATA_DIR)
+        qm.CONFIG, qm.DATA_DIR = Path(self.tmp.name) / "cfg" / "config.json", Path(self.tmp.name) / "data"
         self.con = qm.connect()
 
     def tearDown(self):
         self.con.close()
+        qm.CONFIG, qm.DATA_DIR = self.real_paths
         self.tmp.cleanup()
 
     def test_card_shows_facts_locators_coverage_untried(self):
@@ -40,6 +44,200 @@ class QaMem(unittest.TestCase):
     def test_unknown_page_card(self):
         self.assertIn("NO CARD", qm.card(self.con, "/nope"))
 
+    def test_redaction_is_linear_on_long_whitespace_and_knows_more_tokens(self):  # audit 3 r4
+        t0 = time.time()
+        for text in ("password" + " " * 200000 + "x", "token" + "\t " * 100000, "'apiKey'" + " " * 200000 + "'x'"):
+            qm.redact(text)
+        self.assertLess(time.time() - t0, 5)  # was quadratic: over a minute, past the Stop hook's timeout
+        for secret in ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "glpat-abcdefghijklmnopqrst",
+                       "__Host-session=abcdef0123456789abcdef"):
+            self.assertNotIn(secret[-12:], qm.redact(f"saw {secret} in the log"), secret)
+        for keep in ("class sk-folding-cube-container-large", "session: morning shift", 'password : "x"',
+                     "password \\: hunter2x9"):
+            self.assertEqual(qm.redact(keep), keep) if "hunter" not in keep else self.assertNotIn("hunter2x9", qm.redact(keep))
+        self.assertEqual(qm.redact('"password" : "hunter2x9"'), '"password" : "[REDACTED]"')
+        self.assertEqual(qm.redact("password\\\": \\\"hunter2x9"), "password\\\": \\\"[REDACTED]")  # JSON inside a string
+
+    def test_empty_or_numeric_draft_path(self):  # audit 3 r6
+        bug = {"route": "/form", "title": "t", "symptom": "s", "draft_path": "/abs/bugs/BUG-1.md"}
+        qm.ingest(self.con, run(bugs=[bug]))
+        qm.ingest(self.con, run(bugs=[{**bug, "draft_path": ""}]), run_dir=Path(self.tmp.name))  # a re-sighting without one
+        self.assertEqual(self.con.execute("SELECT draft_path FROM bugs").fetchone()[0], "/abs/bugs/BUG-1.md")
+        qm.ingest(self.con, run(bugs=[{**bug, "symptom": "other", "draft_path": 7}]), run_dir=Path(self.tmp.name))
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
+
+    def test_late_run_keeps_newer_coverage_and_bug_dates(self):  # audit 3 r15
+        cov = lambda r: [{"target": "speed", "heuristic": "boundary", "result": r}]
+        bug = {"route": "/form", "title": "t", "symptom": "s"}
+        qm.ingest(self.con, run(coverage=cov("fail"), bugs=[bug]), ts="2026-02-01T00:00:00Z")
+        qm.ingest(self.con, run(coverage=cov("pass"), bugs=[bug]), ts="2026-01-01T00:00:00Z")  # an older file, ingested late
+        self.assertEqual(self.con.execute("SELECT result, ts FROM coverage").fetchall()[0][:], ("fail", "2026-02-01T00:00:00Z"))
+        self.assertEqual(tuple(self.con.execute("SELECT first_seen, last_seen, seen_count FROM bugs").fetchone()),
+                         ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 2))
+        qm.ingest(self.con, run(coverage=cov("pass")), ts="2026-03-01T00:00:00Z")
+        self.assertEqual(self.con.execute("SELECT result FROM coverage").fetchone()[0], "pass")
+
+    def test_repro_spec_loses_literal_tokens_only(self):  # audit 3 r24: this branch had no test
+        f = Path(self.tmp.name) / "BUG-1.spec.ts"
+        f.write_text("const password = 'hunter2secret';\nconst t = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk';\n")
+        qm.scrub_file(f)
+        self.assertEqual(f.read_text(), "const password = 'hunter2secret';\nconst t = '[REDACTED-JWT]';\n")
+
+    def test_redact_json_cookie_lists_header_pairs_and_key_value_objects(self):  # audit 3 r34
+        sec = "s3cr3tV4lue9x"
+        for obj in ({"cookies": [{"name": "session", "value": sec}]}, {"cookies": {"session": sec}}, {"headers": [["Authorization", sec]]},
+                    {"key": "password", "value": sec}, {"jwt": sec}):
+            self.assertNotIn(sec, json.dumps(qm.redact_json(obj)), obj)
+        for obj in ({"key": "STUDIO-1", "summary": "Bearer of bad news"}, {"name": "Speed limit", "value": "130"},
+                    {"key": "speed", "value": "130"}, ["boundary", "pass"], {"notes": "the jwt cookies banner"}):
+            self.assertEqual(qm.redact_json(obj), obj)
+
+    def test_command_line_and_stated_passwords_are_redacted(self):  # audit 3, after r50
+        for text, secret in (("curl -u admin:hunter2 https://x", "hunter2"), ("curl --user admin:hunter2 https://x", "hunter2"),
+                             ("mysql -u root -phunter2 db", "hunter2"), ("the password is hunter2", "hunter2"),
+                             ("headers: { Authorization: `Bearer ${'abc123def456ghi789'}` }", "abc123def456")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        for keep in ("the password is required", "password is wrong", "mysql -P 3306 -u root db", "curl -u https://x",
+                     "docker run -u 1000:1000 img"):
+            self.assertEqual(qm.redact(keep), keep)
+
+    def test_reopening_a_bug_no_run_lists_removes_it(self):  # audit 3, after r50
+        bug = {"route": "/form", "title": "t", "symptom": "s"}
+        r = run(bugs=[bug])
+        qm.ingest(self.con, r, src="a")
+        h = self.con.execute("SELECT hash FROM bugs").fetchone()[0]
+        qm.run_cmd(self.con, "bug-status", [h, "FILED"])
+        qm.ingest(self.con, {**r, "bugs": []}, src="a")  # the run file was rewritten without it; triaged, so kept
+        self.assertEqual(self.con.execute("SELECT status, seen_count FROM bugs").fetchone()[:], ("FILED", 0))
+        qm.run_cmd(self.con, "bug-status", [h, "OPEN"])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 0)
+
+    def test_fresh_review_findings(self):  # audit 3: independent review after round 50
+        # limits and selectors survive; an assigned password goes whatever its characters
+        for keep in ("Password: 8-64 characters", "Session token: 30min expiry", "PUT /api/profile?key=password", "pwd: 8–64",
+                     "Token: 3600s lifetime", "input#password:nth-child(2)", "session: /incidents/list/details/panel",
+                     "password = getPassword()", "token = await login()", "password=required", "token=1.42.0"):
+            self.assertEqual(qm.redact(keep), keep)
+        for text in ("username=qa.tester&password=Sommerregen", "Server=db;User Id=qa;Password=Sommerregen;",
+                     "client_secret=AbCdEfGhIjKl", "PGPASSWORD=Sommerregen psql", "export API_KEY=abcdefgh",
+                     "X-Api-Key: abcdefghijkl", "Authorization: Bearer abcdefghijkl", "GET /x?key=AbCd1234EfGh5678"):
+            out = qm.redact(text)
+            self.assertIn("[REDACTED]", out, text)
+            self.assertNotRegex(out, "Sommerregen|AbCdEfGhIjKl|abcdefgh|AbCd1234", text)
+        # coverage: n/a is not a check; a bug with its draft id in `hash` is still stored
+        self.assertEqual([qm.coverage_result(r) for r in ("n/a", "N/A (no dialog)", "-", "?", None, "", "pass")],
+                         ["blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "pass"])
+        qm.ingest(self.con, run(facts=[{"kind": "api", "text": "GET /api/zones returns 500 on empty filter"},
+                                       {"kind": "note", "text": "speed chart loads slowly"}],
+                                bugs=[{"route": "/form", "title": "Save accepts 131", "symptom": "saved at 131", "hash": "BUG-2"}]))
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)
+        # search: terms with symbols
+        self.assertIn("returns 500", qm.search(self.con, "/api/zones"))
+        self.assertIn("no facts match", qm.search(self.con, "speed-limit"))
+        self.assertIn("speed chart", qm.search(self.con, "speed -/api/zones"))
+
+    def test_verification_pass_findings(self):  # audit 3: second independent pass
+        for text, secret in (("2. Sign in as `qa.tester` with password: `Winter2026!`", "Winter2026"),
+                             ("- **Cookie:** session=abcdef123456; Path=/", "abcdef123456"), ("- **API token:** abcd1234efgh5678ijkl", "abcd1234"),
+                             ("token=`abc123def456`", "abc123def456"), ("**Password:** Winter2026!", "Winter2026"),
+                             ("__Token:__ abc123def456ghi7", "abc123def456"), ("Log in with user=qa and password=Sommerregen.", "Sommerregen"),
+                             ("password=Summer.Rain", "Summer.Rain"), ("curl -uadmin:hunter2 https://qa.example.com/api", "hunter2"),
+                             ("curl -u 'admin':'hunter2' https://x", "hunter2"), ("password: hunter2", "hunter2")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        for keep in ("Password: maxlength=64", "Save is enabled only when password == confirmPassword", "password: min=8 max=64",
+                     "password: minLength(8)", "password: >=8 chars", "token: uuid4", "token: HS256 signed", "session_id: int64",
+                     "Cookie: SameSite=Lax missing on session cookie", "Session token: HttpOnly=false", "if (token == null) return",
+                     "z.object({ password: z.string().min(8).max(64) })", "password=user.password", "**Speed limit:** 130"):
+            self.assertEqual(qm.redact(keep), keep)
+
+    def test_third_pass_findings(self):  # audit 3: third independent pass
+        for text, secret in (("request header Authorization: ApiKey 9f8e7d6c5b4a39281706aabbccdd) → 500", "9f8e7d6c5b4a"),
+                             ("Authorization: SSWS 00QCjAl4MlV-WPXM1ABCDEFGHIJKLmnopqrstuv", "00QCjAl4"),
+                             ("authorization: Api-Key abcdefghijkl0123", "abcdefghijkl0123"),
+                             ("Sign in as qa.tester with password: Tr0ub4dor&3", "Tr0ub4dor"), ("password: Wint3r,Sturm!", "Sturm"),
+                             ("password=Sommer&Regen2026", "Regen2026"), ("**Password:** Winter;2026!", "2026!"),
+                             ("Password: P@ss;w0rd", "w0rd"), ("redis://:Sommerregen@cache.qa:6379/0", "Sommerregen"),
+                             ("AccountKey=abcdEFGH1234ijklMNOP5678==;EndpointSuffix=core.windows.net", "abcdEFGH1234"),
+                             ("a=1&password=hunter2x&next=/home", "hunter2x")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        self.assertEqual(qm.redact("a=1&password=hunter2x&next=/home"), "a=1&password=[REDACTED]&next=/home")
+        self.assertEqual(qm.redact("(Authorization: Bearer abcdefghijklmnop0123456789), then the page reloaded."),
+                         "(Authorization: Bearer [REDACTED]), then the page reloaded.")
+        for keep in ("6. Open https://qa.example.com/reset-password?token=<the token from the email>", "GET /api/reset?token=${token}",
+                     "GET /api/reset?token=:token", "password: pattern=^[A-Za-z0-9]{8,64}$", "password: 'required|min:8|max:64'",
+                     "cookie: maxAge=1800000, httpOnly, sameSite=lax", "Authorization: header missing on the request",
+                     "Authorization: permissions enforced server-side"):
+            self.assertEqual(qm.redact(keep), keep)
+        # a sighting older than the last one (ingested late) predates the fix
+        bug = {"route": "/form", "title": "t", "symptom": "s"}
+        qm.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
+        h = self.con.execute("SELECT hash FROM bugs").fetchone()[0]
+        self.con.execute("UPDATE bugs SET status='FIXED'")
+        newest = self.con.execute("SELECT last_run FROM bugs").fetchone()[0]
+        qm.ingest(self.con, run(bugs=[bug]), ts="2026-11-05T00:00:00Z")
+        self.assertEqual(tuple(self.con.execute("SELECT status, last_run FROM bugs").fetchone()), ("FIXED", newest))
+        qm.ingest(self.con, run(bugs=[bug]), ts="2026-11-20T00:00:00Z")
+        self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0], "REGRESSED")
+
+    def test_fourth_pass_findings(self):  # audit 3: fourth independent pass
+        line = ("Request headers: Authorization: Bearer 9f8c7d6e5b4a3f2e1d0c9f8c, Cookie: _traffic_session=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFi"
+                "%3D%3D--a1b2c3d4e5; XSRF=1")
+        out = qm.redact(line)
+        self.assertNotIn("9f8c7d6e", out)
+        self.assertNotIn("Zm9vYmFy", out)
+        out = qm.redact("Authorization: Bearer abc123def456ghi789jk | Cookie: session=abc123def456 | X-Api-Key: zonesservicekey")
+        for secret in ("abc123def456ghi789jk", "session=abc123def456", "zonesservicekey"):
+            self.assertNotIn(secret, out)
+        for text, secret in (("API key: 9f8c7d6e5b4a3f2e1d0c", "9f8c7d6e"), ("- **API key:** `9f8c7d6e5b4a3f2e1d0c`", "9f8c7d6e"),
+                             ("Secret key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtn"),
+                             ("Session ID: 7f3a9b2c4d5e6f708192a3b4c5d6e7f8", "7f3a9b2c"), ("Access key: AbCdEf1234567890", "AbCdEf12")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        self.assertEqual(qm.redact_json({"API Key": "9f8c7d6e5b4a3f2e1d0c"}), {"API Key": "[REDACTED]"})
+        for keep in ('Response 400: {"errors":{"password":"must be at least 8 characters"}}',
+                     'Actual: 422 {"password": "Password is too short", "token": "Token has expired"}',
+                     'Error toast: password: "The password field is required."', 'token: "invalid or expired"',
+                     'i18n key errors.password = "Password is required"', "password: this.loginForm.value.password",
+                     "token: response.data.token", "Authorization: Bearer expected but missing"):
+            self.assertEqual(qm.redact(keep), keep)
+        self.assertEqual(qm.redact("password: 'letmein'"), "password: '[REDACTED]'")
+
+    def test_fifth_pass_findings(self):  # audit 3: fifth independent pass
+        tok = "sk." "eyJ1IjoidHJhZmZpY3FhIiwiYSI6ImNrOXh5ejEyMzQ1Njc4OWFiY2RlZiJ9.Xk3mP9qR7sT2vW5yZ8aB1c"
+        for text, secret in ((f"access_token: {tok}", "eyJ1Ijoi"), (f"Mapbox access token: {tok}", "eyJ1Ijoi"), (f"MAPBOX_TOKEN={tok}", "eyJ1Ijoi"),
+                             ("API key: live.a1b2c3d4e5f6a7b8c9d0e1f2", "a1b2c3d4"), ("Session ID: s.abcdef0123456789abcdef", "abcdef0123"),
+                             ("Password: qa.tester2026", "tester2026")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        for keep in ('Response 400: {"errors":{"password":"Too short"}}', 'Response 400: {"errors":{"password":"Invalid password"}}',
+                     'Response 401: {"error":"invalid_token","token":"Token expired"}', 'Toast text: password: "Wrong password"',
+                     'Placeholder for password: "Enter your password"', "X-CSRF-Token: mismatch gives 419 instead of 403",
+                     "X-Auth-Token: returned by POST /api/login, sent on every call", "X-Api-Key: mandatory for /api/zones, optional elsewhere",
+                     "headers: { 'X-Api-Key': process.env.API_KEY }", "password: this.loginForm.value.password"):
+            self.assertEqual(qm.redact(keep), keep)
+        self.assertEqual(qm.redact("Headers: Authorization: Bearer abc123def456ghi789jkl012, Cookie: sid=abcdef0123456789abcdef, X-Api-Key: live_9f8e7d6c5b4a"),
+                         "Headers: Authorization: Bearer [REDACTED], Cookie: [REDACTED], X-Api-Key: [REDACTED]")
+        self.assertEqual(qm.redact("X-Api-Key: abcdefghijkl"), "X-Api-Key: [REDACTED]")
+
+    def test_sixth_pass_findings(self):  # audit 3: sixth independent pass
+        for keep in ("headers: { Authorization: `Bearer ${accessToken}` }", "'Authorization': `Bearer ${session.accessToken}`,",
+                     "Authorization: Bearer {{authToken}}", "Authorization: Bearer <access-token>", "Authorization: Bearer $ACCESS_TOKEN",
+                     "headers: { 'x-api-key': environment.apiKey }", "'X-Api-Key': this.config.apiKey,", "X-Auth-Token: req.headers['x-auth-token']",
+                     "X-Auth-Token: localStorage.getItem('token')", "X-CSRF-Token: Mismatch error shown", "X-Api-Key: Mandatory header",
+                     "token: Validators.required", "password: Validators.required,", "token: DataTypes.STRING", "apiKey: ConfigService.apiKey",
+                     '{"errors":{"password":"Minimum 8 characters"}}', '{"errors":{"token":"Session timed out"}}',
+                     '{"errors":{"password":"Bad credentials"}}', '"token": "Access denied"', "password: 'Use 8+ characters'",
+                     "getByLabel('Password:').fill('x')", "| password | required, min 8 |", "| Speed limit | 130 |"):
+            self.assertEqual(qm.redact(keep), keep)
+        for text, secret in (("| X-Api-Key | 4f3c2b1a0d9e8f7a6b5c |", "4f3c2b1a"), ("| api_key | 4f3c2b1a0d9e8f7a6b5c1234 |", "4f3c2b1a"),
+                             ("| password | Passw0rd! |", "Passw0rd"), ("X-Api-Key: abcdefghijkl", "abcdefghijkl"),
+                             ('{"apiKey": "correct horse battery"}', "horse")):
+            self.assertNotIn(secret, qm.redact(text), text)
+
+    def test_unparseable_url_is_no_route_not_a_traceback(self):  # audit 3 r1
+        self.assertEqual(qm.norm_route("http://[x"), "")
+        self.assertIn("NO CARD", qm.card(self.con, "http://[x"))
+        with self.assertRaises(ValueError):
+            qm.ingest(self.con, {"run_id": "r", "pages": [{"route": "http://[x"}]})
+
     def test_bug_dedup_increments_seen_count(self):
         bug = {"route": "/form", "title": "Speed accepts 999", "symptom": "speed accepts 999",
                "severity": "HIGH", "classification": "CONFIRMED"}
@@ -54,6 +252,30 @@ class QaMem(unittest.TestCase):
         qm.ingest(self.con, r)
         qm.ingest(self.con, r)
         self.assertEqual(self.con.execute("SELECT seen_count FROM bugs").fetchone()[0], 1)
+
+    def test_rewritten_run_replaces_its_bugs_and_counts_runs_once(self):
+        """A run.json rewritten mid-run (or ingested by a sibling explorer's hook first) replaces its earlier version."""
+        bugs = lambda: [tuple(r) for r in self.con.execute("SELECT title, seen_count FROM bugs ORDER BY title")]
+        x, y = {"route": "/f", "title": "X", "symptom": "x"}, {"route": "/f", "title": "Y", "symptom": "y"}
+        a = lambda *b: {"run_id": "explore-f-1", "build": "1", "bugs": list(b)}
+        qm.ingest(self.con, a({**x, "symptom": "first guess"}))
+        qm.ingest(self.con, a(x))  # symptom corrected: the first guess was never a separate bug
+        self.assertEqual(bugs(), [("X", 1)])
+        qm.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [x]})
+        qm.ingest(self.con, a(x, y))  # run A rewritten after run B saw X: still two runs
+        self.assertEqual(bugs(), [("X", 2), ("Y", 1)])
+        qm.ingest(self.con, a())  # A drops both: Y was only A's, X stays B's sighting
+        self.assertEqual(bugs(), [("X", 1)])
+        qm.ingest(self.con, a(x))  # and back again
+        self.assertEqual(bugs(), [("X", 2)])
+        self.con.execute("UPDATE bugs SET status='FILED'")
+        qm.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": [y]})
+        qm.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": []})
+        self.assertEqual(bugs(), [("X", 2)])
+        # two files that reuse one run id are separate files, not rewrites of each other
+        qm.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [y]}, src="qa-out/r/.data/run-a.json")
+        qm.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [x]}, src="qa-out/r/.data/run-b.json")
+        self.assertEqual(bugs(), [("X", 3), ("Y", 1)])
 
     def test_unknown_build_plan_does_not_stale_real_knowledge(self):
         qm.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "real"}],
@@ -266,6 +488,12 @@ class QaMem(unittest.TestCase):
             self.assertIn("[REDACTED]", qm.redact(t), t)
         self.assertEqual(qm.redact(f"X-Api-Key: {S} was sent"), "X-Api-Key: [REDACTED] was sent")
 
+    def test_basic_credentials_outside_a_header_line(self):  # r20: survived in JSON values, prose and specs
+        self.assertEqual(qm.redact_json({"auth": "Basic dXNlcjpwYXNz"}), {"auth": "Basic [REDACTED]"})
+        self.assertNotIn("YWRtaW46aHVudGVyMg", qm.redact_literals("headers({authorization: 'Basic YWRtaW46aHVudGVyMg=='})"))
+        for t in ["basic validation works", "Basic information panel", "Basic auth required"]:
+            self.assertEqual(qm.redact(t), t)
+
     def test_unreadable_build_spellings(self):
         qm.ingest(self.con, run("1.42.0", facts=[{"kind": "rule", "text": "real"}]))
         for b in ["undefined", "unknown (footer .version not found)", "Unknown", "UNKNOWN", "null"]:
@@ -400,11 +628,13 @@ class QaMem(unittest.TestCase):
         self.assertIn("verified=never", qm.card(self.con, "/new"))
 
     def test_heuristic_ids_normalised(self):
-        qm.ingest(self.con, run(coverage=[{"target": "x", "heuristic": "Boundary"},
-                                          {"target": "y", "heuristic": "Traffic time zone"}]))
+        qm.ingest(self.con, run(coverage=[{"target": "x", "heuristic": "Boundary", "result": "pass"},
+                                          {"target": "y", "heuristic": "Traffic time zone", "result": "pass"},
+                                          {"target": "z", "heuristic": "permissions"}]))  # no result: not a check
         c = qm.card(self.con, "/form")
         self.assertIn("other:traffic-time-zone", c)
         self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])
+        self.assertIn("permissions", c.split("UNTRIED: ")[1].splitlines()[0])
 
     def test_bug_status_wildcards_and_stale_extra_args(self):
         qm.ingest(self.con, run(bugs=[{"route": "/form", "title": "a"}, {"route": "/form", "title": "b"}]))
@@ -430,6 +660,24 @@ class QaMem(unittest.TestCase):
         self.assertIn("build=1.1", c)
         self.assertIn("fresh\n", c + "\n")
         self.assertNotIn("fresh *", c)
+
+    def test_late_run_of_the_current_build_still_adds_what_it_saw(self):  # audit 2 r12
+        qm.ingest(self.con, run("2.0", locators=[{"name": "Add", "locator": "getByRole('button', { name: 'Add' })"}]),
+                  "2026-11-22T10:00:00Z")
+        qm.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "code max 6"}],
+                                locators=[{"name": "Code", "locator": "getByLabel('Code')"}]), "2026-11-22T09:00:00Z")
+        names = {r[0] for r in self.con.execute("SELECT name FROM locators")}
+        self.assertEqual(names, {"Add", "Code"})
+        self.assertEqual(self.con.execute("SELECT stale FROM facts WHERE text='code max 6'").fetchone()[0], 0)
+        qm.ingest(self.con, run("1.0", locators=[{"name": "Old", "locator": "#old"}]), "2026-11-21T09:00:00Z")
+        self.assertNotIn("Old", {r[0] for r in self.con.execute("SELECT name FROM locators")})  # older build: skipped
+
+    def test_card_says_when_verified_locators_did_not_fit(self):  # audit 2 r13
+        locs = [{"name": f"btn{i}", "locator": f"getByRole('button', {{ name: 'Button number {i} {'x' * 60}' }})"}
+                for i in range(25)]
+        qm.ingest(self.con, run("1.0", locators=locs))
+        c = qm.card(self.con, "/form")
+        self.assertRegex(c, r"\(\+\d+ more verified")
 
     def test_round5_plan_does_not_refresh_stale_fact(self):
         qm.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "r"}]), "2026-11-20T10:00:00Z")
@@ -504,6 +752,75 @@ class QaMem(unittest.TestCase):
         self.assertIn("FIX  allowedHosts is a list", out)
         self.assertIn("FIX  config has app", out)
 
+    def test_doctor_empty_config_failed_mcp_list_and_source_folders(self):  # audit 2 r19
+        import io, contextlib, shutil
+        cfg = Path(self.tmp.name) / "config.json"
+        real, real_list, real_which = qm.CONFIG, qm.claude_mcp_list, shutil.which
+        qm.CONFIG, qm.claude_mcp_list = cfg, lambda: "FAILED"
+        shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli: the fallback lines print
+        try:
+            for body, want in (({}, "FIX  config has app"),
+                               ({"sourcePaths": "/x"}, "FIX  sourcePaths is a list"),
+                               ({"sourcePaths": [str(Path(self.tmp.name) / "gone")]}, "not found")):
+                cfg.write_text(json.dumps(body))
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    qm.doctor()
+                self.assertIn(want, buf.getvalue(), body)
+            self.assertIn("`claude mcp list` failed", buf.getvalue())
+        finally:
+            qm.CONFIG, qm.claude_mcp_list, shutil.which = real, real_list, real_which
+        self.assertTrue(qm.pillow_fix())
+
+    def test_redaction_audit2_tokens_and_false_positives(self):
+        secrets = ["github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+                   "ATATT3xFfGF0abcdefghijklmnopqrstuvwxyz0123456789=ABCDEF12",
+                   "AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW", "sk_" "live_4eC39HqLyjWDarjtT1zdp7dc",
+                   "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
+                   "-----END RSA PRIVATE KEY-----", "https://b.s3.amazonaws.com/x?X-Amz-Signature=abcdef0123456789abcdef"]
+        for sec in secrets:
+            self.assertNotIn(sec.splitlines()[-1][-12:], qm.redact(f"value: {sec} end"), sec[:20])
+        self.assertNotIn("letmein", qm.redact("const password = 'letmein';"))
+        self.assertNotIn("horse", qm.redact('{"apiKey": "correct horse battery"}'))
+        for keep in ("Bearer acknowledgements are shown", "token=1.42.0 released", "password: required",
+                     "the password field max 64 chars", "Token expired message shown"):
+            self.assertEqual(qm.redact(keep), keep)
+
+    def test_search_terms_and_stale_correction(self):  # audit 2 r29
+        qm.ingest(self.con, run("1.43.0", facts=[{"kind": "rule", "text": "speed max 130"},
+                                                  {"kind": "rule", "text": "closure AND detour shown"}]))
+        self.assertNotIn("max 130", qm.search(self.con, "speed -130"))
+        self.assertIn("detour", qm.search(self.con, "closure NEAR detour"))
+        self.assertIn("max 130", qm.search(self.con, 'speed "130'))
+        qm.main(["stale", "1.44.0"])
+        qm.main(["stale", "1.43.0"])  # corrected: what was verified on 1.43.0 is current again
+        self.assertEqual(self.con.execute("SELECT max(stale) FROM facts").fetchone()[0], 0)
+
+    def test_scrub_backlog_is_worked_off_in_bounded_passes(self):  # audit 2 r36: hook timeout safety
+        root = Path(self.tmp.name) / "qa-out"
+        files = []
+        for i in range(5):
+            f = root / f"r{i}" / "bugs" / "BUG-1.md"
+            f.parent.mkdir(parents=True)
+            f.write_text("Authorization: Bearer abcdef0123456789abcdef")
+            os.utime(f, (1_700_000_000, 1_700_000_000))  # one mtime for all: a copied qa-out
+            files.append(f)
+        passes = 0
+        while any("abcdef0123" in f.read_text() for f in files):
+            qm.scrub_tree(root, budget=0)  # one file per pass
+            passes += 1
+            self.assertLess(passes, 10)
+        self.assertEqual(passes, 5)
+        for _ in range(5):  # each rewritten file is looked at once more (its change time is new), then the pass ends
+            qm.scrub_tree(root, budget=0)
+        self.assertNotIn(" ", (root / ".scrubbed").read_text())  # a finished pass stores a plain time again
+        late = root / "r0" / "bugs" / "BUG-2.md"  # audit 3 r36: copied in with an old mtime (cp -a, a restored backup)
+        late.write_text("Authorization: Bearer abcdef0123456789abcdef")
+        os.utime(late, (1_600_000_000, 1_600_000_000))
+        qm.scrub_tree(root)
+        self.assertNotIn("abcdef0123", late.read_text())
+        self.assertEqual(late.stat().st_mtime, 1_600_000_000)
+
     def test_ingest_redacts_drafts_and_run_json(self):
         out = Path(self.tmp.name) / "qa-out" / "a"
         (out / "bugs").mkdir(parents=True)
@@ -569,7 +886,7 @@ class QaMem(unittest.TestCase):
         self.assertIn("ok   Jira fallback: Atlassian/Jira MCP claude.ai Atlassian", out)
         self.assertNotIn("secret-token-abc", out)  # names only: commands and URLs can carry keys
         self.assertNotIn("FIX  playwright-cli", out)  # a working MCP fallback: the CLI is advice, not a problem
-        self.assertIn("info no saved QA session: MCP runs", out)
+        self.assertIn("info no signed-in profile: MCP runs", out)
         self.assertNotIn("k123", out)
         self.assertNotIn("SECRET42", out)  # error text after the status can hold keys too
         qm.claude_mcp_list = lambda: "playwright: npx @playwright/mcp - ⏸ Pending approval (run `claude` to approve)\n"
@@ -780,7 +1097,9 @@ class QaMem(unittest.TestCase):
         r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
                            input='{"stop_hook_active": false}', capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("could not save this run", r.stderr)
+        self.assertIn("could not save this", r.stderr)
+        self.assertIn(str(ROOT / "references" / "run-json.md"), r.stderr)  # r20: absolute, the project has no references/
+        self.assertIn("did not write", r.stderr)  # a sibling explorer's parked file is not this agent's to fix
         (out / "run.json").write_text(json.dumps({"run_id": "r2", "build": "1", "pages": [{"route": "/x", "facts": 5}]}))
         r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
                            input='{"stop_hook_active": true}', capture_output=True, text=True, env=env)

@@ -9,15 +9,16 @@ secret and file rules as for playwright-cli.
 
 | Procedure step / CLI command | MCP tool |
 |---|---|
-| 1. Start: `open` + `state-load` + `goto <target>` | `browser_tabs` `{action: "new", url: <target>}`: your own tab (no open or state-load: the MCP's browser holds the login; the caller's sign-in tab keeps the login request in its network log, so leave that tab alone) |
-| `find "Save"` | `browser_find` `{text: "Save"}` or `{regex: "error|invalid"}`; older versions without it: `browser_snapshot` with `filename`, then `grep` the file |
-| `snapshot --depth=4` | `browser_snapshot` `{depth: 4}` (`depth` only where the schema lists it); pass `filename` `<out>/evidence/snapshot.md` for big pages and grep it |
+| 1. Start: `qa-mem browser-open <target>` | `browser_tabs` `{action: "new", url: <target>}`: your own tab (no browser-open: the MCP's browser holds the login; the caller's sign-in tab keeps the login request in its network log, so leave that tab alone) |
+| `find 'Save'` | `browser_find` `{text: "Save"}` or `{regex: "/error|invalid/i"}` (slashes add flags; without `/i` it is case-sensitive); older versions without it: `browser_snapshot` with `filename`, then `grep` the file |
+| `snapshot --depth=4` | `browser_snapshot` `{depth: 4}` (`depth` only where the schema lists it); pass `filename` `<out>/.data/snapshot.md` for big pages and grep it |
 | `click`, `fill`, `type`, `select`, `hover`, `press` | `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`, `browser_hover`, `browser_press_key` with the `target` ref from the snapshot |
 | 3. Build, `--raw eval "<js>"`, batched input values | `browser_evaluate` `{function: "() => <js>"}` (async functions work: `async () => {…}`) |
 | `console error` | `browser_console_messages` `{level: "error"}` |
 | `requests`, `response-body <n>`, `request-body <n>` | `browser_network_requests`, then `browser_network_request` `{index: n, part: "response-body"}` (or `request-body`) |
 | one header | `browser_evaluate` `"() => fetch(location.href).then(r => r.headers.get('<name>'))"` |
-| `screenshot --filename=<out>/evidence/BUG-n-x.png` | `browser_take_screenshot` `{filename: "<out>/evidence/BUG-n-x.png"}` |
+| bug image: box eval, `screenshot --filename='<out>/evidence/BUG-<n>.png'`, `qa-mem annotate` | `browser_evaluate` for the same box (CSS pixels, no `devicePixelRatio` factor, like the CLI), `browser_take_screenshot` `{filename: "<out>/evidence/BUG-<n>.png"}`, then the same `qa-mem annotate` command |
+| map screenshot | `browser_take_screenshot` `{filename: "<out>/.data/map-<n>.png"}` |
 | new tab | `browser_tabs` `{action: "new", url: …}`. Switching tabs (`select`) is blocked. A link that opens a new tab: read its `href` and `browser_navigate` to it in your tab. A popup: `browser_tabs` `{action: "list"}`, then `{action: "close", index: <the popup's n>}` (without an index, close shuts the current tab: yours) |
 | 9. `close` | `browser_tabs` `{action: "list"}`, then `{action: "close", index: <your tab's n>}`; `browser_close` is blocked during runs (it would end the login) |
 

@@ -14,7 +14,7 @@
     ],
     "SubagentStop": [
       {
-        "matcher": "qa-sdet:qa-explorer|qa-explorer",
+        "matcher": "qa-sdet:qa-explorer|qa-explorer|qa-sdet:qa-mapper|qa-mapper",
         "hooks": [
           {
             "type": "command",

@@ -1,6 +1,6 @@
 # Exploration heuristics
 
-IDs must match `HEURISTICS` in `bin/qa-mem`. Record each one tried in run.json `coverage`.
+IDs must match `HEURISTICS` in `bin/qa-mem`. Record each one tried in the run JSON's `coverage` (`run-json.md`).
 
 | ID | Try | Typical oracle |
 |---|---|---|
@@ -17,7 +17,7 @@ IDs must match `HEURISTICS` in `bin/qa-mem`. Record each one tried in run.json `
 | loading-empty-states | No data, slow data, one row, many rows | Sensible empty/loading UI |
 | keyboard-a11y | Tab order, Enter/Escape, focus after dialog, labels | Fully operable by keyboard; named controls |
 | console-errors | `console error` after each step | No uncaught errors |
-| network-failures | `requests` after each step: 4xx/5xx, duplicate calls | No unexpected failures (not every 4xx is a bug) |
+| network-failures | `requests` after each step: 4xx/5xx, duplicate calls | A 4xx answering input you sent on purpose (invalid value, forbidden action) is fine; a failed call the page needs for its own data must show as an error, never as a result ("0 found", "saved") |
 | permissions | Hidden/disabled actions, direct URLs to restricted pages | Server enforces, not only UI |
 
 ## Traffic-domain ideas (record under the nearest heuristic ID above)
