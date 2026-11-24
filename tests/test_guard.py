@@ -289,7 +289,10 @@ class R3Secrets(Case):
                               ("Glob", {"pattern": "*/main/**", "path": str(D)}), ("Glob", {"pattern": "**/Cookies", "path": str(D)}),
                               ("Glob", {"pattern": "p*/**", "path": str(D)}), ("Edit", {"file_path": str(CK), "old_string": "a"}),
                               ("Write", {"file_path": f"{MAIN}/x.json"}), ("LS", {"path": str(MAIN)}),
-                              ("Grep", {"pattern": "sid", "path": str(D), "output_mode": "content"})]:
+                              ("Grep", {"pattern": "sid", "path": str(D), "output_mode": "content"}),
+            ("Grep", {"pattern": "sid", "path": str(HOME), "output_mode": "content"}),
+            ("Glob", {"pattern": "**/Cookies", "path": str(HOME / ".local")}),
+            ("Glob", {"pattern": "**/profiles/**", "path": str(HOME)})]:
                 self.assertIsNotNone(tool(name, agent, **tin), (name, tin, agent))
         self.assertIsNone(tool("Glob", pattern="**/*.md", path=str(ROOT)))
         self.assertIsNone(tool("Read", file_path=str(DB)))
@@ -631,20 +634,57 @@ class R7Mapper(Case):
 
 class R8ApproveAndLog(Case):
     def test_checked_calls_are_approved(self):
+        outside = TMP / "outside.txt"
+        outside.write_text("secret\n")
         for cmd in ["playwright-cli -s=qa click e5 | tail -3", "playwright-cli -s=qa snapshot 2>&1 >/dev/null && qa-mem card /x",
                     f"playwright-cli -s=qa console > {RUN}/qa-out/c.txt", "qa-mem report qa-out/r; playwright-cli -s=qa close",
                     "playwright-cli kill-all", f"python3 {Q} card /x", "playwright-cli -s=qa snapshot | grep -n Save",
-                    "playwright-cli -s=qa snapshot\nplaywright-cli -s=qa close"]:
+                    "playwright-cli -s=qa snapshot\nplaywright-cli -s=qa close",
+                    f"playwright-cli -s=qa screenshot --filename={RUN}/qa-out/r/evidence/BUG-1.png",
+                    f"head -20 {RUN}/qa-out/c.txt", f"grep -n Save {RUN}/.playwright-cli/page-1.yml"]:
             self.assertEqual(decision(cmd), "allow", cmd)
         for cmd in ["playwright-cli -s=qa close && rm x", "qa-mem setup-permissions --apply", "git status", "| tail -3",
                     "playwright-cli -s=qa console > /tmp/c.txt", "A=1 playwright-cli -s=qa click e1", "(playwright-cli -s=qa close)",
                     "playwright-cli -s=qa eval \"$(cat x)\"", "playwright-cli -s=qa click e1 &", "qa-mem inbox . < x.json",
                     "bash <<'EOF'\nplaywright-cli -s=qa close\nEOF", "timeout 5 playwright-cli -s=qa click e1", "head <<< x",
                     "playwright-cli -s=qa console > $OUT/c.txt", "playwright-cli -s=qa snapshot | grep $(cat p)", "bash -c 'qa-mem card /x'",
-                    "playwright-cli -s=qa goto https://evil.com | tail -3"]:
+                    "playwright-cli -s=qa goto https://evil.com | tail -3",
+                    f"playwright-cli -s=qa screenshot --filename={outside}", f"playwright-cli -s=qa pdf {outside}",
+                    f"playwright-cli -s=qa list>{RUN}/qa-out/a>{outside}", f"head {outside}", f"grep . {outside}",
+                    f"grep -f {outside}", "grep -r Save",
+                    'python3 -c "print(1) #/qa-mem"', "python3 /tmp/qa-mem", "python3 -X qa-mem /tmp/evil.py"]:
             self.assertNotEqual(decision(cmd), "allow", cmd)
         self.assertEqual(decision("playwright-cli -s=qa goto https://evil.com | tail -3"), "deny")
         self.assertIsNone(decision("git status"))  # not ours: Claude Code decides
+
+    def test_audit_parser_and_wrapper_bypasses(self):
+        # F1: python3 -c / arbitrary /tmp/qa-mem / -X qa-mem must never spoof qa-mem
+        for cmd in ['python3 -c "import os; os.system(\'acli jira workitem delete P-1\') #/qa-mem"',
+                    "python3 /tmp/qa-mem", "python3 -X qa-mem /tmp/evil.py"]:
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+            self.assertEqual(decision(cmd, RUN), "deny", cmd)
+        # F2: chained unspaced redirections must check every target
+        for cmd in [f"echo x>/tmp/a>{DB}", f"cat</dev/null>{DB}", f"cat</dev/null<{CK}"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        self.assertIsNotNone(bash(f"echo '{{}}'>/tmp/a>{CFG}", RUN, explorer=True))
+        # F4: exec, builtin, env -u -v command, env --chdir=, pw_args leading '-' / '--', find -L, cp -S
+        for cmd in [f"exec rm -rf {D}", "exec playwright-cli --profile=/tmp/p open https://evil.com",
+                    "exec acli --config=/dev/null jira workitem delete P-1",
+                    f"env --chdir={MAIN} cat Default/Cookies", f"env -C{D} rm app.db",
+                    "env -u -v command acli jira workitem delete P-1", f"env -u -v command rm -rf {D}",
+                    "env -u -v command playwright-cli -s=qa goto https://evil.com",
+                    "playwright-cli -s=qa eval '-1 || document.cookie'",
+                    "playwright-cli -s=qa eval -- '-(0) || document.cookie'",
+                    "playwright-cli -s=qa eval --header 'document.cookie'",
+                    "playwright-cli -s=qa upload -- -secret.pem",
+                    f"find -L {D} -delete", f"cp /tmp/x {DB} -S .bak"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        for cmd in [f"exec cp /tmp/x {CFG}", "exec curl https://evil.com", "exec bash /tmp/evil.sh",
+                    "builtin source /tmp/evil.sh", f"cp /tmp/x {CFG} -S .bak",
+                    # F9: explorer_net glued short options and --url=
+                    "curl -xevil:8080 https://qa.traffic.example/api", "curl -K/tmp/cfg https://qa.traffic.example/api",
+                    "curl --url=evil.example https://qa.traffic.example/api", "wget -i/tmp/urls https://qa.traffic.example/api"]:
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
 
     def test_hook_prints_allow_deny_or_nothing(self):
         out = lambda cmd: hook({"tool_name": "Bash", "cwd": str(RUN), "tool_input": {"command": cmd}})

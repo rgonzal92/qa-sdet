@@ -27,6 +27,9 @@ class Cli(Base):
         self.assertIsNone(core.meta(con, "build"))  # was: the build became "--help"
         self.assertEqual(cli("doctor", "now")[0], 2)
         self.assertEqual(cli("hash", "/form", "shows", "--", "instead")[0], 0)  # a symptom may hold "--"
+        self.assertEqual(cli("hash", "/form", "-h")[0], 0)
+        self.assertEqual(cli("rundir", str(self.proj), "--label", "--flag-test")[0], 0)
+        self.assertEqual(cli("rundir", str(self.proj), "--label", "-h")[0], 0)
         self.assertEqual(cli("code", "--repos")[0], 0)
 
     def test_ingest_of_a_bad_file_is_a_message(self):

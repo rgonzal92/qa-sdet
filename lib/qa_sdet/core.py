@@ -153,6 +153,15 @@ def cap(s):
     return " ".join(str(s or "").split())[:MAX_TEXT]
 
 
+def norm_build(v):
+    """Same build text however the page laid it out; empty, N/A, undefined or unknown* -> UNKNOWN."""
+    build = cap(v)
+    b = build.lower().strip(" .:()[]'\"")
+    if b in ("", "n/a", "na", "none", "null", "undefined", "?", "-", "not found") or b.startswith(UNKNOWN):
+        return UNKNOWN
+    return build
+
+
 def norm(s):
     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).split())
 

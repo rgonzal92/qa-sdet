@@ -18,10 +18,14 @@ from pathlib import Path
 # ---------- 1. constants ----------
 CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
 DATA_DIR = os.path.realpath(Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser())
+PLUGIN_QA_MEM = os.path.realpath(Path(__file__).resolve().parent.parent / "bin" / "qa-mem")
+_PLUGIN_QAMEM_VAR_RE = re.compile(r"^\$\{?(?:CLAUDE_PLUGIN_ROOT|CLAUDE_SKILL_DIR)\}?(?:/\.\.)*/bin/qa-mem$")
+_PY_SAFE_FLAG_RE = re.compile(r"-[ISsEOuBPqvbdix]+")
 PUNCT, MAX_TEXT = ";&|()\n", 100_000
 QUOTED_GT, QUOTED_LT = "\x01", "\x02"  # quoted '>' / '<' are data, not redirections
 FD_DUP, SUBST = "\x03", "\x04"  # `2>&1` -> `2>` FD_DUP `1`: an fd, never a file; SUBST: a $(...), `...` or <(...)
 WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-U", "-D", "-r", "-t", "-T"}, "nohup": set(), "command": set(),
+            "exec": {"-a"}, "builtin": set(),
             "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, "nice": {"-n", "--adjustment"},
             "timeout": {"-s", "-k", "--signal", "--kill-after"}, "time": {"-o", "-f"}, "stdbuf": {"-i", "-o", "-e"},
             "xargs": {"-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a"}, "npx": {"-p", "--package", "-c", "--call"}}  # -> value options
@@ -79,7 +83,7 @@ GUARDED_TOOL_RE = re.compile(r"(?<![.\w])playwright-cli|@playwright/cli|\bacli\b
 URL_RE = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^\s'\"`)]+", re.I)
 SCHEMELESS_URL_RE = re.compile(r"[\"'`(]\s*//([a-z0-9][a-z0-9.-]*)", re.I)  # '//host/path' in JS
 HEREDOC_RE = re.compile(r"""(?<![<$(\d])<<(?!<)(-?)[ \t]*((?:[^\s<>;&|()'"\\]|\\.|'[^']*'|"[^"]*")+)""")  # <<'E"OF' ends at EOF
-REDIRECT_RE, GLUED_RE = re.compile(r"^(\d*)(>>?|<<?<?)(.*)$", re.S), re.compile(r"^([^<>]+)(?=[<>])", re.S)  # `echo x>f`
+REDIR_OP_RE = re.compile(r"<<<?|<>|>>?|<")  # unquoted redirection operators (quoted ones are QUOTED_GT/LT)
 PW_ENV_RE = re.compile(r"(PLAYWRIGHT_MCP_|PWTEST_)\w*=|\b(export|declare|typeset|readonly|local)\b[^;&|\n]*?\b(PLAYWRIGHT_MCP_|PWTEST_)")
 PROXY_ENV_RE = re.compile(r"(?i)\b(https?|all|ftp)_proxy\s*=")
 HOSTISH_RE = re.compile(r"(?i)(localhost|[\w-]+(\.[\w-]+)*\.[a-z]{2,})(:\d+)?(/\S*)?")
@@ -157,6 +161,13 @@ def path_hits(word, cwd):
         fixed = os.path.realpath(os.path.dirname(GLOB_RE.split(full, 1)[0]) or "/")
         if any(under(fixed, r) or ancestor(fixed, r) for r in roots):
             hits += map(os.path.realpath, islice(glob.iglob(full, recursive=any(under(fixed, r) for r in roots)), 500))
+            if "**" in t:  # recursive glob rooted above a profile: match inside profiles without walking all of HOME
+                pat = os.path.normpath(full)
+                for r in profiles():
+                    if ancestor(fixed, r):
+                        cands = [r, os.path.join(r, "main")]
+                        cands += islice((os.path.join(dp, fn) for dp, _, fs in os.walk(r) for fn in fs), 500)
+                        hits += [c for c in cands if fnmatch(c, pat)]
     return hits
 def paths(words, cwds):
     """Every real path the words may name, also after `=` or `@` (`if=<path>`, `--file=<path>`, `-d @<path>`)."""
@@ -350,24 +361,29 @@ def split_redirects(seg):
     words, outs, ins, here, docs, i = [], [], [], [], 0, 0
     while i < len(seg):
         tok, i = seg[i], i + 1
-        glued = None if REDIRECT_RE.match(tok) else GLUED_RE.match(tok)  # `echo x>f`, `y=>f`
-        m = REDIRECT_RE.match(tok[glued.end():] if glued else tok)
-        words += [glued.group(1)] if glued else [] if m else [tok]
-        if not m:
+        ops = list(REDIR_OP_RE.finditer(tok))
+        if not ops:
+            words.append(tok)
             continue
-        kind, target = m.group(2), m.group(3)
-        if not target and i < len(seg):
-            target, i = seg[i], i + 1
-        if kind == "<<":
-            docs += 1
-        elif kind == "<<<":
-            here.append(unmark(target))
-        elif target and not (target[:1] == FD_DUP and re.fullmatch(r"\d+-?|-", target[1:])):
-            target = target.removeprefix(FD_DUP)  # `>&file` writes stdout and stderr to a file, not to an fd
-            if kind == "<" and target.startswith(">"):  # `<>file` opens it read-write
-                target = target[1:]
-                outs.append(target)
-            (ins if kind == "<" else outs).append(target)
+        lead = tok[:ops[0].start()]
+        if lead and not lead.isdigit():  # `2>f` is an fd, `x>f` / `y=>f` keeps the word before `>`
+            words.append(lead)
+        for idx, m in enumerate(ops):
+            kind = m.group(0)
+            target = tok[m.end():ops[idx + 1].start() if idx + 1 < len(ops) else len(tok)]
+            if not target and idx + 1 == len(ops) and i < len(seg):
+                target, i = seg[i], i + 1
+            if kind == "<<":
+                docs += 1
+            elif kind == "<<<":
+                here.append(unmark(target))
+            elif target and not (target[:1] == FD_DUP and re.fullmatch(r"\d+-?|-", target[1:])):
+                target = target.removeprefix(FD_DUP)  # `>&file` writes stdout and stderr to a file, not to an fd
+                if kind == "<>":  # `<>file` opens it read-write
+                    outs.append(target)
+                    ins.append(target)
+                else:
+                    (ins if kind == "<" else outs).append(target)
     return words, outs, ins, here, docs
 def unmark(text):
     """A quoted string a shell runs again (bash -c, eval): its '<' '>' are redirections there."""
@@ -378,7 +394,7 @@ def prog_name(tok):
     return "playwright-cli" if tok.startswith("@playwright/cli") else re.sub(r"@[^/]*$", "", os.path.basename(tok)).removesuffix(".js")
 def command_word(words):
     """(index of the real program or None, wrappers seen, lookup only (`command -v`), env -C folder)."""
-    i, wrappers, env_dir, duration = 0, [], None, False
+    i, wrappers, env_dir, duration, lookup = 0, [], None, False, False
     while i < len(words):
         tok, w = words[i], wrappers[-1] if wrappers else None
         if re.match(r"[A-Za-z_]\w*\+?=", tok) or tok in SHELL_KEYWORDS and not w:
@@ -386,7 +402,15 @@ def command_word(words):
         elif tok == "function" and not w:  # `function name { body`
             i += 2
         elif w and tok.startswith("-"):
-            env_dir = words[i + 1] if w == "env" and tok in ("-C", "--chdir") and i + 1 < len(words) else env_dir
+            if w == "command" and re.fullmatch(r"-p*[vV]p*", tok):
+                lookup = True
+            if w == "env":
+                if tok in ("-C", "--chdir") and i + 1 < len(words):
+                    env_dir = words[i + 1]
+                elif tok.startswith("--chdir="):
+                    env_dir = tok.split("=", 1)[1]
+                elif tok.startswith("-C") and len(tok) > 2:
+                    env_dir = tok[2:]
             i += 2 if tok in WRAPPERS[w] else 1
         elif duration and re.fullmatch(r"[\d.]+[smhd]?", tok):
             i, duration = i + 1, False
@@ -395,13 +419,23 @@ def command_word(words):
             i, duration = i + 1, wrappers[-1] == "timeout"
         else:
             break
-    return (i if i < len(words) else None), wrappers, "command" in wrappers and bool({"-v", "-V"} & set(words[:i])), env_dir
-def qamem_args(name, rest):
-    """The arguments after qa-mem when this command runs it (bare qa-mem, or python3 [-I…] <path>/qa-mem), else None."""
+    return (i if i < len(words) else None), wrappers, lookup, env_dir
+def qamem_args(name, rest, cwds=None, allow_var=True):
+    """The arguments after qa-mem when this command runs it (bare qa-mem, or python3 [-I…] <plugin>/bin/qa-mem), else None."""
     if name == "qa-mem":
         return rest
-    k = next((k for k, a in enumerate(rest) if not a.startswith("-") or a == "-"), len(rest))
-    return rest[k + 1:] if re.fullmatch(r"python[\d.]*", name) and rest[k:] and os.path.basename(rest[k]) == "qa-mem" else None
+    if not re.fullmatch(r"python[\d.]*", name):
+        return None
+    k = 0
+    while k < len(rest) and _PY_SAFE_FLAG_RE.fullmatch(rest[k]):
+        k += 1
+    if k >= len(rest):
+        return None
+    script = rest[k]
+    if any(real(script, c) == PLUGIN_QA_MEM for c in (cwds or (os.getcwd(),))) or \
+            allow_var and _PLUGIN_QAMEM_VAR_RE.fullmatch(script) and "$" in expand(script):
+        return rest[k + 1:]
+    return None
 def dynamic(w):
     """A word the shell computes: an unset $VAR, ${V:-x}, $(...), `...`."""
     return SUBST in w or "$" in os.path.expandvars(w)
@@ -441,10 +475,14 @@ def pw_help(rest):
     return False
 def pw_args(rest):
     """playwright-cli's positional words (the verb first), as it parses them."""
-    out, skip, flag = [], False, False
+    out, skip, flag, end = [], False, False, False
     for a in rest:
-        if skip:
+        if end:
+            out.append(a)
+        elif skip:
             skip = False
+        elif a == "--":
+            end = True
         elif a.startswith("-"):
             skip, flag = a in PW_VALUE_OPTS, "=" not in a
         else:
@@ -467,7 +505,7 @@ def check_pw(rest, ctx, cwds, outs):
         return f"playwright-cli {verb} blocked: {PW_DENY[verb]}"
     if verb == "show" and any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in opt_values(rest, "--host")):
         return "playwright-cli show --host would expose the logged-in QA browser to the network; keep it on localhost"
-    if verb == "eval" and secret_js(" ".join(args[1:])):
+    if verb == "eval" and secret_js(" ".join(rest)):
         return "playwright-cli eval reading cookie or web storage values blocked; read key names: Object.keys(localStorage)"
     if any(verb != "open" or not v or dynamic(v) or any(real(v, c) not in main_profile() for c in cwds) for v in pw_profile_values(rest)):
         return "playwright-cli --profile/--user-data-dir: only `open` with the qa-sdet main profile, spelled out (qa-mem browser-open)"
@@ -584,11 +622,14 @@ def explorer_net(name, rest, raw):
         return (f"{name} reaches other machines outside the browser; the explorer fetches only from the QA app "
                 "(the browser, or curl/wget to an allowed host)")
     opts = HTTP_REROUTE_OPTS | (WGET_FILE_OPTS if name in ("wget", "aria2c") else set())
-    if any(a.split("=", 1)[0] in opts for a in rest) or PROXY_ENV_RE.search(raw):
+    short_opts = tuple(o for o in opts if len(o) == 2 and o[0] == "-")  # glued short flags: -xproxy, -Kfile, -ifile
+    if any(a.split("=", 1)[0] in opts or a.startswith(short_opts) for a in rest) or PROXY_ENV_RE.search(raw):
         return f"{name} with a proxy, a resolve override or an option file can send the request elsewhere; call the URL directly"
     hosts, urls = allowed_hosts(), URL_RE.findall(" ".join(rest))
-    for k, a in enumerate(rest):  # bare hosts too (`curl -s qa.example/api`, `curl --url evil.example`)
-        if not a.startswith("-") and not (k and rest[k - 1] in HTTP_VALUE_OPTS) \
+    for k, a in enumerate(rest):  # bare hosts too (`curl -s qa.example/api`, `curl --url evil.example`, `--url=evil.example`)
+        if a.startswith("--url=") and not URL_RE.search(a):
+            urls.append(a.split("=", 1)[1])
+        elif not a.startswith("-") and not (k and rest[k - 1] in HTTP_VALUE_OPTS) \
                 and not URL_RE.search(a) and HOSTISH_RE.fullmatch(a):
             urls.append(a)
     if not urls:
@@ -623,6 +664,24 @@ def check_profile(name, rest, outs, ins, cwds, skip=()):
     if any(map(in_profile, cwds)) or any(map(in_profile, paths(args + outs + ins, cwds))) or \
             walks and any(map(in_area, paths(srcs, cwds))):  # `tar c ~/.local/share/qa-sdet`, `grep -r x ~/.local`
         return PROFILE_REASON
+_COPY_VAL_OPTS = set("-S --suffix -t --target-directory -m --mode -o --owner -g --group -Z --context "
+                      "--backup-dir --compare-dest --copy-dest --link-dest -e --rsh --exclude --include --filter "
+                      "--chmod --chown --bwlimit --log-file".split())
+def _pos_args(rest, val_opts):
+    """Positional arguments of a command, skipping values of val_opts and honoring `--`."""
+    out, skip, end = [], False, False
+    for a in rest:
+        if end:
+            out.append(a)
+        elif skip:
+            skip = False
+        elif a == "--":
+            end = True
+        elif a.startswith("-"):
+            skip = a in val_opts
+        else:
+            out.append(a)
+    return out
 def changes(name, rest, outs, cwds, root):
     """R5/R4: does it change root (the data folder, a config file) or remove a folder above it? Reads and copies don't."""
     def hit(w, up=False):
@@ -636,9 +695,13 @@ def changes(name, rest, outs, cwds, root):
         names = {os.path.basename(root)} | (set(os.listdir(root)) if os.path.isdir(root) else set())
         pats = [(a, rest[k + 1]) for k, a in enumerate(rest[:-1]) if a in ("-name", "-iname")]
         up = not pats or any(fnmatch(f.lower(), p.lower()) if o == "-iname" else fnmatch(f, p) for o, p in pats for f in names)
-        return bool(FIND_ACTIONS & set(rest)) and any(hit(a, up) for a in list(takewhile(lambda a: a[:1] not in "-(!", rest)) or ["."])
+        k = 0
+        while k < len(rest) and (rest[k] in ("-H", "-L", "-P", "-D", "--") or re.fullmatch(r"-O\d*", rest[k])):
+            k += 2 if rest[k] == "-D" else 1
+        return bool(FIND_ACTIONS & set(rest)) and any(hit(a, up) for a in list(takewhile(lambda a: a[:1] not in "-(!", rest[k:])) or ["."])
     tdir = opt_values(rest, "-t", "--target-directory")
-    srcs, dests = (pos, tdir) if tdir else (pos[:-1], pos[-1:])
+    cpos = _pos_args(rest, _COPY_VAL_OPTS) if name in WRITERS | {"mv"} else pos
+    srcs, dests = (cpos, tdir) if tdir else (cpos[:-1], cpos[-1:])
     dests += [os.path.join(t, os.path.basename(s.rstrip("/"))) for t in dests for s in srcs]  # `mv x <folder>/`
     moves = name == "mv" or name == "rsync" and any(a.startswith("--remove-source") for a in rest)
     mirror = name == "rsync" and any(a.startswith("--delete") for a in rest)  # deletes what the source lacks
@@ -653,14 +716,14 @@ def config_files(cwds):
     """R4: the qa-sdet config (allowedHosts) and the playwright-cli config files that would pick its browser."""
     return {os.path.realpath(CONFIG), real("~/.playwright/cli.config.json", "/")} | {real(".playwright/cli.config.json", c) for c in cwds}
 # ---------- 8. odd forms ----------
-def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx):
+def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None):
     """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file."""
     kind, val = run
     if ctx.explorer and (kind == "file" or kind == "stdin" and ins):
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
     if not ctx.guarded:
         return None
-    q, pos = qamem_args(name, rest), pw_args(rest)
+    pos = pw_args(rest)
     hidden = lambda t: mentions_guarded(t, ctx.explorer) or ctx.area and dynamic(t)  # noqa: E731 - names it, or computed near it
     forms = [
         (i is not None and dynamic(words[i]), "a program name from $VAR or $(...)"),  # O1
@@ -679,7 +742,8 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx):
             ctx.raw if kind == "stdin" else " ".join(rest + feeds), ctx.explorer), f"{name} code that names a guarded tool or path"),
         ("xargs" in wrappers and (name in GUARDED or q is not None or ctx.area), f"{name} run by xargs"),  # O6
         (name and name not in TEXT_TOOLS | SHELLS | GUARDED | {"eval", "alias"} and not INTERP_RE.fullmatch(name) and any(  # O7
-            prog_name(a.split("=", 1)[-1]) in GUARDED and a[:1] != "@" and k + 1 < len(rest) and "/" not in rest[k + 1]
+            prog_name(a.split("=", 1)[-1]) in GUARDED and a[:1] != "@" and k + 1 < len(rest)
+            and (rest[k + 1].startswith("-") or "/" not in rest[k + 1])
             or re.search(r"\s", a) and hidden(a) or prog_name(a) in SHELLS - {".", "source"} for k, a in enumerate(rest)),
          f"a guarded tool or command string run by {name}"),
         (name not in TEXT_TOOLS and any(map(hidden, feeds)),  # O8
@@ -745,14 +809,30 @@ def _check(cmd, cwd, ctx, depth, carried=()):
                 stack.append(set(cwds))
             elif ch == ")" and stack:
                 cwds = stack.pop()
+_HEAD_VAL_OPTS = {"-n", "-c", "--lines", "--bytes", "--sleep-interval", "--pid"}
+_GREP_VAL_OPTS = set("-e --regexp -f --file -m --max-count -A -B -C --after-context --before-context --context "
+                     "--include --exclude --exclude-dir --label --binary-files --devices --directories "
+                     "--color --colour -d -D".split())
+def _filter_ok(name, rest, cwd, bases):
+    """head/tail/grep auto-approve only as stdin filters, or reading files under qa-out/ or .playwright-cli/."""
+    roots = bases | {os.path.realpath(os.path.join(b, ".playwright-cli")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
+    if name in ("head", "tail"):
+        files = _pos_args(rest, _HEAD_VAL_OPTS)
+    else:
+        has_pat = any(a.split("=", 1)[0] in ("-e", "--regexp", "-f", "--file") or a.startswith(("-e", "-f")) and len(a) > 2 for a in rest)
+        pos = _pos_args(rest, _GREP_VAL_OPTS)
+        files = (pos if has_pat else pos[1:]) + opt_values(rest, "-f", "--file") + [a[2:] for a in rest if a.startswith("-f") and len(a) > 2]
+        if not files and any(re.match(r"-[a-zA-Z]*[rR]", a) or a in ("--recursive", "--dereference-recursive") for a in rest):
+            return False  # `grep -r` with no path walks the whole cwd
+    return all("$" not in f and not GLOB_RE.search(f) and any(real(f, cwd).startswith(b + os.sep) for b in roots) for f in files)
 def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-mem, head/tail/grep run directly, output to qa-out
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if i != 0 or ins or feeds or any(o not in ("/dev/null", "/dev/stdout", "/dev/stderr") and (
             "$" in o or not any(real(o, cwd).startswith(b + os.sep) for b in bases)) for o in map(unmark, outs)):
         return False
-    q = qamem_args(name, rest)
-    return name in ("playwright-cli", "head", "tail", "grep") or q is not None and not (
-        q[:1] == ["setup-permissions"] and "--apply" in q)
+    q = qamem_args(name, rest, {cwd}, allow_var=False)
+    return name == "playwright-cli" or (name in ("head", "tail", "grep") and _filter_ok(name, rest, cwd, bases)) or (
+        q is not None and not (q[:1] == ["setup-permissions"] and "--apply" in q))
 def check_segment(seg, cwds, start, ctx, depth, docs):
     """Check one simple command. Mutates cwds on cd."""
     j = next((k for k, t in enumerate(seg) if t not in SHELL_KEYWORDS | {"time"} or t in LOOP_KEYWORDS), len(seg))
@@ -761,16 +841,18 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     words, outs, ins, here, ndocs = split_redirects(seg)
     feeds = here + (list(docs) if ndocs else [])  # what it reads on stdin from here-strings and heredocs
     if words[:1] in (["case"], ["for"], ["select"]) and not (outs or ins or feeds):
+        ctx.approve = False
         return None  # a list of words (a $(...) in it was checked as its own command)
     i, wrappers, lookup, env_dir = command_word(words)
     name, rest = (prog_name(words[i]), words[i + 1:]) if i is not None else ("", [])
     local = {real(env_dir, c) for c in cwds} if env_dir else cwds
-    ctx.approve = ctx.approve and approvable(i, name, rest, outs, ins, feeds or ndocs, start)
-    q = qamem_args(name, rest)
+    q = qamem_args(name, rest, local)
     run = how_run(name, rest) if name in SHELLS or INTERP_RE.fullmatch(name) and q is None else (None, None)
-    if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx)) or lookup:
+    if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q)) or lookup:
+        ctx.approve = False
         return r  # `command -v x` runs nothing
     if name in ("cd", "pushd", "popd"):  # where the later commands run
+        ctx.approve = False
         target = next((a for a in rest if a not in ("-L", "-P", "-e", "-@", "--")), "~")
         new = {start} | (cwds if target == "-" else set()) if target == "-" or name == "popd" else {real(target, c) for c in cwds}
         return cwds.clear() or cwds.update(new)
@@ -779,6 +861,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
          depth + 1, docs) if name == "eval" else check_pw(rest, ctx, local, outs) if name == "playwright-cli" else check_acli(rest)
          if name == "acli" else check_qamem(q, ctx) if q is not None else None) or (
         explorer_net(name, rest, ctx.raw) if ctx.explorer and name in NET_CLIS else None)
+    ctx.approve = ctx.approve and approvable(i, name, rest, outs, ins, feeds or ndocs, start)
     return r or check_profile(name, rest, outs, ins, local, pw_profile_values(rest) if name == "playwright-cli" else ()) or (
         DB_REASON.format(name or "a redirection") if changes(name, rest, outs, local, DATA_DIR) else None) or (
         CONFIG_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in config_files(local)) else None)
@@ -806,7 +889,8 @@ def check_files(tool, tin, cwd, explorer):
     for raw in tool_paths(tin):
         p = real(raw or ".", cwd)
         if any(map(in_profile, path_hits(os.path.join(raw or ".", str(tin.get("pattern") or "")), cwd) if tool == "Glob" else [p])) \
-                or tool == "Grep" and str(tin.get("output_mode")).lower() == "content" and in_area(p):
+                or tool == "Grep" and str(tin.get("output_mode")).lower() == "content" \
+                and (in_area(p) or any(ancestor(p, r) for r in profiles())):
             return PROFILE_REASON
         if tool in WRITE_TOOLS and under(p, DATA_DIR):
             return "the qa-sdet memory DB directory is written only by qa-mem"

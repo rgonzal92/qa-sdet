@@ -332,7 +332,17 @@ class Scan(CodeMapCase):
         (repo / "src").joinpath(b"bad\xffname.tsx".decode("utf-8", "surrogateescape")).write_text("export const X = () => <b/>;\n")
         self.scan(repo)  # used to raise UnicodeDecodeError
         files = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]["files"]
-        self.assertIn("src/Login.jsx", files)
+        self.assertEqual(files, ["src/Login.jsx"])
+        # non-git folder too: non-UTF-8 names must stay out of scan files and shell menus (SQLite refuses surrogates)
+        plain = self.dir / "plain-nonutf8"
+        (plain / "src").mkdir(parents=True)
+        (plain / "src/Good.jsx").write_text("export const G = () => <b/>;\n")
+        (plain / "src").joinpath(b"bad\xff.tsx".decode("utf-8", "surrogateescape")).write_text("export const X = () => <b/>;\n")
+        plain.joinpath(b"bad\xffconfig.json".decode("utf-8", "surrogateescape")).write_text(
+            json.dumps({"nav": [{"key": "a", "title": "A", "module": {"id": "m", "url": "/u"}}]}))
+        self.scan(plain, stamp="s2")
+        files2 = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]["files"]
+        self.assertEqual(files2, ["src/Good.jsx"])
 
     def test_third_party_code_under_vendor_stays_out(self):
         lib = git_repo(self.dir / "lib", {"src/A.jsx": "export const A = () => <b/>;\n"})

@@ -42,10 +42,7 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
         raise ValueError("run.json missing 'run_id'")
     # Same build text however the page laid it out ("Build:\n 1.42" == "Build: 1.42"); capped like all text.
     # An empty or missing build (empty version element) is unknown, not a broken run.
-    build, rid, ts = core.cap(core.txt(run.get("build"), "build")), core.txt(run["run_id"], "run_id"), ts or core.now()
-    b = build.lower().strip(" .:()[]'\"")
-    if b in ("", "n/a", "na", "none", "null", "undefined", "?", "-", "not found") or b.startswith(core.UNKNOWN):
-        build = core.UNKNOWN  # couldn't read the build ('undefined' from ?.textContent, 'unknown (...)'): stale nothing
+    build, rid, ts = core.norm_build(core.txt(run.get("build"), "build")), core.txt(run["run_id"], "run_id"), ts or core.now()
     known = build.lower() != core.UNKNOWN
     for f in ("mode", "target", "status", "summary"):
         core.txt(run.get(f), f)
@@ -222,13 +219,15 @@ def ingest_pending(root):
     if not root.is_dir():
         return 0
     scrub.scrub_tree(root)
-    pending = _pending(root)
-    if not pending:  # the common case on every Stop: nothing new, so no DB, no lock
+    if not _pending(root):  # the common case on every Stop: nothing new, so no DB, no lock
         return 0
     db = core.db_path()
     db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with open(db.with_suffix(".lock"), "w") as lock:
+    with open(db.with_suffix(".lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)  # Stop and SubagentStop may fire together
+        pending = _pending(root)  # re-read under the lock: another hook may have ingested or the agent rewritten
+        if not pending:
+            return 0
         con = core.connect()
         try:
             return _ingest_files(con, pending)

@@ -222,7 +222,13 @@ def prune(project, days=7, t=None, run=None):
     oldest file). Evidence, bug drafts, repro specs, the JSON files and REPORT.md stay. Returns the count."""
     cutoff, n, since = (time.time() if t is None else t) - days * 86400, 0, None
     if run is not None:
-        stamps = [os.lstat(os.path.join(d, fn)).st_mtime for d, _, fs in os.walk(run) for fn in fs]
+        stamps = []
+        for d, _, fs in os.walk(run):
+            for fn in fs:
+                try:
+                    stamps.append(os.lstat(os.path.join(d, fn)).st_mtime)
+                except OSError:
+                    continue
         since = min(stamps) if stamps else None
         data = Path(run) / ".data"
         for f in [*data.glob("snapshot*.md"), *data.glob("map-*.png")] if data.is_dir() and not data.is_symlink() else []:

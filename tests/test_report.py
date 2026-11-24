@@ -53,9 +53,10 @@ class Verdict(unittest.TestCase):
     def test_known_bug_named_by_hash_belongs_to_that_ticket_only(self):
         cases = [{"id": "TC-1", "ticket": "A-1", "route": "/list", "status": "PASS"},
                  {"id": "TC-2", "ticket": "B-1", "route": "/list", "status": "PASS", "bug": "known 0123456789ab"}]
-        known = [{"hash": "0123456789abcdef", "route": "/list", "severity": "HIGH", "classification": "CONFIRMED", "title": "x"}]
-        self.assertEqual(report.verdict("A-1", cases, known)[0], "PASS")
-        self.assertEqual(report.verdict("B-1", cases, known)[0], "FAIL")
+        for raw in ("0123456789abcdef", "#0123456789ab", "0123456789ab (known)"):
+            known = [{"hash": raw, "route": "/list", "severity": "HIGH", "classification": "CONFIRMED", "title": "x"}]
+            self.assertEqual(report.verdict("A-1", cases, known)[0], "PASS", raw)
+            self.assertEqual(report.verdict("B-1", cases, known)[0], "FAIL", raw)
 
     def test_multi_ticket_runs(self):
         v = report.verdict
@@ -397,6 +398,20 @@ class Layout(Rendering):
         self.assertIn("| ✅ PASS | Saved | [image](evidence/TC-1.png) |", r)
         self.assertIn("![TC-1](evidence/TC-1.png)", r)
         self.assertIn("1 evidence image(s)", r)
+        # annotated=False on a planned case result must surface as "(not highlighted)"
+        d2 = self.rundir("2026-11-23-PROJ-1-nohl", plan=PLAN1, runs=[("form", {**RUN1, "cases": [
+            {"id": "TC-1", "status": "PASS", "actual": "Saved", "annotated": False}, {"id": "TC-2", "status": "PASS"}]})])
+        (d2 / "evidence").mkdir(exist_ok=True)
+        (d2 / "evidence" / "TC-1.png").write_bytes(b"png")
+        self.assertIn("[image](evidence/TC-1.png) (not highlighted)", report.render_report(d2))
+
+    def test_mistagged_bug_table_matches_verdict_ticket(self):
+        runs = [("form", {**RUN1, "bugs": [{"route": "/form", "title": "Broken", "severity": "HIGH",
+                                            "classification": "CONFIRMED", "ticket": "none"}]})]
+        _, r = self.render_run(runs)
+        self.assertIn("**Verdict: ❌ FAIL**", r)
+        self.assertIn("| Broken | /form | PROJ-1 |", r)
+        self.assertNotIn("| Broken | /form | none |", r)
 
     def test_a_folder_named_like_a_case_image_is_not_one(self):
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
@@ -549,11 +564,12 @@ class JiraDraft(Rendering):
         plan = {**PLAN1, "tickets": PLAN1["tickets"] + [{"key": "PROJ-2", "summary": "List", "fix_version": "3.4",
                                                           "fixed_note": "The list loads."}],
                 "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "PROJ-2", "title": "List loads", "route": "/list"}]}
-        runs = [("form", {**RUN1, "build": "unknown"}),
-                ("list", {**RUN1, "target": "/list", "build": "3.4.0", "cases": [{"id": "TC-3", "status": "PASS"}]})]
-        d, _ = self.render_run(runs, plan=plan)
-        self.assertIn("- Build: unknown in this run.", (d / "jira-comment-PROJ-1.md").read_text())
-        self.assertNotIn("Build: unknown", (d / "jira-comment-PROJ-2.md").read_text())
+        for unk in ("unknown", "Unknown", "unknown (missing footer)", "N/A", "undefined", ""):
+            runs = [("form", {**RUN1, "build": unk}),
+                    ("list", {**RUN1, "target": "/list", "build": "3.4.0", "cases": [{"id": "TC-3", "status": "PASS"}]})]
+            d, _ = self.render_run(runs, plan=plan)
+            self.assertIn("- Build: unknown in this run.", (d / "jira-comment-PROJ-1.md").read_text(), unk)
+            self.assertNotIn("Build: unknown", (d / "jira-comment-PROJ-2.md").read_text(), unk)
 
     def test_draft_takes_one_passing_image_per_route(self):  # one route and two passes proved neither
         plan = {**PLAN1, "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "PROJ-1", "ac": "AC-1", "title": "List",

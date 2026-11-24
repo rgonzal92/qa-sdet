@@ -125,7 +125,9 @@ def _rel_files(root):
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SCAN_SKIP_DIRS and not d.startswith(".")]
         for name in files:
-            yield os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+            rel = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+            if rel.isprintable() and rel.encode("utf-8", "ignore").decode() == rel:
+                yield rel
 
 
 def _decode_source(data):

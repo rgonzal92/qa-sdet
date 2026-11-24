@@ -260,6 +260,16 @@ class Prune(Base):
                          [".data/plan.json", ".data/run-form.json", "REPORT.md", "bugs/BUG-1.md", "evidence/TC-1.png",
                           "repro/BUG-1.spec.ts"])
         self.assertEqual(cli("prune", str(self.proj), str(self.t))[0], 2)  # not a run folder
+        # a transient temp file disappearing between os.walk and os.lstat must not crash prune
+        real_lstat = os.lstat
+        vanished = d / ".data/tmp.scrub"
+        vanished.write_text("x")
+        def disappearing(p, *a, **k):
+            if str(p) == str(vanished):
+                raise FileNotFoundError(str(p))
+            return real_lstat(p, *a, **k)
+        with mock.patch.object(os, "lstat", side_effect=disappearing):
+            self.assertEqual(ops.prune(self.proj, run=d), 0)
 
 
 if __name__ == "__main__":

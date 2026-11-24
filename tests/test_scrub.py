@@ -67,7 +67,8 @@ class Redact(unittest.TestCase):
     def test_redact_json_cookie_lists_header_pairs_and_key_value_objects(self):
         sec = "s3cr3tV4lue9x"
         for obj in ({"cookies": [{"name": "session", "value": sec}]}, {"cookies": {"session": sec}}, {"headers": [["Authorization", sec]]},
-                    {"key": "password", "value": sec}, {"jwt": sec}):
+                    {"key": "password", "value": sec}, {"jwt": sec},
+                    {"cookies": [{"name": "session", "value": "ok", "token": sec, "url": f"https://u:{sec}@host/"}]}):
             self.assertNotIn(sec, json.dumps(scrub.redact_json(obj)), obj)
         for obj in ({"key": "PROJ-1", "summary": "Bearer of bad news"}, {"name": "Speed limit", "value": "130"},
                     {"key": "speed", "value": "130"}, ["boundary", "pass"], {"notes": "the jwt cookies banner"}):

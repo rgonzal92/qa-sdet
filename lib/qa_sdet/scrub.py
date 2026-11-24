@@ -65,7 +65,7 @@ def redact_json(obj):
             if isinstance(k, str) and k.lower() == "cookies" and isinstance(v, (list, dict)):  # a cookie jar: every value
                 hide = lambda x: "[REDACTED]" if x not in (None, True, False, "") else x
                 out[k] = {n: hide(x) for n, x in v.items()} if isinstance(v, dict) else [
-                    {**c, "value": hide(c["value"])} if isinstance(c, dict) and "value" in c else redact_json(c) for c in v]
+                    {**redact_json(c), "value": hide(c["value"])} if isinstance(c, dict) and "value" in c else redact_json(c) for c in v]
                 continue
             secret = (isinstance(k, str) and SECRET_NAME_RE.match(k)) or (named and k == "value")
             out[k] = "[REDACTED]" if secret and v not in (None, True, False, "") else redact_json(v)

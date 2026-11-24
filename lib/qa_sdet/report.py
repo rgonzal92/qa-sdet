@@ -119,9 +119,12 @@ def merged_cases(plan, runs, warnings=None):
         res = results.get(cid, {})
         ac = c.get("ac")  # a case may cover several AC: "AC-1, AC-2" or a list
         ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int))) if isinstance(ac, list) else ac
-        out.append({**c, "id": cid, "ac": ac, "status": core.case_status(res.get("status")) or "NOT_RUN",
-                    "actual": str(res.get("actual") or ""), "notes": str(res.get("notes") or ""),
-                    "bug": str(res.get("bug") or "")})
+        merged = {**c, "id": cid, "ac": ac, "status": core.case_status(res.get("status")) or "NOT_RUN",
+                  "actual": str(res.get("actual") or ""), "notes": str(res.get("notes") or ""),
+                  "bug": str(res.get("bug") or "")}
+        if "annotated" in res:
+            merged["annotated"] = res["annotated"]
+        out.append(merged)
     return out
 
 
@@ -147,7 +150,9 @@ def _case_bugs(c):
 
 def _bug_refs(b):
     """What a case may call this bug by: its BUG-n id and, for a known bug, its hash."""
-    return {x for x in (str(b.get("id") or ""), str(b.get("hash") or "")[:12].lower()) if x}
+    m = re.match(r"#?\s*([0-9a-fA-F]{4,})\b", str(b.get("hash") or "").strip())
+    h = m.group(1)[:12].lower() if m else ""
+    return {x for x in (str(b.get("id") or ""), h) if x}
 
 
 def ticket_bugs(key, cases, bugs, known=()):
@@ -406,7 +411,8 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file"):
     out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
-        owners = [str(b["ticket"])] if b.get("ticket") else [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)]
+        owners = [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)] or (
+            [str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else [])
         png = Path(run_dir) / "evidence" / f"{bid}.png"
         ev = Path(str(b.get("evidence") or ""))
         img = f"evidence/{quote(png.name)}" if bid and png.is_file() else \
@@ -521,7 +527,7 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds):
         else:
             placeholders.append(f"screenshot for {r or 'the test page'}")
     lines = ["CHECK BEFORE POSTING (not part of the comment)"]
-    if not builds or "unknown" in builds:  # one page on an unknown build is enough to check
+    if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):  # one page on an unknown build is enough to check
         shown = (fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix) if fix else "<version>"
         lines.append(f"- Build: unknown in this run. Confirm the QA app runs {shown} before you post.")
     lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
@@ -556,8 +562,8 @@ def render_report_parts(run_dir, cfg=None):
             vmap[t["key"]] = (v, why)
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
-            builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")
-                             and any(str(x.get("id")) in ids for x in _list(r, "cases"))})
+            builds = sorted({core.norm_build(r.get("build")) for _, r in runs
+                             if any(str(x.get("id")) in ids for x in _list(r, "cases"))})
             if v in ("PASS", "PASS WITH NOTES") and mine and _safe_key(t["key"]):
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds)
     draft_of = lambda key: f"jira-comment-{key}.md" if f"jira-comment-{key}.md" in drafts else ""

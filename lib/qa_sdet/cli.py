@@ -185,16 +185,24 @@ def _main(argv):
     if cmd not in COMMANDS:
         print(f"qa-mem: unknown command {cmd!r}\n{USAGE}", file=sys.stderr)
         return 2
-    if any(a in ("-h", "--help") for a in args):
-        return usage_error(cmd)
     if args and not COMMANDS[cmd]:
+        if any(a in ("-h", "--help") for a in args):
+            return usage_error(cmd)
         return usage_error(cmd, f"{cmd} takes no arguments")
     # an option the usage line doesn't list is a typo (`stale --bogus` must not set the build to "--bogus");
-    # `hash` takes a symptom, which may hold "--" ("shows -- instead of 50")
+    # option values (after --label, --box, …) and `hash` symptom text may start with "--" or be "-h"
     known = set(re.findall(r"--[a-z]+", COMMANDS[cmd]))
-    bad = next((a for a in args if cmd != "hash" and re.match(r"--[A-Za-z]", a) and a.split("=")[0] not in known), None)
-    if bad:
-        return usage_error(cmd, f"unknown option {bad}")
+    valued = set(re.findall(r"(--[a-z]+)\s+[^|\[\]]", COMMANDS[cmd]))
+    skip = False
+    for k, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a in ("-h", "--help") and not (cmd == "hash" and k >= 1 and a == "-h"):
+            return usage_error(cmd)
+        if cmd != "hash" and re.match(r"--[A-Za-z]", a) and a.split("=")[0] not in known:
+            return usage_error(cmd, f"unknown option {a}")
+        skip = a in valued
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
         for root in dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a):  # cwd + project dir
             try:

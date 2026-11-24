@@ -2,6 +2,7 @@
 bug-status and hash commands, and the DB itself."""
 import contextlib, io, json, os, sqlite3, time, unittest
 from pathlib import Path
+from unittest import mock
 
 from support import MemBase, runfile, run, PLAN, RUN_FORM, RUN_LIST, core, memory
 from qa_sdet import cli, scrub
@@ -605,6 +606,44 @@ class IngestPending(MemBase):
         self.assertTrue(good.with_name("run-ok.json.ingested").exists())
         self.assertTrue(bad.with_name("run-deep.json.error").exists())
         self.assertEqual(len(memory.PARKED), 1)
+
+    def test_concurrent_ingest_pending_rereads_under_lock(self):
+        import fcntl, hashlib, threading
+        out = Path(self.tmp.name) / "qa-out"
+        d = out / "2026-11-24-race"
+        d.mkdir(parents=True)
+        rf = runfile(d)
+        rf.write_text(json.dumps(run(facts=[{"kind": "note", "text": "OLD_STALE_FACT"}])))
+        db = core.db_path()
+        db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        entered_lock = threading.Event()
+        real_flock = fcntl.flock
+        # Hold the lock so worker B snapshots _pending before lock, while worker A ingests an updated file first.
+        lock_fd = open(db.with_suffix(".lock"), "a")
+        real_flock(lock_fd, fcntl.LOCK_EX)
+        def waiting_flock(fh, op):
+            if fh is not lock_fd:
+                entered_lock.set()
+            return real_flock(fh, op)
+        results = []
+        with mock.patch.object(fcntl, "flock", side_effect=waiting_flock):
+            t = threading.Thread(target=lambda: results.append(memory.ingest_pending(out)))
+            t.start()
+            self.assertTrue(entered_lock.wait(5))
+            # While B is blocked on flock, rewrite the run file and ingest it as A (holding lock_fd already).
+            rf.write_text(json.dumps(run(facts=[{"kind": "note", "text": "NEW_FIXED_FACT"}])))
+            con_a = core.connect()
+            try:
+                memory._ingest_files(con_a, memory._pending(out))
+            finally:
+                con_a.close()
+            lock_fd.close()
+            t.join(5)
+        self.assertEqual(results, [0])  # B re-checked under the lock and did not re-ingest stale pre-lock bytes
+        self.con.close()
+        self.con = core.connect()
+        self.assertEqual([r[0] for r in self.con.execute("SELECT text FROM facts")], ["NEW_FIXED_FACT"])
+        self.assertEqual((d / ".data/run-x.json.ingested").read_text().splitlines()[0], hashlib.sha1(rf.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":
