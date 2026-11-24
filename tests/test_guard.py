@@ -18,6 +18,8 @@ CK, DB = MAIN / "Default/Cookies", D / "app.db"
 CFG = HOME / ".config/qa-sdet/config.json"
 PROJ, RUN = TMP / "proj", TMP / "run"  # a project without a run marker; one with a marker and no budget
 Q = ROOT / "bin/qa-mem"
+sys.path.insert(0, str(ROOT / "lib"))
+from qa_sdet import scan
 EVIL, ACLI_W = "playwright-cli -s=qa goto https://evil.com", "acli jira workitem create --summary x"
 EX, MAPPER = "qa-sdet:qa-explorer", "qa-sdet:qa-mapper"
 _ENV = {"HOME": str(HOME), "QA_SDET_DATA": str(D), "QA_SDET_CONFIG": str(CFG)}
@@ -624,8 +626,7 @@ class R7Mapper(Case):
             self.assertIsNotNone(tool("Bash", at, cwd, command="ls"), at)
 
     def test_secret_names_match_codemap_scan(self):
-        q = SourceFileLoader("qamem_guard_test", str(Q)).load_module()
-        self.assertEqual(g.SECRET_FILE_RE.pattern, q.SECRET_FILE_RE.pattern)
+        self.assertEqual(g.SECRET_FILE_RE.pattern, scan.SECRET_FILE_RE.pattern)
 
 
 class R8ApproveAndLog(Case):

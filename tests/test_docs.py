@@ -3,11 +3,12 @@ import re
 import shutil
 import subprocess
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-qm = SourceFileLoader("qa_mem_docs", str(ROOT / "bin/qa-mem")).load_module()
+import sys
+sys.path.insert(0, str(ROOT / "lib"))
+from qa_sdet import core, ops, report, doctor, cli
 DOCS = sorted([*ROOT.glob("skills/*/SKILL.md"), *ROOT.glob("agents/*.md"), *ROOT.glob("references/*.md")])
 
 
@@ -15,7 +16,7 @@ class Docs(unittest.TestCase):
     def test_heuristic_ids_match_code(self):
         table = (ROOT / "references/heuristics.md").read_text()
         ids = re.findall(r"^\| ([a-z][a-z0-9-]+) \|", table, re.M)
-        self.assertEqual(ids, qm.HEURISTICS)
+        self.assertEqual(ids, core.HEURISTICS)
 
     def test_common_steps_referenced_exist(self):
         defined = set(re.findall(r"^## (C\d+)\.", (ROOT / "references/common.md").read_text(), re.M))
@@ -41,8 +42,8 @@ class Docs(unittest.TestCase):
 
     def test_text_plans_are_not_offered_to_qa_ticket(self):
         """A plan from text uses key FEATURE, which qa-ticket's `qa-mem keys` rejects: qa-plan must not offer it."""
-        with self.assertRaises(qm.BadInput):
-            qm.expand_keys(["FEATURE"], "STUDIO")
+        with self.assertRaises(core.BadInput):
+            ops.expand_keys(["FEATURE"], "STUDIO")
         reply = re.search(r"^8\. .*", (ROOT / "skills/qa-plan/SKILL.md").read_text(), re.M).group(0)
         self.assertIn("plan from text", reply)
 
@@ -50,7 +51,7 @@ class Docs(unittest.TestCase):
         """Sessions qa and qa-login share the main profile, which opens in one browser only (playwright-cli: `Browser
         is already in use`; `open` only replaces a session of the same name). qa-login must close a leftover qa session
         first, and the explorer must not report a locked profile as `browser tool failed` (that switches to the MCP)."""
-        a, b = (qm.browser_cmd(s, False, None, "chrome", "/p") for s in ("qa", "qa-login"))
+        a, b = (ops.browser_cmd(s, False, None, "chrome", "/p") for s in ("qa", "qa-login"))
         self.assertEqual(a[a.index("--profile") + 1], b[b.index("--profile") + 1])
         login = (ROOT / "skills/qa-login/SKILL.md").read_text()
         step2 = re.search(r"^2\. .*", login, re.M).group(0)
@@ -63,24 +64,24 @@ class Docs(unittest.TestCase):
     def test_statuses_in_docs_are_real(self):
         text = (ROOT / "skills/qa-memory/SKILL.md").read_text()
         for status in re.findall(r"\b(OPEN|FILED|FIXED|INVALID|REGRESSED)\b", text):
-            self.assertIn(status, qm.STATUSES)
+            self.assertIn(status, core.STATUSES)
 
     def test_report_md_states_the_renderer_verdict_rules(self):
         """report.md is what skills tell users about verdicts: it must name the rules the renderer applies."""
         doc = (ROOT / "references/report.md").read_text()
         t = {"key": "AB-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}]}
-        self.assertEqual(qm.verdict(t, [{"id": "TC-1", "ticket": "AB-1", "ac": "AC-1", "status": "PASS"}], [])[0],
+        self.assertEqual(report.verdict(t, [{"id": "TC-1", "ticket": "AB-1", "ac": "AC-1", "status": "PASS"}], [])[0],
                          "PASS WITH NOTES")
         self.assertIn("an AC with no test case", re.search(r"^3\. .*", doc, re.M).group(0))
         cases = [{"id": "TC-1", "ticket": "A-1", "route": "/f", "status": "FAIL", "bug": "BUG-1"},
                  {"id": "TC-2", "ticket": "B-1", "route": "/f", "status": "PASS"}]
-        self.assertEqual(qm.ticket_bugs("B-1", cases, [{"id": "BUG-1", "route": "/f"}]), [])
+        self.assertEqual(report.ticket_bugs("B-1", cases, [{"id": "BUG-1", "route": "/f"}]), [])
         self.assertIn("belongs to that ticket only", doc)
 
     def test_minutes_cap_is_documented(self):
-        with self.assertRaises(qm.BadInput):
-            qm._count({"--minutes": str(qm.MARKER_HOURS * 60 + 1)}, "--minutes", qm.MARKER_HOURS * 60)
-        self.assertIn(f"at most {qm.MARKER_HOURS * 60}", (ROOT / "references/common.md").read_text())
+        with self.assertRaises(core.BadInput):
+            cli._count({"--minutes": str(ops.MARKER_HOURS * 60 + 1)}, "--minutes", ops.MARKER_HOURS * 60)
+        self.assertIn(f"at most {ops.MARKER_HOURS * 60}", (ROOT / "references/common.md").read_text())
 
     def test_code_map_paths_reject_the_whole_file(self):
         """ingest_codemap rejects a map with any row outside the scan; the docs must not say such rows are dropped
@@ -100,7 +101,7 @@ class Docs(unittest.TestCase):
     def test_readme_lists_every_verdict(self):
         """README is the user's key to the Summary table: every verdict the renderer prints must be explained there."""
         text = (ROOT / "README.md").read_text()
-        for icon in qm.VERDICT_ICON.values():
+        for icon in report.VERDICT_ICON.values():
             self.assertIn(icon, text)
 
     def test_no_old_layout_run_json_or_mapper_path(self):
@@ -111,7 +112,7 @@ class Docs(unittest.TestCase):
 
     def test_readme_permission_rules_match_code(self):
         block = (ROOT / "README.md").read_text().split("adds these allow rules", 1)[1].split("```", 2)[1]
-        self.assertEqual(block.strip().splitlines(), qm.PERMISSION_RULES)
+        self.assertEqual(block.strip().splitlines(), doctor.PERMISSION_RULES)
 
     def test_readme_safety_and_privacy_match_guard(self):
         """The guard's 8 rules (no limits without a marker, the explorer's few extra ones, secret uploads, mapper secret
@@ -178,9 +179,9 @@ class Docs(unittest.TestCase):
         rep = (ROOT / "references/report.md").read_text()
         self.assertIn('`"AC-1, AC-2"`', rep)
         self.assertIn("are unique (the report shows only the first case with an id)", rep)
-        self.assertEqual(qm._case_acs({"ac": "AC-1, AC-2"}), {"AC-1", "AC-2"})
-        merged = qm.merged_cases({"cases": [{"id": "TC-1", "ac": ["AC-1", "AC-2"]}]}, [])
-        self.assertEqual(qm._case_acs(merged[0]), {"AC-1", "AC-2"})
+        self.assertEqual(report._case_acs({"ac": "AC-1, AC-2"}), {"AC-1", "AC-2"})
+        merged = report.merged_cases({"cases": [{"id": "TC-1", "ac": ["AC-1", "AC-2"]}]}, [])
+        self.assertEqual(report._case_acs(merged[0]), {"AC-1", "AC-2"})
         tk = (ROOT / "skills/qa-ticket/SKILL.md").read_text()
         self.assertIn("keep every id the user left", tk)
         self.assertIn("with `--faults`, an AC's API error and empty-response cases are cases instead", tk)

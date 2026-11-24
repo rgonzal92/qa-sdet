@@ -1,12 +1,13 @@
 """v0.4 qa-mem commands: keys, rundir, marker, browser-open, prune, annotate, report + index, verdict, inbox,
 setup-permissions, and ingest of qa-out/<run>/.data/run-*.json. Everything runs in temp folders (HOME, config, data)."""
-import builtins, contextlib, importlib.util, io, json, os, stat, struct, subprocess, sys, tempfile, time, unittest, zlib
+import builtins, contextlib, importlib.util, io, json, os, sqlite3, stat, struct, subprocess, sys, tempfile, time, unittest, zlib
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-qm = SourceFileLoader("qa_mem_report", str(ROOT / "bin/qa-mem")).load_module()
+sys.path.insert(0, str(ROOT / "lib"))
+from qa_sdet import core, scrub, memory, ops, report, doctor, cli as cli_mod
 
 
 def cli(*argv, stdin=None):
@@ -14,7 +15,7 @@ def cli(*argv, stdin=None):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
             mock.patch.object(sys, "stdin", io.StringIO(stdin or "")):
-        code = qm.main(list(argv))
+        code = cli_mod.main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
 
@@ -64,24 +65,24 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.t = Path(self.tmp.name)
-        self.saved = (qm.CONFIG, qm.DATA_DIR, dict(os.environ))
-        qm.CONFIG = self.t / "config" / "config.json"
-        qm.DATA_DIR = self.t / "data" / "qa-sdet"
+        self.saved = (core.CONFIG, core.DATA_DIR, dict(os.environ))
+        core.CONFIG = self.t / "config" / "config.json"
+        core.DATA_DIR = self.t / "data" / "qa-sdet"
         os.environ.update(HOME=str(self.t / "home"), QA_MEM_DB=str(self.t / "m.db"),
                           XDG_DATA_HOME=str(self.t / "xdg"), XDG_CONFIG_HOME=str(self.t / "xdgc"))
         self.proj = self.t / "proj"
         self.proj.mkdir()
 
     def tearDown(self):
-        qm.CONFIG, qm.DATA_DIR, env = self.saved
+        core.CONFIG, core.DATA_DIR, env = self.saved
         os.environ.clear()
         os.environ.update(env)
         self.tmp.cleanup()
 
     def config(self, **cfg):
-        assert str(qm.CONFIG).startswith(self.tmp.name), f"a test must not write the real config: {qm.CONFIG}"
-        qm.CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        qm.CONFIG.write_text(json.dumps(cfg))
+        assert str(core.CONFIG).startswith(self.tmp.name), f"a test must not write the real config: {core.CONFIG}"
+        core.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        core.CONFIG.write_text(json.dumps(cfg))
 
     def rundir(self, name="2026-11-23-STUDIO-1+STUDIO-2", plan=None, runs=()):
         d = self.proj / "qa-out" / name
@@ -102,10 +103,10 @@ class TicketBugOwnership(unittest.TestCase):  # audit 3: independent review afte
         serious = {"severity": "CRITICAL", "classification": "CONFIRMED", "id": "BUG-1"}
         for bug in ({**serious, "route": "/incidents/:id", "target": "/incidents"},  # a record opened from the list page
                     {**serious, "route": "/incidents", "ticket": "none"}, {**serious, "route": "/incidents", "ticket": "s-1 "}):
-            self.assertEqual(qm.verdict("S-1", [case], [bug])[0], "FAIL", bug)
+            self.assertEqual(report.verdict("S-1", [case], [bug])[0], "FAIL", bug)
         other = {**serious, "route": "/elsewhere", "target": "/elsewhere"}
-        self.assertEqual(qm.verdict("S-1", [case], [other])[0], "PASS")
-        self.assertEqual(qm.run_bugs([("a", {"target": "/incidents", "bugs": [{"route": "/incidents/4521", "title": "t"}]})])[0]["target"],
+        self.assertEqual(report.verdict("S-1", [case], [other])[0], "PASS")
+        self.assertEqual(report.run_bugs([("a", {"target": "/incidents", "bugs": [{"route": "/incidents/4521", "title": "t"}]})])[0]["target"],
                          "/incidents")
 
 
@@ -115,7 +116,7 @@ class TicketWithoutCases(unittest.TestCase):  # audit 3: third independent pass
         cases = [case("TC-1", "S-1"), case("TC-3", "S-2")]
         bug = {"id": "BUG-1", "ticket": "S-3", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}
         keys = ["S-1", "S-2", "S-3"]
-        self.assertEqual([qm.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
+        self.assertEqual([report.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
 
 
 class SetupPermissionsEmptyPath(Base):
@@ -127,22 +128,22 @@ class SetupPermissionsEmptyPath(Base):
 
 class Slug(unittest.TestCase):
     def test_dot_leading_last_segment_keeps_its_name(self):  # audit 3 r40
-        self.assertEqual([qm.route_slug(r) for r in ("/.well-known", "/form.html", "/", "/a/b.c.d")],
+        self.assertEqual([ops.route_slug(r) for r in ("/.well-known", "/form.html", "/", "/a/b.c.d")],
                          [".well-known", "form", "home", "a-b.c"])
 
 
 class Keys(Base):
     def test_expansion_validation_and_order(self):
-        self.assertEqual(qm.expand_keys(["1234", "ops-7,1250", "STUDIO-1234"], "studio-"),
+        self.assertEqual(ops.expand_keys(["1234", "ops-7,1250", "STUDIO-1234"], "studio-"),
                          ["STUDIO-1234", "OPS-7", "STUDIO-1250"])
-        self.assertEqual(qm.expand_keys(["1 2,3"], "STUDIO"), ["STUDIO-1", "STUDIO-2", "STUDIO-3"])
+        self.assertEqual(ops.expand_keys(["1 2,3"], "STUDIO"), ["STUDIO-1", "STUDIO-2", "STUDIO-3"])
         for bad in ("abc", "STUDIO-", "1-STUDIO", "STUDIO-12a", "S-1", "ß-12", "ﬀ-1"):  # ß.upper() is SS
-            with self.assertRaises(qm.BadInput) as e:
-                qm.expand_keys([bad], "STUDIO")
+            with self.assertRaises(core.BadInput) as e:
+                ops.expand_keys([bad], "STUDIO")
             self.assertIn(repr(bad), str(e.exception))
-        with self.assertRaisesRegex(qm.BadInput, "jiraKeyPrefix"):
-            qm.expand_keys(["1234"], None)
-        self.assertEqual(qm.expand_keys(["OPS-7"], None), ["OPS-7"])  # full keys need no prefix
+        with self.assertRaisesRegex(core.BadInput, "jiraKeyPrefix"):
+            ops.expand_keys(["1234"], None)
+        self.assertEqual(ops.expand_keys(["OPS-7"], None), ["OPS-7"])  # full keys need no prefix
 
     def test_cli(self):
         self.config(jiraKeyPrefix="STUDIO")
@@ -157,19 +158,19 @@ class Keys(Base):
 
     def test_only_ascii_digits(self):  # r7: OPS-١٢٣ was accepted and would go to Jira as is
         for bad in ("OPS-\u0661\u0662", "\u0661\u0662"):
-            with self.assertRaises(qm.BadInput):
-                qm.expand_keys([bad], "OPS")
+            with self.assertRaises(core.BadInput):
+                ops.expand_keys([bad], "OPS")
 
 
 class RunDir(Base):
     def test_labels(self):
-        self.assertEqual(qm.run_label(["A-1", "B-2"]), "A-1+B-2")
-        self.assertEqual(qm.run_label(["A-1", "A-2", "A-3", "A-4", "A-5"]), "A-1+A-2+A-3+2more")
+        self.assertEqual(ops.run_label(["A-1", "B-2"]), "A-1+B-2")
+        self.assertEqual(ops.run_label(["A-1", "A-2", "A-3", "A-4", "A-5"]), "A-1+A-2+A-3+2more")
         for route, slug in (("/form.html", "form"), ("/incidents/list", "incidents-list"), ("/incidents/4521", "incidents-id"),
                             ("/#/zones", "zones"), ("/#!/zones", "zones"), ("/", "home"), ("/a?x=1", "a")):
-            self.assertEqual(qm.run_label(route=route), slug, route)
-        self.assertEqual(qm.run_label(keys=["A-1"], prefix="plan-"), "plan-A-1")
-        self.assertEqual(qm.run_label(label="init crawl/../x"), "init-crawl-..-x")
+            self.assertEqual(ops.run_label(route=route), slug, route)
+        self.assertEqual(ops.run_label(keys=["A-1"], prefix="plan-"), "plan-A-1")
+        self.assertEqual(ops.run_label(label="init crawl/../x"), "init-crawl-..-x")
 
     def test_folders_suffix_and_git_exclude(self):
         subprocess.run(["git", "init", "-q", str(self.proj)], check=True)
@@ -202,7 +203,7 @@ class RunDir(Base):
         code, out, err = cli("rundir", str(self.proj), "--label", "speed limit form " * 20)
         self.assertEqual((code, err), (0, ""))
         self.assertTrue(Path(out.strip()).is_dir())
-        self.assertLessEqual(len(qm.run_label(route="/" + "a/" * 200, prefix="plan-")), 80)
+        self.assertLessEqual(len(ops.run_label(route="/" + "a/" * 200, prefix="plan-")), 80)
         code, _, err = cli("rundir", str(self.proj), "--keys", "AB-1", "--keys", "AB-2")
         self.assertEqual(code, 2)
         self.assertIn("--keys given twice", err)
@@ -253,9 +254,9 @@ class BrowserOpen(Base):
         self.config(browser="msedge")
         with mock.patch.object(subprocess, "run", return_value=done(3)) as run, \
                 mock.patch.dict(os.environ, PLAYWRIGHT_MCP_STORAGE_STATE="/tmp/s.json", PLAYWRIGHT_MCP_ISOLATED="true"):
-            code = qm.main(["browser-open", "--session", "qa-login", "--headed", "https://qa.example/"])
+            code = cli_mod.main(["browser-open", "--session", "qa-login", "--headed", "https://qa.example/"])
         self.assertEqual(code, 3)  # playwright-cli's exit code
-        profile = qm.DATA_DIR / "profiles" / "main"
+        profile = core.DATA_DIR / "profiles" / "main"
         argv, kw = run.call_args
         self.assertEqual(argv[0], ["playwright-cli", "-s=qa-login", "open", "--browser=msedge", "--profile", str(profile),
                                    "--headed", "https://qa.example/"])
@@ -267,7 +268,7 @@ class BrowserOpen(Base):
         for d in (profile, profile.parent):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
         with mock.patch.object(subprocess, "run", return_value=done(0)) as run:
-            self.assertEqual(qm.main(["browser-open"]), 0)
+            self.assertEqual(cli_mod.main(["browser-open"]), 0)
         self.assertEqual(run.call_args[0][0], ["playwright-cli", "-s=qa", "open", "--browser=msedge", "--profile", str(profile)])
         self.assertEqual(run.call_args_list[0][0][0], ["playwright-cli", "-s=qa-login", "close"])
 
@@ -295,19 +296,19 @@ class BrowserOpen(Base):
 
     def test_config_errors_say_where_and_signal_exit(self):  # r9: "got None" named no file; -15 became exit 241
         with mock.patch.object(subprocess, "run") as run:
-            qm.CONFIG.unlink(missing_ok=True)
+            core.CONFIG.unlink(missing_ok=True)
             code, _, err = cli("browser-open")
             self.assertEqual(code, 2)
-            self.assertIn(f"{qm.CONFIG} is missing", err)
-            qm.CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            qm.CONFIG.write_text("{bad")
+            self.assertIn(f"{core.CONFIG} is missing", err)
+            core.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            core.CONFIG.write_text("{bad")
             self.assertIn("isn't valid JSON", cli("browser-open")[2])
             self.config(browser="opera")
-            self.assertIn(f'set "browser" in {qm.CONFIG}', cli("browser-open")[2])
+            self.assertIn(f'set "browser" in {core.CONFIG}', cli("browser-open")[2])
         run.assert_not_called()
         self.config(browser="chrome")
         with mock.patch.object(subprocess, "run", return_value=done(-15)):
-            self.assertEqual(qm.main(["browser-open"]), 143)
+            self.assertEqual(cli_mod.main(["browser-open"]), 143)
 
 
 class Prune(Base):
@@ -374,40 +375,40 @@ class Annotate(Base):
         code, out, _ = cli("annotate", str(p), "--box", "60,60,50,30", "--box", "5.4,5,10,10", "--label", "Speed accepts 999")
         self.assertEqual(code, 0)
         img = Image.open(p).convert("RGB")
-        self.assertEqual(img.getpixel((57, 75)), qm.RED)  # outline just outside the first box's left edge
-        self.assertEqual(img.getpixel((59, 75)), qm.RED)  # 3px wide
+        self.assertEqual(img.getpixel((57, 75)), ops.RED)  # outline just outside the first box's left edge
+        self.assertEqual(img.getpixel((59, 75)), ops.RED)  # 3px wide
         self.assertEqual(img.getpixel((60, 75)), (255, 255, 255))  # the element itself stays clear
         self.assertEqual(img.getpixel((85, 75)), (255, 255, 255))
-        self.assertEqual(img.getpixel((3, 10)), qm.RED)  # second box
+        self.assertEqual(img.getpixel((3, 10)), ops.RED)  # second box
         tag = [img.getpixel((x, y)) for x in range(60, 200) for y in range(30, 58)]
-        self.assertGreater(tag.count(qm.RED), 200)  # the label tag sits above the first box
-        self.assertIn(qm.WHITE, tag)  # with white text on it
+        self.assertGreater(tag.count(ops.RED), 200)  # the label tag sits above the first box
+        self.assertIn(ops.WHITE, tag)  # with white text on it
         self.assertEqual(list(p.parent.iterdir()), [p])  # written in place, no temp file left
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_label_below_when_no_room_and_clamped(self):
         from PIL import Image
         p = self.png()
-        qm.annotate(p, [(150, 0, 100, 20)], "x" * 200)  # top edge, sticks out on the right
+        ops.annotate(p, [(150, 0, 100, 20)], "x" * 200)  # top edge, sticks out on the right
         img = Image.open(p).convert("RGB")
-        self.assertEqual(img.getpixel((148, 10)), qm.RED)  # outline just outside the box
-        self.assertNotEqual(img.getpixel((199, 10)), qm.RED)  # the box runs off the image: no band there, element kept
-        self.assertEqual(img.getpixel((170, 21)), qm.RED)  # the band under it is drawn
+        self.assertEqual(img.getpixel((148, 10)), ops.RED)  # outline just outside the box
+        self.assertNotEqual(img.getpixel((199, 10)), ops.RED)  # the box runs off the image: no band there, element kept
+        self.assertEqual(img.getpixel((170, 21)), ops.RED)  # the band under it is drawn
         below = [img.getpixel((x, y)) for x in range(0, 200) for y in range(23, 45)]
-        self.assertGreater(below.count(qm.RED), 200)
-        self.assertEqual(len(qm.short(" ".join(("x" * 200).split()), 80)), 80)
+        self.assertGreater(below.count(ops.RED), 200)
+        self.assertEqual(len(core.short(" ".join(("x" * 200).split()), 80)), 80)
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_label_never_covers_another_box(self):
         from PIL import Image
         p = self.png(300, 160)  # the 46-char label wraps to two lines at 300px
         # live case: the 2nd box sits right above the 1st, where the label would go
-        qm.annotate(p, [(10, 60, 280, 16), (40, 30, 60, 20)], "0 closures shown although the API returned 404")
+        ops.annotate(p, [(10, 60, 280, 16), (40, 30, 60, 20)], "0 closures shown although the API returned 404")
         img = Image.open(p).convert("RGB")
         inside = [img.getpixel((x, y)) for x in range(44, 97) for y in range(34, 47)]
-        self.assertEqual(inside.count(qm.RED), 0)  # inside of the 2nd box stays clear
+        self.assertEqual(inside.count(ops.RED), 0)  # inside of the 2nd box stays clear
         below = [img.getpixel((x, y)) for x in range(10, 290) for y in range(83, 140)]
-        self.assertGreater(below.count(qm.RED), 200)  # the label went below the boxes
+        self.assertGreater(below.count(ops.RED), 200)  # the label went below the boxes
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_outline_outside_text_label_off_page_content_and_hidpi(self):  # r23: outline hid the first glyph,
@@ -419,17 +420,17 @@ class Annotate(Base):
             d.rectangle([49 * s, 106 * s, 124 * s, 125 * s], outline=(128, 128, 128), fill=(200, 200, 200))  # dropdown
             d.rectangle([8 * s, 141 * s, 9 * s, 157 * s], fill=(0, 0, 0))  # first glyph of "0 closures shown"
             img.save(p)
-            qm.annotate(p, [(8 * s, 141 * s, 110 * s, 17 * s)], 'Closures API 404 shown as a plain "0 closures shown"')
+            ops.annotate(p, [(8 * s, 141 * s, 110 * s, 17 * s)], 'Closures API 404 shown as a plain "0 closures shown"')
             img = Image.open(p).convert("RGB")
             self.assertEqual(img.getpixel((8 * s, 149 * s)), (0, 0, 0), s)  # the glyph is not painted over
-            self.assertEqual(img.getpixel((8 * s - 1, 149 * s)), qm.RED, s)  # the outline hugs it from outside
+            self.assertEqual(img.getpixel((8 * s - 1, 149 * s)), ops.RED, s)  # the outline hugs it from outside
             drop = [img.getpixel((x, y)) for x in range(49 * s, 125 * s) for y in range(106 * s, 126 * s)]
-            self.assertEqual(drop.count(qm.RED), 0, s)  # dropdown left visible
-            rows = [y for y in range(img.height) if qm.WHITE in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]
-                    and qm.RED in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]]
+            self.assertEqual(drop.count(ops.RED), 0, s)  # dropdown left visible
+            rows = [y for y in range(img.height) if ops.WHITE in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]
+                    and ops.RED in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]]
             tag = max(rows) - min(rows) + 1
             self.assertGreaterEqual(tag, 20 * s, s)  # tag grows with the image
-            lw = sum(img.getpixel((x, 149 * s)) == qm.RED for x in range(0, 8 * s))
+            lw = sum(img.getpixel((x, 149 * s)) == ops.RED for x in range(0, 8 * s))
             self.assertGreaterEqual(lw, 2 * s, s)
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
@@ -437,11 +438,11 @@ class Annotate(Base):
         from PIL import Image
         p = self.png(390, 844)
         label = "Saved at 131 km/h; max is 130 and the error message never appears on mobile view"
-        qm.annotate(p, [(8, 400, 250, 20)], label)
+        ops.annotate(p, [(8, 400, 250, 20)], label)
         img = Image.open(p).convert("RGB")
-        reds = [x for x in range(390) for y in range(0, 844, 2) if img.getpixel((x, y)) == qm.RED]
+        reds = [x for x in range(390) for y in range(0, 844, 2) if img.getpixel((x, y)) == ops.RED]
         self.assertLessEqual(max(reds), 389)
-        tag_rows = [y for y in range(844) if sum(img.getpixel((x, y)) == qm.RED for x in range(20, 200)) > 90]
+        tag_rows = [y for y in range(844) if sum(img.getpixel((x, y)) == ops.RED for x in range(20, 200)) > 90]
         self.assertGreater(len(tag_rows), 40)  # two lines tall, not one line clipped at the right edge
         before = p.read_bytes()
         code, _, err = cli("annotate", str(p), "--box", "800,1700,100,40", "--label", "x")  # a 2x box on a 1x image
@@ -459,7 +460,7 @@ class Annotate(Base):
             return real(name, *a, **k)
         with mock.patch.object(builtins, "__import__", fake):
             code, out, _ = cli("annotate", str(p), "--box", "1,1,5,5", "--label", "x")
-        self.assertEqual((code, out.strip()), (0, qm.NO_PILLOW))
+        self.assertEqual((code, out.strip()), (0, ops.NO_PILLOW))
         self.assertEqual(p.read_bytes(), before)
 
     def test_refuses_paths_outside_evidence(self):
@@ -489,9 +490,9 @@ class Annotate(Base):
             self.assertEqual(code, 2, target)
             self.assertIn("of this project", err)
         self.assertEqual((other / "a.png").read_bytes(), before)
-        self.assertEqual(qm.evidence_png(other / "a.png"), (other / "a.png").resolve())  # its own project: fine
+        self.assertEqual(ops.evidence_png(other / "a.png"), (other / "a.png").resolve())  # its own project: fine
         (p.parent / "same.png").symlink_to(p)  # a link within the same project stays allowed
-        self.assertEqual(qm.evidence_png(p.parent / "same.png"), p.resolve())
+        self.assertEqual(ops.evidence_png(p.parent / "same.png"), p.resolve())
 
     def test_refuses_all_but_a_png_in_a_run_evidence_folder(self):  # these were the guard's checks until v0.5
         p = self.png()
@@ -541,10 +542,10 @@ class Annotate(Base):
         p = self.png()
         im = Image.new("P", (40, 40), 0)
         im.save(p, transparency=0)
-        qm.annotate(p, [(1, 1, 5, 5)], "x")
+        ops.annotate(p, [(1, 1, 5, 5)], "x")
         self.assertEqual(Image.open(p).convert("RGBA").getpixel((30, 30))[3], 0)  # still transparent
         Image.new("I;16", (40, 40), 32768).save(p)
-        qm.annotate(p, [(1, 1, 5, 5)], "x")
+        ops.annotate(p, [(1, 1, 5, 5)], "x")
         self.assertEqual(Image.open(p).convert("RGB").getpixel((30, 30)), (128, 128, 128))
 
 
@@ -553,7 +554,7 @@ class Verdict(unittest.TestCase):
         return {"id": cid, "ticket": "T-1", "ac": ac, "route": route, "status": status, "notes": "", "actual": "", **kw}
 
     def test_four_outcomes(self):
-        v = qm.verdict
+        v = report.verdict
         self.assertEqual(v("T-1", [self.case("TC-1", "PASS"), self.case("TC-2", "PASS")], []), ("PASS", "all 2 cases passed"))
         self.assertEqual(v({"key": "T-1"}, [self.case("TC-1", "PASS"), self.case("TC-3", "FAIL", "AC-2")],
                            [{"id": "BUG-1", "ticket": "T-1", "severity": "HIGH", "classification": "CONFIRMED"}]),
@@ -579,11 +580,11 @@ class Verdict(unittest.TestCase):
         cases = [{"id": "TC-1", "ticket": "A-1", "route": "/list", "status": "PASS"},
                  {"id": "TC-2", "ticket": "B-1", "route": "/list", "status": "PASS", "bug": "known 0123456789ab"}]
         known = [{"hash": "0123456789abcdef", "route": "/list", "severity": "HIGH", "classification": "CONFIRMED", "title": "x"}]
-        self.assertEqual(qm.verdict("A-1", cases, known)[0], "PASS")
-        self.assertEqual(qm.verdict("B-1", cases, known)[0], "FAIL")
+        self.assertEqual(report.verdict("A-1", cases, known)[0], "PASS")
+        self.assertEqual(report.verdict("B-1", cases, known)[0], "FAIL")
 
     def test_multi_ticket_runs(self):
-        v = qm.verdict
+        v = report.verdict
         # shared /form: an untagged bug named by T-2's failing case is T-2's, not T-1's
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "FAIL", ticket="T-2", bug="BUG-1", actual="131 saved")]
         bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
@@ -593,7 +594,7 @@ class Verdict(unittest.TestCase):
         t = {"key": "T-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}, {"id": "AC-3", "text": "x"}]}
         two = [self.case("TC-1", "PASS", ac="AC-1, AC-2")]
         self.assertEqual(v(t, two, []), ("PASS WITH NOTES", "AC-3 has no test case"))
-        self.assertEqual(qm._ac_lines(t, two, True)[:2], ["- AC-1 — ✅ PASS (TC-1)", "- AC-2 — ✅ PASS (TC-1)"])
+        self.assertEqual(report._ac_lines(t, two, True)[:2], ["- AC-1 — ✅ PASS (TC-1)", "- AC-2 — ✅ PASS (TC-1)"])
         # a route skipped after another explorer was BLOCKED: say which route has no result
         self.assertEqual(v("T-1", [self.case("TC-1", "NOT_RUN", route="/list")], []),
                          ("BLOCKED", "TC-1 not run: no result reported for /list"))
@@ -607,21 +608,21 @@ class Verdict(unittest.TestCase):
                 "1000 saved"]
         cases = [self.case(f"TC-{i}", "FAIL", ac="AC-1" if i < 4 else "AC-10", actual=a) for i, a in enumerate(acts, 1)]
         bugs = [{"id": f"BUG-{i}", "ticket": "T-1", "severity": "HIGH", "classification": "CONFIRMED"} for i in (1, 2, 3)]
-        self.assertEqual(qm.verdict("T-1", cases, bugs),
+        self.assertEqual(report.verdict("T-1", cases, bugs),
                          ("FAIL", "4 cases failed (TC-1, TC-2, TC-3, TC-4) on AC-1, AC-10; BUG-1 HIGH; BUG-2 HIGH; +1 more"))
-        v, why = qm.verdict("T-1", cases[:1], [])
+        v, why = report.verdict("T-1", cases[:1], [])
         self.assertEqual(why, "TC-1 failed (AC-1): Speed 131 shows 'Saved zone \"qa-sdet-zone-c\" at…")
         stuck = self.case("TC-12", "NOT_RUN", actual="Not testable: faults are off", notes="The 0 seen comes from the 404")
-        self.assertEqual(qm.verdict("T-1", [stuck], [])[1], "TC-12 not run: Not testable: faults are off")  # why, not a side note
+        self.assertEqual(report.verdict("T-1", [stuck], [])[1], "TC-12 not run: Not testable: faults are off")  # why, not a side note
         nine = [self.case(f"TC-{i}", "FAIL") for i in range(1, 10)]
-        self.assertEqual(qm.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1")
+        self.assertEqual(report.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1")
 
     def test_header_browser_comes_from_the_runs(self):
         plan = {"kind": "ticket", "env": {"url": "https://qa", "browser": "chrome"}}
         runs = [("run-form.json", {"env": {"url": "https://qa/form", "browser": "mcp"}})]
-        self.assertEqual(qm._header("/x/qa-out/2026-11-23-T", "ticket", plan, runs)[1],
+        self.assertEqual(report._header("/x/qa-out/2026-11-23-T", "ticket", plan, runs)[1],
                          "ticket · 2026-11-23 · https://qa · build not run yet · browser mcp")
-        self.assertTrue(qm._header("/x/qa-out/2026-11-23-T", "ticket", plan, [])[1].endswith("browser chrome"))
+        self.assertTrue(report._header("/x/qa-out/2026-11-23-T", "ticket", plan, [])[1].endswith("browser chrome"))
 
 
 class MergedCases(Base):
@@ -633,13 +634,13 @@ class MergedCases(Base):
                                            {"id": "TC-2", "status": "NOT_RUN"}, {"id": "TC-3", "status": "BLOCKED"}]}
         newer = {"target": "/b", "cases": [{"id": "TC-2", "status": "PASS"}, {"id": "TC-3", "status": "PASS"},
                                            {"id": "TC-1", "status": "NOT_RUN", "notes": "other route"}]}
-        d = qm.load_run(self.rundir(plan=plan, runs=[("a", older), ("b", newer)]))
-        cases = qm.merged_cases(d["plan"], d["runs"])
+        d = report.load_run(self.rundir(plan=plan, runs=[("a", older), ("b", newer)]))
+        cases = report.merged_cases(d["plan"], d["runs"])
         self.assertEqual([(c["id"], c["status"], c["actual"]) for c in cases],
                          [("TC-1", "FAIL", "131 saved"), ("TC-2", "PASS", ""), ("TC-3", "PASS", "")])
-        self.assertEqual(qm.verdict("STUDIO-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
+        self.assertEqual(report.verdict("STUDIO-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
         # same rank: the newest run wins
-        tie = qm.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
+        tie = report.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
                                      ("b", {"cases": [{"id": "TC-1", "status": "pass", "actual": "new"}]})])
         self.assertEqual(tie[0]["actual"], "new")
 
@@ -649,7 +650,7 @@ class MergedCases(Base):
             {"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 131"},  # added by hand in --review
             {"ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 0"}]}
         d = self.rundir(plan=plan)
-        qm.write_report(d)
+        report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertIn("## Problems reading this folder", r)
         self.assertIn("- plan.json: case 'Reject 131' repeats id TC-1; it is left out of this report: give it an id "
@@ -659,15 +660,15 @@ class MergedCases(Base):
     def test_page_column_when_a_ticket_spans_pages(self):
         cases = [{"id": "TC-1", "route": "/a", "status": "PASS", "actual": "", "notes": ""},
                  {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": ""}]
-        self.assertEqual(qm._case_table(cases, "/x", True)[0],
+        self.assertEqual(report._case_table(cases, "/x", True)[0],
                          "| ID | AC | Page | Case | Status | Actual | Evidence |")
-        self.assertEqual(qm._case_table(cases[:1], "/x", False)[0], "| ID | AC | Case |")
+        self.assertEqual(report._case_table(cases[:1], "/x", False)[0], "| ID | AC | Case |")
 
 
 class MergedCasesIds(unittest.TestCase):
     def test_numeric_id_zero_is_an_id(self):  # audit 3 r1
         warnings = []
-        cases = qm.merged_cases({"cases": [{"id": 0, "title": "zero"}]}, [("a", {"cases": [{"id": 0, "status": "PASS"}]})],
+        cases = report.merged_cases({"cases": [{"id": 0, "title": "zero"}]}, [("a", {"cases": [{"id": 0, "status": "PASS"}]})],
                                 warnings)
         self.assertEqual([(c["id"], c["status"]) for c in cases], [("0", "PASS")])
         self.assertEqual(warnings, [])
@@ -680,7 +681,7 @@ class Report(Base):
         plan["cases"][1]["ac"] = 2
         d = self.rundir(plan=plan, runs=[("form", {**RUN_FORM, "cases": [{"id": "TC-1", "status": "PASS"},
                                                                          {"id": "TC-2", "status": "PASS"}], "bugs": []})])
-        text = qm.render_report(d)
+        text = report.render_report(d)
         self.assertIn("- 2 a number — ✅ PASS (TC-2)", text)
         self.assertIn("a list for an id — not covered", text)
         self.assertNotIn("2 has no test case", text)
@@ -722,7 +723,7 @@ class Report(Base):
 
     def test_nothing_run_yet(self):
         d = self.rundir(plan=PLAN)
-        qm.write_report(d)
+        report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertEqual(r.count("⏸️ not run"), 4 + 3)  # every case, and every covered AC
         self.assertIn("| STUDIO-1 — Speed limit form | ⏳ NOT STARTED | testing hasn't started yet | 0 / 0 / 2 | 0 |", r)
@@ -732,10 +733,10 @@ class Report(Base):
 
     def test_empty_folder_and_broken_files(self):
         d = self.rundir("2026-11-20-x")
-        self.assertIn("Nothing recorded yet", qm.render_report(d))
+        self.assertIn("Nothing recorded yet", report.render_report(d))
         (d / ".data/plan.json").write_text("{nope")
         (d / ".data/run-a.json").write_text("[1]")
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("## Problems reading this folder\n- plan.json unreadable (JSONDecodeError)\n- run-a.json is not an object", r)
         self.assertEqual(cli("report", str(self.proj))[0], 2)  # not a qa-out/<run> folder
 
@@ -743,7 +744,7 @@ class Report(Base):
         run = {**RUN_FORM, "mode": "explore", "cases": [], "bugs": [{**RUN_FORM["bugs"][0], "ticket": None}]}
         d = self.rundir("2026-11-23-form", plan={"kind": "explore", "title": "/form", "env": {"url": "http://localhost:8765"}},
                         runs=[("form", run)])
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("## Summary\n**Status:** /form COMPLETED · 1 bug(s)", r)
         self.assertNotIn("Verdict", r)
         self.assertNotIn("| Ticket | Verdict", r)
@@ -752,7 +753,7 @@ class Report(Base):
 
     def test_plan_kind(self):
         d = self.rundir("2026-11-23-plan-STUDIO-1", plan={**PLAN, "kind": "plan"})
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("| STUDIO-1 — Speed limit form | 2 | 2 |", r)
         self.assertIn("| ID | AC | Case |\n|---|---|---|", r)
         self.assertNotIn("Status", r)
@@ -761,11 +762,11 @@ class Report(Base):
 
     def test_plan_questions_render(self):
         q = {**PLAN, "kind": "plan", "questions": ["Q1 [BLOCKING] Is 0 a valid speed?", "Q2 [LOW] Units?"]}
-        r = qm.render_report(self.rundir("2026-11-23-plan-STUDIO-1", plan=q))
+        r = report.render_report(self.rundir("2026-11-23-plan-STUDIO-1", plan=q))
         self.assertIn("## Questions\n- Q1 [BLOCKING] Is 0 a valid speed?\n- Q2 [LOW] Units?", r)
         d = self.rundir(plan={**q, "kind": "ticket"}, runs=[("form", RUN_FORM)])
         # r26: a run's follow-up on plan Q1 read as a second, unnumbered Q1 in one flat list: two labelled lists
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)  # a run's follow-up is one list now
         self.assertIn("- Q2 [LOW] Units? _(from test plan)_", r)
         self.assertIn("## Exploration notes\nHeuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", r)
@@ -793,9 +794,9 @@ class Report(Base):
     def test_one_broken_folder_does_not_break_the_index(self):
         good = self.rundir("2026-11-23-good", plan=PLAN)
         bad = self.rundir("2026-11-22-bad", plan=PLAN)
-        real = qm.run_summary
-        with mock.patch.object(qm, "run_summary", lambda p: (_ for _ in ()).throw(TypeError("x")) if p.name == bad.name
-                               else real(p)), mock.patch.object(qm, "render_report_parts", side_effect=TypeError("boom")):
+        real = report.run_summary
+        with mock.patch.object(report, "run_summary", lambda p: (_ for _ in ()).throw(TypeError("x")) if p.name == bad.name
+                               else real(p)), mock.patch.object(report, "render_report_parts", side_effect=TypeError("boom")):
             self.assertEqual(cli("report", str(good))[0], 0)
         self.assertIn("Could not render this report: TypeError: boom", (good / "REPORT.md").read_text())
         idx = (self.proj / "qa-out/README.md").read_text()
@@ -811,7 +812,7 @@ class Report(Base):
                "bugs": [{"hash": "ab|cd\nef", "title": "t", "route": "/f"}]}
         d = self.rundir(plan=plan, runs=[("f", run)])
         (d / "bugs/BUG-9.md").write_text("x")
-        r = qm.render_report(d)
+        r = report.render_report(d)
         headings = [ln for ln in r.splitlines() if ln.startswith("#")]
         self.assertEqual(headings, ["# QA report: T ## injected", "## Needs your action", "### Bugs to file (1)",
                                     "### Failed, blocked or not-run cases (1)", "## STUDIO-1 — s # H1 \\| x",
@@ -826,7 +827,7 @@ class Report(Base):
         plan = {"kind": "ticket", "tickets": [{"key": "T-1", "acs": [{"id": "AC-1", "text": "a"}]}],
                 "cases": [{"id": "TC-1", "ticket": "T-1", "ac": "AC-1", "title": "x", "route": "/f"}]}
         d = self.rundir("2026-11-23-types", plan=plan, runs=[("f", {"cases": "TC-1 PASS", "questions": "why?"})])
-        qm.write_report(d)
+        report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertIn("## Problems reading this folder", r)
         self.assertIn("`cases` should be a list", r)
@@ -845,7 +846,7 @@ class Report(Base):
         (d / "bugs/BUG-1.md").write_text("x")
         (d / "evidence/BUG-1.png").write_bytes(b"x")
         (d / "evidence/shot (1).png").write_bytes(b"x")
-        qm.write_report(d)
+        report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertNotIn("<!--", r)
         self.assertNotIn("<script>", r)
@@ -865,8 +866,8 @@ class Report(Base):
         self.rundir("old-layout-slug")  # no REPORT.md, no plan: not listed
         (self.proj / "qa-out/form").mkdir()
         (self.proj / "qa-out/form/run.json").write_text("{}")
-        qm.write_report(a)
-        qm.write_report(b)
+        report.write_report(a)
+        report.write_report(b)
         idx = (self.proj / "qa-out/README.md").read_text()
         rows = [ln for ln in idx.splitlines() if ln.startswith("| 2026")]
         self.assertEqual(rows, [
@@ -885,12 +886,12 @@ class Inbox(Base):
     def test_shapes(self):
         flat = [{"key": "ops-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}]
         for data in (self.ACLI, {"issues": self.ACLI}, {"workItems": self.ACLI}, {"values": self.ACLI}):
-            self.assertEqual([x["key"] for x in qm.inbox_items(data)], ["STUDIO-5", "STUDIO-7"])
-        self.assertEqual(qm.inbox_items(flat + [{"nokey": 1}, "junk"]),
+            self.assertEqual([x["key"] for x in report.inbox_items(data)], ["STUDIO-5", "STUDIO-7"])
+        self.assertEqual(report.inbox_items(flat + [{"nokey": 1}, "junk"]),
                          [{"key": "OPS-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}])
         for bad in ({"x": 1}, "text", 5):
-            with self.assertRaises(qm.BadInput):
-                qm.inbox_items(bad)
+            with self.assertRaises(core.BadInput):
+                report.inbox_items(bad)
 
     def test_new_tracking_persists(self):
         self.config(jiraKeyPrefix="STUDIO")
@@ -942,7 +943,7 @@ class Inbox(Base):
         self.assertIn("6000 open, 0 new", cli("inbox", str(self.proj), stdin=big)[1])  # was 1000 new forever
 
     def test_failed_write_keeps_tickets_new(self):  # r11: keys were remembered before INBOX.md was written
-        with mock.patch.object(qm, "_write", side_effect=OSError("disk full")), self.assertRaises(OSError):
+        with mock.patch.object(core, "_write", side_effect=OSError("disk full")), self.assertRaises(OSError):
             cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))
         self.assertIn("2 open, 2 new", cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))[1])
 
@@ -963,20 +964,20 @@ class Inbox(Base):
 class SetupPermissions(Base):
     def test_print(self):
         code, out, _ = cli("setup-permissions")
-        self.assertEqual((code, out.splitlines()), (0, qm.PERMISSION_RULES))
+        self.assertEqual((code, out.splitlines()), (0, doctor.PERMISSION_RULES))
         self.assertFalse((self.t / "home/.claude").exists())  # printing changes nothing
 
     def test_merge_deep_json_same_second_backups_and_spacing(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "settings.json"
             f.write_text("[" * 200000 + "]" * 200000)
-            with self.assertRaises(qm.BadInput):
-                qm.merge_permissions(f)
+            with self.assertRaises(core.BadInput):
+                doctor.merge_permissions(f)
             f.write_text(json.dumps({"permissions": {"allow": ["Bash( qa-mem *)"]}}))
-            added = qm.merge_permissions(f, stamp="20261123000000")
+            added = doctor.merge_permissions(f, stamp="20261123000000")
             self.assertNotIn("Bash(qa-mem *)", added)  # same rule, other spacing
             f.write_text(json.dumps({"permissions": {"allow": []}}))
-            qm.merge_permissions(f, stamp="20261123000000")
+            doctor.merge_permissions(f, stamp="20261123000000")
             self.assertEqual(len(list(Path(d).glob("settings.json.bak-20261123000000*"))), 2)  # first backup kept
 
     def test_merge_keeps_keys_no_dupes_backup_mode(self):
@@ -993,14 +994,14 @@ class SetupPermissions(Base):
         allow = got["permissions"]["allow"]
         self.assertEqual(allow[:2], ["Bash(ls)", "Skill(qa-sdet:*)"])
         self.assertEqual(sorted(allow), sorted(set(allow)))
-        self.assertEqual(set(allow), {"Bash(ls)"} | set(qm.PERMISSION_RULES))
+        self.assertEqual(set(allow), {"Bash(ls)"} | set(doctor.PERMISSION_RULES))
         self.assertNotIn("Skill(qa-sdet:*)", out)  # only what was added
         self.assertIn("Bash(qa-mem *)", out)
-        self.assertFalse(any(r.startswith("Agent(") or "python" in r for r in qm.PERMISSION_RULES))  # auto mode drops them
+        self.assertFalse(any(r.startswith("Agent(") or "python" in r for r in doctor.PERMISSION_RULES))  # auto mode drops them
         # r10: the config read every run is allowed, but never Edit/Write (allowedHosts is the guard's trust root)
-        self.assertIn("Read(~/.config/qa-sdet/config.json)", qm.PERMISSION_RULES)
+        self.assertIn("Read(~/.config/qa-sdet/config.json)", doctor.PERMISSION_RULES)
         self.assertFalse(any(r.startswith(("Edit(", "Write(", "MultiEdit(")) or "qa-state" in r
-                             for r in qm.PERMISSION_RULES))
+                             for r in doctor.PERMISSION_RULES))
         self.assertEqual(stat.S_IMODE(s.stat().st_mode), 0o640)
         backups = list(self.t.glob("settings.json.bak-*"))
         self.assertEqual(len(backups), 1)
@@ -1013,7 +1014,7 @@ class SetupPermissions(Base):
     def test_missing_file_and_invalid_json(self):
         s = self.t / "home/.claude/settings.json"
         self.assertEqual(cli("setup-permissions", "--apply")[0], 0)  # default path under HOME
-        self.assertEqual(json.loads(s.read_text()), {"permissions": {"allow": qm.PERMISSION_RULES}})
+        self.assertEqual(json.loads(s.read_text()), {"permissions": {"allow": doctor.PERMISSION_RULES}})
         bad = self.t / "bad.json"
         bad.write_text('{"permissions": ')
         code, _, err = cli("setup-permissions", "--settings", str(bad), "--apply")
@@ -1068,15 +1069,15 @@ class IngestDataFolder(Base):
     def test_run_json_in_data_with_drafts_in_bugs(self):
         d = self.rundir(plan=PLAN, runs=[("form", RUN_FORM)])
         (d / "bugs/BUG-1.md").write_text("draft")
-        self.assertEqual(qm.ingest_pending(self.proj / "qa-out"), 1)
+        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 1)
         self.assertTrue((d / ".data/run-form.json.ingested").exists())
         self.assertFalse((d / ".data/plan.json.ingested").exists())  # the plan is not ingested
-        con = qm.connect()
+        con = core.connect()
         try:
             self.assertEqual(con.execute("SELECT draft_path FROM bugs").fetchone()[0], str((d / "bugs/BUG-1.md").resolve()))
         finally:
             con.close()
-        self.assertEqual(qm.ingest_pending(self.proj / "qa-out"), 0)
+        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 0)
 
     def test_bad_report_fields_are_parked(self):
         for bad in ({"cases": [{"id": "TC-1", "status": "MAYBE"}]}, {"cases": [{"status": "PASS"}]},
@@ -1087,9 +1088,9 @@ class IngestDataFolder(Base):
             d = self.rundir("bad")
             f = d / ".data/run-x.json"
             f.write_text(json.dumps({**RUN_LIST, "bugs": [], **bad}))
-            qm.PARKED.clear()
+            memory.PARKED.clear()
             with contextlib.redirect_stderr(io.StringIO()):
-                qm.ingest_pending(self.proj / "qa-out")
+                memory.ingest_pending(self.proj / "qa-out")
             self.assertTrue(f.with_name("run-x.json.error").exists(), bad)
             f.with_name("run-x.json.error").unlink()
         good = {**RUN_LIST, "cases": [{"id": "TC-1", "status": "not run"}], "env": {"url": "u", "browser": "mcp"},
@@ -1097,19 +1098,19 @@ class IngestDataFolder(Base):
                 "questions": ["a?", {"text": "b?", "status": "resolved", "answer": "yes"}],
                 "not_tested": ["c", {"category": "safety", "text": "d"}]}
         f.write_text(json.dumps(good))
-        self.assertEqual(qm.ingest_pending(d), 1)  # ISSUE-4: a run folder finds its qa-out
+        self.assertEqual(memory.ingest_pending(d), 1)  # ISSUE-4: a run folder finds its qa-out
 
 
     def test_deep_json_does_not_stop_other_ingests(self):  # r11: a RecursionError in scrub aborted the whole hook
         bad = self.rundir("a") / ".data/run-deep.json"
         bad.write_text("[" * 50000 + "]" * 50000)
         good = self.rundir("b", runs=[("ok", RUN_LIST)]) / ".data/run-ok.json"
-        qm.PARKED.clear()
+        memory.PARKED.clear()
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(qm.ingest_pending(self.proj / "qa-out"), 1)
+            self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 1)
         self.assertTrue(good.with_name("run-ok.json.ingested").exists())
         self.assertTrue(bad.with_name("run-deep.json.error").exists())
-        self.assertEqual(len(qm.PARKED), 1)
+        self.assertEqual(len(memory.PARKED), 1)
 
     def test_scrub_ignores_planted_temp_link(self):  # r11: .<draft>.scrub was opened following links
         d = self.rundir("c")
@@ -1120,7 +1121,7 @@ class IngestDataFolder(Base):
         (d / "bugs/.BUG-1.md.scrub").symlink_to(victim)
         (d / "REPORT.md").write_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n")
         (self.proj / "qa-out/INBOX.md").write_text("| NEW | AB-1 | api_key=sk_live_abcdefghij123 |\n")
-        qm.scrub_tree(self.proj / "qa-out")
+        scrub.scrub_tree(self.proj / "qa-out")
         self.assertEqual(victim.read_text(), "keep")
         self.assertFalse(draft.is_symlink())
         self.assertEqual(draft.read_text(), "token: [REDACTED]\n")
@@ -1132,42 +1133,42 @@ class IngestDataFolder(Base):
 class Doctor(Base):
     def test_profile_pillow_and_old_cookie_lines(self):
         self.config(app="x")
-        qm.CONFIG.with_name("qa-state.json").write_text("{}")
-        with mock.patch.object(qm, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None):
+        core.CONFIG.with_name("qa-state.json").write_text("{}")
+        with mock.patch.object(doctor, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                qm.doctor()
+                doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
             self.assertIn("old cookie file present: qa-setup can delete it", out.getvalue())
             self.assertIn("Pillow", out.getvalue())
             self.assertNotIn("qa-state.json readable", out.getvalue())
-            qm.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
-            (qm.profile_dir() / "Default").mkdir()
+            ops.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
+            (ops.profile_dir() / "Default").mkdir()
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                qm.doctor()
+                doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
             self.assertNotIn("signed-in profile present", out.getvalue())
             self.assertEqual(cli("login-ok")[0], 0)  # qa-login verified the sign-in
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                qm.doctor()
+                doctor.doctor()
             self.assertIn("ok   signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)",
                           out.getvalue())
             self.assertEqual(cli("login-ok", "x")[0], 2)
             with mock.patch.object(subprocess, "run", return_value=done(0)):
                 self.config(app="x", browser="chrome")
-                qm.main(["browser-open"])  # a test run keeps the sign-in
-                self.assertTrue(qm.signed_in_stamp().exists())
-                qm.main(["browser-open", "--session", "qa-login", "--headed"])  # a new sign-in starts: forget it
-                self.assertFalse(qm.signed_in_stamp().exists())
+                cli_mod.main(["browser-open"])  # a test run keeps the sign-in
+                self.assertTrue(ops.signed_in_stamp().exists())
+                cli_mod.main(["browser-open", "--session", "qa-login", "--headed"])  # a new sign-in starts: forget it
+                self.assertFalse(ops.signed_in_stamp().exists())
 
 
     def doctor_out(self):
         out = io.StringIO()
-        with mock.patch.object(qm, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None), \
+        with mock.patch.object(doctor, "claude_mcp_list", lambda: ""), mock.patch("shutil.which", lambda *a, **k: None), \
                 contextlib.redirect_stdout(out):
-            qm.doctor()
+            doctor.doctor()
         return out.getvalue()
 
     def test_doctor_agrees_with_the_guard_and_stops_at_a_json_error(self):  # audit 3: second independent pass
@@ -1178,7 +1179,7 @@ class Doctor(Base):
             out = self.doctor_out()
             self.assertNotIn("FIX  allowedHosts", out, cfg)
             self.assertNotIn("FIX  qaBaseUrl", out, cfg)
-        qm.CONFIG.write_text('{"app": "x", "qaBaseUrl": "https://qa.example.com",}')
+        core.CONFIG.write_text('{"app": "x", "qaBaseUrl": "https://qa.example.com",}')
         out = self.doctor_out()
         self.assertIn("JSONDecodeError", out)
         self.assertNotIn("config has app", out)
@@ -1213,17 +1214,17 @@ class Doctor(Base):
             self.assertNotIn("add the qaBaseUrl host to allowedHosts", out, bad)  # the wrong fix for a bad URL
         self.config(**good, jiraKeyPrefix="studio-")
         self.assertIn("ok   jiraKeyPrefix is a Jira project key", self.doctor_out())
-        with self.assertRaisesRegex(qm.BadInput, "jiraKeyPrefix .* must be a Jira project key"):
-            qm.expand_keys(["1234"], "STUDIO-1234")
-        qm.CONFIG.write_text("[1]")
+        with self.assertRaisesRegex(core.BadInput, "jiraKeyPrefix .* must be a Jira project key"):
+            ops.expand_keys(["1234"], "STUDIO-1234")
+        core.CONFIG.write_text("[1]")
         self.assertIn("must be one JSON object", self.doctor_out())
-        qm.CONFIG.write_text("{bad")
+        core.CONFIG.write_text("{bad")
         self.assertIn("-> fix the JSON (", self.doctor_out())
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions")
     def test_unreadable_folders_never_crash_and_cookie_file_is_never_read(self):
         self.config(app="x")
-        qm.CONFIG.with_name("qa-state.json").write_text("SECRET-COOKIE")
+        core.CONFIG.with_name("qa-state.json").write_text("SECRET-COOKIE")
         real_open = builtins.open
         def no_cookie(f, *a, **k):
             if "qa-state" in str(f):
@@ -1231,7 +1232,7 @@ class Doctor(Base):
             return real_open(f, *a, **k)
         with mock.patch("builtins.open", no_cookie):
             self.assertIn("old cookie file present", self.doctor_out())
-        for folder in (qm.CONFIG.parent, qm.DATA_DIR):  # Path.exists/is_file raised here on python < 3.12
+        for folder in (core.CONFIG.parent, core.DATA_DIR):  # Path.exists/is_file raised here on python < 3.12
             folder.mkdir(parents=True, exist_ok=True)
             os.chmod(folder, 0)
             try:
@@ -1239,27 +1240,27 @@ class Doctor(Base):
             finally:
                 os.chmod(folder, 0o700)
             self.assertIn("python", out)
-        self.assertIn("make it readable: chmod", (os.chmod(qm.CONFIG.parent, 0), self.doctor_out(),
-                                                  os.chmod(qm.CONFIG.parent, 0o700))[1])
+        self.assertIn("make it readable: chmod", (os.chmod(core.CONFIG.parent, 0), self.doctor_out(),
+                                                  os.chmod(core.CONFIG.parent, 0o700))[1])
 
 
 class Cli(Base):
     def test_every_command_answers_help_and_bad_options_with_usage(self):
         code, out, _ = cli()
         self.assertEqual(code, 2)
-        for name in qm.COMMANDS:
+        for name in cli_mod.COMMANDS:
             self.assertIn(f"  qa-mem {name}", out)
         self.assertEqual(cli("--help")[0], 2)
         self.assertEqual(cli("nope")[0], 2)
-        for name in qm.COMMANDS:
+        for name in cli_mod.COMMANDS:
             for args in (["--help"], ["-h"], ["--bogus"], ["x", "--help"]):
                 code, out, err = cli(name, *args)
                 self.assertEqual(code, 2, (name, args, out, err))
                 self.assertIn(f"usage: qa-mem {name}", err + out, (name, args))
         self.assertEqual(cli("stale", "--help")[0], 2)
-        con = qm.connect()
+        con = core.connect()
         self.addCleanup(con.close)
-        self.assertIsNone(qm.meta(con, "build"))  # was: the build became "--help"
+        self.assertIsNone(core.meta(con, "build"))  # was: the build became "--help"
         self.assertEqual(cli("doctor", "now")[0], 2)
         self.assertEqual(cli("hash", "/form", "shows", "--", "instead")[0], 0)  # a symptom may hold "--"
         self.assertEqual(cli("code", "--repos")[0], 0)
@@ -1273,7 +1274,7 @@ class Cli(Base):
         self.assertEqual((code, "run_id" in err), (2, True))
 
     def test_busy_db_is_a_message(self):
-        with mock.patch.object(qm, "run_cmd", side_effect=qm.sqlite3.OperationalError("database is locked")):
+        with mock.patch.object(cli_mod, "run_cmd", side_effect=sqlite3.OperationalError("database is locked")):
             code, _, err = cli("stale", "1.2")
         self.assertEqual(code, 1)
         self.assertIn("stayed busy", err)
@@ -1281,38 +1282,38 @@ class Cli(Base):
 
 class Concurrency(Base):
     def test_overlapping_inbox_runs_keep_each_others_keys(self):
-        a, b = qm.connect(), qm.connect()
+        a, b = core.connect(), core.connect()
         self.addCleanup(a.close)
         self.addCleanup(b.close)
-        real = qm._write
+        real = core._write
         def b_runs_meanwhile(path, text):
-            qm._write = real
-            qm.inbox(b, self.proj, [{"key": "OPS-2"}])
+            core._write = real
+            report.inbox(b, self.proj, [{"key": "OPS-2"}])
             real(path, text)
-        with mock.patch.object(qm, "_write", b_runs_meanwhile):
-            qm.inbox(a, self.proj, [{"key": "OPS-1"}])
-        self.assertEqual(sorted(json.loads(qm.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
+        with mock.patch.object(core, "_write", b_runs_meanwhile):
+            report.inbox(a, self.proj, [{"key": "OPS-1"}])
+        self.assertEqual(sorted(json.loads(core.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
 
     def test_scrub_keeps_an_explorers_rewrite(self):
         f = self.t / "BUG-1.md"
         f.write_text("token=abcdefabcdefabcdef1234\n")
-        real = qm.redact
+        real = scrub.redact
         def rewrite_meanwhile(text):
             time.sleep(0.01)
             f.write_text("NEW draft\n")
             return real(text)
-        with mock.patch.object(qm, "redact", rewrite_meanwhile):
-            qm.scrub_file(f)
+        with mock.patch.object(scrub, "redact", rewrite_meanwhile):
+            scrub.scrub_file(f)
         self.assertEqual(f.read_text(), "NEW draft\n")
         self.assertEqual([p.name for p in self.t.iterdir() if p.name.startswith(".BUG")], [])
 
-    @unittest.skipIf(qm.fcntl is None, "no flock")
+    @unittest.skipIf(core.fcntl is None, "no flock")
     def test_index_write_waits_for_another_report(self):
         import threading
         d = self.rundir(runs=[("x", {"target": "/x"})])
         fd = os.open(d.parent, os.O_RDONLY)
-        qm.fcntl.flock(fd, qm.fcntl.LOCK_EX)  # another report is writing the index
-        th = threading.Thread(target=qm.write_report, args=(d,))
+        core.fcntl.flock(fd, core.fcntl.LOCK_EX)  # another report is writing the index
+        th = threading.Thread(target=report.write_report, args=(d,))
         th.start()
         th.join(0.5)
         self.assertTrue(th.is_alive())
@@ -1345,7 +1346,7 @@ class Layout(Base):
         if templates is not None:
             self.config(releaseTemplates=templates)
         d = self.rundir("2026-11-23-STUDIO-1", plan=plan, runs=runs)
-        qm.write_report(d)
+        report.write_report(d)
         return d, (d / "REPORT.md").read_text()
 
     def test_verdict_block_action_and_draft_for_a_pass(self):
@@ -1364,7 +1365,7 @@ class Layout(Base):
                                                                                   "actual": "131 saved"}]})]
         d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=runs)
         (d / "jira-comment-STUDIO-1.md").write_text("old draft")
-        qm.write_report(d)
+        report.write_report(d)
         self.assertFalse((d / "jira-comment-STUDIO-1.md").exists())
         r = (d / "REPORT.md").read_text()
         self.assertIn("**Verdict: ❌ FAIL**", r)
@@ -1398,10 +1399,10 @@ class Layout(Base):
 
     def test_case_image_is_linked_and_embedded_only_when_the_file_exists(self):
         d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
-        self.assertIn("| ✅ PASS | Saved | — |", qm.render_report(d))
+        self.assertIn("| ✅ PASS | Saved | — |", report.render_report(d))
         (d / "evidence").mkdir(exist_ok=True)
         (d / "evidence" / "TC-1.png").write_bytes(b"png")
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("| ✅ PASS | Saved | [image](evidence/TC-1.png) |", r)
         self.assertIn("![TC-1](evidence/TC-1.png)", r)
         self.assertIn("1 evidence image(s)", r)
@@ -1409,7 +1410,7 @@ class Layout(Base):
     def test_a_folder_named_like_a_case_image_is_not_one(self):  # audit pi-10
         d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
         (d / "evidence" / "TC-1.png").mkdir(parents=True)
-        r = qm.render_report(d)
+        r = report.render_report(d)
         self.assertIn("0 evidence image(s)", r)
         self.assertNotIn("![TC-1]", r)
 
@@ -1433,7 +1434,7 @@ class Layout(Base):
         for cid in ("TC-1", "TC-2", "TC-3"):
             (d / "evidence" / f"{cid}.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
-        qm.write_report(d)
+        report.write_report(d)
         draft = (d / "jira-comment-STUDIO-1.md").read_text()
         self.assertIn(f"Paste this image: {d}/evidence/TC-2.png (/form)", draft)  # TC-1 is first, but no pass
         self.assertIn(f"Paste this image: {d}/evidence/TC-3.png (/list)", draft)
@@ -1459,7 +1460,7 @@ class Layout(Base):
 
     def test_plan_only_lists_a_resolved_question_once(self):  # audit agy-8: once bare (looked open), once answered
         plan = {**PLAN1, "kind": "plan", "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h"}]}
-        r = qm.render_report(self.rundir("2026-11-23-STUDIO-1", plan=plan))
+        r = report.render_report(self.rundir("2026-11-23-STUDIO-1", plan=plan))
         self.assertEqual(r.count("Units?"), 1, r)
         self.assertIn("- Units? — answer: km/h", r)
 
@@ -1471,7 +1472,7 @@ class Layout(Base):
     def test_bug_evidence_naming_a_folder_has_no_image(self):  # audit agy-11
         bugs = [{"title": t, "severity": "LOW", "classification": "CONFIRMED", "evidence": ev}
                 for t, ev in (("b1", ".."), ("b2", "."), ("b3", "/"))]
-        r = qm.render_report(self.rundir("2026-11-24-r", runs=[("f", {"mode": "explore", "target": "/f",
+        r = report.render_report(self.rundir("2026-11-24-r", runs=[("f", {"mode": "explore", "target": "/f",
                                                                       "status": "COMPLETED", "bugs": bugs})]))
         self.assertIn("| b1 |", r)
         self.assertNotIn("[image](evidence/", r)
@@ -1487,7 +1488,7 @@ class Layout(Base):
         self.assertIn("Real gap", r)
         self.config(releaseTemplates=["Rel-\n{version}"])
         d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
-        qm.write_report(d)
+        report.write_report(d)
         self.assertIn("Passed on Rel- 3.5.0\n", (d / "jira-comment-STUDIO-1.md").read_text())
 
     def test_draft_shows_one_image_per_route_and_no_markup(self):
@@ -1496,7 +1497,7 @@ class Layout(Base):
         (d / "evidence" / "TC-1.png").write_bytes(b"png")
         (d / "evidence" / "TC-2.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
-        qm.write_report(d)
+        report.write_report(d)
         draft = (d / "jira-comment-STUDIO-1.md").read_text()
         self.assertEqual(draft.count("Paste this image:"), 1)  # both cases are on /form: first passing one only
         self.assertIn(f"Paste this image: {d}/evidence/TC-1.png (/form)", draft)
@@ -1507,7 +1508,7 @@ class Layout(Base):
         d = self.rundir("2026-11-23-STUDIO-1", plan={**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": None,
                                                                             "fixed_note": ""}]}, runs=[("form", RUN1)])
         self.config()  # no releaseTemplates at all
-        qm.write_report(d)
+        report.write_report(d)
         draft = (d / "jira-comment-STUDIO-1.md").read_text()
         self.assertIn("Passed on <release name>", draft)
         self.assertIn("release names (set releaseTemplates in the qa-sdet config)", draft)
@@ -1560,10 +1561,10 @@ class Layout(Base):
         self.assertNotIn("Not reached", sec)  # empty groups are left out
 
     def test_release_names_fill_the_version(self):
-        self.assertEqual(qm._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
-        self.assertEqual(qm._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
-        self.assertEqual(qm._release_names(["A-{version}"], None)[1], "the ticket has no single fix version (plan.json fix_version)")
-        self.assertEqual(qm._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
+        self.assertEqual(report._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
+        self.assertEqual(report._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
+        self.assertEqual(report._release_names(["A-{version}"], None)[1], "the ticket has no single fix version (plan.json fix_version)")
+        self.assertEqual(report._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
 
 
 if __name__ == "__main__":

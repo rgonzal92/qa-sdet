@@ -1,6 +1,6 @@
 # Exploration heuristics
 
-IDs must match `HEURISTICS` in `bin/qa-mem`. Record each one tried in the run JSON's `coverage` (`run-json.md`).
+IDs must match `HEURISTICS` in `lib/qa_sdet/core.py`. Record each one tried in the run JSON's `coverage` (`run-json.md`).
 
 | ID | Try | Typical oracle |
 |---|---|---|

@@ -1,11 +1,12 @@
 """Code map (/qa-sdet:qa-init): scan, ingest, card block, `code`, search. Hints from source, never requirements."""
 import json, os, shutil, subprocess, tempfile, unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-qm = SourceFileLoader("qa_mem_codemap", str(ROOT / "bin/qa-mem")).load_module()
-qm.claude_mcp_list = lambda: ""
+import sys
+sys.path.insert(0, str(ROOT / "lib"))
+from qa_sdet import core, codemap, scan as scan_mod, memory, doctor, cli
+doctor.claude_mcp_list = lambda: ""
 FIX = ROOT / "tests/fixture-src"
 
 
@@ -32,16 +33,16 @@ class CodeMap(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         os.environ["QA_MEM_DB"] = str(self.dir / "t.db")
-        self.con = qm.connect()
+        self.con = core.connect()
         self.out = self.dir / "qa-out" / "init"
-        qm.PARKED.clear()  # a module-level list: one test's parked file must not leak into the next
+        memory.PARKED.clear()  # a module-level list: one test's parked file must not leak into the next
 
     def tearDown(self):
         self.con.close()
         self.tmp.cleanup()
 
     def scan(self, *paths, full=False, stamp="s1"):
-        return qm.codemap_scan(self.con, [str(p) for p in paths], self.out, full, stamp)
+        return scan_mod.codemap_scan(self.con, [str(p) for p in paths], self.out, full, stamp)
 
     def test_root_and_home_are_refused_not_walked(self):
         out = self.scan("/", "~")
@@ -56,16 +57,16 @@ class CodeMap(unittest.TestCase):
         return f
 
     def ingest_all(self):
-        self.assertEqual(qm.PARKED, [], qm.PARKED)
-        qm.ingest_pending(self.dir / "qa-out")
+        self.assertEqual(memory.PARKED, [], memory.PARKED)
+        memory.ingest_pending(self.dir / "qa-out")
         self.con.close()
-        self.con = qm.connect()
+        self.con = core.connect()
 
     # ---- scan ----
     def test_scan_classifies_areas_and_skips_secrets_and_generated(self):
         s = self.scan(FIX / "frontend", FIX / "backend", FIX / "e2e")
         files = {a: [f for r in json.loads((self.out / f"scan-{a}.json").read_text())["repos"] for f in r["files"]]
-                 for a in qm.CODEMAP_AREAS}
+                 for a in codemap.CODEMAP_AREAS}
         self.assertEqual(sorted(files["frontend"]), ["src/api/client.js", "src/components/IncidentMap.jsx",
                                                      "src/components/IncidentsTable.jsx",
                                                      "src/components/SpeedZoneForm.jsx", "src/routes.js"])
@@ -105,7 +106,7 @@ class CodeMap(unittest.TestCase):
             return None
 
         for name in ("TESTS_IMPORT_RE", "BACKEND_RE", "SERVER_SIGNAL_RE", "SCHEMA_RE"):
-            p = getattr(qm, name)
+            p = getattr(scan_mod, name)
             items = list(P.parse(p.pattern, p._flags))
             self.assertIs(items[0][0], C.ASSERT, name)
             starts = first(items[1:])
@@ -113,7 +114,7 @@ class CodeMap(unittest.TestCase):
             self.assertLessEqual(starts, first(list(items[0][1][1])), name)
 
     def test_classify_source(self):
-        c = qm.classify_source
+        c = scan_mod.classify_source
         self.assertEqual(c("src/app/app.routes.ts", "export const routes: Routes = [{ path: 'zones' }]"), "frontend")
         self.assertEqual(c("src/Main.java", "@GetMapping(\"/api/zones\") public List<Zone> all()"), "backend")
         self.assertEqual(c("api/openapi.yaml", "openapi: 3.0.0\npaths:"), "backend")
@@ -169,8 +170,8 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(other["deleted"], [])  # a changed frontend file isn't "deleted" for an area that never had it
         self.write_map("frontend", [])  # the mapper found nothing new
         self.ingest_all()
-        self.assertNotIn("Incidents table", qm.code(self.con, "/index.html"))  # its file is gone
-        self.assertIn("Speed zone", qm.code(self.con))  # untouched file: kept
+        self.assertNotIn("Incidents table", codemap.code(self.con, "/index.html"))  # its file is gone
+        self.assertIn("Speed zone", codemap.code(self.con))  # untouched file: kept
         full = self.scan(repo, full=True, stamp="s3")
         self.assertFalse(full["incremental"])
 
@@ -208,30 +209,30 @@ class CodeMap(unittest.TestCase):
         note = (self.out / "code-map-frontend.json.ingested").read_text()
         self.assertIn("'unknown kind': 1", note)
         self.assertIn("'page * outside backend (no card shows it)': 1", note)
-        self.assertEqual(qm.find_page(self.con, "speed zone")["route"], "/form.html")  # resolves by name now
-        idx = qm.code(self.con, "/index.html")
+        self.assertEqual(codemap.find_page(self.con, "speed zone")["route"], "/form.html")  # resolves by name now
+        idx = codemap.code(self.con, "/index.html")
         self.assertIn("GET /api/incidents", idx)  # backend endpoint linked through the frontend call
         self.assertNotIn("admin/stats", idx)
-        self.assertIn("admin/stats", qm.search(self.con, "admin stats"))  # findable, not in cards
+        self.assertIn("admin/stats", memory.search(self.con, "admin stats"))  # findable, not in cards
 
     def test_ingest_rejects_maps_from_another_scan(self):
         self.scan(FIX / "frontend")
         self.write_map("frontend", [], scan_id="frontend-old")
-        qm.PARKED.clear()
-        qm.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(any("older scan" in p for p in qm.PARKED), qm.PARKED)
-        qm.PARKED.clear()
+        memory.PARKED.clear()
+        memory.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(any("older scan" in p for p in memory.PARKED), memory.PARKED)
+        memory.PARKED.clear()
 
     def test_removed_routes_drop_code_only_pages(self):
         self.scan(FIX / "frontend")
         row = {"page": "/old.html", "kind": "route", "label": "Old", "value": "Old", "file": "src/routes.js:1"}
         self.write_map("frontend", [row])
         self.ingest_all()
-        self.assertIsNotNone(qm.find_page(self.con, "/old.html"))
+        self.assertIsNotNone(codemap.find_page(self.con, "/old.html"))
         self.scan(FIX / "frontend", full=True, stamp="s2")  # the route is gone from the code
         self.write_map("frontend", [])
         self.ingest_all()
-        self.assertIsNone(qm.find_page(self.con, "/old.html"))
+        self.assertIsNone(codemap.find_page(self.con, "/old.html"))
 
     def test_code_page_is_not_a_new_build_for_runs(self):
         """A page the code map created has no build: the first real run must not treat that as a build change."""
@@ -239,11 +240,11 @@ class CodeMap(unittest.TestCase):
         self.write_map("frontend", [{"page": "/form.html", "kind": "route", "label": "Speed zone", "value": "F",
                                      "file": "src/routes.js:4"}])
         self.ingest_all()
-        qm.ingest(self.con, {"run_id": "p1", "build": "", "pages": [  # a plan: build unknown, ticket fact
+        memory.ingest(self.con, {"run_id": "p1", "build": "", "pages": [  # a plan: build unknown, ticket fact
             {"route": "/form.html", "facts": [{"kind": "rule", "text": "speed max 120", "source": "TRAF-1"}]}]})
         self.con.execute("UPDATE pages SET build=NULL WHERE route='/form.html'")  # as if the map came last
         self.con.commit()
-        qm.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/form.html"}]})
+        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/form.html"}]})
         self.assertEqual(self.con.execute("SELECT stale FROM facts").fetchone()[0], 0)
 
     # ---- card, code, search ----
@@ -256,16 +257,16 @@ class CodeMap(unittest.TestCase):
                   "file": "src/components/SpeedZoneForm.jsx:8"}]
         self.write_map("frontend", rows)
         self.ingest_all()
-        c = qm.card(self.con, "speed zone")
+        c = memory.card(self.con, "speed zone")
         self.assertIn("NOTE: known from source code only", c)
         self.assertNotIn("re-verify", c)
         self.assertIn("FROM CODE (hints from source, not requirements; unverified;", c)
         self.assertIn("speed: min 0, max 130", c)
         self.assertIn("+2 more", c)  # 17 locators, 15 shown
         self.assertNotIn("(from ", c.split("FROM CODE")[0])  # never shown as a stated requirement
-        qm.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [
+        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [
             {"route": "/form.html", "locators": [{"name": "field 00", "locator": "#f0"}]}]})
-        c = qm.card(self.con, "speed zone")
+        c = memory.card(self.con, "speed zone")
         self.assertIn("LOCATORS (fresh): field 00=#f0", c)
         self.assertNotIn("field 00=#f0;", c.split("FROM CODE")[1])  # confirmed: not repeated as a hint
         self.assertIn("+1 more", c)
@@ -286,17 +287,17 @@ class CodeMap(unittest.TestCase):
             (repo / f"n{i}.txt").write_text(str(i))
             git(repo, "add", "-A")
             git(repo, "commit", "-qm", f"c{i}")
-        self.assertIn("2 commits behind", qm.card(self.con, "/form.html"))
+        self.assertIn("2 commits behind", memory.card(self.con, "/form.html"))
 
     def test_empty_map_tips(self):
-        self.assertIn("tip: /qa-sdet:qa-init", qm.card(self.con, "closures"))
-        self.assertIn("no code map yet", qm.code(self.con))
+        self.assertIn("tip: /qa-sdet:qa-init", memory.card(self.con, "closures"))
+        self.assertIn("no code map yet", codemap.code(self.con))
         self.scan(FIX / "frontend")
         self.write_map("frontend", [{"page": "/form.html", "kind": "route", "label": "Speed zone", "value": "F",
                                      "file": "src/routes.js:4"}])
         self.ingest_all()
-        self.assertNotIn("tip:", qm.card(self.con, "closures"))
-        self.assertIn("/form.html  Speed zone", qm.code(self.con))
+        self.assertNotIn("tip:", memory.card(self.con, "closures"))
+        self.assertIn("/form.html  Speed zone", codemap.code(self.con))
 
     def test_repos_listing_and_forget(self):
         gone = str(self.dir / "old-clone")
@@ -308,12 +309,12 @@ class CodeMap(unittest.TestCase):
                          "VALUES('/old.html','route','Old','Old','a.js:1',?,'frontend','t','a.js')", (gone,))
         self.con.execute("INSERT INTO pages(route, name) VALUES('/old.html', 'Old')")
         self.con.commit()
-        listing = qm.code(self.con, "--repos")
+        listing = codemap.code(self.con, "--repos")
         self.assertIn(str((FIX / "frontend").resolve()) + "  1 rows", listing)
         self.assertIn(gone + "  1 rows  (folder no longer exists", listing)
-        self.assertEqual(qm.codemap_forget(self.con, gone), 1)
-        self.assertIsNone(qm.find_page(self.con, "/old.html"))  # its code-only page went with it
-        self.assertIsNotNone(qm.find_page(self.con, "/form.html"))
+        self.assertEqual(codemap.codemap_forget(self.con, gone), 1)
+        self.assertIsNone(codemap.find_page(self.con, "/old.html"))  # its code-only page went with it
+        self.assertIsNotNone(codemap.find_page(self.con, "/form.html"))
 
     def test_forget_a_moved_folder_as_typed_and_say_when_unknown(self):
         """r16: a folder that is gone was matched only byte-for-byte: `~/old-clone/` removed 0 rows, said nothing."""
@@ -322,11 +323,11 @@ class CodeMap(unittest.TestCase):
         gone = str(self.dir / "old-clone")
         self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) "
                          "VALUES('/old.html','route','Old','Old','a.js:1',?,'frontend','t','a.js')", (gone,))
-        qm.set_meta(self.con, f"codemap_commit:frontend:{gone}", "a" * 40)
+        core.set_meta(self.con, f"codemap_commit:frontend:{gone}", "a" * 40)
         self.con.commit()
-        self.assertIsNone(qm.codemap_forget(self.con, "~/never-mapped"))
-        self.assertEqual(qm.codemap_forget(self.con, "~/old-clone/"), 1)
-        self.assertNotIn("old-clone", qm.code(self.con, "--repos"))  # its bookkeeping went too
+        self.assertIsNone(codemap.codemap_forget(self.con, "~/never-mapped"))
+        self.assertEqual(codemap.codemap_forget(self.con, "~/old-clone/"), 1)
+        self.assertNotIn("old-clone", codemap.code(self.con, "--repos"))  # its bookkeeping went too
 
     def test_behind_note_covers_the_backend_rows_on_the_card(self):
         """r16: the note named only the page's own repo, so a backend 3 commits on looked current beside its rules."""
@@ -344,10 +345,10 @@ class CodeMap(unittest.TestCase):
             git(api, "commit", "-qam", f"c{i}")
         (ui / "src/routes.js").write_text("// x\n")
         git(ui, "commit", "-qam", "u")
-        c = qm.card(self.con, "/zones")
+        c = memory.card(self.con, "/zones")
         self.assertIn("POST /api/zones speed: max 130", c)
         self.assertRegex(c, r"api [0-9a-f]{7}, 3 commits behind; ui [0-9a-f]{7}, 1 commits behind")
-        self.assertIn("api ", qm.code(self.con, "/zones").splitlines()[0])
+        self.assertIn("api ", codemap.code(self.con, "/zones").splitlines()[0])
 
     def test_code_lists_totals_even_with_only_a_backend(self):
         """r16: with only backend rows, `code` printed a bare header; qa-init's reply takes its counts from it."""
@@ -356,7 +357,7 @@ class CodeMap(unittest.TestCase):
         self.write_map("backend", [{"page": "*", "kind": "api", "label": "POST /api/zones", "value": "x",
                                     "file": "routes/zones.js:1"}])
         self.ingest_all()
-        out = qm.code(self.con)
+        out = codemap.code(self.con)
         self.assertIn("(none: no frontend routes mapped yet)", out)
         self.assertIn("TOTAL: 0 routes, 0 locators, 0 rules, 1 endpoints (1 backend", out)
 
@@ -419,7 +420,7 @@ class CodeMap(unittest.TestCase):
         self.scan(api)
         self.write_map("backend", [{"page": "*", "kind": "api", "label": "POST /api/zones", "value": "x",
                                     "file": "routes/zones.js:1"}])
-        self.assertEqual(qm.ingest_pending(self.out), 1)
+        self.assertEqual(memory.ingest_pending(self.out), 1)
 
     def test_renamed_menu_path_drops_rows_left_on_the_old_path(self):  # audit pi-1: judged before the menu landed
         ui = git_repo(self.dir / "ui", {"public/config.json": json.dumps(self.SHELL_NAV), "e2e/home.spec.ts":
@@ -436,14 +437,14 @@ class CodeMap(unittest.TestCase):
         git(ui, "commit", "-qam", "rename")
         self.scan(ui, stamp="s2")
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/home'").fetchone()[0], 0)
-        self.assertEqual(json.loads(qm.meta(self.con, "codemap_lost")), ["/home"])
+        self.assertEqual(json.loads(core.meta(self.con, "codemap_lost")), ["/home"])
         self.assertEqual(self.scan(ui, stamp="s3")["areas"]["tests"]["files"], 1)  # the spec is read again
 
     def test_a_menu_route_never_pushes_locators_off_a_full_page(self):  # audit pi-4
         ui = git_repo(self.dir / "ui", {"src/Main.jsx": "const Main = () => <form/>;\n"})
         self.scan(ui)
         self.write_map("frontend", [{"page": "/home", "kind": "locator", "label": f"Field {i}", "value": "x",
-                                     "file": "src/Main.jsx:1"} for i in range(qm.CODEMAP_PAGE_CAP)])
+                                     "file": "src/Main.jsx:1"} for i in range(codemap.CODEMAP_PAGE_CAP)])
         self.ingest_all()
         (ui / "public").mkdir()
         (ui / "public/config.json").write_text(json.dumps({"nav": [{"key": "home", "title": "Home", "module": {"url": "/m"}}]}))
@@ -451,7 +452,7 @@ class CodeMap(unittest.TestCase):
         git(ui, "commit", "-qm", "menu")
         self.scan(ui, stamp="s2")
         self.assertEqual(dict(self.con.execute("SELECT kind, count(*) FROM codemap WHERE page='/home' GROUP BY kind")
-                              .fetchall()), {"locator": qm.CODEMAP_PAGE_CAP, "route": 1})
+                              .fetchall()), {"locator": codemap.CODEMAP_PAGE_CAP, "route": 1})
 
     def test_a_renamed_menu_title_moves_the_page_name(self):  # audit pi-6: the first title stayed the page's name
         nav = lambda a, b: json.dumps({"nav": [{"key": k, "title": n, "module": {"url": "/m/" + k}}
@@ -461,7 +462,7 @@ class CodeMap(unittest.TestCase):
         (ui / "public/config.json").write_text(nav("Beta", "Alpha"))
         git(ui, "commit", "-qam", "swap")
         self.scan(ui, stamp="s2")
-        self.assertEqual(qm.find_page(self.con, "Alpha")["route"], "/b")
+        self.assertEqual(codemap.find_page(self.con, "Alpha")["route"], "/b")
 
     def test_menu_urls_are_redacted_like_a_mappers_rows(self):  # audit pi-3
         token = "ghp_" + "a" * 36
@@ -469,12 +470,12 @@ class CodeMap(unittest.TestCase):
             {"nav": [{"key": "home", "title": "Home", "module": {"url": f"/m/home?sig={token}"}}]})})
         self.scan(ui)
         self.assertNotIn(token, json.dumps(self.routes()))
-        self.assertNotIn(token, (self.out / f"code-map-frontend-{qm.SHELL_MAP_CHUNK}.json").read_text())
+        self.assertNotIn(token, (self.out / f"code-map-frontend-{scan_mod.SHELL_MAP_CHUNK}.json").read_text())
 
     def test_an_api_spec_with_menu_like_properties_is_not_a_menu(self):  # audit pi-7
         spec = json.dumps({"openapi": "3.0.0", "paths": {"/api/settings": {}}, "components": {"schemas": {"S": {
             "properties": {"module": {}, "key": {}, "nav": {}}}}}})
-        self.assertEqual(qm.classify_source("api/openapi-config.json", spec), "backend")
+        self.assertEqual(scan_mod.classify_source("api/openapi-config.json", spec), "backend")
 
     def test_a_broken_menu_drops_its_routes_and_settles(self):  # audit agy-13: stale routes, a full re-map every scan
         ui = self.shell_repo()
@@ -526,10 +527,10 @@ class CodeMap(unittest.TestCase):
         self.scan(repo, other, full=True, stamp="s2")
         self.write_map("frontend", [{"repo": "/nowhere", "page": "/form", "kind": "locator", "label": "A", "value": "#a",
                                      "file": "src/Form.jsx:1"}])
-        qm.PARKED.clear()
-        qm.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(any("isn't in scan-frontend.json" in p for p in qm.PARKED), qm.PARKED)
-        qm.PARKED.clear()
+        memory.PARKED.clear()
+        memory.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(any("isn't in scan-frontend.json" in p for p in memory.PARKED), memory.PARKED)
+        memory.PARKED.clear()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 2)  # nothing lost
 
     def test_route_params_meet_run_pages(self):
@@ -538,11 +539,11 @@ class CodeMap(unittest.TestCase):
         self.write_map("frontend", [{"page": "/incidents/:incidentId", "kind": "locator", "label": "Title",
                                      "value": "getByTestId('title')", "file": "src/Detail.jsx:1"}])
         self.ingest_all()
-        qm.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/incidents/4521"}]})
-        c = qm.card(self.con, "/incidents/4521")
+        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/incidents/4521"}]})
+        c = memory.card(self.con, "/incidents/4521")
         self.assertIn("Title=getByTestId('title')", c)  # one page: /incidents/:id
         for r in ("/zones/{zoneId}", "/zones/[id]", "/zones/<int:pk>", "/zones/42"):
-            self.assertEqual(qm.norm_route(r), "/zones/:id", r)
+            self.assertEqual(core.norm_route(r), "/zones/:id", r)
 
     def test_page_known_only_from_locators_has_a_card(self):
         repo = git_repo(self.dir / "e2e", {"pages/Zones.ts": "import { test } from '@playwright/test'; page.getByRole('row')"})
@@ -550,7 +551,7 @@ class CodeMap(unittest.TestCase):
         self.write_map("tests", [{"page": "/zones", "kind": "locator", "label": "Rows", "value": "getByRole('row')",
                                   "file": "pages/Zones.ts:1"}])
         self.ingest_all()
-        self.assertIn("Rows=getByRole('row')", qm.card(self.con, "/zones"))
+        self.assertIn("Rows=getByRole('row')", memory.card(self.con, "/zones"))
 
     def test_backend_linking_is_method_aware_and_handles_more_path_shapes(self):
         ui = git_repo(self.dir / "ui", {"src/Z.jsx": "fetch('/zones')"})
@@ -563,11 +564,11 @@ class CodeMap(unittest.TestCase):
             {"repo": str(api), "page": "*", "kind": "api", "label": "DELETE /zones", "value": "drop all", "file": "r.js:1"},
             {"repo": str(api), "page": "*", "kind": "rule", "label": "POST /zones name", "value": "max 80", "file": "r.js:1"}])
         self.ingest_all()
-        c = qm.code(self.con, "/zones")
+        c = codemap.code(self.con, "/zones")
         self.assertIn("GET /zones = list", c)  # single segment, absolute URL on the frontend side
         self.assertNotIn("DELETE /zones", c)  # different method
         self.assertNotIn("POST /zones name", c)
-        self.assertEqual(qm._api_ref("fetch(`${BASE}/zones/${id}`)"), ("", "zones/:id"))
+        self.assertEqual(codemap._api_ref("fetch(`${BASE}/zones/${id}`)"), ("", "zones/:id"))
 
     def test_crawl_names_dont_break_lookup_by_code_name(self):
         repo = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/zones' }]"})
@@ -577,7 +578,7 @@ class CodeMap(unittest.TestCase):
         self.ingest_all()
         self.con.execute("UPDATE pages SET name='Traffic QA' WHERE route='/zones'")  # a crawl wrote document.title
         self.con.commit()
-        self.assertEqual(qm.find_page(self.con, "speed zones")["route"], "/zones")
+        self.assertEqual(codemap.find_page(self.con, "speed zones")["route"], "/zones")
 
     def test_search_lists_page_rows_before_backend_rows(self):
         repo = git_repo(self.dir / "ui", {"src/Z.jsx": "<input name='speed'/>"})
@@ -588,15 +589,15 @@ class CodeMap(unittest.TestCase):
         self.write_map("frontend", [{"repo": str(repo), "page": "/zones", "kind": "rule", "label": "speed",
                                      "value": "max 130", "file": "src/Z.jsx:1"}])
         self.ingest_all()
-        self.assertTrue(qm.search(self.con, "speed").splitlines()[0].startswith("/zones [code:rule]"))
+        self.assertTrue(memory.search(self.con, "speed").splitlines()[0].startswith("/zones [code:rule]"))
 
     def test_a_visit_with_an_unreadable_build_counts_as_a_visit(self):
         repo = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/map' }]"})
         self.scan(repo)
         self.write_map("frontend", [{"page": "/map", "kind": "route", "label": "Map", "value": "M", "file": "src/routes.js:1"}])
         self.ingest_all()
-        qm.ingest(self.con, {"run_id": "r1", "build": "", "pages": [{"route": "/map"}]})
-        self.assertNotIn("no run has visited", qm.card(self.con, "/map"))
+        memory.ingest(self.con, {"run_id": "r1", "build": "", "pages": [{"route": "/map"}]})
+        self.assertNotIn("no run has visited", memory.card(self.con, "/map"))
 
     def test_behind_note_clears_and_ignores_other_folders(self):
         mono = self.dir / "mono"
@@ -608,14 +609,14 @@ class CodeMap(unittest.TestCase):
         self.ingest_all()
         (mono / "api/r.js").write_text("y")  # a commit outside the mapped folder
         git(mono, "commit", "-qam", "api only")
-        self.assertNotIn("behind", qm.card(self.con, "/z"))
+        self.assertNotIn("behind", memory.card(self.con, "/z"))
         (web / "README.md").write_text("docs")  # inside the folder, but no mapped file changes
         git(mono, "add", "-A")
         git(mono, "commit", "-qm", "web docs")
-        self.assertIn("1 commits behind", qm.card(self.con, "/z"))
+        self.assertIn("1 commits behind", memory.card(self.con, "/z"))
         s = self.scan(web, stamp="s2")  # nothing to map: the scan settles it
         self.assertFalse(s["areas"]["frontend"]["needs_mapper"])
-        self.assertNotIn("behind", qm.card(self.con, "/z"))
+        self.assertNotIn("behind", memory.card(self.con, "/z"))
 
     def test_incremental_handles_renames_unicode_ignored_and_new_candidates(self):
         repo = git_repo(self.dir / "ui", {"src/A.jsx": "<b data-testid='a'/>", "src/Zoné café.jsx": "<b/>",
@@ -656,8 +657,8 @@ class CodeMap(unittest.TestCase):
 
     def test_secret_stores_in_code_files_are_never_listed(self):  # r14
         for name in ("secrets.py", "app/secrets.rb", "Api/Secrets.cs", "credentials.py", "wp-config.php"):
-            self.assertIsNone(qm.classify_source(name, "Route::get('/x', fn() => 1);\n@app.route('/x')\n[HttpGet]"), name)
-        self.assertEqual(qm.classify_source("Api/Credentials.cs", "public record Credentials([Required] string User);"),
+            self.assertIsNone(scan_mod.classify_source(name, "Route::get('/x', fn() => 1);\n@app.route('/x')\n[HttpGet]"), name)
+        self.assertEqual(scan_mod.classify_source("Api/Credentials.cs", "public record Credentials([Required] string User);"),
                          "backend")  # a login DTO class, not a store
 
     def test_bad_commit_values_never_reach_git(self):
@@ -672,9 +673,9 @@ class CodeMap(unittest.TestCase):
         stray = self.dir / "qa-out" / "form" / "code-map-frontend.json"
         stray.parent.mkdir(parents=True)
         stray.write_text(json.dumps({"scan_id": "x", "area": "frontend", "rows": []}))
-        qm.PARKED.clear()
-        qm.ingest_pending(self.dir / "qa-out")
-        self.assertEqual(qm.PARKED, [])
+        memory.PARKED.clear()
+        memory.ingest_pending(self.dir / "qa-out")
+        self.assertEqual(memory.PARKED, [])
         self.assertFalse((stray.parent / "code-map-frontend.json.ingested").exists())
 
     # ---- review round 2 ----
@@ -698,8 +699,8 @@ class CodeMap(unittest.TestCase):
             {"page": "/speed-zones", "kind": "locator", "label": "Speed", "value": "getByTestId('speed')",
              "file": "src/Zones.jsx:1"}])
         self.ingest_all()
-        self.assertIsNone(qm.find_page(self.con, "/zones"))
-        self.assertEqual(qm.find_page(self.con, "speed zones")["route"], "/speed-zones")
+        self.assertIsNone(codemap.find_page(self.con, "/zones"))
+        self.assertEqual(codemap.find_page(self.con, "speed zones")["route"], "/speed-zones")
 
     def test_orphans_from_shared_files_are_read_again(self):
         """A page object with rows on a removed route and on a surviving one is still listed again."""
@@ -725,8 +726,8 @@ class CodeMap(unittest.TestCase):
         tests_scan = self.out / "scan-tests.json"
         tests_scan.unlink()  # the tests mapper never finished
         self.ingest_all()
-        self.assertNotIn("Row", qm.code(self.con, "/zones"))
-        self.assertIn("Nav", qm.code(self.con, "/home"))
+        self.assertNotIn("Row", codemap.code(self.con, "/zones"))
+        self.assertIn("Nav", codemap.code(self.con, "/home"))
         self.scan(ui, e2e, stamp="s3")
         self.assertIn("pages/App.ts", (self.out / "scan-tests.json").read_text())  # orphaned or never landed: read again
 
@@ -748,7 +749,7 @@ class CodeMap(unittest.TestCase):
         if f.exists():
             f.unlink()  # the tests mapper hasn't finished yet
         self.ingest_all()
-        self.assertNotIn("Row", qm.code(self.con, "/zones"))
+        self.assertNotIn("Row", codemap.code(self.con, "/zones"))
         self.scan(ui, e2e, stamp="s3")
         self.assertIn("pages/Zones.ts", (self.out / "scan-tests.json").read_text())  # read again, to land on the new route
 
@@ -757,10 +758,10 @@ class CodeMap(unittest.TestCase):
         self.scan(repo)
         rows = [{"page": "/a", "kind": "locator", "label": f"L{i}", "value": f"#l{i}", "file": "src/A.jsx:1"} for i in range(9)]
         self.write_map("frontend", rows + [{"page": "/a", "kind": "locator", "label": "X", "value": "#x", "file": "src/Other.jsx:1"}])
-        qm.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(qm.PARKED)
+        memory.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(memory.PARKED)
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 0)
-        self.assertEqual(qm._hashes(self.con, "frontend", str(repo)), {})  # not marked read
+        self.assertEqual(codemap._hashes(self.con, "frontend", str(repo)), {})  # not marked read
 
     def test_cap_evictions_dont_cause_endless_rereads(self):
         """Rows past a page's cap are dropped (documented), and their files are not re-read on every run."""
@@ -795,7 +796,7 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(self.scan(plain, stamp="p2")["areas"]["frontend"]["files"], 0)
 
     def test_more_classification_from_review_two(self):
-        c = qm.classify_source
+        c = scan_mod.classify_source
         self.assertEqual(c("app/controllers/zoneController.js", "exports.create = async (req, res) => { if (!req.body.name) }"), "backend")
         self.assertEqual(c("app/models/zone.js", "const Zone = new Schema({ name: { type: String, required: true } })"), "backend")
         self.assertIsNone(c("routes/index.js", "module.exports = require('./zones')"))
@@ -818,7 +819,7 @@ class CodeMap(unittest.TestCase):
 
     def test_large_areas_are_chunked_and_chunks_ingest_in_any_order(self):
         repo = git_repo(self.dir / "ui", {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(5)})
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=2, chunk_tokens=10**9)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=2, chunk_tokens=10**9)
         mappers = s["areas"]["frontend"]["mappers"]
         self.assertEqual([m["files"] for m in mappers], [2, 2, 1])
         for m in reversed(mappers):  # ingested in reverse order: nothing may wipe another chunk's rows
@@ -830,7 +831,7 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 5)
         (repo / "src/C4.jsx").unlink()
         git(repo, "commit", "-qam", "drop C4")
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, True, "s2", chunk_files=2, chunk_tokens=10**9)  # --full
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, True, "s2", chunk_files=2, chunk_tokens=10**9)  # --full
         for m in s["areas"]["frontend"]["mappers"]:
             scan = json.loads(Path(m["scan_file"]).read_text())
             rows = [{"page": "/c", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}
@@ -855,14 +856,14 @@ class CodeMap(unittest.TestCase):
             {"page": "*", "kind": "rule", "label": "jwt.secret", "value": "s3cr3t-Value-123456", "file": "r.js:1"},
             {"page": "*", "kind": "rule", "label": "POST /login password", "value": "min 8 chars", "file": "r.js:1"}])
         self.ingest_all()
-        everything = qm.search(self.con, "secret") + qm.search(self.con, "password")
+        everything = memory.search(self.con, "secret") + memory.search(self.con, "password")
         self.assertNotIn("s3cr3t-Value-123456", everything)
         self.assertIn("min 8 chars", everything)
 
     def test_long_file_field_is_fast(self):
         import time as _t
         t0 = _t.time()
-        qm._row_src("/r", "a" * 200000 + ":" + "1:" * 50000)
+        codemap._row_src("/r", "a" * 200000 + ":" + "1:" * 50000)
         self.assertLess(_t.time() - t0, 1)
 
     # ---- review round 3 ----
@@ -881,12 +882,12 @@ class CodeMap(unittest.TestCase):
         route_rows = lambda f: [{"page": p, "kind": "route", "label": p, "value": "X", "file": f + ":1"}
                                 for p in ("/zones", "/map")] if "rout" in f else []
         comp = lambda f: [{"page": "/zones", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}] if "/C" in f else []
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10**6)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10**6)
         self.map_chunks(s, lambda f: route_rows(f) + comp(f))
         self.ingest_all()
         git(repo, "mv", "src/routes.js", "src/router.js")  # the routes move to a file that lands in another chunk
         git(repo, "commit", "-qm", "rename router")
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=2, chunk_tokens=10**9)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=2, chunk_tokens=10**9)
         mappers = self.map_chunks(s, lambda f: route_rows(f) + comp(f))
         self.assertGreater(len(mappers), 1)
         for m in mappers:  # the chunk without the router first: the route seems gone until the other chunk lands
@@ -896,12 +897,12 @@ class CodeMap(unittest.TestCase):
 
     def test_a_chunk_that_never_lands_is_listed_again_and_holds_the_commit(self):
         repo = git_repo(self.dir / "ui", {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(4)})
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=2, chunk_tokens=10**9)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=2, chunk_tokens=10**9)
         mappers = self.map_chunks(s, lambda f: [{"page": "/c", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}])
         Path(mappers[1]["out"]).unlink()  # the second mapper never wrote its map
         self.ingest_all()
         self.assertIsNone(self.con.execute("SELECT value FROM meta WHERE key LIKE 'codemap_commit:frontend:%'").fetchone())
-        s2 = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=10, chunk_tokens=10**9)
+        s2 = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=10, chunk_tokens=10**9)
         listed = json.loads(Path(s2["areas"]["frontend"]["mappers"][0]["scan_file"]).read_text())["repos"][0]["files"]
         self.assertTrue({"src/C2.jsx", "src/C3.jsx"} <= set(listed))  # no commit was recorded: the missing chunk comes back
 
@@ -909,8 +910,8 @@ class CodeMap(unittest.TestCase):
         self.scan(FIX / "frontend", FIX / "backend")
         scan = json.loads((self.out / "scan-frontend.json").read_text())
         (self.out / "code-map-frontend.json").write_text(json.dumps({"scan_id": scan["scan_id"], "area": "backend", "rows": []}))
-        qm.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(qm.PARKED)
+        memory.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(memory.PARKED)
 
     def test_cap_never_evicts_route_rows(self):
         repo = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/big' }]",
@@ -950,7 +951,7 @@ class CodeMap(unittest.TestCase):
         self.write_map("tests", [{"repo": str(e2e), "page": "/old", "kind": "locator", "label": "Row", "value": "#r",
                                   "file": "pages/Old.ts:1"}])  # the page object really still opens /old
         self.ingest_all()
-        self.assertIn("Row", qm.code(self.con, "/old"))  # kept on the second read, no endless re-read
+        self.assertIn("Row", codemap.code(self.con, "/old"))  # kept on the second read, no endless re-read
         self.assertEqual(self.scan(ui, e2e, stamp="s4")["total_files"], 0)
 
     def test_a_page_file_edit_does_not_remap_everything(self):
@@ -968,7 +969,7 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(r["files"], ["src/pages/zones.jsx"])
 
     def test_classification_round_three(self):
-        c = qm.classify_source
+        c = scan_mod.classify_source
         self.assertEqual(c("src/ApiDocs.tsx", "export const D = () => <SwaggerUI url='/openapi.json'/> // app.get('/x')"), "frontend")
         self.assertEqual(c("app/api/zones/route.ts", "export async function POST(req: Request) { }"), "backend")
         self.assertEqual(c("src/routes/api/zones/+server.ts", "export const GET = async () => json([])"), "backend")
@@ -1022,7 +1023,7 @@ class CodeMap(unittest.TestCase):
                                     "file": "r.js:1"}])
         self.ingest_all()
         self.assertIn("route outside frontend", (self.out / "code-map-backend.json.ingested").read_text())
-        self.assertNotIn("*", qm.code(self.con).split("\n", 1)[1].split("\nTOTAL:")[0])
+        self.assertNotIn("*", codemap.code(self.con).split("\n", 1)[1].split("\nTOTAL:")[0])
         self.assertEqual(self.scan(ui, api, stamp="s2")["total_files"], 0)  # no endless full re-maps
 
     def test_pending_maps_of_an_unscanned_folder_dont_block_orphan_cleanup(self):
@@ -1044,13 +1045,13 @@ class CodeMap(unittest.TestCase):
             {"page": "/new", "kind": "route", "label": "New", "value": "N", "file": "src/routes.js:1"},
             {"page": "/new", "kind": "locator", "label": "O", "value": "#o", "file": "src/Old.jsx:1"}])
         self.ingest_all()
-        self.assertIsNone(qm.find_page(self.con, "/old"))
-        self.assertIn(str(clone), qm.code(self.con, "--repos"))  # listed, so the skill can offer to forget it
+        self.assertIsNone(codemap.find_page(self.con, "/old"))
+        self.assertIn(str(clone), codemap.code(self.con, "--repos"))  # listed, so the skill can offer to forget it
 
     def test_an_unresolved_snapshot_is_merged_not_overwritten(self):
         repo = git_repo(self.dir / "ui", {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(3)} |
                         {"src/routes.js": "export const routes = [{ path: '/a' }, { path: '/b' }]"})
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10**6)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10**6)
         self.map_chunks(s, lambda f: [{"page": p, "kind": "route", "label": p, "value": "X", "file": f + ":1"}
                                       for p in ("/a", "/b")] if "rout" in f else
                         [{"page": "/a", "kind": "locator", "label": f, "value": "#" + f, "file": f + ":1"}])
@@ -1061,7 +1062,7 @@ class CodeMap(unittest.TestCase):
         self.assertIn("/gone", self.con.execute("SELECT value FROM meta WHERE key='codemap_lost'").fetchone()[0])
 
     def test_classification_round_four(self):
-        c = qm.classify_source
+        c = scan_mod.classify_source
         for rel, text in (("config/routes.rb", "Rails.application.routes.draw do\n resources :zones\nend"),
                           ("app/models/zone.rb", "class Zone < ApplicationRecord\n validates :name, presence: true\nend"),
                           ("routes/api.php", "Route::post('/zones', [ZoneController::class, 'store']);"),
@@ -1077,14 +1078,14 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(c("pages/settings.vue", "<template><div/></template><script>export default { runtimeConfig: 1 }</script>"), "frontend")
         self.assertIsNone(c("myapp/settings.py", "INSTALLED_APPS = []\nDATABASES = {}"))
         self.assertEqual(c("src/SettingsPage.tsx", "export class SettingsPage extends React.Component { render() { return <div data-testid='s'/> } }"), "frontend")
-        self.assertEqual(qm._api_ref("fetch('/api/zones/' + id + '/detours')"), ("", "api/zones/:id/detours"))
+        self.assertEqual(codemap._api_ref("fetch('/api/zones/' + id + '/detours')"), ("", "api/zones/:id/detours"))
 
     # ---- review round 5 ----
     def test_a_full_remap_chunk_that_never_lands_is_listed_again(self):
         files = {f"src/C{i}.jsx": f"<b data-testid='c{i}'/>" for i in range(3)}
         files["src/routes.js"] = "export const routes = [{ path: '/zones', c: A }, { path: '/map', c: B }]"
         repo = git_repo(self.dir / "ui", files)
-        s = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10, chunk_tokens=10**9)
+        s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s1", chunk_files=10, chunk_tokens=10**9)
         route_rows = lambda f: [{"page": p, "kind": "route", "label": p, "value": "X", "file": f + ":1"}
                                 for p in ("/zones", "/map")] if f.endswith("routes.js") else []
         self.map_chunks(s, lambda f: route_rows(f) or [{"page": "/zones", "kind": "locator", "label": f, "value": "#" + f,
@@ -1092,20 +1093,20 @@ class CodeMap(unittest.TestCase):
         self.ingest_all()
         (repo / "src/routes.js").write_text("export const routes = [{ path: '/zones', c: B }, { path: '/map', c: A }]")
         git(repo, "commit", "-qam", "swap")  # a router change: frontend is mapped in full, in two chunks
-        s2 = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=2, chunk_tokens=10**9)
+        s2 = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=2, chunk_tokens=10**9)
         mappers = self.map_chunks(s2, lambda f: route_rows(f) or [{"page": "/map", "kind": "locator", "label": f,
                                                                    "value": "#" + f, "file": f + ":1"}])
         self.assertEqual(len(mappers), 2)
         Path(mappers[0]["out"]).unlink()  # the components' chunk never landed; the router's did
         self.ingest_all()
-        s3 = qm.codemap_scan(self.con, [str(repo)], self.out, False, "s3", chunk_files=10, chunk_tokens=10**9)
+        s3 = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s3", chunk_files=10, chunk_tokens=10**9)
         listed = json.loads(Path(s3["areas"]["frontend"]["mappers"][0]["scan_file"]).read_text())["repos"][0]["files"]
         self.assertTrue({"src/C0.jsx", "src/C1.jsx"} <= set(listed))
         self.assertIsNone(self.con.execute("SELECT 1 FROM meta WHERE key LIKE 'codemap_commit:frontend:%' AND value LIKE ?",
-                                           ((qm._git(repo, "rev-parse", "HEAD") or "").strip(),)).fetchone())
+                                           ((core._git(repo, "rev-parse", "HEAD") or "").strip(),)).fetchone())
 
     def test_classification_round_five(self):
-        c = qm.classify_source
+        c = scan_mod.classify_source
         form = "export const F = () => <form data-testid='f' onSubmit={() => navigate('/x')}/>"
         for rel, folder in (("src/features/inspections/InspectionForm.tsx", "ui"), ("pages/special-events/index.tsx", "ui"),
                             ("src/components/LatestIncidents.tsx", "ui"), ("src/pages/Zones.tsx", "signal-automation-ui"),
@@ -1147,8 +1148,8 @@ class CodeMap(unittest.TestCase):
         # typed client calls
         svc = "export const create = (z: Zone) => api.post<Zone>('/zones', z); export const ls = () => api.get<Zone[]>('/zones')"
         self.assertEqual(c("src/services/zoneService.ts", svc), "frontend")
-        self.assertEqual(qm._api_ref("api.get<Zone[]>('/zones')"), ("GET", "zones"))
-        self.assertEqual(qm._api_ref("http.post<Zone>('/api/zones', z)"), ("POST", "api/zones"))
+        self.assertEqual(codemap._api_ref("api.get<Zone[]>('/zones')"), ("GET", "zones"))
+        self.assertEqual(codemap._api_ref("http.post<Zone>('/api/zones', z)"), ("POST", "api/zones"))
 
     def test_typed_backend_schemas_and_monorepo_client_schemas(self):
         api = git_repo(self.dir / "api", {"src/routes/zones.ts": "router.post('/api/zones', validate(zoneSchema), h)",
@@ -1185,14 +1186,14 @@ class CodeMap(unittest.TestCase):
             {"repo": str(api), "page": "*", "kind": "api", "label": "GET /api/admin/zones", "value": "admin", "file": "r.js:1"},
             {"repo": str(api), "page": "*", "kind": "api", "label": "GET /api/v1/zones", "value": "list", "file": "r.js:1"}])
         self.ingest_all()
-        i, z = qm.code(self.con, "/incidents/:id"), qm.code(self.con, "/zones")
+        i, z = codemap.code(self.con, "/incidents/:id"), codemap.code(self.con, "/zones")
         self.assertIn("OPEN, CLOSED", i)
         self.assertNotIn("ACTIVE", i)  # a router-relative tail could be any resource
         self.assertIn("GET /api/v1/zones", z)
         self.assertNotIn("admin", z)
 
     def test_api_path_shapes(self):
-        p = qm._api_path
+        p = codemap._api_path
         self.assertEqual(p("GET /api/incidents?x=1"), "api/incidents")
         self.assertEqual(p("fetch('api/incidents.json')"), "api/incidents")
         self.assertEqual(p("PUT /api/zones/{id}"), "api/zones/:id")
@@ -1229,11 +1230,11 @@ class CodeMap(unittest.TestCase):
                 {"page": "/login", "kind": "rule", "label": "jwt.secret", "value": "abcDEF123456ghiJKL7890", "file": "src/Login.jsx:1"}]
         self.write_map("frontend", rows)
         self.ingest_all()
-        out = qm.code(self.con, "/login")
+        out = codemap.code(self.con, "/login")
         for kept in ("POST /api/auth/reset-password", "string, min 8, max 64, required", "minLength=8"):
             self.assertIn(kept, out)
         self.assertNotIn("abcDEF123456", out)
-        self.assertIn("reset-password", qm.search(self.con, "/api/auth/reset-password"))
+        self.assertIn("reset-password", memory.search(self.con, "/api/auth/reset-password"))
 
     def test_submodule_and_ignored_folder_are_scanned(self):  # audit 3: second independent pass
         sub = git_repo(self.dir / "web", {"src/A.jsx": "export const A = () => <b/>;\n"})
@@ -1250,7 +1251,7 @@ class CodeMap(unittest.TestCase):
                 {"page": "/login", "kind": "route", "label": "Login", "value": "B", "file": "B.jsx:1"}]
         self.write_map("frontend", rows)
         self.ingest_all()
-        out = qm.code(self.con, "/login")
+        out = codemap.code(self.con, "/login")
         self.assertIn("z.string().min(8).max(64)", out)
         self.assertIn("StringLength(32)", out)
 
@@ -1278,22 +1279,22 @@ class CodeMap(unittest.TestCase):
         self.write_map("frontend", [{"page": "/login", "kind": "route", "label": "Login", "value": "L", "file": "src/Login.jsx:1"}]
                        + [rule(k, v) for k, v in rules])
         self.ingest_all()
-        out = qm.code(self.con, "/login")
+        out = codemap.code(self.con, "/login")
         for _, value in rules:  # every rule kept, the second `password` row included
             self.assertIn(value, out)
         self.scan(top, stamp="s9", full=True)  # sixth pass: a key under a label that ends in "key"
         self.write_map("frontend", [rule("Mapbox API key", "9f8a7b6c5d4e3f2a1b0c9f8a7b6c5d4e")])
         self.ingest_all()
-        self.assertNotIn("9f8a7b6c", qm.code(self.con, "/login"))
+        self.assertNotIn("9f8a7b6c", codemap.code(self.con, "/login"))
 
     def test_out_option_with_equals_and_repos_listing(self):  # audit 3 r1
         import contextlib, io
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            self.assertEqual(qm.run_cmd(self.con, "codemap-scan", [f"--out={self.out}", str(FIX)]), 0)
+            self.assertEqual(cli.run_cmd(self.con, "codemap-scan", [f"--out={self.out}", str(FIX)]), 0)
         self.assertEqual(json.loads(buf.getvalue())["skipped"], [])
         self.assertTrue((self.out / "scan-frontend.json").exists())
-        self.assertIn(os.path.realpath(FIX), qm.code(self.con, "--repos"))  # bookkeeping only: no map has landed yet
+        self.assertIn(os.path.realpath(FIX), codemap.code(self.con, "--repos"))  # bookkeeping only: no map has landed yet
 
 
 if __name__ == "__main__":
