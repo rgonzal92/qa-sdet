@@ -7,7 +7,7 @@ description: List the open Jira tickets assigned to me, newest first, marking th
 
 JQL: `assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`
 
-1. **acli** (`acli jira auth status` succeeds): `acli jira workitem search --jql "<JQL>" --fields "key,summary,status,priority,updated" --limit 50 --json | qa-mem inbox '${CLAUDE_PROJECT_DIR}'` as one command, so the ticket list goes straight into qa-mem. When the flags fail, read `acli jira workitem search --help` once and adapt.
+1. **acli** (`acli jira auth status` succeeds): `acli jira workitem search --jql "<JQL>" --fields "key,summary,status,priority" --limit 50 --json | qa-mem inbox '${CLAUDE_PROJECT_DIR}'` as one command, so the ticket list goes straight into qa-mem (acli rejects `updated` in `--fields`; the JQL already sorts by it). When the flags fail, read `acli jira workitem search --help` once and adapt.
 2. **Jira MCP** otherwise: its JQL search tool (`searchJiraIssuesUsingJql`, `jira_search`, …) with the JQL, limit 50, fields summary, status, priority, updated. Write the result JSON to `${CLAUDE_PROJECT_DIR}/qa-out/.inbox.json`, then `qa-mem inbox '${CLAUDE_PROJECT_DIR}' --file '${CLAUDE_PROJECT_DIR}/qa-out/.inbox.json'`.
 3. Neither: tell the user qa-inbox needs acli (`acli jira auth login`) or a Jira MCP, and stop.
 

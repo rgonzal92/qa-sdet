@@ -79,6 +79,7 @@ class Base(unittest.TestCase):
         self.tmp.cleanup()
 
     def config(self, **cfg):
+        assert str(qm.CONFIG).startswith(self.tmp.name), f"a test must not write the real config: {qm.CONFIG}"
         qm.CONFIG.parent.mkdir(parents=True, exist_ok=True)
         qm.CONFIG.write_text(json.dumps(cfg))
 
@@ -629,8 +630,8 @@ class MergedCases(Base):
         cases = [{"id": "TC-1", "route": "/a", "status": "PASS", "actual": "", "notes": ""},
                  {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": ""}]
         self.assertEqual(qm._case_table(cases, "/x", True)[0],
-                         "| ID | AC | Page | Case | Steps | Expected | Status | Actual / notes |")
-        self.assertEqual(qm._case_table(cases[:1], "/x", False)[0], "| ID | AC | Case | Steps | Expected |")
+                         "| ID | AC | Page | Case | Status | Actual | Evidence |")
+        self.assertEqual(qm._case_table(cases[:1], "/x", False)[0], "| ID | AC | Case |")
 
 
 class MergedCasesIds(unittest.TestCase):
@@ -673,18 +674,19 @@ class Report(Base):
         self.assertIn("- AC-1 Sorted by date — ❓ QUESTION (TC-3, TC-4)", r)
         self.assertIn("- **Scope:** speed field\n- **Risks:**\n  - rounding\n- **Out of scope:**\n  - mobile", r)
         # the plan set a priority (P1 first): a Pri column; one start page per ticket: no Page column
-        self.assertIn("| ID | Pri | AC | Case | Steps | Expected | Status | Actual / notes |", r)
-        self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | 1. Open form<br>2. Type 130 \\| save | Saved | ✅ PASS | Saved |", r)
-        self.assertIn("| TC-2 |  | AC-2 | Reject 131 | 1. Type 131 | Error shown | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) |", r)
+        self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)
+        self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | ✅ PASS | Saved | — |", r)
+        self.assertIn("| TC-2 |  | AC-2 | Reject 131 | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) | — |", r)
         self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | STUDIO-1 | "
                       "[image](evidence/BUG-1.png) |", r)
         self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | STUDIO-2 | — |", r)
-        self.assertIn("## Questions\n- Is 0 a valid speed?\n- TC-4: Order of ties unspecified", r)
-        self.assertIn("## Not tested\n- Keyboard only: out of time", r)
-        self.assertIn("### /form (run-form.json: COMPLETED, build 1.42)\nExplored the speed field.\n\n"
-                      "Heuristics covered: boundary ❌, happy-path ✅", r)
-        self.assertIn("### /list (run-list.json: COMPLETED, build 1.42)", r)
-        order = [r.index(h) for h in ("## Summary", "## STUDIO-1", "## STUDIO-2", "## Bugs", "## Questions",
+        self.assertIn("### Open questions (2)\n- Is 0 a valid speed? _(from /form)_\n"
+                      "- TC-4: Order of ties unspecified _(from /list)_", r)
+        self.assertIn("<details><summary>Other (1)</summary>\n\n- Keyboard only: out of time", r)
+        self.assertIn("<details><summary>/form (run-form.json: COMPLETED, build 1.42) — boundary ❌, happy-path ✅</summary>\n\n"
+                      "Explored the speed field.", r)
+        self.assertIn("<details><summary>/list (run-list.json: COMPLETED, build 1.42)</summary>", r)
+        order = [r.index(h) for h in ("## Summary", "## Needs your action", "## STUDIO-1", "## STUDIO-2",
                                       "## Not tested", "## Exploration notes")]
         self.assertEqual(order, sorted(order))
 
@@ -722,7 +724,7 @@ class Report(Base):
         d = self.rundir("2026-11-23-plan-STUDIO-1", plan={**PLAN, "kind": "plan"})
         r = qm.render_report(d)
         self.assertIn("| STUDIO-1 — Speed limit form | 2 | 2 |", r)
-        self.assertIn("| ID | AC | Case | Steps | Expected |\n|---|---|---|---|---|", r)
+        self.assertIn("| ID | AC | Case |\n|---|---|---|", r)
         self.assertNotIn("Status", r)
         self.assertNotIn("Verdict", r)
         self.assertIn("- AC-1 Saves 0-130 (TC-1)", r)
@@ -734,8 +736,8 @@ class Report(Base):
         d = self.rundir(plan={**q, "kind": "ticket"}, runs=[("form", RUN_FORM)])
         # r26: a run's follow-up on plan Q1 read as a second, unnumbered Q1 in one flat list: two labelled lists
         r = qm.render_report(d)
-        self.assertIn("## Questions\n**From the test plan (before testing):**\n\n- Q1 [BLOCKING] Is 0 a valid speed?\n"
-                      "- Q2 [LOW] Units?\n\n**Raised while testing:**\n\n- Is 0 a valid speed?\n", r)
+        self.assertIn("- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)  # a run's follow-up is one list now
+        self.assertIn("- Q2 [LOW] Units? _(from test plan)_", r)
         self.assertIn("## Exploration notes\nHeuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", r)
 
     def test_odd_field_types_never_crash(self):
@@ -763,7 +765,7 @@ class Report(Base):
         bad = self.rundir("2026-11-22-bad", plan=PLAN)
         real = qm.run_summary
         with mock.patch.object(qm, "run_summary", lambda p: (_ for _ in ()).throw(TypeError("x")) if p.name == bad.name
-                               else real(p)), mock.patch.object(qm, "render_report", side_effect=TypeError("boom")):
+                               else real(p)), mock.patch.object(qm, "render_report_parts", side_effect=TypeError("boom")):
             self.assertEqual(cli("report", str(good))[0], 0)
         self.assertIn("Could not render this report: TypeError: boom", (good / "REPORT.md").read_text())
         idx = (self.proj / "qa-out/README.md").read_text()
@@ -781,14 +783,14 @@ class Report(Base):
         (d / "bugs/BUG-9.md").write_text("x")
         r = qm.render_report(d)
         headings = [ln for ln in r.splitlines() if ln.startswith("#")]
-        self.assertEqual(headings, ["# QA report: T ## injected", "## Summary", "## STUDIO-1 — s # H1 \\| x",
-                                    "### Acceptance criteria", "### Test cases", "## Bugs", "## Exploration notes",
-                                    "### /f (run-f.json: done # X, build 1 ## b)"])
+        self.assertEqual(headings, ["# QA report: T ## injected", "## Needs your action", "### Bugs to file (1)",
+                                    "### Failed, blocked or not-run cases (1)", "## STUDIO-1 — s # H1 \\| x",
+                                    "### Acceptance criteria", "### Test cases", "## Exploration notes"])
         self.assertIn("| ❌ FAIL | BUG-9 \\| &lt;img src=x> new |", r)  # not a link: not exactly BUG-n
         self.assertNotIn("](bugs/BUG-9", r)
         self.assertIn("| known ab\\|cd ef |", r)
         self.assertIn("- AC-1 - x t — ❌ FAIL (TC-1)", r)
-        self.assertIn("| STUDIO-1 — s # H1 \\| x | ❌ FAIL |", r)
+        self.assertIn("## STUDIO-1 — s # H1 \\| x", r)
 
     def test_wrong_typed_run_fields_are_named_not_hidden(self):  # audit 2 r20
         plan = {"kind": "ticket", "tickets": [{"key": "T-1", "acs": [{"id": "AC-1", "text": "a"}]}],
@@ -817,10 +819,10 @@ class Report(Base):
         r = (d / "REPORT.md").read_text()
         self.assertNotIn("<!--", r)
         self.assertNotIn("<script>", r)
-        self.assertNotIn("<details>", r)
+        self.assertIn("q &lt;details>", r)  # the run's own text is escaped; our folds are the only real tags
         self.assertIn("&lt;script>alert(1)&lt;/script>", r)
         self.assertIn("saw ![p]\\(https://evil.example/t.png) [here]\\(https://evil.example)", r)  # links stay text
-        self.assertIn("Heuristics covered: other:", r)
+        self.assertIn("— other:", r)  # the coverage line is in the folded page title now
         self.assertIn("\n\\```<br>rest\n", r)
         self.assertIn("| [BUG-1](bugs/BUG-1.md) | LOW |  | bad @@ title | /f | STUDIO-1 | [image](evidence/BUG-1.png) |", r)
         self.assertIn("| [image](evidence/shot%20%281%29.png) |", r)
@@ -1049,6 +1051,7 @@ class IngestDataFolder(Base):
     def test_bad_report_fields_are_parked(self):
         for bad in ({"cases": [{"id": "TC-1", "status": "MAYBE"}]}, {"cases": [{"status": "PASS"}]},
                     {"cases": "TC-1 PASS"}, {"questions": "why?"}, {"not_tested": [1]}, {"notes": ["x"]},
+                    {"questions": [{"status": "open"}]}, {"not_tested": [{"category": "safety", "text": 3}]},
                     {"env": "chrome"}, {"env": {"url": ["x"]}},
                     {"bugs": [{"route": "/x", "title": "t", "annotated": "yes"}]}):
             d = self.rundir("bad")
@@ -1059,9 +1062,12 @@ class IngestDataFolder(Base):
                 qm.ingest_pending(self.proj / "qa-out")
             self.assertTrue(f.with_name("run-x.json.error").exists(), bad)
             f.with_name("run-x.json.error").unlink()
-        good = {**RUN_LIST, "cases": [{"id": "TC-1", "status": "not run"}], "env": {"url": "u", "browser": "mcp"}}
+        good = {**RUN_LIST, "cases": [{"id": "TC-1", "status": "not run"}], "env": {"url": "u", "browser": "mcp"},
+                # BUG-6: question and not-tested objects are valid too
+                "questions": ["a?", {"text": "b?", "status": "resolved", "answer": "yes"}],
+                "not_tested": ["c", {"category": "safety", "text": "d"}]}
         f.write_text(json.dumps(good))
-        self.assertEqual(qm.ingest_pending(self.proj / "qa-out"), 1)
+        self.assertEqual(qm.ingest_pending(d), 1)  # ISSUE-4: a run folder finds its qa-out
 
 
     def test_deep_json_does_not_stop_other_ingests(self):  # r11: a RecursionError in scrub aborted the whole hook
@@ -1284,6 +1290,130 @@ class Concurrency(Base):
         os.close(fd)
         th.join(5)
         self.assertIn(d.name, (d.parent / "README.md").read_text())
+
+
+PLAN1 ={"kind": "ticket", "title": "STUDIO-1", "created": "2026-11-23T18:00:00Z",
+         "env": {"url": "https://qa.example", "browser": "chrome"},
+         "tickets": [{"key": "STUDIO-1", "summary": "Speed limit form", "fix_version": "3.5",
+                      "fixed_note": "Speed no longer accepts 131.",
+                      "acs": [{"id": "AC-1", "text": "Saves 0-130"}, {"id": "AC-2", "text": "Rejects 131"}]}],
+         "cases": [{"id": "TC-1", "ticket": "STUDIO-1", "ac": "AC-1", "title": "Save 130", "route": "/form",
+                    "priority": "P1", "steps": ["Open form", "Type 130"], "expected": "Saved"},
+                   {"id": "TC-2", "ticket": "STUDIO-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
+                    "priority": "P1", "steps": ["Type 131"], "expected": "Error shown"}],
+         "questions": ["Q1 [BLOCKING] Is 0 a valid speed?"]}
+RUN1 = {"mode": "ticket", "target": "/form", "build": "1.42", "status": "COMPLETED", "notes": "Explored.",
+        "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"}, {"id": "TC-2", "status": "PASS", "actual": "Error shown"}],
+        "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h, as the label says."}]}
+TEMPLATES = ["Release-A-{version}", "Release-B-{version}"]
+
+
+class Layout(Base):
+    """REPORT.md layout (FEAT-3), case images (FEAT-4) and the Jira pass-comment draft (FEAT-5)."""
+
+    def render_run(self, runs, plan=PLAN1, templates=TEMPLATES):
+        if templates is not None:
+            self.config(releaseTemplates=templates)
+        d = self.rundir("2026-11-23-STUDIO-1", plan=plan, runs=runs)
+        qm.write_report(d)
+        return d, (d / "REPORT.md").read_text()
+
+    def test_verdict_block_action_and_draft_for_a_pass(self):
+        d, r = self.render_run([("form", RUN1)])
+        self.assertIn("**Verdict: ✅ PASS** — all 2 cases passed\n", r)
+        self.assertIn("Jira comment draft: [jira-comment-STUDIO-1.md](jira-comment-STUDIO-1.md)", r)
+        self.assertNotIn("## Summary", r)  # one ticket: no table
+        self.assertLess(r.index("## Needs your action"), r.index("## STUDIO-1"))  # actions come before the detail
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertIn("Passed on Release-A-3.5.0 and Release-B-3.5.0\n", draft)
+        self.assertIn("Fixed: Speed no longer accepts 131.", draft)
+        self.assertIn("TC-1 - PASS: Save 130\nTC-2 - PASS: Reject 131", draft)
+
+    def test_fail_has_no_draft_and_a_stale_draft_is_removed(self):
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL",
+                                                                                  "actual": "131 saved"}]})]
+        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=runs)
+        (d / "jira-comment-STUDIO-1.md").write_text("old draft")
+        qm.write_report(d)
+        self.assertFalse((d / "jira-comment-STUDIO-1.md").exists())
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("**Verdict: ❌ FAIL**", r)
+        self.assertNotIn("Jira comment draft", r)
+
+    def test_action_block_lists_failures_and_open_questions(self):
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL",
+                                                                                  "actual": "131 saved"}]})]
+        _, r = self.render_run(runs)
+        self.assertIn("### Open questions (1)\n- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)
+        self.assertIn("### Failed, blocked or not-run cases (1)\n- TC-2 ❌ FAIL (AC-2) — 131 saved · STUDIO-1", r)
+        self.assertNotIn("Nothing needs your action", r)
+
+    def test_same_question_on_two_pages_is_one_line_and_resolved_ones_fold(self):
+        a = {**RUN1, "target": "/a", "cases": [], "questions": ["Is the limit inclusive?"] + RUN1["questions"]}
+        b = {**RUN1, "target": "/b", "cases": [], "questions": ["is the limit  inclusive?"]}
+        _, r = self.render_run([("a", a), ("b", b)], plan={**PLAN1, "questions": []})
+        self.assertEqual(r.count("Is the limit inclusive?"), 1)  # merged, case and spaces ignored
+        self.assertIn("_(from /a, /b)_", r)
+        self.assertIn("<details><summary>Resolved questions (1)</summary>\n\n- Units? — answer: km/h, as the label says.", r)
+
+    def test_compact_table_and_folds_open_for_non_pass(self):
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"},
+                                            {"id": "TC-2", "status": "FAIL", "actual": "131 saved"}]})]
+        _, r = self.render_run(runs)
+        self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)  # no Steps or Expected columns
+        self.assertNotIn("| Steps |", r)
+        self.assertIn("<details><summary>TC-1 — Save 130</summary>", r)  # passing: closed
+        self.assertIn("<details open><summary>TC-2 — Reject 131</summary>", r)  # failing: open
+        self.assertIn("**Expected:** Error shown", r)
+
+    def test_case_image_is_linked_and_embedded_only_when_the_file_exists(self):
+        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        self.assertIn("| ✅ PASS | Saved | — |", qm.render_report(d))
+        (d / "evidence").mkdir(exist_ok=True)
+        (d / "evidence" / "TC-1.png").write_bytes(b"png")
+        r = qm.render_report(d)
+        self.assertIn("| ✅ PASS | Saved | [image](evidence/TC-1.png) |", r)
+        self.assertIn("![TC-1](evidence/TC-1.png)", r)
+        self.assertIn("1 evidence image(s)", r)
+
+    def test_draft_shows_one_image_per_route_and_no_markup(self):
+        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        (d / "evidence").mkdir(exist_ok=True)
+        (d / "evidence" / "TC-1.png").write_bytes(b"png")
+        (d / "evidence" / "TC-2.png").write_bytes(b"png")
+        self.config(releaseTemplates=TEMPLATES)
+        qm.write_report(d)
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertEqual(draft.count("Paste this image:"), 1)  # both cases are on /form: first passing one only
+        self.assertIn(f"Paste this image: {d}/evidence/TC-1.png (/form)", draft)
+        body = draft.split("---------- paste below ----------", 1)[1]
+        self.assertNotRegex(body, r"[|<>*#]|!\[")  # plain text for Jira
+
+    def test_missing_templates_or_fix_version_leave_placeholders(self):
+        d = self.rundir("2026-11-23-STUDIO-1", plan={**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": None,
+                                                                            "fixed_note": ""}]}, runs=[("form", RUN1)])
+        self.config()  # no releaseTemplates at all
+        qm.write_report(d)
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertIn("Passed on <release name>", draft)
+        self.assertIn("release names (set releaseTemplates in the qa-sdet config)", draft)
+        self.assertIn("Fixed: <write one sentence: what was fixed>", draft)
+        self.assertIn("Placeholders to fill:", draft)
+
+    def test_pass_with_notes_draft_has_a_notes_line(self):
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "QUESTION",
+                                                                                  "notes": "Order unclear"}]})]
+        d, r = self.render_run(runs)
+        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertIn("TC-2 - QUESTION: Reject 131", draft)
+        self.assertIn("Notes: TC-2 open question", draft)
+
+    def test_release_names_fill_the_version(self):
+        self.assertEqual(qm._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
+        self.assertEqual(qm._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
+        self.assertEqual(qm._release_names(["A-{version}"], None)[1], "the ticket has no single fix version (plan.json fix_version)")
+        self.assertEqual(qm._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
 
 
 if __name__ == "__main__":

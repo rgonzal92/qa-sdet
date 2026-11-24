@@ -407,10 +407,14 @@ def check_report_fields(run):
             txt(c.get(f), f"cases.{f}")
         if not case_status(c.get("status")):
             raise ValueError(f"case {c['id']}: 'status' must be one of {', '.join(CASE_STATUSES)}")
-    for key in ("questions", "not_tested"):
-        items = run.get(key) or []
-        if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
-            raise ValueError(f"'{key}' must be a list of strings")
+    items = run.get("questions") or []
+    if not isinstance(items, list) or not all(
+            isinstance(i, str) or (isinstance(i, dict) and isinstance(i.get("text"), str)) for i in items):
+        raise ValueError("'questions' must be a list of strings, or of {\"text\", \"status\", \"answer\"} objects")
+    items = run.get("not_tested") or []
+    if not isinstance(items, list) or not all(
+            isinstance(i, str) or (isinstance(i, dict) and isinstance(i.get("text"), str)) for i in items):
+        raise ValueError("'not_tested' must be a list of strings, or of {\"category\", \"text\"} objects")
     txt(run.get("notes"), "notes")
     env = run.get("env") or {}
     if not isinstance(env, dict):
@@ -423,6 +427,8 @@ def ingest_pending(root):
     """Scrub the qa-out tree, then ingest every run.json that changed since its last ingest. Never raises.
     Touches nothing when root doesn't exist, and no DB when there is no run.json (the hook runs everywhere)."""
     root = Path(root)
+    if root.name != "qa-out":  # given qa-out/init or a run folder: its qa-out, where _pending looks
+        root = next((p for p in root.parents if p.name == "qa-out"), root)
     if not root.is_dir():
         return 0
     scrub_tree(root)
@@ -1031,6 +1037,69 @@ def _tests_path(path):
     return False
 
 
+def _shell_menu(rel, text):
+    """The app shell's menu config (a config.json with module urls and keys). Not credentials: no secret words."""
+    return rel.endswith("config.json") and '"module"' in text and '"key"' in text and not CONFIG_SECRET_RE.search(text)
+
+
+SHELL_MAP_CHUNK = 900  # the shell menu's map and scan: chunk 900 is never a mapper's (mappers use 1..n)
+
+
+def _shell_nav_routes(nav, parent, lines, rel):
+    """(page, label, module id, url, line) for every menu item with a module, children included."""
+    out = []
+    for it in nav if isinstance(nav, list) else []:
+        if not isinstance(it, dict):
+            continue
+        key = str(it.get("key") or "")
+        path = f"{parent}/{key}" if parent else f"/{key}"
+        mod = it.get("module")
+        if isinstance(mod, dict) and isinstance(mod.get("url"), str):
+            ln = next((i + 1 for i, l in enumerate(lines) if f'"url": "{mod["url"]}"' in l), 1)
+            out.append((path, str(it.get("title") or key)[:120], str(mod.get("id") or "")[:60], mod["url"], ln))
+        out += _shell_nav_routes(it.get("children"), path, lines, rel)
+    return out
+
+
+def _write_shell_menu(con, out_dir, repos, stamp):
+    """The app shell's menu maps shell page paths to module page paths. Code writes
+    its route rows, not a mapper: a mapper can fail to write them, and a full re-map deletes its rows. Never raises."""
+    import hashlib
+    out_dir = Path(out_dir)
+    for repo, head, candidates, _routers in repos:
+        for rel, (area, _size, h) in candidates.items():
+            if area != "shell":
+                continue
+            try:
+                text = _decode_source((Path(repo) / rel).read_bytes())
+                nav = json.loads(text).get("nav")
+            except (OSError, ValueError, AttributeError):
+                continue
+            found = _shell_nav_routes(nav, "", text.splitlines(), rel)
+            if not found:
+                continue
+            scan_id = f"shell-{stamp}"
+            scan_file = out_dir / f"scan-frontend-{SHELL_MAP_CHUNK}.json"
+            map_file = out_dir / f"code-map-frontend-{SHELL_MAP_CHUNK}.json"
+            cm = {"scan_id": scan_id, "area": "frontend", "rows": [
+                {"repo": repo, "page": page, "kind": "route", "label": label,
+                 "value": f"module {mid} at {url}"[:300], "file": f"{rel}:{ln}"}
+                for page, label, mid, url, ln in found]}
+            scan_file.write_text(json.dumps({"scan_id": scan_id, "area": "frontend", "repos": [
+                # its hash: without it the next scan sees a changed multi-route file and re-maps frontend in full
+                {"path": repo, "commit": head or "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]},
+                indent=1))
+            map_file.write_text(json.dumps(cm, indent=1))
+            done = map_file.with_name(map_file.name + ".ingested")
+            done.unlink(missing_ok=True)
+            try:
+                with con:
+                    ingest_codemap(con, cm, map_file, now())
+                done.write_text(f"{hashlib.sha1(map_file.read_bytes()).hexdigest()}\n{now()}\n")
+            except (ValueError, sqlite3.Error) as e:
+                print(f"qa-mem: shell menu not ingested: {e}", file=sys.stderr)
+
+
 def _ui_file(name):
     """A UI component file by type: .jsx/.tsx/.vue/.svelte, Angular .component.ts/.html."""
     return os.path.splitext(name)[1].lower() in (".jsx", ".tsx", ".vue", ".svelte") or \
@@ -1052,9 +1121,11 @@ def classify_source(rel, text, folder=""):
     `e2e/` still counts as tests). Tests are page objects and specs with locators; backend needs a server-side
     signal (and backend languages never go to the frontend); frontend components are taken by file type."""
     name = rel.rsplit("/", 1)[-1]
-    if SECRET_FILE_RE.search(name) or GENERATED_FILE_RE.search(name) or CONFIG_FILE_RE.search(rel) \
-            or SECRET_CONTENT_RE.search(text[:20000]):
+    if SECRET_FILE_RE.search(name) or GENERATED_FILE_RE.search(name) \
+            or (CONFIG_FILE_RE.search(rel) and not _shell_menu(rel, text)) or SECRET_CONTENT_RE.search(text[:20000]):
         return None  # secret stores, generated code, config that holds credentials
+    if _shell_menu(rel, text):
+        return "frontend"  # the app shell's menu: maps shell page paths to module page paths
     suffix = os.path.splitext(name)[1].lower()
     if suffix in SPEC_SUFFIXES:  # only real API specs among data files (a version key), never config that holds secrets
         return "backend" if SPEC_VERSION_RE.search(text[:4000]) else None
@@ -1153,6 +1224,8 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                 continue
             text = _decode_source(raw_bytes)
             area = classify_source(rel, text, os.path.basename(repo))
+            if area == "frontend" and _shell_menu(rel, text):
+                area = "shell"  # written by code (_write_shell_menu), not by a mapper
             if area:
                 candidates[rel] = [area, size, text, hashlib.sha1(raw_bytes).hexdigest()]
         # a server folder (a real route or server import, not a stray word): its schema files are request rules
@@ -1173,7 +1246,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
         by_file = _route_pages_by_file(con, repo)
         for src, pages in by_file.items():
             cur = candidates.get(src)
-            if cur is None or cur[0] != "frontend" or (len(pages) > 1 and stored.get(src) != cur[2]):
+            if cur is None or cur[0] not in ("frontend", "shell") or (len(pages) > 1 and stored.get(src) != cur[2]):
                 routes_moved = True
         # a new router file, or a one-route file that now holds several: its new pages render components whose
         # files didn't change, so only a full pass puts their locators there
@@ -1188,19 +1261,21 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
     for repo, head, candidates, _ in repos:
         for a in CODEMAP_AREAS:
             mine = {rel: (size, h) for rel, (area, size, h) in candidates.items() if area == a}
+            keep = set(mine) | ({rel for rel, (ar, _, _) in candidates.items() if ar == "shell"} if a == "frontend" else set())
             stored = _hashes(con, a, repo)
             had = {r[0] for r in con.execute("SELECT DISTINCT src FROM codemap WHERE repo=? AND area=?", (repo, a))} | set(stored)
             # orphaned by a removed route, or listed by an earlier scan whose map never landed: read again
             forced = _meta_set(con, f"codemap_reread:{a}:{repo}") | _meta_set(con, f"codemap_pending:{a}:{repo}")
             if full or not had or (routes_moved and a in ("frontend", "tests")):
-                entry = {"path": repo, "commit": head, "full": True, "files": sorted(mine),
-                         "deleted": sorted(rel for rel in had if rel not in mine)}  # used when the area is chunked
+                # with a shell menu, replaced file by file (files + deleted cover the rest): its code-written rows stay
+                entry = {"path": repo, "commit": head, "full": keep == set(mine), "files": sorted(mine),
+                         "deleted": sorted(rel for rel in had if rel not in keep)}  # used when the area is chunked
             else:
                 summary["incremental"] = True
                 entry = {"path": repo, "commit": head, "full": False,
                          "files": sorted(rel for rel, (_, h) in mine.items() if stored.get(rel) != h or rel in forced),
                          # renamed away, deleted, reverted out, or no longer this area's: their rows must go
-                         "deleted": sorted(rel for rel in had if rel not in mine)}
+                         "deleted": sorted(rel for rel in had if rel not in keep)}
             entry["hashes"] = {rel: mine[rel][1] for rel in entry["files"]}
             entry["sizes"] = {rel: mine[rel][0] for rel in entry["files"]}
             entry["bytes"] = sum(entry["sizes"].values())
@@ -1240,6 +1315,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                                "needs_mapper": n > 0, "mappers": info}
         summary["total_files"] += n
         summary["tokens"] += tokens
+    _write_shell_menu(con, out_dir, repos, stamp)
     return summary
 
 
@@ -2003,6 +2079,11 @@ def doctor():
             line(isinstance(prefix, str) and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"),
                                                                re.ASCII)),
                  "jiraKeyPrefix is a Jira project key", 'the letters before the ticket number: e.g. "jiraKeyPrefix": "STUDIO"')
+        temps = cfg.get("releaseTemplates")
+        if temps not in (None, []):  # optional: the Jira pass-comment draft fills {version} into these
+            ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
+            line(ok_t, "releaseTemplates lists release names with {version}",
+                 'a list such as ["Release-A-{version}"]: the pass-comment draft fills in the fix version')
     try:
         import PIL
         line(True, f"Pillow {PIL.__version__}")
@@ -2465,6 +2546,30 @@ def _list(obj, key):
     return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
 
+# Not tested items are grouped in this order. A plain string (older runs) goes under "other".
+NOT_TESTED_CATEGORIES = [
+    ("safety", "Safety rules (not done on purpose)"),
+    ("out_of_scope", "Out of scope for this ticket"),
+    ("not_reached", "Not reached (budget, time or route)"),
+    ("needs_setup", "Needs a fault, account or data this run lacks"),
+    ("heuristic", "Heuristics not run"),
+    ("other", "Other"),
+]
+
+
+def _not_tested(obj):
+    """[(category key, text)] for run['not_tested']: a string (category other) or {"category", "text"}."""
+    out = []
+    items = obj.get("not_tested") if isinstance(obj, dict) else None
+    for x in items or []:
+        if isinstance(x, dict):
+            cat = x.get("category") if x.get("category") in dict(NOT_TESTED_CATEGORIES) else "other"
+            out.append((cat, str(x.get("text") or "")))
+        elif isinstance(x, (str, int, float)):
+            out.append(("other", str(x)))
+    return [(c, t) for c, t in out if t]
+
+
 def _strs(obj, key):
     v = obj.get(key) if isinstance(obj, dict) else None
     return [str(x) for x in v if isinstance(x, (str, int, float))] if isinstance(v, list) else []
@@ -2701,26 +2806,68 @@ def _plan_lines(t):
     return out
 
 
+CASE_RESULT_WORD = {"PASS": "PASS", "FAIL": "FAIL", "BLOCKED": "BLOCKED", "NOT_RUN": "NOT RUN", "QUESTION": "QUESTION"}
+
+
+def _evidence_file(run_dir, cid):
+    """evidence/TC-<n>.png (relative, URL-quoted) when the case image exists, else ''. Only TC-style ids."""
+    from urllib.parse import quote
+    cid = str(cid or "")
+    if not re.fullmatch(r"[A-Za-z]+-\d+", cid):
+        return ""
+    name = f"{cid}.png"
+    return f"evidence/{quote(name)}" if (Path(run_dir) / "evidence" / name).exists() else ""
+
+
 def _case_table(cases, run_dir, with_status):
-    # priority (P1 first) when the plan set one; the start page when the cases start on more than one
+    """Compact table: ID, AC, case, status, actual, evidence. Steps and expected are in _case_details."""
     pri = any(c.get("priority") for c in cases)
     routes = len({str(c.get("route")).strip() for c in cases if c.get("route")}) > 1
-    head = ["ID"] + ["Pri"] * pri + ["AC"] + ["Page"] * routes + ["Case", "Steps", "Expected"] + \
-        (["Status", "Actual / notes"] if with_status else [])
+    head = ["ID"] + ["Pri"] * pri + ["AC"] + ["Page"] * routes + ["Case"] + \
+        (["Status", "Actual", "Evidence"] if with_status else [])
     out = [row(*head), "|" + "---|" * len(head)]
     for c in cases:
-        steps = c.get("steps")
-        steps = "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1)) if isinstance(steps, list) else steps
-        cols = [c["id"]] + [c.get("priority")] * pri + [c.get("ac")] + [c.get("route")] * routes + \
-            [c.get("title"), steps, c.get("expected")]
+        cols = [c["id"]] + [c.get("priority")] * pri + [c.get("ac")] + [c.get("route")] * routes + [c.get("title")]
         if with_status:
-            note = " — ".join(x for x in (short(c["actual"], 300), short(c["notes"], 300)) if x)
-            cols += [STATUS_ICON[c["status"]], note]
-        line = row(*cols)
-        if with_status and c.get("bug"):  # the link must not be escaped
-            line = line[:-2] + (" " if note else "") + _bug_link(c["bug"], run_dir) + " |"
-        out.append(line)
+            actual = Raw(" ".join(x for x in (cell(short(c.get("actual") or c.get("notes"), 160)),
+                                             _bug_link(c["bug"], run_dir) if c.get("bug") else "") if x))
+            img = _evidence_file(run_dir, c["id"])
+            ev = Raw(f"[image]({img})" + (" (not highlighted)" if c.get("annotated") is False else "")) if img else "—"
+            cols += [STATUS_ICON[c["status"]], actual, ev]
+        out.append(row(*cols))
     return out
+
+
+def _case_details(cases, run_dir, with_status):
+    """One folded block per case: steps, expected, actual and notes, with the case image inside. Non-pass cases open."""
+    out = []
+    for c in cases:
+        steps = c.get("steps")
+        if isinstance(steps, list):
+            step_lines = [f"{i}. {cell(x)}" for i, x in enumerate(steps, 1)]
+        else:
+            step_lines = [cell(steps)] if steps else []
+        non_pass = with_status and c["status"] != "PASS"
+        head = " ".join(x for x in (c["id"], "—", one_line(c.get("title") or "")) if x)  # status is in the table
+        out += [f"<details{' open' if non_pass else ''}><summary>{cell(head)}</summary>", ""]
+        out += ["**Steps**", ""] + step_lines + [""] if step_lines else []
+        out += [f"**Expected:** {cell(c.get('expected'))}", ""] if c.get("expected") else []
+        if with_status:
+            out += [f"**Actual:** {cell(c.get('actual'))}", ""] if c.get("actual") else []
+            out += [f"**Notes:** {cell(c.get('notes'))}", ""] if c.get("notes") else []
+        img = _evidence_file(run_dir, c["id"]) if with_status else ""
+        if img:
+            out += [f"![{c['id']}]({img})", ""]
+        out += ["</details>", ""]
+    return out
+
+
+def _case_block(cases, run_dir, with_status):
+    """Table, then the per-case details folded in one block."""
+    non_pass = with_status and any(c["status"] != "PASS" for c in cases)
+    return _case_table(cases, run_dir, with_status) + [
+        "", f"<details{' open' if non_pass else ''}><summary>Steps, expected results and evidence ({len(cases)} cases)"
+        "</summary>", ""] + _case_details(cases, run_dir, with_status) + ["</details>", ""]
 
 
 def _header(run_dir, kind, plan, runs):
@@ -2739,9 +2886,9 @@ def _header(run_dir, kind, plan, runs):
             " · ".join(one_line(b) for b in bits if b)]
 
 
-def _bug_section(bugs, cases, tickets, run_dir):
+def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file"):
     from urllib.parse import quote
-    out = ["## Bugs", row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
+    out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
         owners = [str(b["ticket"])] if b.get("ticket") else [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)]
@@ -2760,10 +2907,6 @@ def _notes_section(runs):
     out = ["## Exploration notes", "Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", ""]
     for name, r in runs:
         route = r.get("target") or next((p.get("route") for p in _list(r, "pages")), "") or name
-        out.append("### " + one_line(f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})"))
-        if r.get("notes") or r.get("summary"):
-            para = cell(short(r.get("notes") or r.get("summary"), 1500))  # a leading ``` would fence off the rest
-            out += [("\\" if para[:1] in tuple("#`~>-+*=_") else "") + para, ""]
         cov = {}
         for p in _list(r, "pages"):
             for c in _list(p, "coverage"):
@@ -2772,20 +2915,142 @@ def _notes_section(runs):
                     order = ("fail", "blocked", "pass")
                     if h not in cov or (res in order and (cov[h] not in order or order.index(res) < order.index(cov[h]))):
                         cov[h] = res
-        if cov:
-            out.append("Heuristics covered: " + ", ".join(one_line(f"{h} {COVERAGE_ICON.get(v, v)}") for h, v in cov.items()))
-        out.append("")
+        icons = ", ".join(one_line(f"{h} {COVERAGE_ICON.get(v, v)}") for h, v in cov.items())
+        title = one_line(f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})") + \
+            (f" — {icons}" if icons else "")
+        out += [f"<details><summary>{title}</summary>", ""]
+        if r.get("notes") or r.get("summary"):
+            para = cell(short(r.get("notes") or r.get("summary"), 1500))  # a leading ``` would fence off the rest
+            out += [("\\" if para[:1] in tuple("#`~>-+*=_") else "") + para, ""]
+        out += ["</details>", ""]
     return out
 
 
-def render_report(run_dir):
+# ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
+def _q_items(obj, label):
+    out = []
+    raw = obj.get("questions") if isinstance(obj, dict) else None
+    for x in raw if isinstance(raw, list) else []:
+        if isinstance(x, dict):
+            text, status, ans = str(x.get("text") or ""), x.get("status"), str(x.get("answer") or "")
+        elif isinstance(x, (str, int, float)):
+            text, status, ans = str(x), None, ""
+        else:
+            continue
+        text = " ".join(text.split())
+        if text:
+            out.append({"text": text, "resolved": str(status or "").lower() == "resolved",
+                        "answer": " ".join(ans.split()), "where": label})
+    return out
+
+
+def _merge_questions(items):
+    """Equal text (case and spaces ignored) becomes one entry listing every place it came from. Open wins over resolved."""
+    merged, index = [], {}
+    for q in items:
+        k = q["text"].lower()
+        if k not in index:
+            index[k] = {"text": q["text"], "resolved": q["resolved"], "answer": q["answer"], "where": []}
+            merged.append(index[k])
+        m = index[k]
+        m["resolved"] = m["resolved"] and q["resolved"]
+        m["answer"] = m["answer"] or q["answer"]
+        if q["where"] and q["where"] not in m["where"]:
+            m["where"].append(q["where"])
+    return merged
+
+
+def _q_rank(q):
+    return 0 if "[BLOCKING]" in q["text"] else 1 if "[HIGH]" in q["text"] else 2
+
+
+def _q_bullet(q, show_from=True):
+    labels = ", ".join(str(w) for w in q["where"])
+    return f"- {cell(short(q['text'], 300))}" + (f" _(from {cell(labels)})_" if labels and show_from else "")
+
+
+def _safe_key(key):
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", str(key or "")))
+
+
+# ---------- Jira pass comment: a paste-ready draft, never posted (passed on, fixed, one line per case)
+def _release_names(templates, fix):
+    """(names, gap): the config's releaseTemplates with {version} filled from the fix version (3.5 -> 3.5.0)."""
+    temps = [t.strip() for t in templates if isinstance(t, str) and t.strip()] if isinstance(templates, list) else []
+    if not temps:
+        return ["<release name>"], "set releaseTemplates in the qa-sdet config"
+    if not fix:
+        return ["<release name>"], "the ticket has no single fix version (plan.json fix_version)"
+    v = fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix
+    return [t.replace("{version}", v) for t in temps], ""
+
+
+def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds):
+    fix = t.get("fix_version")
+    fix = str(fix).strip() if isinstance(fix, (str, int, float)) and str(fix).strip() else None
+    names, gap = _release_names(cfg.get("releaseTemplates"), fix)
+    fixed = " ".join(str(t.get("fixed_note") or "").split())
+    routes = []
+    for c in mine:
+        r = str(c.get("route") or "")
+        if r not in routes:
+            routes.append(r)
+    shots, placeholders = [], ([f"release names ({gap})"] if gap else []) + ([] if fixed else ["the fixed note"])
+    for r in routes:
+        pick = next((c for c in mine if str(c.get("route") or "") == r and c.get("status") == "PASS"
+                     and _evidence_file(run_dir, c["id"])), None)
+        if pick:
+            shots.append((r or "test page", Path(run_dir) / "evidence" / f"{pick['id']}.png"))
+        else:
+            placeholders.append(f"screenshot for {r or 'the test page'}")
+    lines = ["CHECK BEFORE POSTING (not part of the comment)"]
+    if not builds or builds == ["unknown"]:
+        shown = (fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix) if fix else "<version>"
+        lines.append(f"- Build: unknown in this run. Confirm the QA app runs {shown} before you post.")
+    lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
+    if not shots:
+        lines.append("- No screenshot for this ticket yet. Add one before you post.")
+    if placeholders:
+        lines.append("- Placeholders to fill: " + "; ".join(placeholders))
+    passed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    lines += ["", "---------- paste below ----------", "", f"Passed on {passed}", "",
+              f"Fixed: {fixed or '<write one sentence: what was fixed>'}", ""]
+    lines += [f"{c['id']} - {CASE_RESULT_WORD[c['status']]}: {' '.join(str(c.get('title') or '').split())}" for c in mine]
+    if verdict_v == "PASS WITH NOTES":
+        lines += ["", f"Notes: {why}"]
+    return "\n".join(lines) + "\n"
+
+
+def _config_dict():
+    try:
+        data = json.loads(CONFIG.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def render_report_parts(run_dir, cfg=None):
+    """(REPORT.md text, {draft file name: text}). Drafts exist for PASS and PASS WITH NOTES tickets only."""
+    run_dir = Path(run_dir)
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
-    tickets = [t for t in _list(plan, "tickets") if t.get("key")]
+    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
     keys = [t["key"] for t in tickets]
     cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs)
     with_status = kind != "plan"
+    cfg = _config_dict() if cfg is None else cfg
+    builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")})
+    drafts, vmap = {}, {}
+    if tickets and with_status:
+        for t in tickets:
+            v, why = verdict(t, cases, bugs, bool(runs), keys)
+            vmap[t["key"]] = (v, why)
+            mine = [c for c in cases if c.get("ticket") == t["key"]]
+            if v in ("PASS", "PASS WITH NOTES") and mine and _safe_key(t["key"]):
+                drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds)
+    draft_of = lambda key: f"jira-comment-{key}.md" if f"jira-comment-{key}.md" in drafts else ""
+
     out = _header(run_dir, kind, plan, runs) + [""]
     if not plan and not runs:
         out += ["_Nothing recorded yet: no plan and no test run in this folder._", ""]
@@ -2793,53 +3058,95 @@ def render_report(run_dir):
         out += ["## Summary", row("Ticket", "ACs", "Cases"), "|---|---|---|"]
         out += [row(_ticket_title(t), len(_list(t, "acs")), sum(c.get("ticket") == t["key"] for c in cases))
                 for t in tickets]
-    elif tickets:
+    elif tickets and len(tickets) > 1:
         out += ["## Summary", row("Ticket", "Verdict", "Why", "Cases (pass/fail/other)", "Bugs"), "|---|---|---|---|---|"]
         for t in tickets:
-            v, why = verdict(t, cases, bugs, bool(runs), keys)
+            v, why = vmap.get(t["key"]) or ("NOT STARTED", "")
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             out.append(row(_ticket_title(t), VERDICT_ICON[v], why, _counts(mine), len(ticket_bugs(t["key"], cases, bugs, keys))))
+    elif tickets and with_status:
+        t = tickets[0]
+        v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
+        out += [f"**Verdict: {VERDICT_ICON[v]}** — {one_line(why)}"]
     elif runs:
         out += ["## Summary", "**Status:** " + "; ".join(
             one_line(f"{r.get('target') or name} {r.get('status') or '?'}") for name, r in runs)
             + f" · {len(bugs)} bug(s)" + (f" · cases {_counts(cases)} (pass/fail/other)" if cases else "")]
+
+    # questions: plan, runs and QUESTION cases, one list
+    q_items = _q_items(plan, "test plan") + [q for name, r in runs for q in _q_items(r, str(r.get("target") or name))] + \
+        [{"text": f"{c['id']}: {' '.join(str(c.get('notes') or c.get('actual') or c.get('title') or '').split())}",
+          "resolved": False, "answer": "", "where": str(c.get("route") or "test cases")}
+         for c in cases if c["status"] == "QUESTION"]
+    merged = _merge_questions(q_items)
+    open_qs = sorted([q for q in merged if not q["resolved"]], key=_q_rank)
+    resolved_qs = [q for q in merged if q["resolved"]]
+    attention = [c for c in cases if c["status"] in ("FAIL", "BLOCKED", "NOT_RUN")]
+    if runs:
+        n_img = sum(bool(_evidence_file(run_dir, c["id"])) for c in cases)
+        out += [f"{len(bugs)} bug(s) · {len(open_qs)} open question(s) · "
+                f"{len([c for c in cases if c['status'] in ('FAIL', 'BLOCKED', 'NOT_RUN', 'QUESTION')])} "
+                f"case(s) need attention · {n_img} evidence image(s)"]
+    if len(tickets) == 1 and draft_of(tickets[0]["key"]):
+        out += [f"Jira comment draft: [{draft_of(tickets[0]['key'])}]({draft_of(tickets[0]['key'])})"]
     out.append("")
+
+    if not runs and (open_qs or resolved_qs):  # plan only: no run to act on, so the questions are the list
+        out += ["## Questions"] + [_q_bullet(q, show_from=False) for q in open_qs + resolved_qs] + [""]
+    # the things to act on, first
+    if runs:
+        action = []
+        if bugs:
+            action += _bug_section(bugs, cases, keys, run_dir, heading=f"### Bugs to file ({len(bugs)})") + [""]
+        if open_qs:
+            action += [f"### Open questions ({len(open_qs)})"] + [_q_bullet(q) for q in open_qs] + [""]
+        if attention:
+            action += [f"### Failed, blocked or not-run cases ({len(attention)})"] + [
+                f"- {c['id']} {STATUS_ICON[c['status']]}" + (f" ({c['ac']})" if c.get("ac") else "") +
+                (f" — {cell(short(c.get('actual') or c.get('notes'), 160))}" if (c.get("actual") or c.get("notes")) else "")
+                + (f" · {cell(c['ticket'])}" if c.get("ticket") else "") for c in attention] + [""]
+        out += ["## Needs your action"] + (action or ["Nothing needs your action.", ""])
+
     for t in tickets:
         mine = [c for c in cases if c.get("ticket") == t["key"]]
         out.append(f"## {one_line(_ticket_title(t))}")
-        if with_status:
-            v, why = verdict(t, cases, bugs, bool(runs), keys)
+        if with_status and len(tickets) > 1:
+            v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
             out.append(f"**Verdict: {VERDICT_ICON[v]}** — {one_line(why)}")
+        if len(tickets) > 1 and draft_of(t["key"]):  # one ticket: the link is in the top block
+            out.append(f"**Jira comment draft:** [{draft_of(t['key'])}]({draft_of(t['key'])})")
         if _list(t, "acs"):
             out += ["### Acceptance criteria"] + _ac_lines(t, mine, with_status)
-        if _plan_lines(t):
-            out += ["### Test plan"] + _plan_lines(t)
         if mine:
-            out += ["### Test cases"] + _case_table(mine, run_dir, with_status)
+            out += ["### Test cases"] + _case_block(mine, run_dir, with_status)
+        if _plan_lines(t):
+            out += ["<details><summary>Test plan</summary>", ""] + _plan_lines(t) + ["", "</details>", ""]
         out.append("")
     other = [c for c in cases if c.get("ticket") not in keys]
     if other:
-        out += ["## Test cases" if not tickets else "## Other test cases"] + _case_table(other, run_dir, with_status) + [""]
-    if runs:
-        out += (_bug_section(bugs, cases, keys, run_dir) if bugs else ["## Bugs", "None found."]) + [""]
-    asked = _strs(plan, "questions")
-    many = sum(bool(_strs(r, "questions")) for _, r in runs) > 1  # several pages raised some: say which
-    raised = [(f"{r.get('target') or name}: " if many else "") + q for name, r in runs for q in _strs(r, "questions")] + \
-        [f"{c['id']}: {c['notes'] or c['actual'] or c.get('title') or ''}" for c in cases if c["status"] == "QUESTION"]
-    bullets = lambda qs: [f"- {cell(short(q, 300))}" for q in qs]
-    if asked and raised:  # two lists, so a follow-up on plan Q1 doesn't read as a second, unnumbered Q1
-        out += ["## Questions", "**From the test plan (before testing):**", ""] + bullets(asked) + \
-            ["", "**Raised while testing:**", ""] + bullets(raised) + [""]
-    elif asked or raised:
-        out += ["## Questions"] + bullets(asked or raised) + [""]
-    not_tested = [q for _, r in runs for q in _strs(r, "not_tested")]
+        out += ["## Test cases" if not tickets else "## Other test cases"] + _case_block(other, run_dir, with_status) + [""]
+
+    not_tested = [item for _, r in runs for item in _not_tested(r)]
     if not_tested:
-        out += ["## Not tested"] + [f"- {cell(short(q, 300))}" for q in not_tested] + [""]
+        out += ["## Not tested"]
+        for key, label in NOT_TESTED_CATEGORIES:
+            group = [t for k, t in not_tested if k == key]
+            if group:
+                out += [f"<details><summary>{label} ({len(group)})</summary>", ""] + \
+                    [f"- {cell(short(t, 300))}" for t in group] + ["", "</details>", ""]
+    if resolved_qs:
+        out += [f"<details><summary>Resolved questions ({len(resolved_qs)})</summary>", ""]
+        out += [f"- {cell(short(q['text'], 300))}" + (f" — answer: {cell(short(q['answer'], 300))}" if q["answer"] else "")
+                for q in resolved_qs] + ["", "</details>", ""]
     if runs:
         out += _notes_section(runs)
     if d["warnings"]:
         out += ["## Problems reading this folder"] + [f"- {one_line(w)}" for w in d["warnings"]] + [""]
-    return "\n".join(out).rstrip() + "\n"
+    return "\n".join(out).rstrip() + "\n", drafts
+
+
+def render_report(run_dir):
+    return render_report_parts(run_dir)[0]
 
 
 def run_summary(run_dir):
@@ -2900,11 +3207,17 @@ def write_report(run_dir):
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
         raise BadInput(f"report: not a run folder (qa-out/<run>/): {run_dir}")
     try:
-        text = render_report(run_dir)
+        text, drafts = render_report_parts(run_dir)
     except Exception as e:  # never fail: say what went wrong in the report itself
-        text = (f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
-                f"{one_line(short(e, 200))}. Check the files in .data/._\n")
+        text, drafts = (f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
+                        f"{one_line(short(e, 200))}. Check the files in .data/._\n"), None
     _write(run_dir / "REPORT.md", text)
+    if drafts is not None:  # Jira drafts: written with the report; a draft no longer due (or a failed render) is removed
+        for name, body in drafts.items():
+            _write(run_dir / name, body)
+        for old in run_dir.glob("jira-comment-*.md"):
+            if old.name not in drafts:
+                old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one
     # rendered before the other run's REPORT.md existed, and that run would vanish from the index.
     fd = os.open(run_dir.parent, os.O_RDONLY) if fcntl else None  # the qa-out folder itself: no lock file left behind

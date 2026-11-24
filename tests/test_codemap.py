@@ -360,6 +360,48 @@ class CodeMap(unittest.TestCase):
         self.assertIn("(none: no frontend routes mapped yet)", out)
         self.assertIn("TOTAL: 0 routes, 0 locators, 0 rules, 1 endpoints (1 backend", out)
 
+    # ---- the app shell's menu (BUG-1): route rows written by code, not by a mapper ----
+    SHELL_NAV = {"nav": [{"key": "home", "title": "Home", "module": {"id": "m0", "url": "/m/home"}},
+                         {"key": "reports", "title": "Reports",
+                          "children": [{"key": "daily", "title": "Daily", "module": {"id": "m1", "url": "/m/daily"}}]}]}
+
+    def shell_repo(self):
+        return git_repo(self.dir / "ui", {"src/routes.js": "const r = [{ path: '/m/daily', element: <D/> }]\n",
+                                          "public/config.json": json.dumps(self.SHELL_NAV, indent=1)})
+
+    def routes(self):
+        return [tuple(r) for r in self.con.execute("SELECT page, value FROM codemap WHERE kind='route' ORDER BY page")]
+
+    def test_shell_menu_routes_survive_a_full_frontend_map(self):
+        ui = self.shell_repo()
+        s = self.scan(ui)
+        frontend = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]
+        self.assertEqual(frontend["files"], ["src/routes.js"])  # the menu is not a mapper's file
+        self.write_map("frontend", [{"page": "/m/daily", "kind": "route", "label": "Daily", "value": "D",
+                                     "file": "src/routes.js:1"}])
+        self.ingest_all()
+        self.assertEqual(self.routes(), [("/home", "module m0 at /m/home"), ("/m/daily", "D"),
+                                         ("/reports/daily", "module m1 at /m/daily")])
+        self.assertFalse(s["incremental"])
+
+    def test_unchanged_shell_menu_keeps_the_next_scan_incremental(self):
+        ui = self.shell_repo()
+        self.scan(ui)
+        self.write_map("frontend", [{"page": "/m/daily", "kind": "route", "label": "Daily", "value": "D",
+                                     "file": "src/routes.js:1"}])
+        self.ingest_all()
+        s = self.scan(ui, stamp="s2")
+        self.assertTrue(s["incremental"])
+        self.assertEqual(s["areas"]["frontend"]["files"], 0)  # a stored "" hash for the menu forced a full re-map
+        self.assertEqual(len(self.routes()), 3)
+
+    def test_ingest_pending_accepts_the_init_folder(self):  # ISSUE-4: qa-out/init loaded nothing, silently
+        api = git_repo(self.dir / "api", {"routes/zones.js": "router.post('/api/zones', h)\n"})
+        self.scan(api)
+        self.write_map("backend", [{"page": "*", "kind": "api", "label": "POST /api/zones", "value": "x",
+                                    "file": "routes/zones.js:1"}])
+        self.assertEqual(qm.ingest_pending(self.out), 1)
+
     # ---- review findings ----
     def test_backend_rows_are_not_capped(self):
         repo = git_repo(self.dir / "api", {"routes/zones.js": "router.get('/api/zones', h)\n"})

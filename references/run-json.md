@@ -14,8 +14,8 @@ automatically; it is the only way knowledge gets into the DB (the user's `bug-st
   "env": {"url": "<target URL>", "browser": "<config browser, or mcp>"},
   "cases": [{"id": "TC-1", "status": "PASS | FAIL | BLOCKED | NOT_RUN | QUESTION",
              "actual": "what you saw, ≤300 chars", "notes": "≤300 chars", "bug": "BUG-2 or empty"}],
-  "questions": ["for the product owner or dev, ≤300 chars each"],
-  "not_tested": ["what and why, ≤300 chars each"],
+  "questions": [{"text": "for the product owner or dev, ≤300 chars", "status": "open | resolved", "answer": "only when resolved"}],
+  "not_tested": [{"category": "safety | out_of_scope | not_reached | needs_setup | heuristic | other", "text": "what and why, ≤300 chars"}],
   "notes": "what you explored, in plain words, ≤1500 chars",
   "pages": [{
     "route": "/form",
@@ -36,6 +36,8 @@ Rules
 - `build` = exactly the text read via config buildSource, or `unknown` when unreadable; no notes (any other text is a different build, which marks everything stale).
 - `run_id` = `<mode>-<slug>-<UTC yyyymmdd-hhmm>` (`date -u +%Y%m%d-%H%M`); a new run gets a new id (seen_count counts distinct run ids).
 - `cases`: one entry per case the caller gave, ids exactly as given; a case you never reached (budget or time ran out) is `NOT_RUN` with the reason in `notes`; one you reached but couldn't do is `BLOCKED`. A FAIL names its bug in `bug`: `BUG-<n>` of its draft, a KNOWN BUG's hash, or a known Jira key. Leave `cases` empty when you were given none.
+- `not_tested`: pick the category that fits. `safety` = held back on purpose by the run's rules; `out_of_scope` = outside this ticket; `not_reached` = budget, time or route ran out; `needs_setup` = needs a fault, account or data this run lacks; `heuristic` = a heuristic from the card's UNTRIED line that was not run; `other` = anything else. A plain string still works and is shown under Other.
+- Case images (ticket mode): for each case with a result, take one image while its checked value is on screen: `<out>/evidence/TC-<n>.png`. The report embeds it when the file exists. Never a new `run-*.json` for images.
 - Facts are things you **verified** (observed, or stated in a ticket). Guesses go in `questions`, not facts.
 - Locators: only ones you used successfully this run (role/label/test-id form).
 - `heuristic` must be an ID from heuristics.md; anything else is stored as `other:<text>` and doesn't count as covering a heuristic.

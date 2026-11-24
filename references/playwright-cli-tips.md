@@ -35,6 +35,18 @@ playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelecto
 ```
 Reproduce a suspicious value with real `fill`/`click` commands before calling it a bug: the recording and the repro spec need them.
 
+## Box for a case image in the app frame (not yet checked on a live page)
+When the app shell loads each page in a frame, the bug-image recipe below cannot see inside that frame. Find the frame's selector once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : f.name).join(' ')"` (no frame: use the bug-image recipe). Then one eval reads the element through the frame and adds the frame's offset, so the box is in page coordinates (`run-code` would be simpler, but the guard denies it: it runs outside the page sandbox):
+```
+playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<#id of the frame>');
+  const el = f.contentDocument.querySelector('<css of the element>'); el.scrollIntoView({block: 'center'});
+  const o = f.getBoundingClientRect(), r = el.getBoundingClientRect();
+  return [o.x + f.clientLeft + r.x, o.y + f.clientTop + r.y, r.width, r.height].map(Math.round).join(','); })()"
+playwright-cli -s=qa screenshot --filename='<out>/evidence/TC-<n>.png'
+qa-mem annotate '<out>/evidence/TC-<n>.png' --box <x,y,w,h> --label 'TC-<n> <STATUS>: <value read>'
+```
+`contentDocument` is null when the frame is on another origin: then keep the plain screenshot (no `annotate`). Not yet run against the QA app: check the first case before you rely on it, and keep the plain screenshot if the box is missing or wrong.
+
 ## Box for a bug image (one eval, then screenshot, then annotate)
 ```
 playwright-cli -s=qa --raw eval "(() => { const r = document.querySelector('<css of the element>').getBoundingClientRect();

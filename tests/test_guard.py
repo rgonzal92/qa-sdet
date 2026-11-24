@@ -1209,6 +1209,14 @@ class V04(unittest.TestCase):
             self.assertEqual(json.loads(active.read_text())["used"], 41)
             self.assertIsNone(g.check_mcp("mcp__playwright__browser_snapshot", {}, cwd, True))
 
+    def test_case_images_allowed_in_evidence(self):  # FEAT-4: TC-n.png next to BUG-n.png, same rules
+        Q, d = self.Q, self.run_dir()
+        for explorer in (False, True):
+            self.allow(f"python3 {Q} annotate {d}/evidence/TC-1.png --box 10,20,30,40 --label 'TC-1 PASS: 09:30 AM'",
+                       explorer=explorer)
+        self.deny(f"python3 {Q} annotate {d}/bugs/TC-1.png --box 1,1,1,1 --label x", explorer=True)  # not in evidence/
+        self.deny(f"python3 {Q} annotate {d}/evidence/TC-1.jpg --box 1,1,1,1 --label x", explorer=True)  # not a PNG
+
     def test_annotate_only_evidence_pngs(self):
         Q, d = self.Q, self.run_dir()
         good = [f"{d}/evidence/BUG-1.png", f"qa-out/{d.name}/evidence/BUG-2.png", f"{d}/evidence/../evidence/BUG-3.png"]

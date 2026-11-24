@@ -1187,7 +1187,8 @@ def run_output_ok(path, cwds, raw=""):
 
 
 RUN_OUTPUT_REASON = ("the explorer saves browser output only in its run folder: <out>/evidence/BUG-<n>.png for bug "
-                     "images, <out>/.data/ for map screenshots and snapshots (absolute paths, out = <project>/qa-out/<run>)")
+                     "images, <out>/evidence/TC-<n>.png for case images, <out>/.data/ for map screenshots and snapshots "
+                     "(absolute paths, out = <project>/qa-out/<run>)")
 SECRET_UPLOAD_REASON = ("uploading this file would hand a secret (key, .env, credentials, qa-sdet data or config) to the "
                         "app; upload a test file you made for the run")
 

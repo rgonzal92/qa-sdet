@@ -63,13 +63,17 @@ qa-out/
   README.md                       index of all runs, newest first: date, run, verdicts, bugs
   INBOX.md                        from qa-inbox
   2026-11-23-STUDIO-1234+STUDIO-1250/
-    REPORT.md                     open this: summary, verdicts, test cases, bugs, questions
+    REPORT.md                     open this: verdict, what needs action, test cases with images, not tested
     bugs/BUG-1.md                 Jira-ready bug drafts (the run's reply gives the acli command to file each)
-    evidence/BUG-1.png            bug images only, problem boxed in red with a label
+    evidence/BUG-1.png            bug images, problem boxed in red with a label
+    evidence/TC-1.png             one image per checked case
+    jira-comment-STUDIO-1234.md   pass comment draft (PASS and PASS WITH NOTES): paste it into Jira yourself
     repro/BUG-1.spec.ts           Playwright spec that fails while the bug exists
     .data/                        machine files: plan.json, run-<page>.json, snapshots
 ```
 Each run gets a fresh folder. `qa-out/`, `.playwright-cli/` and `.playwright-mcp/` are kept out of git (via `.git/info/exclude`).
+
+Project safety rules (optional): write them in `<project>/qa-rules.md`, one per line ("never click Confirm", "use only test device X"). Every explorer gets them as hard limits; a check they hold back is listed under Not tested, Safety rules.
 
 ## Config: `~/.config/qa-sdet/config.json`
 
