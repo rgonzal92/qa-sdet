@@ -2143,6 +2143,14 @@ class A2(unittest.TestCase):
         for cmd in [f'F={os.path.dirname(sess)}/"qa-state.json"; cat $F', f"F=; F+={sess}; cat $F"]:
             no(g.check(cmd, base), cmd)
 
+    def test_pretooluse_entry_point_gives_guard_output(self):  # perf r1: hooks.json runs guard.py as a cached module
+        for d in [{"tool_name": "Bash", "tool_input": {"command": "acli jira workitem create --summary x"}, "cwd": TMP},
+                  {"tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": TMP}, "not json"]:
+            outs = [subprocess.run([sys.executable, str(ROOT / "hooks" / f)], capture_output=True, text=True,
+                                   input=d if isinstance(d, str) else json.dumps(d), env={**os.environ, **_ENV})
+                    for f in ("guard.py", "pretooluse.py")]
+            self.assertEqual([(o.stdout, o.returncode) for o in outs[:1]], [(o.stdout, o.returncode) for o in outs[1:]], d)
+
     def test_nul_and_lone_surrogates_do_not_crash_the_guard_open(self):  # audit 3 r7
         data = os.path.join(TMP, "data")
         for cmd in [f"rm -rf {data} '\ud800'", f"rm -rf {data} 'a\x00b'"]:

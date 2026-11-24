@@ -25,6 +25,7 @@ pass. If the guard itself fails, it denies commands that mention a guarded tool 
 Limit: it checks command text, not intent (curl, scripts, JS that builds URLs at runtime, etc.).
 """
 import codecs
+import functools
 import glob
 import json
 import os
@@ -33,11 +34,9 @@ import math
 import shlex
 import signal
 import sys
-import tempfile
 import time
 from fnmatch import fnmatch
 from pathlib import Path
-from urllib.parse import urlparse
 
 try:
     import fcntl
@@ -48,6 +47,19 @@ CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json"))
 DATA_DIR = os.path.realpath(Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser())
 PUNCT = ";&|()\n"
 QUOTED_GT, QUOTED_LT = "\x01", "\x02"  # quoted '>' / '<' are data, not redirections
+
+
+class _LazyRe:
+    """re.compile on first use: most tool calls (Read, Edit, `git status`) need only a few of the patterns below, and
+    compiling them all costs ~3 ms of start-up on every call. After first use the pattern's methods sit on the instance."""
+    def __init__(self, pattern, flags=0):
+        self.pattern, self._flags = pattern, flags
+
+    def __getattr__(self, name):
+        rx = re.compile(self.pattern, self._flags)
+        self.__dict__.update((n, getattr(rx, n)) for n in ("search", "match", "fullmatch", "findall", "finditer", "sub", "split"))
+        return getattr(rx, name)
+
 
 # Wrapper -> its options that take a separate value.
 WRAPPERS = {
@@ -95,7 +107,7 @@ PW_DENY["delete-data"] = ("it deletes the session's browser profile, and with it
 PW_DENY["tracing-start"] = ("a trace records every request with its headers, cookies included, into a file; "
                             "use requests / response-body, and screenshots for evidence")
 # Page-side reads of cookies / web storage (eval runs in the page).
-SECRET_JS = re.compile(
+SECRET_JS = _LazyRe(
     r"[dD]ocument\s*(\.\s*cookie|\[\s*['\"`]cookie)|cookieStore|"  # also el.ownerDocument.cookie
     r"\.\s*cookie\b(?![-\w'\"`])|['\"`]cookie['\"`]|[{,]\s*cookie\s*[,}:]|"  # d=document; d.cookie / Reflect.get(document,'cookie') / ({cookie}) =>
     r"(local|session)Storage\s*(\.\s*getItem\b|\[)|\.\.\.\s*(local|session)Storage|"
@@ -112,21 +124,21 @@ DB_WRITERS = {"cp", "tee", "install", "ln", "rsync"}
 INPLACE_EDITORS = {"sed", "gsed", "perl", "ruby", "gawk"}
 SESSION_FILE_OK = {"chmod", "ls", "stat", "test", "[", "[[", "rm", "touch", "echo", "printf", "file", "wc",
                    "realpath", "readlink", "du", "mkdir", "dirname", "basename"}
-URL_RE = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^\s'\"`)]+", re.I)
+URL_RE = _LazyRe(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^\s'\"`)]+", re.I)
 # `<<EOF`, `<<-'EOF'`, `<<E"OF"`, `<<\EOF`: the delimiter is the whole word with its quotes removed (bash: EOF)
-HEREDOC_RE = re.compile(r"""(?<![<$(\d])<<(?!<)(-?)[ \t]*((?:[^\s<>;&|()'"\\]|\\.|'[^']*'|"[^"]*")+)""")
+HEREDOC_RE = _LazyRe(r"""(?<![<$(\d])<<(?!<)(-?)[ \t]*((?:[^\s<>;&|()'"\\]|\\.|'[^']*'|"[^"]*")+)""")
 
 
 def heredoc_end(word):
     return re.sub(r"""\\(.)|['"]""", lambda m: m.group(1) or "", word)
 REDIRECT_RE = re.compile(r"^(\d*)(>>?|<<?<?)(.*)$", re.S)
 GUARDED_TOOLS_RE = re.compile(r"(?<![.\w])playwright-cli|@playwright/cli|\bacli\b|(?<![\w.-])qa-mem(?![\w-])")  # not .playwright-cli/
-POS_PARAM_RE = re.compile(r"^\$(\{?[@*]\}?|\{?[1-9]\}?)$")  # exactly "$@", $1: a wrapper passing its args through ('$100' is data)
-SCHEMELESS_URL_RE = re.compile(r"[\"'`(]\s*//([a-z0-9][a-z0-9.-]*)", re.I)  # '//host/path' in JS
-PAGE_DUMP_RE = re.compile(r"(documentElement|document\.body|document\.head|\bdocument)\s*\.\s*(outer|inner)HTML"
+POS_PARAM_RE = _LazyRe(r"^\$(\{?[@*]\}?|\{?[1-9]\}?)$")  # exactly "$@", $1: a wrapper passing its args through ('$100' is data)
+SCHEMELESS_URL_RE = _LazyRe(r"[\"'`(]\s*//([a-z0-9][a-z0-9.-]*)", re.I)  # '//host/path' in JS
+PAGE_DUMP_RE = _LazyRe(r"(documentElement|document\.body|document\.head|\bdocument)\s*\.\s*(outer|inner)HTML"
                           r"|XMLSerializer|document\.scripts|querySelectorAll\(\s*['\"`]script")
 NOT_A_PATH_RE = re.compile(r"[\s()'\"=;`|<>]")  # page JS/CSS in an argument, not a file path
-CODE_TEXT_RE = re.compile(r"[()'\"=;`|<>\n]")  # like NOT_A_PATH_RE, but a path may hold spaces ('/home/me/my proj/.env')
+CODE_TEXT_RE = _LazyRe(r"[()'\"=;`|<>\n]")  # like NOT_A_PATH_RE, but a path may hold spaces ('/home/me/my proj/.env')
 GLOB_RE = re.compile(r"[*?\[{]")
 NET_CLIS = {"curl", "wget", "http", "https", "xh", "httpie", "nc", "ncat", "netcat", "telnet", "socat", "aria2c", "ssh", "scp",
             "sftp", "ftp",
@@ -149,7 +161,7 @@ STRING_RUNNERS = {"ssh", "parallel", "tmux", "screen", "at", "batch", "watch", "
 EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir", "--exec", "--exec-batch", "-x", "-X", "--"}  # a program follows
 NAME_ONLY_TOOLS = {"echo", "printf", "true", ":", "which", "type", "whereis", "whatis", "man", "info", "help", "hash",
                    "apropos", "tldr", "alias", "unalias", "sort", "uniq", "cut", "tr", "column", "fold", "nl", "tee"}
-GUARDED_ANY_RE = re.compile(r"playwright-cli|@playwright/cli|\bacli\b|qa-state|qa-mem|qa-sdet/profiles")
+GUARDED_ANY_RE = _LazyRe(r"playwright-cli|@playwright/cli|\bacli\b|qa-state|qa-mem|qa-sdet/profiles")
 PROFILE_OK = {"test", "[", "[[", "echo", "printf", "true", ":"}  # name a profile path without reading it
 PROFILE_REASON = ("the qa-sdet browser profile folder holds the signed-in QA session (cookies); only "
                   "qa-mem browser-open (playwright-cli open --profile <main profile>) may use it")
@@ -163,16 +175,16 @@ QAMEM_VALUE_OPTS = {"browser-open": {"--session"}, "annotate": {"--box", "--labe
 # Other places playwright-cli takes its browser from (playwright-core resolveCLIConfigForCLI / configFromEnv):
 # env vars, a config file (--config, ./.playwright/cli.config.json, ~/.playwright/cli.config.json), a real browser.
 PW_ENV_RE = re.compile(r"(PLAYWRIGHT_MCP_|PWTEST_)\w*=")  # `PLAYWRIGHT_MCP_USER_DATA_DIR=x cmd`, env/export forms
-PW_ENV_NAME_RE = re.compile(r"^(PLAYWRIGHT_MCP_|PWTEST_)")
+PW_ENV_NAME_RE = _LazyRe(r"^(PLAYWRIGHT_MCP_|PWTEST_)")
 EXPORTERS = {"export", "declare", "typeset", "readonly", "local"}
 PW_SOURCE_OPTS = {"--config", "--extension", "--cdp", "--endpoint"}  # a config file or someone else's browser
-CLI_CONFIG_RE = re.compile(r"cli\.config\.json")
+CLI_CONFIG_RE = _LazyRe(r"cli\.config\.json")
 QAMEM_RUNNERS = {"uv", "uvx", "poetry", "pipx", "pdm", "hatch", "rye", "conda", "mamba", "micromamba", "pixi"}
 # The explorer always runs under its skill's marker; without one (deleted, moved, expired) its budget, deadline
 # and faults setting would be gone, so its browser commands stop.
 NO_RUN = ("no active run marker (<project>/qa-out/.active is missing or expired): the explorer's browser commands "
           "run only inside the calling skill's run; close the browser, write <out>/.data/run-<slug>.json (out = <project>/qa-out/<run>) and return to the caller")
-MARKER_CODE_RE = re.compile(r"(?<![\w-])\.active(?:\.lock)?\b|\.config/+qa-sdet|qa-sdet/+config\.json|QA_SDET_CONFIG|"
+MARKER_CODE_RE = _LazyRe(r"(?<![\w-])\.active(?:\.lock)?\b|\.config/+qa-sdet|qa-sdet/+config\.json|QA_SDET_CONFIG|"
                             + re.escape(str(CONFIG)))  # the config where QA_SDET_CONFIG puts it, too
 QAMEM_NAME_OK = {"test", "[", "[[", "which", "type", "whereis"}  # the explorer may check qa-mem exists, nothing that prints or copies it
 
@@ -182,10 +194,10 @@ class Ctx:
     def __init__(self, cwd, explorer=False):
         self.explorer = explorer  # the qa-explorer subagent: observes the app through the browser only
         self.marker_path, self.marker, self.marker_error = read_marker(cwd)
-        self.marker_files = {os.path.realpath(os.path.join(b, "qa-out", ".active"))
+        self.marker_files = {realpath(os.path.join(b, "qa-out", ".active"))
                              for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
         self.marker_files |= {m + ".lock" for m in self.marker_files}
-        self.marker_files.add(os.path.realpath(CONFIG))  # the explorer leaves the allowlist alone too
+        self.marker_files.add(realpath(CONFIG))  # the explorer leaves the allowlist alone too
         self.spend = 0
         self.raw = ""
         self.loop = False  # a playwright-cli call runs inside a loop / xargs / watch: can't be counted
@@ -196,6 +208,35 @@ class Ctx:
 
 
 # ---------- config, hosts, files ----------
+
+_RP = None  # real paths for one top-level check()/decide(); None outside one
+
+
+def realpath(p):
+    """os.path.realpath, remembered for the length of one hook decision: a sourced rc file asks for the same paths
+    thousands of times, each an lstat per component (slow on a network home folder). Within one decision the guard
+    changes no file before spend_budget at the very end. Outside one (helpers called directly), as it is now."""
+    if _RP is None:
+        return os.path.realpath(p)
+    if p not in _RP:
+        _RP[p] = os.path.realpath(p)
+    return _RP[p]
+
+
+def _one_decision(fn):
+    """check() and decide() share one path cache per top-level call; a nested call joins the outer one."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        global _RP
+        if _RP is not None:
+            return fn(*args, **kwargs)
+        _RP = {}
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _RP = None
+    return run
+
 
 _MEMO = {}  # per hook call: these folder sets cost a glob and several realpaths, and are asked for every word
 _MEMO_ENV = ("HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "LOCALAPPDATA", "PLAYWRIGHT_MCP_USER_DATA_DIR",
@@ -211,7 +252,12 @@ def _memo(fn):
                 cfg = (st.st_mtime_ns, st.st_size, st.st_ino)
             except OSError:
                 pass
-        key = (fn.__name__, CONFIG, DATA_DIR, cfg) + tuple(map(os.environ.get, _MEMO_ENV))
+        env = _RP.get(_MEMO_ENV) if _RP is not None else None  # read once per decision: a script asks thousands of times
+        if env is None:
+            env = tuple(map(os.environ.get, _MEMO_ENV))
+            if _RP is not None:
+                _RP[_MEMO_ENV] = env  # (a tuple key: never one of the real paths kept there)
+        key = (fn.__name__, CONFIG, DATA_DIR, cfg) + env
         if key not in _MEMO:
             _MEMO[key] = frozenset(fn())
         return _MEMO[key]
@@ -245,6 +291,7 @@ def host_ok(url, hosts):
         return False  # user@host forms: browsers and urlparse disagree; don't guess (an @ in the query is fine)
     if "://" not in url:
         url = "http://" + url
+    from urllib.parse import urlparse  # here: ~2 ms of start-up on every tool call, and only URL checks need it
     try:
         host = (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
@@ -268,14 +315,14 @@ def resolve(path, cwd):
     head = re.split(r"[*?\[{]", path)[0]
     if head != path:
         head = head if head.endswith("/") else os.path.dirname(head)
-    return os.path.realpath(os.path.join(cwd, head or "."))
+    return realpath(os.path.join(cwd, head or "."))
 
 
 @_memo
 def session_files():
-    files = {os.path.realpath(CONFIG.with_name("qa-state.json"))}
+    files = {realpath(CONFIG.with_name("qa-state.json"))}
     if os.environ.get("PLAYWRIGHT_MCP_STORAGE_STATE"):  # the user's own browser cookie jar
-        files.add(os.path.realpath(expand(os.environ["PLAYWRIGHT_MCP_STORAGE_STATE"])))
+        files.add(realpath(expand(os.environ["PLAYWRIGHT_MCP_STORAGE_STATE"])))
     return files
 
 
@@ -287,22 +334,22 @@ def profile_dirs():
     dirs |= set(glob.glob(os.path.expanduser(f"{cache}/ms-playwright/mcp-*")))  # older MCP versions kept profiles here
     if os.environ.get("PLAYWRIGHT_MCP_USER_DATA_DIR"):
         dirs.add(os.environ["PLAYWRIGHT_MCP_USER_DATA_DIR"])
-    home = os.path.realpath(os.path.expanduser("~"))
-    return ({os.path.realpath(expand(d)) for d in dirs if "$" not in expand(d)} | profile_roots()) - {home, "/", ""}
+    home = realpath(os.path.expanduser("~"))
+    return ({realpath(expand(d)) for d in dirs if "$" not in expand(d)} | profile_roots()) - {home, "/", ""}
 
 
 @_memo
 def profile_roots():
     """The qa-sdet browser profile folders (the persistent `main` profile holds the QA login). qa-mem keeps them
     beside its DB; an XDG_DATA_HOME location is protected too."""
-    roots = {os.path.realpath(os.path.join(DATA_DIR, "profiles"))}
+    roots = {realpath(os.path.join(DATA_DIR, "profiles"))}
     if os.environ.get("XDG_DATA_HOME"):
-        roots.add(os.path.realpath(os.path.join(os.path.expanduser(os.environ["XDG_DATA_HOME"]), "qa-sdet", "profiles")))
+        roots.add(realpath(os.path.join(os.path.expanduser(os.environ["XDG_DATA_HOME"]), "qa-sdet", "profiles")))
     return roots
 
 
 def main_profiles():
-    return {os.path.realpath(os.path.join(r, "main")) for r in profile_roots()}
+    return {realpath(os.path.join(r, "main")) for r in profile_roots()}
 
 
 _ASSIGNED = {}
@@ -341,7 +388,7 @@ def in_profile_root(token, cwds, raw=""):
             if not t or NOT_A_PATH_RE.search(t):
                 continue
             for c in cwds:
-                p = os.path.realpath(os.path.join(c, t))
+                p = realpath(os.path.join(c, t))
                 if any(p == r or p.startswith(r + os.sep) for r in roots):
                     return True
                 if GLOB_RE.search(t):  # `cat ~/.local/share/qa-*/pro*/main/Default/Cookies`
@@ -359,7 +406,7 @@ def is_main_profile(value, cwds, raw=""):
         t = expand(t)
         if not t or "$" in t or "SUBST" in t or GLOB_RE.search(t):
             return False
-        if any(os.path.realpath(os.path.join(c, t)) not in main_profiles() for c in cwds):
+        if any(realpath(os.path.join(c, t)) not in main_profiles() for c in cwds):
             return False
     return True
 
@@ -371,7 +418,7 @@ def glob_reaches_profile(t, cwd):
 
 
 def in_profile_dir(path, cwd):
-    p = os.path.realpath(os.path.join(cwd, expand(path)))
+    p = realpath(os.path.join(cwd, expand(path)))
     return any(p == d or p.startswith(d + os.sep) for d in profile_dirs())
 
 
@@ -379,7 +426,7 @@ def in_profile_dir(path, cwd):
 def session_dirs():
     """The folders that directly hold a session file (never ~ or /). Their parents are protected only from
     tools that read recursively (is_session_ancestor), so ordinary commands in a project stay allowed."""
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = realpath(os.path.expanduser("~"))
     return {os.path.dirname(f) for f in session_files()} - {home, "/", ""}
 
 
@@ -407,7 +454,7 @@ def glob_hits(token, cwd, paths):
     """Paths (absolute, real) that the shell glob `token`, run in cwd, could expand to."""
     head = re.split(r"[*?\[{]", token)[0]
     base_rel = os.path.dirname(head) or "."
-    base = os.path.realpath(os.path.join(cwd, base_rel))
+    base = realpath(os.path.join(cwd, base_rel))
     pat = os.path.join(base, os.path.relpath(os.path.join(cwd, token), os.path.join(cwd, base_rel)))
     return {p for p in paths for a in brace_alts(pat) if shell_glob_match(p, a)}
 
@@ -426,7 +473,7 @@ def brace_alts(pattern, limit=256):
 
 
 def is_session_file(path, cwd="/"):
-    return os.path.realpath(os.path.join(cwd, expand(path))) in session_files()
+    return realpath(os.path.join(cwd, expand(path))) in session_files()
 
 
 def is_session_ref(token, cwds, raw=""):
@@ -442,14 +489,14 @@ def _is_session_ref(token, cwds):
     if not code_like and os.path.basename(t).startswith("qa-state"):  # a copy or the file seen from anywhere
         return True
     for c in cwds:
-        if os.path.realpath(os.path.join(c, t)) in files or (not code_like and in_profile_dir(t, c)):
+        if realpath(os.path.join(c, t)) in files or (not code_like and in_profile_dir(t, c)):
             return True
         if code_like:
             continue
         if GLOB_RE.search(t):  # `cat ~/.config/*/*.json`, `tar c ~/.config/qa-*`: a session file or its folder?
             if glob_hits(t, c, files | session_dirs()) or glob_reaches_profile(t, c):
                 return True
-        elif os.path.realpath(os.path.join(c, t)) in session_dirs():
+        elif realpath(os.path.join(c, t)) in session_dirs():
             return True
     return False
 
@@ -581,6 +628,7 @@ def spend_budget(path, n, explorer=False):
             return (f"the run's budget of {budget} browser commands is used up ({used} used): "
                     "close the browser (MCP: browser_tabs close on your tab), write your bug drafts and <out>/.data/run-<slug>.json now")
         marker["used"] = used + n
+        import tempfile  # here, not at the top: it costs ~4 ms of start-up on every tool call, and only a run's budget needs it
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".active.")
         with os.fdopen(fd, "w") as f:
             json.dump(marker, f)
@@ -652,7 +700,7 @@ def normalize(cmd):
     return "".join(out)
 
 
-CASE_WORD_RE = re.compile(r"(case|esac|in)(?![\w.-])")
+CASE_WORD_RE = _LazyRe(r"(case|esac|in)(?![\w.-])")
 
 
 def match_paren(cmd, k):
@@ -842,6 +890,7 @@ def resume_at(seg, j):
 
 # ---------- per-command checks ----------
 
+@functools.lru_cache(maxsize=4096)  # a script asks for the same few words thousands of times
 def prog_name(tok):
     if tok in ("$SHELL", "${SHELL}"):  # the user's shell, whatever it is
         return "sh"
@@ -1095,7 +1144,7 @@ def sets_pw_env(words, i, in_file=False):
 
 
 def qa_bases(cwds):
-    return {os.path.realpath(os.path.join(b, "qa-out")) for b in set(cwds) | {os.environ.get("CLAUDE_PROJECT_DIR")} if b}
+    return {realpath(os.path.join(b, "qa-out")) for b in set(cwds) | {os.environ.get("CLAUDE_PROJECT_DIR")} if b}
 
 
 def literal_path(path, cwds):
@@ -1113,7 +1162,7 @@ def evidence_png(path, cwds, raw=""):
         if "$" in t or "SUBST" in t or (GLOB_RE.search(t) and not literal_path(t, cwds)):
             return False
         for c in cwds:
-            p = os.path.realpath(os.path.join(c, t))
+            p = realpath(os.path.join(c, t))
             ev = os.path.dirname(p)
             if not p.endswith(".png") or os.path.basename(ev) != "evidence" or \
                     os.path.dirname(os.path.dirname(ev)) not in qa_bases({c}):
@@ -1131,7 +1180,7 @@ def run_output_ok(path, cwds, raw=""):
         if "$" in t or "SUBST" in t or (GLOB_RE.search(t) and not literal_path(t, cwds)):  # (after `${OUT}` is filled in)
             return False
         for c in cwds:
-            d = os.path.dirname(os.path.realpath(os.path.join(c, t)))
+            d = os.path.dirname(realpath(os.path.join(c, t)))
             if os.path.basename(d) not in ("evidence", ".data") or os.path.dirname(os.path.dirname(d)) not in qa_bases({c}):
                 return False
     return True
@@ -1147,7 +1196,7 @@ def glob_paths(path, c):
     """Real paths a word names in folder c: itself, or (a glob) what it expands to now (bounded)."""
     full = os.path.join(c, expand(path))
     hits = glob.glob(full)[:200] if GLOB_RE.search(path) and not long_text(path) else []
-    return [os.path.realpath(x) for x in hits or [full]]
+    return [realpath(x) for x in hits or [full]]
 
 
 def secret_upload(path, cwds):
@@ -1183,8 +1232,8 @@ def check_qamem(args, ctx, cwds, hosts, via_loop):
     return None
 
 
-_KEY_READ_RE = re.compile(r"(Object\.keys\(\s*(window\.)?|\bin\s+(window\.)?|typeof\s+(window\.)?)$")
-_QUOTE_END_RE, _BRACKET_QUOTE_END_RE = re.compile(r"['\"`]$"), re.compile(r"\[\s*['\"`]$")
+_KEY_READ_RE = _LazyRe(r"(Object\.keys\(\s*(window\.)?|\bin\s+(window\.)?|typeof\s+(window\.)?)$")
+_QUOTE_END_RE, _BRACKET_QUOTE_END_RE = _LazyRe(r"['\"`]$"), _LazyRe(r"\[\s*['\"`]$")
 
 
 def storage_value_read(js):
@@ -1330,7 +1379,7 @@ def touches_marker(name, rest, outs, cwds, markers, raw=""):
                 if glob_hits(t, c, markers) or parents:
                     return reason
                 continue
-            p = os.path.realpath(os.path.join(c, t))
+            p = realpath(os.path.join(c, t))
             if p in markers or (removes_folders and any(m.startswith(p.rstrip(os.sep) + os.sep) for m in markers)):
                 return reason
     return None
@@ -1445,14 +1494,14 @@ def check_db(words, outs, name, rest, cwds, raw=""):
 
 def in_profile_area(p):
     """A real path that is the qa-sdet data folder, inside it, or a folder between home and a profile folder."""
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = realpath(os.path.expanduser("~"))
     return p == DATA_DIR or p.startswith(DATA_DIR + os.sep) or (
         p.startswith(home + os.sep) and any(r.startswith(p.rstrip(os.sep) + os.sep) for r in profile_roots()))
 
 
 # Secret stores and keys: never read by the qa-mapper, never uploaded to the app. Same pattern as qa-mem's
 # codemap-scan SECRET_FILE_RE (tests keep them equal), plus home folders that hold credentials.
-SECRET_FILE_RE = re.compile(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
+SECRET_FILE_RE = _LazyRe(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
                             r"properties|ini|toml|txt|xml)$|^credentials?\.(json|xml|ya?ml|ini|toml|txt)$|"
                             r"^id_(rsa|ed25519|ecdsa|dsa)|^\.(npmrc|netrc|pgpass|pypirc|dockercfg)$|^appsettings\.\w+\.json$|"
                             r"^secrets?\.(py|rb|php|go|java|kt|cs)$|^credentials?\.(py|rb|php|go)$|^wp-config\.php$")
@@ -1465,9 +1514,9 @@ SCAN_SKIP = {"node_modules", ".git", "dist", "build", "vendor", "__pycache__", "
 
 @_memo
 def secret_roots():
-    home = os.path.realpath(os.path.expanduser("~"))
-    roots = {os.path.realpath(os.path.join(home, p)) for p in SECRET_HOME_PATHS}
-    return roots | {DATA_DIR, os.path.realpath(CONFIG.parent)} | profile_dirs()
+    home = realpath(os.path.expanduser("~"))
+    roots = {realpath(os.path.join(home, p)) for p in SECRET_HOME_PATHS}
+    return roots | {DATA_DIR, realpath(CONFIG.parent)} | profile_dirs()
 
 
 def is_secret_path(p):
@@ -1547,7 +1596,7 @@ def explorer_outside(name, rest, outs, cwds, raw, via_loop=False):
                 plain = os.path.normpath(os.path.join(c, t))  # before links are followed: /dev/stderr links into /proc
                 if plain in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty") or plain.startswith("/dev/fd/"):
                     continue
-                p = os.path.realpath(plain)
+                p = realpath(plain)
                 if not any(explorer_run_path(p, b) or (name == "mkdir" and os.path.dirname(p) == b) for b in bases):
                     return True  # (mkdir of the run folder itself is fine: it only makes what is missing)
     return False
@@ -1606,7 +1655,7 @@ def _names_profile_area(raw, cwds):
     for w in re.findall(r"[^\s'\"`();|&<>=]+", raw)[:300]:
         for t in var_variants(w, raw):
             t = expand(t)
-            if "$" not in t and not t.startswith("-") and any(in_profile_area(os.path.realpath(os.path.join(c, t)))
+            if "$" not in t and not t.startswith("-") and any(in_profile_area(realpath(os.path.join(c, t)))
                                                                for c in cwds):
                 return True
     return False
@@ -1643,12 +1692,12 @@ def check_profile(name, args, rest, outs, ins, cwds, ctx, via_loop=False, docs=(
         srcs = pos if {"-t", "--target-directory"} & set(rest) or any(a.startswith("--target-directory=") for a in rest) \
             else pos[:-1]
         if any(any(r == p or r.startswith(p.rstrip(os.sep) + os.sep) for r in roots)
-               for a in srcs for c in cwds for p in [os.path.realpath(os.path.join(c, expand(a)))]):
+               for a in srcs for c in cwds for p in [realpath(os.path.join(c, expand(a)))]):
             return PROFILE_REASON
     if name == "git":  # `git -C <data dir> add -A`, `cd ~/.local/share && git add qa-sdet`: git reads whole trees
         dirs = [a for a in rest if not a.startswith("-")] + [rest[k + 1] for k, a in enumerate(rest[:-1]) if a == "-C"]
         dirs += [a.split("=", 1)[1] for a in rest if a.startswith(("--work-tree=", "--git-dir="))]
-        if any(in_profile_area(c) for c in cwds) or any(in_profile_area(os.path.realpath(os.path.join(c, expand(a))))
+        if any(in_profile_area(c) for c in cwds) or any(in_profile_area(realpath(os.path.join(c, expand(a))))
                                                          for a in dirs for c in cwds):
             return PROFILE_REASON
     reads_list = via_loop or name in LIST_READERS or bool(LIST_READER_OPTS & {a.split("=", 1)[0] for a in rest})
@@ -1657,7 +1706,7 @@ def check_profile(name, args, rest, outs, ins, cwds, ctx, via_loop=False, docs=(
         return PROFILE_REASON
     listing = (name == "tree" or (name == "ls" and any(re.match(r"^-[a-zA-Z]*R", a) or a == "--recursive" for a in rest))
                or (name == "du" and any(re.match(r"^-[a-zA-Z]*a", a) or a == "--all" for a in rest)))
-    if listing and any(os.path.realpath(os.path.join(c, expand(a))) == DATA_DIR
+    if listing and any(realpath(os.path.join(c, expand(a))) == DATA_DIR
                        for a in [x for x in args if not x.startswith("-")] or ["."] for c in cwds):
         return PROFILE_REASON  # `ls -R ~/.local/share/qa-sdet` lists the profile's files
     return None
@@ -1679,6 +1728,7 @@ def find_exec(rest):
     return cmds
 
 
+@_one_decision
 def check(cmd, cwd, ctx=None, depth=0, explorer=False):
     """Deny reason for a Bash command, or None. At the top level a passing command is charged to the
     active run's budget (only then: a denied command spends nothing)."""
@@ -1753,7 +1803,7 @@ def read_script(path, cwds, raw="", strict=False):
     paths = [expand(t) for t in var_variants(path, raw)]
     if "SUBST" in path or any("$" in t or GLOB_RE.search(t) for t in paths):
         return None
-    reals = [os.path.realpath(os.path.join(c, t)) for c in cwds for t in paths]
+    reals = [realpath(os.path.join(c, t)) for c in cwds for t in paths]
     if not strict and not any(os.path.lexists(p) for p in reals) and not makes_file(
             raw, {os.path.basename(t) for t in paths + reals}):  # (a dangling link's target too)
         return ""  # `. "$HOME/.cargo/env"` where there is none, and nothing in the command makes it: nothing runs
@@ -1808,7 +1858,7 @@ def shell_script_texts(name, rest, seg, ins, cwds, docs, ctx):
 
 # a package manager's arguments are package names (`apt-get install tar zsh`), not file tools at work; a `$(...)` or
 # backquote in them still runs
-PKG_CMD_RE = re.compile(r"\b(?:npm|pnpm|yarn|bun|pip3?|pipx|uv|apt(?:-get)?|brew|dnf|yum|zypper|pacman|apk|gem|cargo|go|"
+PKG_CMD_RE = _LazyRe(r"\b(?:npm|pnpm|yarn|bun|pip3?|pipx|uv|apt(?:-get)?|brew|dnf|yum|zypper|pacman|apk|gem|cargo|go|"
                         r"composer|poetry|snap|flatpak|port|choco|scoop|winget)[ \t]+(?:install|add|i|-S\w*)\b[^;&|\n$`<>()]*")
 _WRITES = {}
 
@@ -1834,9 +1884,9 @@ def makes_file(raw, names):
     return _WRITES["any"] or bool(_WRITES["targets"] & names)
 
 
-STDIN_FEED_RE = re.compile(r"(?<!\|)\|(?!\|)|<")  # a pipe or an input redirection anywhere in the command
-WRITER_WORD_RE = re.compile(r"(?<![\w.-])(unzip|tar|bsdtar|7za?|cpio|cp|mv|ln|rsync|install|dd|tee)(?![\w.-])")
-FILE_MAKER_RE = re.compile(WRITER_WORD_RE.pattern.replace("|tee)", "|tee|curl|wget|sponge|aria2c)"))
+STDIN_FEED_RE = _LazyRe(r"(?<!\|)\|(?!\|)|<")  # a pipe or an input redirection anywhere in the command
+WRITER_WORD_RE = _LazyRe(r"(?<![\w.-])(unzip|tar|bsdtar|7za?|cpio|cp|mv|ln|rsync|install|dd|tee)(?![\w.-])")
+FILE_MAKER_RE = _LazyRe(WRITER_WORD_RE.pattern.replace("|tee)", "|tee|curl|wget|sponge|aria2c)"))
 UNKNOWN_SCRIPT_REASON = ("a shell reading its script from a pipe, a variable or a file made in the same command can't be "
                          "checked; run the commands directly")
 
@@ -2045,7 +2095,7 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                 for x in {a.split("=", 1)[-1].lstrip("@"), a.lstrip("@")} - {a, ""}]
     if name in COPY_TOOLS and checked[1:]:  # `cp x ~/.config/qa-sdet/`: a session folder as the destination is fine
         last = checked[-1]
-        if not any(os.path.realpath(os.path.join(c, expand(last))) in session_files() for c in local):
+        if not any(realpath(os.path.join(c, expand(last))) in session_files() for c in local):
             checked = checked[:-1]
     if name in GREP_TOOLS and checked[1:] and not {"-e", "-f", "--regexp", "--file"} & set(rest):
         checked.pop(1)  # `grep -rn "qa-state" src`: the first word is the pattern, not a file
@@ -2059,7 +2109,7 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
     opt_values = [a.split("=", 1)[1] for a in words[i + 1:] if a.startswith("-") and "=" in a]  # --from-file=PATH
     if not (pw_session_verb or lists_names) and name not in SESSION_FILE_OK and (
             any(is_session_ref(a, local, ctx.raw) for a in checked)
-            or any(os.path.realpath(os.path.join(c, expand(v))) in session_files() for v in opt_values for c in local)):
+            or any(realpath(os.path.join(c, expand(v))) in session_files() for v in opt_values for c in local)):
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
     if env_dir and any(is_session_ref(a, local, ctx.raw) for a in ins):  # `env -C dir cat < f`
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
@@ -2194,7 +2244,7 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
 
 MCP_BROWSER_RE = re.compile(r"^mcp__.+__browser_[a-z_]+$")
 MCP_JIRA_RE = re.compile(r"^mcp__.*(atlassian|jira|confluence)", re.I)  # server or tool name (mcp__corp__createJiraIssue)
-MCP_JIRA_READ_RE = re.compile(r"^(batch_)?(get|search|lookup|list|fetch|read|view|download)|^atlassianuserinfo$", re.I)
+MCP_JIRA_READ_RE = _LazyRe(r"^(batch_)?(get|search|lookup|list|fetch|read|view|download)|^atlassianuserinfo$", re.I)
 MCP_WRITE_WORDS = {"create", "edit", "update", "delete", "remove", "transition", "add", "assign", "archive", "unarchive",
                    "move", "upload", "post", "put", "patch", "write", "set", "clone", "restore", "replace", "publish",
                    "rank", "invoke", "run", "execute", "send", "import", "bulk", "upsert", "modify", "change"}
@@ -2205,7 +2255,7 @@ MAPPER_TOOLS = {"Read", "Grep", "Glob", "LS", "Write", "ToolSearch", "TodoWrite"
                 "TaskList"}
 EXPLORER_TOOLS = {"Bash", "Read", "Write", "Grep", "Glob", "LS", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate",
                   "TaskGet", "TaskList", "TaskOutput", "BashOutput", "TaskStop", "KillShell", "KillBash"}
-MCP_SECRET_TOOL_RE = re.compile(r"(cookie|(local|session)storage)s?_(list|get)|storage_state|request_headers|"
+MCP_SECRET_TOOL_RE = _LazyRe(r"(cookie|(local|session)storage)s?_(list|get)|storage_state|request_headers|"
                                 r"response_headers|get_config")  # set/delete/clear print nothing; config holds headers
 
 
@@ -2308,9 +2358,9 @@ def check_mcp_browser(name, tin, cwd, explorer):
             return f"{name} writing into the qa-sdet memory DB directory is blocked"
         if is_session_ref(f, cwds):
             return "the saved browser session holds live cookies; it stays out of the browser tools"
-        target = Path(os.path.realpath(os.path.join(cwd, expand(f))))  # realpath: a symlinked folder is the same
+        target = Path(realpath(os.path.join(cwd, expand(f))))  # realpath: a symlinked folder is the same
         if (target.name in (".active", ".active.lock") and target.parent.name == "qa-out") or \
-                str(target) == os.path.realpath(CONFIG):  # a JSON result over config.json would widen allowedHosts
+                str(target) == realpath(CONFIG):  # a JSON result over config.json would widen allowedHosts
             return "the run marker and the qa-sdet config are not output files; save files under the run's out folder"
         if f in sent and is_session_ancestor(f, cwds):
             return f"{name} would send a folder that holds the saved browser session"
@@ -2350,7 +2400,7 @@ def mentions_profile(text):
     """Does text name the browser profile folder (absolute, ~, $HOME / ${HOME} forms, or .../qa-sdet/profiles)?"""
     if "qa-sdet/profiles" in text:
         return True
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = realpath(os.path.expanduser("~"))
     for r in profile_roots():
         forms = {r}
         if r.startswith(home + os.sep):
@@ -2402,6 +2452,7 @@ def agent_role(data):
     return str(data.get("agent_type") or "").strip().lower().split(":")[-1].strip()
 
 
+@_one_decision
 def decide(data):
     _MEMO.clear()
     tool, tin = data.get("tool_name"), data.get("tool_input")
@@ -2414,17 +2465,17 @@ def decide(data):
         if tool not in MAPPER_TOOLS:
             return f"the qa-mapper reads source files and writes its code map; {tool} is not one of its tools"
         if tool == "Write":
-            dirs = {os.path.realpath(os.path.join(b, "qa-out", "init"))
+            dirs = {realpath(os.path.join(b, "qa-out", "init"))
                     for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
             for raw in tool_paths(tin):
-                target = os.path.realpath(os.path.join(cwd, expand(raw)))
+                target = realpath(os.path.join(cwd, expand(raw)))
                 if os.path.dirname(target) not in dirs or not re.fullmatch(
                         r"code-map-(frontend|backend|tests)(-\d+)?\.json", os.path.basename(target)):
                     return "the qa-mapper writes only <project>/qa-out/init/code-map-<area>[-<n>].json"
         if tool in ("Read", "Grep", "Glob", "LS"):  # source code yes; keys, .env, the memory DB and logins no
             for raw in tool_paths(tin):
                 raw = raw or "."
-                target = resolve(raw, cwd) if tool == "Glob" else os.path.realpath(os.path.join(cwd, expand(raw)))
+                target = resolve(raw, cwd) if tool == "Glob" else realpath(os.path.join(cwd, expand(raw)))
                 if is_secret_path(target):
                     return ("the qa-mapper reads source code only; secret files (.env, keys, credentials, the qa-sdet "
                             "data and config folders) stay closed: map the code that uses them, write [secret] for values")
@@ -2437,8 +2488,8 @@ def decide(data):
             return (f"the qa-explorer tests through the browser only: {tool} is not one of its tools "
                     "(Bash, Read, Write, Grep, Glob and the browser_* MCP tools)")
         for raw in tool_paths(tin) if tool in WRITE_TOOLS else ():
-            target = Path(os.path.realpath(os.path.join(cwd, expand(raw or "x"))))
-            if (target.name == ".active" and target.parent.name == "qa-out") or str(target) == os.path.realpath(CONFIG):
+            target = Path(realpath(os.path.join(cwd, expand(raw or "x"))))
+            if (target.name == ".active" and target.parent.name == "qa-out") or str(target) == realpath(CONFIG):
                 return "the run marker belongs to the calling skill: read it if you like, but leave it unchanged and carry on testing"
             if not explorer_write_ok(str(target), cwd):
                 return ("the explorer writes only its run files: <out>/bugs/BUG-<n>.md, <out>/repro/BUG-<n>.spec.ts, "
@@ -2448,7 +2499,7 @@ def decide(data):
             if tool == "Glob":  # the pattern up to its first `**`, joined to the search path
                 base, pattern = raw or ".", str(tin.get("pattern") or "")
                 raw = os.path.join(base, re.split(r"(?:^|/)\*\*", pattern)[0])
-                if "**" in pattern and in_profile_area(os.path.realpath(os.path.join(cwd, expand(base)))):
+                if "**" in pattern and in_profile_area(realpath(os.path.join(cwd, expand(base)))):
                     return PROFILE_REASON  # `**/Cookies` from the data folder lists the profile
             if raw and in_profile_root(raw, {cwd}):
                 return PROFILE_REASON
@@ -2484,7 +2535,7 @@ def _clean(obj, depth=0):
 
 
 def mentions_data_dir(text):
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = realpath(os.path.expanduser("~"))
     rel = DATA_DIR[len(home):] if DATA_DIR.startswith(home + os.sep) else None
     return DATA_DIR in text or bool(rel) and any(f + rel in text for f in ("~", "$HOME", "${HOME}"))
 

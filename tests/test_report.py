@@ -250,7 +250,7 @@ class Marker(Base):
 class BrowserOpen(Base):
     def test_command_env_and_profile(self):
         self.config(browser="msedge")
-        with mock.patch.object(qm.subprocess, "run", return_value=done(3)) as run, \
+        with mock.patch.object(subprocess, "run", return_value=done(3)) as run, \
                 mock.patch.dict(os.environ, PLAYWRIGHT_MCP_STORAGE_STATE="/tmp/s.json", PLAYWRIGHT_MCP_ISOLATED="true"):
             code = qm.main(["browser-open", "--session", "qa-login", "--headed", "https://qa.example/"])
         self.assertEqual(code, 3)  # playwright-cli's exit code
@@ -265,7 +265,7 @@ class BrowserOpen(Base):
         self.assertEqual(run.call_count, 2)
         for d in (profile, profile.parent):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
-        with mock.patch.object(qm.subprocess, "run", return_value=done(0)) as run:
+        with mock.patch.object(subprocess, "run", return_value=done(0)) as run:
             self.assertEqual(qm.main(["browser-open"]), 0)
         self.assertEqual(run.call_args[0][0], ["playwright-cli", "-s=qa", "open", "--browser=msedge", "--profile", str(profile)])
         self.assertEqual(run.call_args_list[0][0][0], ["playwright-cli", "-s=qa-login", "close"])
@@ -273,17 +273,17 @@ class BrowserOpen(Base):
     def test_profile_in_use_says_close_the_other_browser(self):  # r6: playwright-cli's hint was --isolated (no login)
         self.config(browser="chrome")
         msg = "Error: Browser is already in use for /x/profiles/main, use --isolated to run multiple instances"
-        with mock.patch.object(qm.subprocess, "run", side_effect=[done(0), done(0, out=msg)]):
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=msg)]):
             code, out, err = cli("browser-open", "https://qa.example/")
         self.assertEqual(code, 1)  # an error even if playwright-cli exited 0
         self.assertTrue(err.startswith("browser-open: Browser is already in use: another qa-sdet browser"), err)
         self.assertIn("Close the other qa-sdet browser", err)
         self.assertIn(msg, out)  # the original output is still shown
-        with mock.patch.object(qm.subprocess, "run", side_effect=[OSError("gone"), done(0, out="opened")]):
+        with mock.patch.object(subprocess, "run", side_effect=[OSError("gone"), done(0, out="opened")]):
             self.assertEqual(cli("browser-open")[:2], (0, "opened"))  # a failing close never blocks the open
 
     def test_refusals(self):
-        with mock.patch.object(qm.subprocess, "run") as run:
+        with mock.patch.object(subprocess, "run") as run:
             self.config(browser="safari")
             self.assertEqual(cli("browser-open", "https://x")[0], 2)
             self.config(browser="chrome")
@@ -293,7 +293,7 @@ class BrowserOpen(Base):
         run.assert_not_called()
 
     def test_config_errors_say_where_and_signal_exit(self):  # r9: "got None" named no file; -15 became exit 241
-        with mock.patch.object(qm.subprocess, "run") as run:
+        with mock.patch.object(subprocess, "run") as run:
             qm.CONFIG.unlink(missing_ok=True)
             code, _, err = cli("browser-open")
             self.assertEqual(code, 2)
@@ -305,7 +305,7 @@ class BrowserOpen(Base):
             self.assertIn(f'set "browser" in {qm.CONFIG}', cli("browser-open")[2])
         run.assert_not_called()
         self.config(browser="chrome")
-        with mock.patch.object(qm.subprocess, "run", return_value=done(-15)):
+        with mock.patch.object(subprocess, "run", return_value=done(-15)):
             self.assertEqual(qm.main(["browser-open"]), 143)
 
 
@@ -1017,12 +1017,12 @@ class SetupPermissions(Base):
             os.chmod(d, 0o755)
         self.assertEqual((code, s.read_text()), (2, "{}"))
         self.assertIn("can't write", err)
-        real = qm.tempfile.mkstemp
+        real = tempfile.mkstemp
 
         def racing(*a, **k):
             s.write_text('{"model": "saved meanwhile"}')
             return real(*a, **k)
-        with mock.patch.object(qm.tempfile, "mkstemp", racing):
+        with mock.patch.object(tempfile, "mkstemp", racing):
             code, _, err = cli("setup-permissions", "--settings", str(s), "--apply")
         self.assertEqual(code, 2)
         self.assertIn("changed while merging", err)
@@ -1119,7 +1119,7 @@ class Doctor(Base):
             self.assertIn("ok   signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)",
                           out.getvalue())
             self.assertEqual(cli("login-ok", "x")[0], 2)
-            with mock.patch.object(qm.subprocess, "run", return_value=done(0)):
+            with mock.patch.object(subprocess, "run", return_value=done(0)):
                 self.config(app="x", browser="chrome")
                 qm.main(["browser-open"])  # a test run keeps the sign-in
                 self.assertTrue(qm.signed_in_stamp().exists())

@@ -79,6 +79,39 @@ class CodeMap(unittest.TestCase):
         self.assertGreater(s["tokens"], 0)
         self.assertTrue(s["areas"]["tests"]["needs_mapper"])
 
+    def test_lookaheads_cover_every_first_character(self):  # perf r12: editing one of these patterns must update its (?=[...])
+        try:
+            from re import _constants as C, _parser as P
+        except ImportError:  # Python < 3.11
+            import sre_constants as C, sre_parse as P
+
+        def first(items):  # the characters a match can start with; None: could be any
+            for op, av in items:
+                if op is C.AT:  # ^, \b: zero-width
+                    continue
+                if op is C.LITERAL:
+                    return {chr(av)}
+                if op is C.SUBPATTERN:
+                    return first(list(av[-1]))
+                if op is C.BRANCH:
+                    sets = [first(list(alt)) for alt in av[1]]
+                    return None if None in sets else set().union(*sets)
+                if op is C.IN and all(o in (C.LITERAL, C.RANGE) for o, _ in av):
+                    return {chr(a) for o, a in av if o is C.LITERAL} | {
+                        chr(c) for o, a in av if o is C.RANGE for c in range(a[0], a[1] + 1)}
+                if op in (C.MAX_REPEAT, C.MIN_REPEAT) and av[0] >= 1:
+                    return first(list(av[2]))
+                return None
+            return None
+
+        for name in ("TESTS_IMPORT_RE", "BACKEND_RE", "SERVER_SIGNAL_RE", "SCHEMA_RE"):
+            p = getattr(qm, name)
+            items = list(P.parse(p.pattern, p._flags))
+            self.assertIs(items[0][0], C.ASSERT, name)
+            starts = first(items[1:])
+            self.assertIsNotNone(starts, name)
+            self.assertLessEqual(starts, first(list(items[0][1][1])), name)
+
     def test_classify_source(self):
         c = qm.classify_source
         self.assertEqual(c("src/app/app.routes.ts", "export const routes: Routes = [{ path: 'zones' }]"), "frontend")

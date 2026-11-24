@@ -11,24 +11,35 @@ v0.4 run folders (qa-out/<date>-<label>/): `rundir` makes one, explorers write .
 like run.json), and `report` renders REPORT.md + qa-out/README.md from .data/plan.json and those files.
 Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) keep skill commands to one shape.
 """
-import hashlib
 import json
-import subprocess
 import os
 import re
 import sqlite3
 import stat
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+# hashlib, subprocess, tempfile and urllib.parse are imported in the functions that use them (~10 ms of start-up):
+# card, bugs and marker need none of them, a Stop hook with nothing new only hashlib
 
 try:
     import fcntl
 except ImportError:  # shortcut: no file lock on Windows; fine while one session runs QA at a time
     fcntl = None
+
+
+class _LazyRe:
+    """re.compile on first use: compiling all ~66 patterns costs ~11 ms of start-up, and most runs (a Stop hook with
+    nothing new, card, marker) use few or none of them. After first use the pattern's methods sit on the instance."""
+    def __init__(self, pattern, flags=0):
+        self.pattern, self._flags = pattern, flags
+
+    def __getattr__(self, name):
+        rx = re.compile(self.pattern, self._flags)
+        self.__dict__.update((n, getattr(rx, n)) for n in ("search", "match", "fullmatch", "findall", "finditer", "sub", "split"))
+        return getattr(rx, name)
+
 
 CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
 DATA_DIR = Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser()
@@ -129,6 +140,7 @@ def txt(v, field):
 
 def norm_route(r):
     """'/form.html', 'http://host/form.html?x=1', '/form.html/' -> '/form.html'. Keeps SPA hash routes (#/..., #!/...)."""
+    from urllib.parse import urlsplit
     r = str(r or "").strip()
     if not r:
         return ""
@@ -143,7 +155,7 @@ def norm_route(r):
     return path + (f"#{bang}{frag}" if frag else "")
 
 
-ID_SEGMENT = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
+ID_SEGMENT = _LazyRe(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
                         r":\w+|\{\w+\}|\[\.{0,3}\w+\]|<[^/>]+>|\$\{[^}/]*\}", re.I)  # route params: :id, {id}, [id], <id>
 
 
@@ -162,6 +174,7 @@ def norm(s):
 
 
 def bug_hash(route, symptom):
+    import hashlib
     return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode()).hexdigest()[:12]
 
 
@@ -429,60 +442,62 @@ def ingest_pending(root):
 
 
 # ---------- redaction: secrets must not reach drafts the user files, or the DB ----------
-SECRET_HEADERS = ("authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
-                  "x-xsrf-token|x-amz-security-token")
+# (?=[...]): the first letters of the names, so (?i) passes skip most positions without trying every name (~25% faster)
+SECRET_HEADERS = ("(?=[acpsx])(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
+                  "x-xsrf-token|x-amz-security-token)")
 # Any name ending in one of these (PRIVATE_TOKEN, secret_key, bearerToken); not 'sid': site/segment IDs.
-SECRET_KEYS = ("[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
+SECRET_KEYS = ("[A-Za-z0-9_-]{0,40}?(?=[apst])(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
                "access[ _-]?key|account[ _-]?key|subscription[ _-]?key)|session[ _-]?id")  # also 'API key', 'Session ID'
-SECRET_NAME_RE = re.compile(rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid|jwt|"
+SECRET_NAME_RE = _LazyRe(rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid|jwt|"
                             rf"bearer)$")  # as a JSON key or header name only; in prose these are ordinary words
-# Literal tokens: safe to replace anywhere, including inside code and JSON strings.
+# Literal tokens: safe to replace anywhere, including inside code and JSON strings. A new pattern here, in
+# CLI_SECRET_RES or in the secret names needs a word of its match in REDACT_NEEDLES.
 LITERAL_REDACTIONS = [
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED-JWT]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"\bATATT[A-Za-z0-9_=-]{20,}"), "[REDACTED-ATLASSIAN-TOKEN]"),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"), "[REDACTED-GOOGLE-KEY]"),
-    (re.compile(r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}"), "[REDACTED-STRIPE-KEY]"),
+    (_LazyRe(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED-JWT]"),
+    (_LazyRe(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY]"),
+    (_LazyRe(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "[REDACTED-GITHUB-TOKEN]"),
+    (_LazyRe(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
+    (_LazyRe(r"\bgithub_pat_[A-Za-z0-9_]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
+    (_LazyRe(r"\bATATT[A-Za-z0-9_=-]{20,}"), "[REDACTED-ATLASSIAN-TOKEN]"),
+    (_LazyRe(r"\bAIza[0-9A-Za-z_-]{30,}"), "[REDACTED-GOOGLE-KEY]"),
+    (_LazyRe(r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}"), "[REDACTED-STRIPE-KEY]"),
     # sk-ant-…, sk-proj-…: a digit somewhere, so CSS classes like sk-folding-cube-container stay
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), lambda m: "[REDACTED-API-KEY]" if re.search(r"\d", m.group(0)) else m.group(0)),
-    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"), "[REDACTED-GITLAB-TOKEN]"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:(?!-----BEGIN )[\s\S]){0,20000}?-----END [A-Z ]*PRIVATE KEY-----|(?:\s*[A-Za-z0-9+/=]{16,})*)"),
+    (_LazyRe(r"\bsk-[A-Za-z0-9_-]{20,}"), lambda m: "[REDACTED-API-KEY]" if re.search(r"\d", m.group(0)) else m.group(0)),
+    (_LazyRe(r"\bglpat-[A-Za-z0-9_-]{20,}"), "[REDACTED-GITLAB-TOKEN]"),
+    (_LazyRe(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:(?!-----BEGIN )[\s\S]){0,20000}?-----END [A-Z ]*PRIVATE KEY-----|(?:\s*[A-Za-z0-9+/=]{16,})*)"),
      "[REDACTED-PRIVATE-KEY]"),
     # a token, not a word: "Bearer acknowledgements" in prose stays
-    (re.compile(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9\-._~+/]*[0-9._~+/-])[A-Za-z0-9\-._~+/]{16,}=*"),
+    (_LazyRe(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9\-._~+/]*[0-9._~+/-])[A-Za-z0-9\-._~+/]{16,}=*"),
      r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)\b(bearer\s+\$\{\s*[\"'])(?!\[REDACTED)[^\"'\n]{8,}(?=[\"'])"), r"\1[REDACTED]"),  # `Bearer ${'tok'}`
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s:@\"'`]*:[^/\s@\"'`]+@"), r"\1[REDACTED]@"),
-    (re.compile(r"(?i)\b(jsessionid|phpsessid|asp\.net_sessionid|connect\.sid)=(?!\[REDACTED)[^;\s\"'`&]+"),
+    (_LazyRe(r"(?i)\b(bearer\s+\$\{\s*[\"'])(?!\[REDACTED)[^\"'\n]{8,}(?=[\"'])"), r"\1[REDACTED]"),  # `Bearer ${'tok'}`
+    (_LazyRe(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s:@\"'`]*:[^/\s@\"'`]+@"), r"\1[REDACTED]@"),
+    (_LazyRe(r"(?i)\b(jsessionid|phpsessid|asp\.net_sessionid|connect\.sid)=(?!\[REDACTED)[^;\s\"'`&]+"),
      r"\1=[REDACTED]"),
     # ?key=: only a key-looking value (a digit, 12+ chars); `?key=password` sorts a table
-    (re.compile(r"(?i)([?&]key=)(?!\[REDACTED)(?=[^&\s\"'`#]*\d)[^&\s\"'`#]{12,}"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)(\b(?:sid|session)[\"']?\s*[:=]\s*[\"']?)(?!\[REDACTED|/)[A-Za-z0-9%._~+/-]{16,}"), r"\1[REDACTED]"),  # session-length only
+    (_LazyRe(r"(?i)([?&]key=)(?!\[REDACTED)(?=[^&\s\"'`#]*\d)[^&\s\"'`#]{12,}"), r"\1[REDACTED]"),
+    (_LazyRe(r"(?i)(\b(?:sid|session)[\"']?\s*[:=]\s*[\"']?)(?!\[REDACTED|/)[A-Za-z0-9%._~+/-]{16,}"), r"\1[REDACTED]"),  # session-length only
     # not ?code=: usually an ordinary value (road/segment codes); an OAuth code is single-use and short-lived
-    (re.compile(r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey|"
+    (_LazyRe(r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey|"
                 r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)(?!\[REDACTED|<|\$\{|\{|:\w)"
                 r"[^&\s\"'`#]+"), r"\1[REDACTED]"),
 ]
 # one whitespace run unless a quote or backslash splits it: two adjacent runs made a long run of spaces quadratic
 # (`**Password:** x`, `password: \`x\``: Markdown's bold marks and backticks sit around the separator)
 _SEP = r"([ \t]*[*_]{0,3}(?:(?:\\[\"']?|[\"'])[ \t]*)?[:=][*_]{0,3}[ \t]*\\?[\"'`]?)"
-HEADER_VALUE_RE = re.compile(rf"(?im)\b({SECRET_HEADERS})\b{_SEP}(?!\[REDACTED)"
+HEADER_VALUE_RE = _LazyRe(rf"(?im)\b({SECRET_HEADERS})\b{_SEP}(?!\[REDACTED)"
                              rf"((?:(?!\b(?:{SECRET_HEADERS})\b[ \t]*[:=])[^\n\"'`\\}}])+)")
-KEY_VALUE_RE = re.compile(rf"(?i)\b({SECRET_KEYS})\b{_SEP}(?!\[REDACTED|[=<>!~])([^\s\"'\\`]+)")  # not `token == null`
-VALUE_END_RE = re.compile(r"[&;,](?=[\w.-]+=)|\}")  # where the value stops: `&next=`, `; Path=`, a closing `,` or `}`
+KEY_VALUE_RE = _LazyRe(rf"(?i)\b({SECRET_KEYS})\b{_SEP}(?!\[REDACTED|[=<>!~])([^\s\"'\\`]+)")  # not `token == null`
+VALUE_END_RE = _LazyRe(r"[&;,](?=[\w.-]+=)|\}")  # where the value stops: `&next=`, `; Path=`, a closing `,` or `}`
 # credentials on a command line or stated in a sentence ("the password is …"): redacted when the value looks like one
 CLI_SECRET_RES = [
-    re.compile(r"(?i)(\bcurl\b[^\n|;&]{0,300}?\s(?:-u|--user)[ =]*[\"']?[^\s:\"'/]+[\"']?:[\"']?)()(?!\[REDACTED|//)([^\s\"']+)"),
-    re.compile(r"(?i)(\b(?:mysql|mysqldump|mariadb)\b[^\n|;&]{0,300}?\s-p)()(?!\[REDACTED)([^\s\"']+)"),
-    re.compile(r"(?i)(\b(?:password|passwd|passcode|pwd))(\s+(?:is|was)\s+[\"']?)(?!\[REDACTED)([^\s\"'.,;]+)"),
+    _LazyRe(r"(?i)(\bcurl\b[^\n|;&]{0,300}?\s(?:-u|--user)[ =]*[\"']?[^\s:\"'/]+[\"']?:[\"']?)()(?!\[REDACTED|//)([^\s\"']+)"),
+    _LazyRe(r"(?i)(\b(?:mysql|mysqldump|mariadb)\b[^\n|;&]{0,300}?\s-p)()(?!\[REDACTED)([^\s\"']+)"),
+    _LazyRe(r"(?i)(\b(?:password|passwd|passcode|pwd))(\s+(?:is|was)\s+[\"']?)(?!\[REDACTED)([^\s\"'.,;]+)"),
 ]
 HARMLESS = {"null", "none", "true", "false", "undefined", "required", "optional", "n/a", "na", "empty", "hidden"}
 
 
-TYPE_WORD_RE = re.compile(r"(?i)(u?int|float|sha|hs|rs|es|uuidv?|utf-?|md|oauth|ipv|http|base|h)\d+")  # uuid4, HS256, int64
+TYPE_WORD_RE = _LazyRe(r"(?i)(u?int|float|sha|hs|rs|es|uuidv?|utf-?|md|oauth|ipv|http|base|h)\d+")  # uuid4, HS256, int64
 COOKIE_ATTRS = {"samesite", "httponly", "secure", "path", "domain", "maxage", "expires", "priority", "partitioned"}
 
 
@@ -512,7 +527,7 @@ def _secret_looking(v):
     return " " not in v and bool(re.search(r"\d", v)) and len(v) >= 4 and (_tokenish(v) or not v.isalnum())
 
 
-BASIC_RE = re.compile(r"(?i)\b(basic)(\s+)(?!\[REDACTED)([A-Za-z0-9+/]{6,}={0,2})(?![A-Za-z0-9+/=])")
+BASIC_RE = _LazyRe(r"(?i)\b(basic)(\s+)(?!\[REDACTED)([A-Za-z0-9+/]{6,}={0,2})(?![A-Za-z0-9+/=])")
 
 
 def redact_literals(text):
@@ -523,8 +538,8 @@ def redact_literals(text):
                         else m.group(0), text)
 
 
-AUTH_SCHEME_RE = re.compile(r"(\s*(?:bearer|basic|token|digest|negotiate|ntlm|aws4-hmac-sha256)\s+)(\S+)", re.I)
-COOKIE_PAIRS_RE = re.compile(r"\s*(?:[^\s;=]+=[^\s;]*;?\s*)+")
+AUTH_SCHEME_RE = _LazyRe(r"(\s*(?:bearer|basic|token|digest|negotiate|ntlm|aws4-hmac-sha256)\s+)(\S+)", re.I)
+COOKIE_PAIRS_RE = _LazyRe(r"\s*(?:[^\s;=]+=[^\s;]*;?\s*)+")
 
 
 def _basic_credentials(tok):
@@ -568,11 +583,11 @@ def _header_value(val, name=""):
     return val
 
 
-QUOTED_SECRET_RE = re.compile(rf"(?i)\b({SECRET_KEYS})\b([ \t]*(?:[\"'][ \t]*)?[:=][ \t]*)([\"'])(?!\[REDACTED)([^\"'\n]{{4,}})\3")
+QUOTED_SECRET_RE = _LazyRe(rf"(?i)\b({SECRET_KEYS})\b([ \t]*(?:[\"'][ \t]*)?[:=][ \t]*)([\"'])(?!\[REDACTED)([^\"'\n]{{4,}})\3")
 
 
 # a quoted sentence after a secret name is the app's message ("Password is too short"), not a passphrase ("correct horse battery")
-MESSAGE_WORD_RE = re.compile(r"(?i)\b(is|are|was|has|have|must|be|or|not|the|too|at|to|required|invalid|expired|missing|cannot|"
+MESSAGE_WORD_RE = _LazyRe(r"(?i)\b(is|are|was|has|have|must|be|or|not|the|too|at|to|required|invalid|expired|missing|cannot|"
                              r"can't|should|does|did|field|wrong|incorrect|failed|match|least|most|your|enter|please|short|long|weak)\b")
 
 
@@ -599,9 +614,9 @@ def _assigned_secret(v):
 
 # `user / password: qa / Passw0rd!`: up to six labels and as many values, each joined by `/`; a value goes with its
 # label. A label starts a word (not after `-`), so a long hyphenated or base64url run is scanned once, not from every `-`.
-PAIRED_RE = re.compile(r"(?i)(?<![\w-])((?:[\w-]+(?:[ \t][\w-]+)?[ \t]*/[ \t]*){1,5}[\w-]+(?:[ \t][\w-]+)?)"
+PAIRED_RE = _LazyRe(r"(?i)(?<![\w-])((?:[\w-]+(?:[ \t][\w-]+)?[ \t]*/[ \t]*){1,5}[\w-]+(?:[ \t][\w-]+)?)"
                        r"([ \t]*[*_]{0,3}[ \t]*[:=][*_]{0,3}[ \t]*)((?:[^\s/|]+[ \t]*/[ \t]*){1,5}[^\s/|]+)")
-SECRET_LABEL_RE = re.compile(rf"(?i)(?:{SECRET_KEYS})$")  # a label ending in a secret name: `Confirm password`, `API key`
+SECRET_LABEL_RE = _LazyRe(rf"(?i)(?:{SECRET_KEYS})$")  # a label ending in a secret name: `Confirm password`, `API key`
 
 
 def _paired(m):
@@ -616,11 +631,39 @@ def _paired(m):
     return m.group(1) + m.group(2) + "/".join(out)
 
 
-TABLE_ROW_RE = re.compile(rf"(?im)(\|[ \t]*`?(?:{SECRET_HEADERS}|{SECRET_KEYS})`?[ \t]*\|[ \t]*`?)(?!\[REDACTED)([^|\n`]+?)(`?[ \t]*\|)")
+TABLE_ROW_RE = _LazyRe(rf"(?im)(\|[ \t]*`?(?:{SECRET_HEADERS}|{SECRET_KEYS})`?[ \t]*\|[ \t]*`?)(?!\[REDACTED)([^|\n`]+?)(`?[ \t]*\|)")
+
+
+# Every pass of redact() needs one of these, in lower case, inside its match (a secret name, a token prefix, '://' of
+# URL credentials, 'key=' of a query key). ASCII text with none of them comes back as it is, skipping ~30 regex passes:
+# most strings of a run JSON or HAR ('PASS', '/zones', '200'). Non-ASCII text always takes the passes: (?i) matches
+# 'ſ' for 's' and the Kelvin sign for 'k'.
+KEY_WORDS = ("passw", "pwd", "secret", "token", "api", "private", "access", "account", "subscription", "session")  # SECRET_KEYS
+HEADER_WORDS = ("authorization", "cookie", "api", "token")  # SECRET_HEADERS
+REDACT_NEEDLES = (*KEY_WORDS, *HEADER_WORDS, "passcode", "sid", "bearer", "basic", "credential", "sig", "key=", "://",
+                  "eyj", "akia", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xox", "github_pat_", "atatt", "aiza",
+                  "k_live_", "k_test_", "sk-", "glpat-", "-----begin", "curl", "mysql", "mariadb")
+
+
+def _sub_lines(pattern, repl, text, words):
+    """pattern.sub on only the lines that hold one of `words` (lower case), for the single-line passes of redact():
+    test_qa_mem checks those patterns can't match a newline. A big log names a secret on a few lines."""
+    if "\n" not in text or not text.isascii():  # (?i) folds 'ſ' and the Kelvin sign: the word test is exact for ASCII
+        return pattern.sub(repl, text)
+    lines = text.split("\n")
+    for k, line in enumerate(lines):
+        low = line.lower()
+        if any(w in low for w in words):
+            lines[k] = pattern.sub(repl, line)
+    return "\n".join(lines)
 
 
 def redact(text):
     """Prose and log text: literal tokens plus secret-looking values of secret-named headers and keys."""
+    if text.isascii():
+        low = text.lower()
+        if not any(n in low for n in REDACT_NEEDLES):
+            return text
     def sub(m):  # `password=Tr0ub4dor&3` is one value; `password=x&user=qa` and `password: x,` end at the mark
         if m.group(2)[-1:] in "\"'`" and m.string[m.end():m.end() + 1] == " ":
             return m.group(0)  # the first word of a quoted sentence: QUOTED_SECRET_RE has judged the whole of it
@@ -635,10 +678,11 @@ def redact(text):
     for _ in range(5):  # a value ends early now, so a second header on the same line needs another pass
         before = text
         text = redact_literals(text)
-        text = QUOTED_SECRET_RE.sub(_quoted_secret, text)
-        text = HEADER_VALUE_RE.sub(lambda m: m.group(1) + m.group(2) + _header_value(m.group(3), m.group(1)), text)
-        text = KEY_VALUE_RE.sub(sub, text)
-        text = PAIRED_RE.sub(_paired, text)
+        text = _sub_lines(QUOTED_SECRET_RE, _quoted_secret, text, KEY_WORDS)
+        text = _sub_lines(HEADER_VALUE_RE, lambda m: m.group(1) + m.group(2) + _header_value(m.group(3), m.group(1)), text,
+                          HEADER_WORDS)
+        text = _sub_lines(KEY_VALUE_RE, sub, text, KEY_WORDS)
+        text = _sub_lines(PAIRED_RE, _paired, text, KEY_WORDS)  # (_paired changes only values under a secret label)
         text = TABLE_ROW_RE.sub(lambda m: m.group(1) + ("[REDACTED]" if (_secret_looking if " " in m.group(2).strip()
                                                                           else _assigned_secret)(m.group(2)) else m.group(2))
                                 + m.group(3), text)  # `| api_key | 4f3c… |`
@@ -680,6 +724,7 @@ CODE_SUFFIXES = {".ts", ".js", ".mjs", ".cjs", ".py"}
 
 
 def scrub_file(f):
+    import tempfile
     try:
         before = f.stat()
         text = f.read_text()
@@ -729,17 +774,22 @@ def scrub_tree(root, budget=4.0):
     except (OSError, ValueError):
         since, cursor = 0.0, ""
     started = time.time()
-    todo = []
-    for f in root.rglob("*"):
-        try:
-            if f.is_file() and not f.is_symlink() and f.suffix in PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES:
-                st = f.stat()
+    todo, suffixes = [], PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES
+    for folder, _, names in os.walk(root):  # no stat for folders, images or other files this never scrubs (sorted below)
+        for name in names:
+            # Path.suffix is '' or the text from the last dot: most names (images) fail the cheap test first
+            if name[name.rfind("."):] not in suffixes or Path(name).suffix not in suffixes:
+                continue
+            f = os.path.join(folder, name)
+            try:
+                st = os.lstat(f)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):  # not a symlink, fifo or socket
                 # ctime too: a draft copied in with its old mtime (cp -a, a restored backup) is new here
-                key = (max(st.st_mtime, st.st_ctime), str(f))
+                key = (max(st.st_mtime, st.st_ctime), f)
                 if (key > (since, cursor) if cursor else key[0] >= since - 2) and st.st_size < 20_000_000:
                     todo.append(key)
-        except OSError:
-            continue
     todo.sort()
     done = None
     for mtime, name in todo:
@@ -769,6 +819,7 @@ def _pending(root):
     """[(file, bytes, mtime, sha1)] for run.json and code-map-*.json whose content changed since its last
     ingest, oldest first. Sentinels hold the sha1 of the file they cover, so clock skew or copied mtimes can't
     cause loops."""
+    import hashlib
     out = []
     for f in [*root.rglob("run.json"), *root.glob("*/.data/run-*.json"),  # old layout, then run folders
               *(root / "init").glob("code-map-*.json")]:  # code maps: qa-out/init only
@@ -777,7 +828,8 @@ def _pending(root):
         except OSError:
             continue
         digest = hashlib.sha1(data).hexdigest()
-        if digest not in (_first_line(f.with_name(f.name + ".ingested")), _first_line(f.with_name(f.name + ".error"))):
+        if (_first_line(f.with_name(f.name + ".ingested")) != digest  # (.error is read only when this one doesn't match)
+                and _first_line(f.with_name(f.name + ".error")) != digest):
             out.append((f, data, mtime, digest))
     return sorted(out, key=lambda x: x[2])
 
@@ -822,33 +874,36 @@ TEMPLATE_SUFFIXES = {".cshtml", ".razor", ".erb", ".jsp", ".twig", ".hbs", ".njk
 BACKEND_SUFFIXES = {".py", ".java", ".kt", ".cs", ".go", ".rb", ".php"}
 SPEC_SUFFIXES = {".yaml", ".yml", ".json"}
 # Never read: secret stores and keys (source files are judged on content; literal secrets are scrubbed at ingest).
-SECRET_FILE_RE = re.compile(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
+SECRET_FILE_RE = _LazyRe(r"(?i)^\.env|\.(pem|key|p12|pfx|jks|keystore|crt|cer|kdbx)$|^secrets?\.(json|ya?ml|env|"
                             r"properties|ini|toml|txt|xml)$|^credentials?\.(json|xml|ya?ml|ini|toml|txt)$|"
                             r"^id_(rsa|ed25519|ecdsa|dsa)|^\.(npmrc|netrc|pgpass|pypirc|dockercfg)$|^appsettings\.\w+\.json$|"
                             r"^secrets?\.(py|rb|php|go|java|kt|cs)$|^credentials?\.(py|rb|php|go)$|^wp-config\.php$")
-GENERATED_FILE_RE = re.compile(r"(?i)\.min\.(js|css)$|\.map$|^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
+GENERATED_FILE_RE = _LazyRe(r"(?i)\.min\.(js|css)$|\.map$|^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
                                r"composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock)$|\.(bundle|chunk)\.js$|\.d\.ts$|"
                                r"\.generated\.|\.g\.(ts|cs)$")
 TEST_WORDS = {"test", "tests", "spec", "specs", "cypress", "playwright", "selenium", "pageobject", "pageobjects", "pom"}
-TEST_NAME_RE = re.compile(r"(?i)\.(spec|test|cy|e2e|po)\.\w+$")
-UNIT_TEST_RE = re.compile(r"(?i)\.(spec|test)\.\w+$|(^|/)test_\w+\.py$|\b(describe|it|test)\(\s*['\"`]|import\s+pytest|"
+TEST_NAME_RE = _LazyRe(r"(?i)\.(spec|test|cy|e2e|po)\.\w+$")
+UNIT_TEST_RE = _LazyRe(r"(?i)\.(spec|test)\.\w+$|(^|/)test_\w+\.py$|\b(describe|it|test)\(\s*['\"`]|import\s+pytest|"
                           r"@Test\b|\[Fact\]|\[Test\]")
-TESTS_RE = re.compile(r"get_by_(test_id|role|label|text|placeholder|alt_text|title)\(|GetBy(TestId|Role|Label|Text|Placeholder|"
+TESTS_RE = _LazyRe(r"get_by_(test_id|role|label|text|placeholder|alt_text|title)\(|GetBy(TestId|Role|Label|Text|Placeholder|"
                       r"AltText|Title)\(|\.Locator\(|By\.(ID|CSS_SELECTOR|XPATH|NAME|CLASS_NAME|LINK_TEXT)\b|"
                       r"By\.(Id|CssSelector|XPath|Name|ClassName|LinkText)\(|\[FindsBy|"
                       r"getBy(TestId|Role|Label|Text|Placeholder|AltText|Title)\(|page\.(locator|fill|click|check|type|"
                       r"selectOption)\(|\.locator\(|cy\.(get|findBy\w+|contains)\(|By\.(id|css|cssSelector|xpath|name|"
                       r"className|linkText|tagName)\(|@FindBy\(|\$\$?\(['\"`]|data-testid|data-test|data-cy")
-TESTS_IMPORT_RE = re.compile(r"""from\s+['"]@playwright/test['"]|require\(\s*['"]@playwright/test|from\s+['"]cypress|"""
+# The (?=[...]) in front of the next four: every match starts with one of those characters, so re skips other positions
+# without trying each alternative there (codemap-scan ~30% faster). test_codemap derives the sets from the patterns.
+TESTS_IMPORT_RE = _LazyRe(r"(?=[bcfipruw])(?:" r"""from\s+['"]@playwright/test['"]|require\(\s*['"]@playwright/test|from\s+['"]cypress|"""
                              r"""\bcy\.(visit|get)\(|^from\s+selenium|^import\s+org\.openqa\.selenium|webdriverio|"""
                              r"""from\s+['"]@testing-library|\bbrowser\.\$\(|^from\s+playwright\.(sync_api|async_api)|"""
                              r"""^using\s+(Microsoft\.Playwright|OpenQA\.Selenium)|^import\s+com\.microsoft\.playwright|"""
-                             r"""^(from|import)\s+behave\b|pytest_bdd""", re.M)
-PO_CLASS_RE = re.compile(r"\bclass\s+\w*(Page|Screen|Po|PO)(Object)?\b")
-PO_CALL_RE = re.compile(r"\bpage\.getBy\w+\(|\.locator\(|\bGetBy(Role|TestId|Label|Text|Placeholder|AltText|Title)\(|"
+                             r"""^(from|import)\s+behave\b|pytest_bdd)""", re.M)
+PO_CLASS_RE = _LazyRe(r"\bclass\s+\w*(Page|Screen|Po|PO)(Object)?\b")
+PO_CALL_RE = _LazyRe(r"\bpage\.getBy\w+\(|\.locator\(|\bGetBy(Role|TestId|Label|Text|Placeholder|AltText|Title)\(|"
                         r"\.Locator\(|FindElement\(By\.|@FindBy\(|\bget_by_(role|test_id|label|text|placeholder|alt_text|"
                         r"title)\(|\bcy\.get\(")  # not repository calls (GetByIdAsync, get_by_email)
-BACKEND_RE = re.compile(
+BACKEND_RE = _LazyRe(
+    r"(?=[\-.@AFR\[abcefgmpqrsuv])(?:"
     r"@(Get|Post|Put|Patch|Delete|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|Controller|"
     r"RestController|Path|GET|POST|PUT|DELETE|PATCH)\b|"                      # Spring, Nest, JAX-RS
     r"\b(router|app|server|fastify|v1|api_router|blueprint)\.(get|post|put|patch|delete|route)\(\s*['\"`]/|"  # express-ish
@@ -864,52 +919,52 @@ BACKEND_RE = re.compile(
     r"Rails\.application\.routes|\bresources\s+:|\bvalidates\s+:|params\.require\(|"                 # Rails
     r"Route::(get|post|put|patch|delete|resource|apiResource)\(|extends\s+FormRequest|->validate\(\[|"    # Laravel
     r"\bmodels\.\w+Field\(|forms\.ModelForm|\bmarshmallow\b|\brouting\s*\{|"                          # Django, Ktor
-    r"\b(body|query|param|check)\(\s*['\"][\w.]+['\"]\s*\)\s*\.(is\w+|not\w*|matches|exists)")
-FRONTEND_RE = re.compile(r"\bpath\s*:\s*['\"`]|<Route\b|createBrowserRouter|createHashRouter|RouterModule|\bRoutes\b|"
+    r"\b(body|query|param|check)\(\s*['\"][\w.]+['\"]\s*\)\s*\.(is\w+|not\w*|matches|exists))")
+FRONTEND_RE = _LazyRe(r"\bpath\s*:\s*['\"`]|<Route\b|createBrowserRouter|createHashRouter|RouterModule|\bRoutes\b|"
                          r"createRouter\(|vue-router|data-testid|data-test=|data-cy|aria-label|formControlName|"
                          r"Validators\.|\bv-model|\bng-model|\byup\.|\bz\.(object|string|number)|useForm\(|register\(|"
                          r"\b(required|maxLength|minLength|pattern)\b|\b(min|max)=|\bfetch\(|\baxios\b|HttpClient|\$http|"
                          r"\buseQuery\(|\bapiClient\b|['\"`]/api/|<template\b|@Component\(|export\s+default\s+defineComponent|"
                          r"\b\w*(api|http|client|request)\w*\.(get|post|put|patch|delete)\s*(<[^()]*?>)?\s*\(")  # api.post<Z>('/zones')
-PAGE_DIR_RE = re.compile(r"(^|/)(app|pages|routes|views|screens)/")  # file-system routing (Next, Nuxt, SvelteKit, Remix)
-UI_SIGNAL_RE = re.compile(r"export\s+((async\s+)?function|const|let)\s+(load|loader|action|generateMetadata|"
+PAGE_DIR_RE = _LazyRe(r"(^|/)(app|pages|routes|views|screens)/")  # file-system routing (Next, Nuxt, SvelteKit, Remix)
+UI_SIGNAL_RE = _LazyRe(r"export\s+((async\s+)?function|const|let)\s+(load|loader|action|generateMetadata|"
                           r"getServerSideProps|getStaticProps)\b|['\"]use client['\"]|@Component\(|defineComponent|<template\b")
-UI_TAG_RE = re.compile(r"<[A-Za-z][\w.-]*[\s/>]")  # a tag; in .ts it would be a generic (Promise<Zone>)
-NOISE_FILE_RE = re.compile(r"(?i)\.(stories|story|fixtures?|mocks?)\.\w+$|(^|/)(__mocks__|mocks|__fixtures__|test-utils|"
+UI_TAG_RE = _LazyRe(r"<[A-Za-z][\w.-]*[\s/>]")  # a tag; in .ts it would be a generic (Promise<Zone>)
+NOISE_FILE_RE = _LazyRe(r"(?i)\.(stories|story|fixtures?|mocks?)\.\w+$|(^|/)(__mocks__|mocks|__fixtures__|test-utils|"
                            r"testing)/|(^|/)setupTests\.\w+$")
-BACKEND_WEAK_RE = re.compile(r"\b(openapi|swagger)\b|\bJoi\.|\bcelebrate\(|\bpydantic\b")  # backend languages only
-SERVER_SIGNAL_RE = re.compile(r"\bmongoose\.(Schema|model)\b|new\s+Schema\(|sequelize\.define|\bDataTypes\.|@(Column|Entity|"
+BACKEND_WEAK_RE = _LazyRe(r"\b(openapi|swagger)\b|\bJoi\.|\bcelebrate\(|\bpydantic\b")  # backend languages only
+SERVER_SIGNAL_RE = _LazyRe(r"(?=[(@Dkmnrs])(?:" r"\bmongoose\.(Schema|model)\b|new\s+Schema\(|sequelize\.define|\bDataTypes\.|@(Column|Entity|"
                               r"PrimaryGeneratedColumn)\b|@prisma/client|\bknex\.schema|\(\s*req\s*,\s*res\b|\breq\.(body|params|query)\b|"
-                              r"module\.exports\s*=\s*\{?\s*\w*(Controller|Service|Model|Repository)")
-SCHEMA_RE = re.compile(r"from\s+['\"](zod|yup|joi|class-validator|valibot|superstruct)['\"]|\bz\.object\(|\byup\.object\(|"
-                       r"\bJoi\.object\(|\bmarshmallow\b|validate:\"")
-PAGE_SIGNAL_RE = re.compile(r"\.goto\(|GotoAsync\(|GoToUrl\(|cy\.visit\(|\bnavigate(To)?\(|driver\.get\(|browser\.url\(|"
+                              r"module\.exports\s*=\s*\{?\s*\w*(Controller|Service|Model|Repository))")
+SCHEMA_RE = _LazyRe(r"(?=[Jfmvyz])(?:" r"from\s+['\"](zod|yup|joi|class-validator|valibot|superstruct)['\"]|\bz\.object\(|\byup\.object\(|"
+                       r"\bJoi\.object\(|\bmarshmallow\b|validate:\")")
+PAGE_SIGNAL_RE = _LazyRe(r"\.goto\(|GotoAsync\(|GoToUrl\(|cy\.visit\(|\bnavigate(To)?\(|driver\.get\(|browser\.url\(|"
                             r"\bclass\s+\w*(Page|Screen|Po|PO|Component|Dialog|Modal|Form|Panel|Section|Widget)(Object)?\b|"
                             r"(?i:(^|/)(pages|pom|po|steps?|page-?objects?|e2e|cypress|playwright)/)")
-SPEC_VERSION_RE = re.compile(r"(?m)^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d|[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d")
-CONFIG_FILE_RE = re.compile(r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|properties)$|(^|/)docker-compose[\w.-]*\.ya?ml$|"
+SPEC_VERSION_RE = _LazyRe(r"(?m)^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d|[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d")
+CONFIG_FILE_RE = _LazyRe(r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|properties)$|(^|/)docker-compose[\w.-]*\.ya?ml$|"
                             r"(^|/)values[\w.-]*\.ya?ml$|"
                             r"\.tfvars$|(^|/)config\.(json|ya?ml)$|(^|/)(next|nuxt|vite|vue|svelte|astro|remix|webpack)\.config\.\w+$|"
                             r"(^|/)environments?/environment[\w.-]*\.ts$|(^|/)(config|configuration|settings|secrets?|"
                             r"credentials?)\.(js|ts|mjs|cjs)$|(^|/)config/(default|production|development|staging|local|test|"
                             r"custom-environment-variables)[\w.-]*\.(js|ts|mjs|cjs)$")
-SECRET_CONTENT_RE = re.compile(r"(?m)^\s*(SECRET_KEY|INSTALLED_APPS|DATABASES)\s*=|class\s+\w+\(\s*BaseSettings\s*\)|"
+SECRET_CONTENT_RE = _LazyRe(r"(?m)^\s*(SECRET_KEY|INSTALLED_APPS|DATABASES)\s*=|class\s+\w+\(\s*BaseSettings\s*\)|"
                                r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[a-z][\w+.-]*://[^\s:/'\"@]+:[^\s@'\"/]+@")
 # Django settings, pydantic settings, keys, connection URIs with a password (mongodb://user:pass@host)
-CONFIG_SECRET_RE = re.compile(r"(?i)\b(secret\w*|pass(word|wd|phrase)?|pwd|private_?key\w*|api_?key\w*|\w*token)['\"]?\s*[:=]\s*"
+CONFIG_SECRET_RE = _LazyRe(r"(?i)\b(secret\w*|pass(word|wd|phrase)?|pwd|private_?key\w*|api_?key\w*|\w*token)['\"]?\s*[:=]\s*"
                               r"['\"][^'\"\s]{6,}['\"]")  # in a config/ folder: a literal credential
-SERVER_ROUTE_PATH_RE = re.compile(r"(^|/)(pages/api/|app/(.*/)?route\.(ts|js)$|[^/]*\+server\.(ts|js)$|server/(api|routes|"
+SERVER_ROUTE_PATH_RE = _LazyRe(r"(^|/)(pages/api/|app/(.*/)?route\.(ts|js)$|[^/]*\+server\.(ts|js)$|server/(api|routes|"
                                   r"middleware)/)")
-SERVER_ROUTE_RE = re.compile(r"export\s+(async\s+)?(function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b|defineEventHandler\(|"
+SERVER_ROUTE_RE = _LazyRe(r"export\s+(async\s+)?(function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b|defineEventHandler\(|"
                              r"NextApiRequest|\(\s*req\b[^,)]*,\s*res\b")
-JSX_RE = re.compile(r"<[A-Z][\w.]*[\s/>]|return\s*\(?\s*<(div|form|input|button|table|section|main|ul|span|a)[\s>]")
-STRONG_UI_RE = re.compile(r"<[A-Z][\w.]*[\s/>]|<(div|form|input|button|table|select|textarea)\b|<template\b|@Component\(|"
+JSX_RE = _LazyRe(r"<[A-Z][\w.]*[\s/>]|return\s*\(?\s*<(div|form|input|button|table|section|main|ul|span|a)[\s>]")
+STRONG_UI_RE = _LazyRe(r"<[A-Z][\w.]*[\s/>]|<(div|form|input|button|table|select|textarea)\b|<template\b|@Component\(|"
                           r"['\"]use client['\"]")
-STRONG_UI_TS_RE = re.compile(r"<template\b|@Component\(|['\"]use client['\"]")  # .ts can't hold JSX: <Zone> is a generic
-ROUTER_ENTRY_RE = re.compile(r"\bpath\s*:\s*['\"`]|<Route\b")  # two or more in a file: it is a router
+STRONG_UI_TS_RE = _LazyRe(r"<template\b|@Component\(|['\"]use client['\"]")  # .ts can't hold JSX: <Zone> is a generic
+ROUTER_ENTRY_RE = _LazyRe(r"\bpath\s*:\s*['\"`]|<Route\b")  # two or more in a file: it is a router
 PKG_CONTAINERS = {"packages", "apps", "services", "libs", "modules", "projects"}
 SCAN_MAX_BYTES = 400_000  # bigger files are generated or data, not hand-written source
-COMMIT_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+COMMIT_RE = _LazyRe(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 
 GIT_SLOW = []
@@ -917,6 +972,7 @@ GIT_SLOW = []
 
 def _git(repo, *args, timeout=30):
     """git output (text) or None. Paths stay unquoted (core.quotePath=false) so non-ASCII names round-trip."""
+    import subprocess
     try:
         r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args], capture_output=True,
                            encoding="utf-8", errors="surrogateescape", timeout=timeout)  # a file name may not be UTF-8
@@ -1060,6 +1116,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
     rows that are gone or no longer this area's are listed as deleted. When a router (a file defining several routes)
     changed or a route file is gone, frontend and tests are mapped in full (rows elsewhere sit on routes that may have
     moved). Areas with nothing to read are settled here. Returns a summary dict for the skill."""
+    import hashlib
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1403,14 +1460,16 @@ def ingest_codemap(con, cm, f, ts=None):
 def _codemap_behind(con, rows):
     """'<sha>' or '<sha>, 12 commits behind' for the repos these rows came from (a card's backend rows included);
     one note per repo when several. Only commits that touch the mapped folder count."""
-    notes = {}
+    notes, counted = {}, {}  # counted: areas of one repo mapped at one commit share a single git call
     for repo, area in sorted({(x["repo"], x["area"]) for x in rows}):
         commit = meta(con, f"codemap_commit:{area}:{repo}")
         if not COMMIT_RE.fullmatch(commit or ""):
             continue
-        # a card is read on every page: a slow or hung git (network share) costs 2 s once, then counts are left out
-        behind = "" if GIT_SLOW else (_git(repo, "rev-list", "--count", "--end-of-options", f"{commit}..HEAD", "--", ".",
-                                           timeout=2) or "").strip()
+        if (repo, commit) not in counted:
+            # a card is read on every page: a slow or hung git (network share) costs 2 s once, then counts are left out
+            counted[repo, commit] = "" if GIT_SLOW else (_git(repo, "rev-list", "--count", "--end-of-options",
+                                                              f"{commit}..HEAD", "--", ".", timeout=2) or "").strip()
+        behind = counted[repo, commit]
         n = int(behind) if behind.isdigit() else 0
         if repo not in notes or n > notes[repo][0]:  # areas of one repo: the furthest behind
             notes[repo] = (n, commit[:7] + (f", {n} commits behind" if n else ""))
@@ -1452,7 +1511,7 @@ def _api_path(text):
     return _api_ref(text)[1]
 
 
-API_BASE_SEG_RE = re.compile(r"api|rest|v\d+(\.\d+)?|[\w-]+-api|api-[\w-]+")
+API_BASE_SEG_RE = _LazyRe(r"api|rest|v\d+(\.\d+)?|[\w-]+-api|api-[\w-]+")
 
 
 def _same_endpoint(a, b):
@@ -1473,13 +1532,15 @@ def _codemap_rows(con, route):
     called = set()
     for x in rows:
         if x["kind"] == "api":
-            ref = _api_ref(x["value"]) if _api_ref(x["value"])[1] else _api_ref(x["label"])
+            ref = _api_ref(x["value"])
+            ref = ref if ref[1] else _api_ref(x["label"])
             if ref[1]:
                 called.add(ref)
     if called and route != "*":
         for x in con.execute("SELECT kind,label,value,file,repo,area FROM codemap WHERE page='*' AND kind IN ('api','rule') "
                              "ORDER BY kind, label"):
-            m, p = _api_ref(x["label"]) if _api_ref(x["label"])[1] else _api_ref(x["value"])
+            ref = _api_ref(x["label"])
+            m, p = ref if ref[1] else _api_ref(x["value"])
             if p and any(_same_endpoint(p, c) and (not m or not cm or m == cm) for cm, c in called):
                 rows.append(x)
     return rows
@@ -1795,6 +1856,7 @@ def claude_mcp_list():
 def doctor():
     """Setup check for a new machine. Prints one line per item; returns the number of problems.
     Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 + 30 s) so a skill's Bash call never cuts it off."""
+    from urllib.parse import urlsplit
     import shutil
     import subprocess
     import time
@@ -1979,7 +2041,7 @@ def doctor():
 
 
 # ---------- v0.4 wrappers: ticket keys, run folders, run marker, browser, prune ----------
-KEY_RE = re.compile(r"[A-Z][A-Z0-9]+-\d+", re.ASCII)  # ASCII: Jira keys never hold other digits
+KEY_RE = _LazyRe(r"[A-Z][A-Z0-9]+-\d+", re.ASCII)  # ASCII: Jira keys never hold other digits
 
 
 class BadInput(ValueError):
@@ -2140,6 +2202,7 @@ def browser_cmd(session, headed, url, browser, profile):
 
 
 def browser_open(args):
+    import subprocess
     session, headed, url = "qa", False, None
     it = iter(args)
     for a in it:
@@ -2275,6 +2338,7 @@ def annotate(path, boxes, label):
     hiding the least of the boxes; a label taller than the image keeps the lines that fit, ending in …). Line width and font
     grow with the image (a HiDPI 2560px screenshot gets 2x), long labels wrap. Boxes are in the screenshot's
     pixels; a box wholly outside the image is refused. Returns False when Pillow is missing (image untouched)."""
+    import tempfile
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
@@ -2676,6 +2740,7 @@ def _header(run_dir, kind, plan, runs):
 
 
 def _bug_section(bugs, cases, tickets, run_dir):
+    from urllib.parse import quote
     out = ["## Bugs", row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
@@ -2796,6 +2861,7 @@ def run_summary(run_dir):
 
 def render_index(qa_out):
     """qa-out/README.md: every run folder with a REPORT.md or a plan, newest first."""
+    from urllib.parse import quote
     qa_out = Path(qa_out)
     runs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink()
             and ((p / "REPORT.md").exists() or (p / ".data" / "plan.json").exists())]
@@ -2816,6 +2882,7 @@ def render_index(qa_out):
 
 def _write(path, text):
     """Atomic write via a fresh temp file (O_EXCL): a planted `.<name>.tmp` link can't redirect it outside qa-out."""
+    import tempfile
     path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -2936,6 +3003,7 @@ PERMISSION_RULES = [
 def merge_permissions(path, stamp=None):
     """Add missing PERMISSION_RULES to permissions.allow in a Claude Code settings file. Keeps every other key and the
     existing order, backs the file up first, writes atomically with its mode. Returns the rules added."""
+    import tempfile
     path = Path(os.path.realpath(Path(path).expanduser()))  # a symlinked settings.json (dotfiles) stays a link
     def no_constant(c):  # NaN / Infinity: Python reads them, Claude Code can't
         raise ValueError(f"non-standard number {c}")

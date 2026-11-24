@@ -230,6 +230,45 @@ class QaMem(unittest.TestCase):
                              ('{"apiKey": "correct horse battery"}', "horse")):
             self.assertNotIn(secret, qm.redact(text), text)
 
+    def test_line_sliced_passes_cannot_match_a_newline(self):  # perf r32: redact() runs these on single lines
+        try:
+            from re import _constants as C, _parser as P
+        except ImportError:  # Python < 3.11
+            import sre_constants as C, sre_parse as P
+        nl = ord("\n")
+
+        def class_has_newline(items):  # the members of a [...] class, without the NEGATE marker
+            for op, av in items:
+                if (op is C.LITERAL and av == nl) or (op is C.RANGE and av[0] <= nl <= av[1]) or \
+                        (op is C.CATEGORY and av in (C.CATEGORY_SPACE, C.CATEGORY_NOT_WORD, C.CATEGORY_NOT_DIGIT)):
+                    return True
+            return False
+
+        def can_match_newline(items):
+            for op, av in items:
+                if op is C.LITERAL and av == nl or op is C.NOT_LITERAL and av != nl or op is C.ANY and flags & re.S:
+                    return True
+                if op is C.IN:
+                    negated = bool(av) and av[0][0] is C.NEGATE
+                    if class_has_newline(av[1:] if negated else av) != negated:
+                        return True
+                if op is C.CATEGORY and av in (C.CATEGORY_SPACE, C.CATEGORY_NOT_WORD, C.CATEGORY_NOT_DIGIT):
+                    return True
+                subs = (av[1] if op is C.BRANCH else [av[-1]] if op is C.SUBPATTERN else [av[2]] if op in (
+                    C.MAX_REPEAT, C.MIN_REPEAT) else [av[1]] if op in (C.ASSERT, C.ASSERT_NOT) else [])
+                if any(can_match_newline(list(sub)) for sub in subs):
+                    return True
+            return False
+
+        for name in ("QUOTED_SECRET_RE", "HEADER_VALUE_RE", "KEY_VALUE_RE", "PAIRED_RE"):
+            p = getattr(qm, name)
+            flags = re.compile(p.pattern, p._flags).flags
+            self.assertFalse(can_match_newline(list(P.parse(p.pattern, flags))), name)
+        self.assertTrue(can_match_newline(list(P.parse(r"a\sb", 0))))  # the walker itself sees a newline class
+        self.assertTrue(can_match_newline(list(P.parse(r"a[^x]b", 0))))
+        multi = "user / password: qa / Passw0rd!\nnote: fine\nX-Api-Key: abcdefghijkl\napi_key=Sommerregen9\n"
+        self.assertEqual(qm.redact(multi), "\n".join(qm.redact(line) for line in multi.split("\n")))
+
     def test_paired_labels_and_values(self):  # known issue in 0.4.0: `user / password: qa / Passw0rd!`
         for text, secret, kept in (("user / password: qa / Passw0rd!", "Passw0rd", "qa /"),
                                    ("Login / Password: qa@x.com / Hunter22", "Hunter22", "qa@x.com"),
@@ -370,6 +409,28 @@ class QaMem(unittest.TestCase):
         self.assertTrue((out / "a/run.json.ingested").exists())
         self.assertTrue((out / "b/run.json.error").exists())
         self.assertEqual(qm.ingest_pending(out), 0)
+
+    def test_stop_hook_command_skips_python_without_qa_out(self):  # perf r2: no Python start in unrelated projects
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        cmd = hooks["Stop"][0]["hooks"][0]["command"]
+        self.assertEqual(cmd, hooks["SubagentStop"][0]["hooks"][0]["command"])
+        base = Path(self.tmp.name)
+        proj, other = base / "proj", base / "other"
+        for d in (proj, other):
+            d.mkdir()
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT), "CLAUDE_PROJECT_DIR": str(proj), "QA_MEM_DB": str(base / "db/x.db")}
+        sh = lambda cwd: subprocess.run(["bash", "-c", cmd], cwd=cwd, env=env, input="{}", capture_output=True, text=True)
+        self.assertEqual(sh(other).returncode, 0)
+        self.assertFalse((base / "db").exists())
+        (proj / "qa-out/a").mkdir(parents=True)  # the project's folder, reached from another cwd
+        (proj / "qa-out/a/run.json").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
+        self.assertEqual(sh(other).returncode, 0)
+        self.assertTrue((proj / "qa-out/a/run.json.ingested").exists())
+        (other / "qa-out/b").mkdir(parents=True)  # the cwd's folder alone
+        (other / "qa-out/b/run.json").write_text("{not json")
+        r = sh(other)
+        self.assertEqual(r.returncode, 2, r.stderr)  # the agent still hears about a run JSON it must fix
+        self.assertTrue((other / "qa-out/b/run.json.error").exists())
 
     def test_hook_in_unrelated_project_creates_no_db(self):
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "fresh" / "x.db")
@@ -1104,6 +1165,7 @@ class QaMem(unittest.TestCase):
         self.assertIn(f"{plugin}:{agent}", hooks["SubagentStop"][0]["matcher"].split("|"))
         # every tool: MCP names vary in case and server name, and the explorer's tool allowlist is enforced here
         self.assertEqual(hooks["PreToolUse"][0]["matcher"], "*")
+        self.assertIn("/hooks/pretooluse.py", hooks["PreToolUse"][0]["hooks"][0]["command"])  # guard.py, bytecode cached
         for event in ("SubagentStop", "Stop"):
             self.assertIn('"$CLAUDE_PROJECT_DIR/qa-out"', hooks[event][0]["hooks"][0]["command"])
 
