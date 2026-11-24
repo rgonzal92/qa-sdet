@@ -395,12 +395,103 @@ class CodeMap(unittest.TestCase):
         self.assertEqual(s["areas"]["frontend"]["files"], 0)  # a stored "" hash for the menu forced a full re-map
         self.assertEqual(len(self.routes()), 3)
 
+    def test_menu_without_modules_drops_its_old_routes(self):  # audit r3: rows of a module-less menu stayed forever
+        ui = self.shell_repo()
+        self.scan(ui)
+        self.assertEqual(len(self.routes()), 2)
+        (ui / "public/config.json").write_text(json.dumps({"nav": [{"key": "home", "module": None}]}))
+        git(ui, "commit", "-qam", "no modules")
+        self.scan(ui, stamp="s2")
+        self.assertEqual(self.routes(), [])
+
+    def test_deeply_nested_shell_menu_never_breaks_the_scan(self):  # audit r2: RecursionError escaped "never raises"
+        deep = {"key": "a", "title": "A", "module": {"id": "m", "url": "/m/a"}}
+        for _ in range(3000):
+            deep = {"key": "a", "children": [deep]}
+        ui = git_repo(self.dir / "ui", {"src/routes.js": "const r = [{ path: '/m/a', element: <A/> }]\n",
+                                        "public/config.json": json.dumps({"nav": [deep]})})
+        s = self.scan(ui)
+        self.assertEqual(s["areas"]["frontend"]["files"], 1)
+        self.assertEqual(self.routes(), [])
+
     def test_ingest_pending_accepts_the_init_folder(self):  # ISSUE-4: qa-out/init loaded nothing, silently
         api = git_repo(self.dir / "api", {"routes/zones.js": "router.post('/api/zones', h)\n"})
         self.scan(api)
         self.write_map("backend", [{"page": "*", "kind": "api", "label": "POST /api/zones", "value": "x",
                                     "file": "routes/zones.js:1"}])
         self.assertEqual(qm.ingest_pending(self.out), 1)
+
+    def test_renamed_menu_path_drops_rows_left_on_the_old_path(self):  # audit pi-1: judged before the menu landed
+        ui = git_repo(self.dir / "ui", {"public/config.json": json.dumps(self.SHELL_NAV), "e2e/home.spec.ts":
+                                        "import { test } from '@playwright/test';\n"
+                                        "test('home', async ({ page }) => { await page.getByRole('button').click(); });\n"})
+        self.scan(ui)
+        self.write_map("tests", [{"page": "/home", "kind": "locator", "label": "Open", "value": "getByRole('button')",
+                                  "file": "e2e/home.spec.ts:2"}])
+        self.ingest_all()
+        self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/home' AND area='tests'").fetchone()[0], 1)
+        nav = json.loads(json.dumps(self.SHELL_NAV))
+        nav["nav"][0]["key"] = "start"
+        (ui / "public/config.json").write_text(json.dumps(nav))
+        git(ui, "commit", "-qam", "rename")
+        self.scan(ui, stamp="s2")
+        self.assertEqual(self.con.execute("SELECT count(*) FROM codemap WHERE page='/home'").fetchone()[0], 0)
+        self.assertEqual(json.loads(qm.meta(self.con, "codemap_lost")), ["/home"])
+        self.assertEqual(self.scan(ui, stamp="s3")["areas"]["tests"]["files"], 1)  # the spec is read again
+
+    def test_a_menu_route_never_pushes_locators_off_a_full_page(self):  # audit pi-4
+        ui = git_repo(self.dir / "ui", {"src/Main.jsx": "const Main = () => <form/>;\n"})
+        self.scan(ui)
+        self.write_map("frontend", [{"page": "/home", "kind": "locator", "label": f"Field {i}", "value": "x",
+                                     "file": "src/Main.jsx:1"} for i in range(qm.CODEMAP_PAGE_CAP)])
+        self.ingest_all()
+        (ui / "public").mkdir()
+        (ui / "public/config.json").write_text(json.dumps({"nav": [{"key": "home", "title": "Home", "module": {"url": "/m"}}]}))
+        git(ui, "add", "-A")
+        git(ui, "commit", "-qm", "menu")
+        self.scan(ui, stamp="s2")
+        self.assertEqual(dict(self.con.execute("SELECT kind, count(*) FROM codemap WHERE page='/home' GROUP BY kind")
+                              .fetchall()), {"locator": qm.CODEMAP_PAGE_CAP, "route": 1})
+
+    def test_a_renamed_menu_title_moves_the_page_name(self):  # audit pi-6: the first title stayed the page's name
+        nav = lambda a, b: json.dumps({"nav": [{"key": k, "title": n, "module": {"url": "/m/" + k}}
+                                               for k, n in (("a", a), ("b", b))]})
+        ui = git_repo(self.dir / "ui", {"public/config.json": nav("Alpha", "Beta")})
+        self.scan(ui)
+        (ui / "public/config.json").write_text(nav("Beta", "Alpha"))
+        git(ui, "commit", "-qam", "swap")
+        self.scan(ui, stamp="s2")
+        self.assertEqual(qm.find_page(self.con, "Alpha")["route"], "/b")
+
+    def test_menu_urls_are_redacted_like_a_mappers_rows(self):  # audit pi-3
+        token = "ghp_" + "a" * 36
+        ui = git_repo(self.dir / "ui", {"public/config.json": json.dumps(
+            {"nav": [{"key": "home", "title": "Home", "module": {"url": f"/m/home?sig={token}"}}]})})
+        self.scan(ui)
+        self.assertNotIn(token, json.dumps(self.routes()))
+        self.assertNotIn(token, (self.out / f"code-map-frontend-{qm.SHELL_MAP_CHUNK}.json").read_text())
+
+    def test_an_api_spec_with_menu_like_properties_is_not_a_menu(self):  # audit pi-7
+        spec = json.dumps({"openapi": "3.0.0", "paths": {"/api/settings": {}}, "components": {"schemas": {"S": {
+            "properties": {"module": {}, "key": {}, "nav": {}}}}}})
+        self.assertEqual(qm.classify_source("api/openapi-config.json", spec), "backend")
+
+    def test_a_broken_menu_drops_its_routes_and_settles(self):  # audit agy-13: stale routes, a full re-map every scan
+        ui = self.shell_repo()
+        self.scan(ui)
+        self.write_map("frontend", [{"page": "/m/daily", "kind": "route", "label": "Daily", "value": "D",
+                                     "file": "src/routes.js:1"}])
+        self.ingest_all()
+        (ui / "public/config.json").write_text('{"nav": [{"key": "a", "module": {"url": "/x"} BROKEN')
+        git(ui, "commit", "-qam", "broken")
+        self.scan(ui, stamp="s2")  # the menu changed: one full pass, as for any changed multi-route menu
+        self.assertEqual(self.routes(), [("/m/daily", "D")])  # the menu's two routes are gone, the router's stays
+        self.write_map("frontend", [{"page": "/m/daily", "kind": "route", "label": "Daily", "value": "D",
+                                     "file": "src/routes.js:1"}])
+        self.ingest_all()
+        s = self.scan(ui, stamp="s3")  # and not on every scan after it
+        self.assertTrue(s["incremental"])
+        self.assertEqual(s["areas"]["frontend"]["files"], 0)
 
     # ---- review findings ----
     def test_backend_rows_are_not_capped(self):

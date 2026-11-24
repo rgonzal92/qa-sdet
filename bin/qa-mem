@@ -871,7 +871,7 @@ def _ingest_files(con, pending):
 # ---------- code map: routes, locators, rules and endpoints read from the app's source ----------
 CODEMAP_AREAS = ("frontend", "backend", "tests")  # one qa-mapper agent per area
 CODEMAP_KINDS = ("route", "locator", "rule", "api")
-CODEMAP_PAGE_CAP = 200  # per page; page '*' (the whole backend) is exempt
+CODEMAP_PAGE_CAP = 200  # rows per page, route rows not counted; page '*' (the whole backend) is exempt
 SCAN_SKIP_DIRS = {"node_modules", ".git", "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".angular", "coverage",
                   "vendor", "__pycache__", ".venv", "venv", "target", "bin", "obj", ".cache", ".turbo", "storybook-static",
                   "qa-out", ".playwright-cli", ".playwright-mcp", ".idea", ".vscode"}
@@ -1038,11 +1038,13 @@ def _tests_path(path):
 
 
 def _shell_menu(rel, text):
-    """The app shell's menu config (a config.json with module urls and keys). Not credentials: no secret words."""
-    return rel.endswith("config.json") and '"module"' in text and '"key"' in text and not CONFIG_SECRET_RE.search(text)
+    """The app shell's menu config (a config.json with a nav of module urls and keys). Not credentials: no secret
+    words. Not an API spec that merely has module and key properties (openapi-config.json)."""
+    return rel.endswith("config.json") and '"module"' in text and '"key"' in text and '"nav"' in text \
+        and not CONFIG_SECRET_RE.search(text) and not SPEC_VERSION_RE.search(text[:4000])
 
 
-SHELL_MAP_CHUNK = 900  # the shell menu's map and scan: chunk 900 is never a mapper's (mappers use 1..n)
+SHELL_MAP_CHUNK = 0  # the shell menu's map and scan: chunk 0 is never a mapper's (mappers use 1..n, however many)
 
 
 def _shell_nav_routes(nav, parent, lines, rel):
@@ -1072,19 +1074,22 @@ def _write_shell_menu(con, out_dir, repos, stamp):
                 continue
             try:
                 text = _decode_source((Path(repo) / rel).read_bytes())
-                nav = json.loads(text).get("nav")
-            except (OSError, ValueError, AttributeError):
+            except OSError:
                 continue
-            found = _shell_nav_routes(nav, "", text.splitlines(), rel)
-            if not found:
-                continue
+            try:
+                found = _shell_nav_routes(json.loads(text).get("nav"), "", text.splitlines(), rel)
+            except (ValueError, AttributeError, RecursionError):  # broken, or too deep (json and the walk both recurse):
+                found = []  # no routes, so its old ones go and its hash lands (else every scan re-maps in full)
+            if not found and not con.execute("SELECT 1 FROM codemap WHERE repo=? AND area='frontend' AND src=? LIMIT 1",
+                                              (repo, rel)).fetchone():
+                continue  # (a menu that lost all its modules still ingests: its old rows go; the frontend keeps them)
             scan_id = f"shell-{stamp}"
             scan_file = out_dir / f"scan-frontend-{SHELL_MAP_CHUNK}.json"
             map_file = out_dir / f"code-map-frontend-{SHELL_MAP_CHUNK}.json"
-            cm = {"scan_id": scan_id, "area": "frontend", "rows": [
+            cm = redact_json({"scan_id": scan_id, "area": "frontend", "rows": [  # as _ingest_files does for a mapper's
                 {"repo": repo, "page": page, "kind": "route", "label": label,
                  "value": f"module {mid} at {url}"[:300], "file": f"{rel}:{ln}"}
-                for page, label, mid, url, ln in found]}
+                for page, label, mid, url, ln in found]})
             scan_file.write_text(json.dumps({"scan_id": scan_id, "area": "frontend", "repos": [
                 # its hash: without it the next scan sees a changed multi-route file and re-maps frontend in full
                 {"path": repo, "commit": head or "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]},
@@ -1293,6 +1298,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                     _set_meta_set(con, f"codemap_reread:{a}:{repo}", [])
                     entry["settled"] = True
             areas[a].append(entry)
+    _write_shell_menu(con, out_dir, repos, stamp)  # before routes are judged: a menu's renamed path is a lost route
     with con:
         _resolve_routes(con)  # all frontend settled here: judge orphans now
         _drop_code_only_pages(con)
@@ -1315,7 +1321,6 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                                "needs_mapper": n > 0, "mappers": info}
         summary["total_files"] += n
         summary["tokens"] += tokens
-    _write_shell_menu(con, out_dir, repos, stamp)
     return summary
 
 
@@ -1508,11 +1513,14 @@ def ingest_codemap(con, cm, f, ts=None):
                         (page, kind, label, value, cap(x.get("file")), repo, area, src, ts))
             if page != "*":  # cards and page-name lookups resolve it, whichever kind of row named the page
                 pages.add(page)
-                con.execute("INSERT INTO pages(route, name) VALUES(?,?) ON CONFLICT(route) DO UPDATE SET "
-                            "name=coalesce(name, excluded.name)", (page, label if kind == "route" else None))
+                # a page only the code knows (no build) takes its current route label: a renamed menu title moves
+                con.execute("INSERT INTO pages(route, name) VALUES(?,?) ON CONFLICT(route) DO UPDATE SET name=CASE WHEN "
+                            "pages.build IS NULL THEN coalesce(excluded.name, name) ELSE coalesce(name, excluded.name) END",
+                            (page, label if kind == "route" else None))
         for page in pages:  # page '*' holds the whole backend: never capped; route rows are never evicted
-            con.execute("DELETE FROM codemap WHERE page=? AND rowid NOT IN (SELECT rowid FROM codemap WHERE page=? "
-                        "ORDER BY kind='route' DESC, ts DESC, kind='api' DESC, rowid LIMIT ?)",
+            # nor counted: a route added to a full page (a shell menu path) must not push out another file's locator
+            con.execute("DELETE FROM codemap WHERE page=? AND kind!='route' AND rowid NOT IN (SELECT rowid FROM codemap "
+                        "WHERE page=? AND kind!='route' ORDER BY ts DESC, kind='api' DESC, rowid LIMIT ?)",
                         (page, page, CODEMAP_PAGE_CAP))
         for path, r in repos.items():
             files, gone = set(r.get("files") or []), set(r.get("deleted") or [])
@@ -2561,11 +2569,12 @@ def _not_tested(obj):
     """[(category key, text)] for run['not_tested']: a string (category other) or {"category", "text"}."""
     out = []
     items = obj.get("not_tested") if isinstance(obj, dict) else None
-    for x in items or []:
+    for x in items if isinstance(items, list) else []:  # a string is not a list of letters (load_run warns about it)
         if isinstance(x, dict):
-            cat = x.get("category") if x.get("category") in dict(NOT_TESTED_CATEGORIES) else "other"
+            cat = x.get("category")  # a list or dict category can't be looked up in a dict (TypeError)
+            cat = cat if isinstance(cat, str) and cat in dict(NOT_TESTED_CATEGORIES) else "other"
             out.append((cat, str(x.get("text") or "")))
-        elif isinstance(x, (str, int, float)):
+        elif isinstance(x, (str, int, float)) and not isinstance(x, bool):  # JSON true is no text ("True")
             out.append(("other", str(x)))
     return [(c, t) for c, t in out if t]
 
@@ -2760,6 +2769,19 @@ def row(*cols):
     return "| " + " | ".join(c if isinstance(c, Raw) else cell(c) for c in cols) + " |"
 
 
+def paragraph(v):
+    """cell() text that stands alone on its line: a leading ``` or # would fence off or head the rest of the report."""
+    s = cell(v)
+    return ("\\" if s[:1] in tuple("#`~>-+*=_") else "") + s
+
+
+def summary_text(v):
+    """Text for a <details><summary> line: that line is an HTML block, where Markdown escapes (`\\|`) show as typed,
+    so it gets HTML escaping only (no tags, entities as text) and one line."""
+    import html
+    return html.escape(" ".join(str(v if v is not None else "").split()), quote=False)
+
+
 def _counts(cases):
     p = sum(c["status"] == "PASS" for c in cases)
     f = sum(c["status"] == "FAIL" for c in cases)
@@ -2816,7 +2838,7 @@ def _evidence_file(run_dir, cid):
     if not re.fullmatch(r"[A-Za-z]+-\d+", cid):
         return ""
     name = f"{cid}.png"
-    return f"evidence/{quote(name)}" if (Path(run_dir) / "evidence" / name).exists() else ""
+    return f"evidence/{quote(name)}" if (Path(run_dir) / "evidence" / name).is_file() else ""
 
 
 def _case_table(cases, run_dir, with_status):
@@ -2846,10 +2868,10 @@ def _case_details(cases, run_dir, with_status):
         if isinstance(steps, list):
             step_lines = [f"{i}. {cell(x)}" for i, x in enumerate(steps, 1)]
         else:
-            step_lines = [cell(steps)] if steps else []
+            step_lines = [paragraph(steps)] if steps else []
         non_pass = with_status and c["status"] != "PASS"
-        head = " ".join(x for x in (c["id"], "—", one_line(c.get("title") or "")) if x)  # status is in the table
-        out += [f"<details{' open' if non_pass else ''}><summary>{cell(head)}</summary>", ""]
+        head = " ".join(x for x in (c["id"], "—", str(c.get("title") or "")) if x)  # status is in the table
+        out += [f"<details{' open' if non_pass else ''}><summary>{summary_text(head)}</summary>", ""]
         out += ["**Steps**", ""] + step_lines + [""] if step_lines else []
         out += [f"**Expected:** {cell(c.get('expected'))}", ""] if c.get("expected") else []
         if with_status:
@@ -2894,8 +2916,9 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file"):
         owners = [str(b["ticket"])] if b.get("ticket") else [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)]
         png = Path(run_dir) / "evidence" / f"{bid}.png"
         ev = Path(str(b.get("evidence") or ""))
-        img = f"evidence/{quote(png.name)}" if bid and png.exists() else \
-            f"evidence/{quote(ev.name)}" if b.get("evidence") and (Path(run_dir) / "evidence" / ev.name).exists() else ""
+        img = f"evidence/{quote(png.name)}" if bid and png.is_file() else \
+            f"evidence/{quote(ev.name)}" if b.get("evidence") and (Path(run_dir) / "evidence" / ev.name).is_file() else ""
+        # (is_file: evidence '.', '..' or '/' names a folder, and a link to it is broken)
         evidence = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), short(b.get("title"), 120), b.get("route"),
@@ -2915,13 +2938,12 @@ def _notes_section(runs):
                     order = ("fail", "blocked", "pass")
                     if h not in cov or (res in order and (cov[h] not in order or order.index(res) < order.index(cov[h]))):
                         cov[h] = res
-        icons = ", ".join(one_line(f"{h} {COVERAGE_ICON.get(v, v)}") for h, v in cov.items())
-        title = one_line(f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})") + \
-            (f" — {icons}" if icons else "")
+        icons = ", ".join(f"{h} {COVERAGE_ICON.get(v, v)}" for h, v in cov.items())
+        title = summary_text(f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})" +
+                             (f" — {icons}" if icons else ""))
         out += [f"<details><summary>{title}</summary>", ""]
         if r.get("notes") or r.get("summary"):
-            para = cell(short(r.get("notes") or r.get("summary"), 1500))  # a leading ``` would fence off the rest
-            out += [("\\" if para[:1] in tuple("#`~>-+*=_") else "") + para, ""]
+            out += [paragraph(short(r.get("notes") or r.get("summary"), 1500)), ""]
         out += ["</details>", ""]
     return out
 
@@ -2933,7 +2955,7 @@ def _q_items(obj, label):
     for x in raw if isinstance(raw, list) else []:
         if isinstance(x, dict):
             text, status, ans = str(x.get("text") or ""), x.get("status"), str(x.get("answer") or "")
-        elif isinstance(x, (str, int, float)):
+        elif isinstance(x, (str, int, float)) and not isinstance(x, bool):
             text, status, ans = str(x), None, ""
         else:
             continue
@@ -2976,7 +2998,7 @@ def _safe_key(key):
 # ---------- Jira pass comment: a paste-ready draft, never posted (passed on, fixed, one line per case)
 def _release_names(templates, fix):
     """(names, gap): the config's releaseTemplates with {version} filled from the fix version (3.5 -> 3.5.0)."""
-    temps = [t.strip() for t in templates if isinstance(t, str) and t.strip()] if isinstance(templates, list) else []
+    temps = [" ".join(t.split()) for t in templates if isinstance(t, str) and t.strip()] if isinstance(templates, list) else []
     if not temps:
         return ["<release name>"], "set releaseTemplates in the qa-sdet config"
     if not fix:
@@ -2987,24 +3009,26 @@ def _release_names(templates, fix):
 
 def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds):
     fix = t.get("fix_version")
-    fix = str(fix).strip() if isinstance(fix, (str, int, float)) and str(fix).strip() else None
+    # one line each in the draft: newlines collapsed; JSON true is no version
+    fix = " ".join(str(fix).split()) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
+    fix = fix or None
     names, gap = _release_names(cfg.get("releaseTemplates"), fix)
     fixed = " ".join(str(t.get("fixed_note") or "").split())
+    route_of = lambda c: " ".join(str(c.get("route") or "").split())
     routes = []
     for c in mine:
-        r = str(c.get("route") or "")
-        if r not in routes:
-            routes.append(r)
+        if route_of(c) not in routes:
+            routes.append(route_of(c))
     shots, placeholders = [], ([f"release names ({gap})"] if gap else []) + ([] if fixed else ["the fixed note"])
     for r in routes:
-        pick = next((c for c in mine if str(c.get("route") or "") == r and c.get("status") == "PASS"
+        pick = next((c for c in mine if route_of(c) == r and c.get("status") == "PASS"
                      and _evidence_file(run_dir, c["id"])), None)
         if pick:
             shots.append((r or "test page", Path(run_dir) / "evidence" / f"{pick['id']}.png"))
         else:
             placeholders.append(f"screenshot for {r or 'the test page'}")
     lines = ["CHECK BEFORE POSTING (not part of the comment)"]
-    if not builds or builds == ["unknown"]:
+    if not builds or "unknown" in builds:  # one page on an unknown build is enough to check
         shown = (fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix) if fix else "<version>"
         lines.append(f"- Build: unknown in this run. Confirm the QA app runs {shown} before you post.")
     lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
@@ -3040,13 +3064,15 @@ def render_report_parts(run_dir, cfg=None):
     cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs)
     with_status = kind != "plan"
     cfg = _config_dict() if cfg is None else cfg
-    builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")})
     drafts, vmap = {}, {}
     if tickets and with_status:
         for t in tickets:
             v, why = verdict(t, cases, bugs, bool(runs), keys)
             vmap[t["key"]] = (v, why)
             mine = [c for c in cases if c.get("ticket") == t["key"]]
+            ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
+            builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")
+                             and any(str(x.get("id")) in ids for x in _list(r, "cases"))})
             if v in ("PASS", "PASS WITH NOTES") and mine and _safe_key(t["key"]):
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds)
     draft_of = lambda key: f"jira-comment-{key}.md" if f"jira-comment-{key}.md" in drafts else ""
@@ -3091,8 +3117,8 @@ def render_report_parts(run_dir, cfg=None):
         out += [f"Jira comment draft: [{draft_of(tickets[0]['key'])}]({draft_of(tickets[0]['key'])})"]
     out.append("")
 
-    if not runs and (open_qs or resolved_qs):  # plan only: no run to act on, so the questions are the list
-        out += ["## Questions"] + [_q_bullet(q, show_from=False) for q in open_qs + resolved_qs] + [""]
+    if not runs and open_qs:  # plan only: no run to act on, so the questions are the list (resolved: folded below)
+        out += ["## Questions"] + [_q_bullet(q, show_from=False) for q in open_qs] + [""]
     # the things to act on, first
     if runs:
         action = []
@@ -3102,7 +3128,7 @@ def render_report_parts(run_dir, cfg=None):
             action += [f"### Open questions ({len(open_qs)})"] + [_q_bullet(q) for q in open_qs] + [""]
         if attention:
             action += [f"### Failed, blocked or not-run cases ({len(attention)})"] + [
-                f"- {c['id']} {STATUS_ICON[c['status']]}" + (f" ({c['ac']})" if c.get("ac") else "") +
+                f"- {cell(c['id'])} {STATUS_ICON[c['status']]}" + (f" ({cell(c['ac'])})" if c.get("ac") else "") +
                 (f" — {cell(short(c.get('actual') or c.get('notes'), 160))}" if (c.get("actual") or c.get("notes")) else "")
                 + (f" · {cell(c['ticket'])}" if c.get("ticket") else "") for c in attention] + [""]
         out += ["## Needs your action"] + (action or ["Nothing needs your action.", ""])
@@ -3212,7 +3238,7 @@ def write_report(run_dir):
         text, drafts = (f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
                         f"{one_line(short(e, 200))}. Check the files in .data/._\n"), None
     _write(run_dir / "REPORT.md", text)
-    if drafts is not None:  # Jira drafts: written with the report; a draft no longer due (or a failed render) is removed
+    if drafts is not None:  # Jira drafts: written with the report; a draft no longer due is removed (a failed render keeps them)
         for name, body in drafts.items():
             _write(run_dir / name, body)
         for old in run_dir.glob("jira-comment-*.md"):
@@ -3306,6 +3332,7 @@ PERMISSION_RULES = [
     "Bash(playwright-cli -s=qa *)", "Bash(playwright-cli -s=qa-login *)", "Bash(playwright-cli --version)",
     "Bash(command -v playwright-cli*)",
     "Bash(acli jira auth status*)", "Bash(acli jira workitem view *)", "Bash(acli jira workitem search *)",
+    "Bash(acli jira workitem comment list *)",  # C8 reads a ticket's comments too
     "Skill(qa-sdet:*)",
     # every skill/explorer reads it (hosts/URLs, no secrets). Read only: allowedHosts is the guard's trust root, so an
     # auto-allowed Edit/Write would let a prompt-injected agent widen it silently

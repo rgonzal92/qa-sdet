@@ -45,7 +45,7 @@ Plan-only reports (no run yet) show the summary table and the questions, and no 
 
 Case images: `evidence/TC-<n>.png` for a case, taken when its result is read. The table links it and the case's folded block embeds it when the file exists.
 
-Jira pass comment: `jira-comment-<KEY>.md`, written next to REPORT.md for each ticket whose verdict is PASS or PASS WITH NOTES. It is plain text: a CHECK block (not for Jira: build, images to paste, placeholders), then "Passed on <release names>", "Fixed: <note>", and one `TC-n - RESULT: title` line per case. Release names come from the config key `releaseTemplates` (`{version}` = the ticket's `fix_version`; 3.5 becomes 3.5.0). The renderer never posts to Jira; a missing name or note stays a visible placeholder. Remove the CHECK block before pasting.
+Jira pass comment: `jira-comment-<KEY>.md`, written next to REPORT.md for each ticket whose verdict is PASS or PASS WITH NOTES. It is plain text: a CHECK block (not for Jira: build, images to paste, placeholders), then "Passed on <release names>", "Fixed: <note>", and one `TC-n - RESULT: title` line per case. Release names come from the config key `releaseTemplates` (`{version}` = the ticket's `fix_version`; 3.5 becomes 3.5.0). The renderer never posts to Jira; a missing name or note stays a visible placeholder. Remove the CHECK block before pasting. Every render rewrites the draft (and removes it once the verdict is no longer a pass), so fill placeholders in Jira or in a copy, not in the file.
 
 ## Verdict per ticket (decided by the renderer)
 1. ❌ FAIL: any case FAIL, or a CONFIRMED bug with severity CRITICAL or HIGH.

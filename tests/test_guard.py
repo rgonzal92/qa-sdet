@@ -869,7 +869,10 @@ class Guard(unittest.TestCase):
         self.assertIsNotNone(mcp("mcp__playwright__browser_evaluate", cwd=cwd, agent=ex, function="() => 1", filename=cwd + "/x/.active"))
         self.assertIsNotNone(g.decide({"tool_name": "Write", "agent_type": ex, "cwd": cwd,
                                        "tool_input": {"file_path": cwd + "/x/.active", "content": "{}"}}))
-        self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", paths=[os.path.expanduser("~/.config")]))
+        # the user's cookie jar under ~/.config, as in real use (this module moves the qa-sdet config to a temp folder,
+        # so without it the result hung on whether the developer's shell set the variable)
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_MCP_STORAGE_STATE": os.path.expanduser("~/.config/qa-t/state.json")}):
+            self.assertIsNotNone(mcp("mcp__playwright__browser_file_upload", paths=[os.path.expanduser("~/.config")]))
         self.assertIsNone(mcp("mcp__playwright__browser_file_upload", paths=[RUN + "/fixture.csv"]))
         # R25 the explorer can't rewrite the config (allowedHosts) by any route
         cfg = os.environ["QA_SDET_CONFIG"]
@@ -2158,6 +2161,48 @@ class A2(unittest.TestCase):
                                    input=d if isinstance(d, str) else json.dumps(d), env={**os.environ, **_ENV})
                     for f in ("guard.py", "pretooluse.py")]
             self.assertEqual([(o.stdout, o.returncode) for o in outs[:1]], [(o.stdout, o.returncode) for o in outs[1:]], d)
+
+    def test_pretooluse_runs_with_pythonsafepath(self):  # audit agy-6: the import failed, and a failed hook allows all
+        d = {"tool_name": "Bash", "tool_input": {"command": "acli jira workitem create --summary x"}, "cwd": TMP}
+        o = subprocess.run([sys.executable, str(ROOT / "hooks/pretooluse.py")], capture_output=True, text=True,
+                           input=json.dumps(d), env={**os.environ, **_ENV, "PYTHONSAFEPATH": "1"})
+        self.assertIn('"permissionDecision": "deny"', o.stdout, o.stderr)
+
+    def test_second_audit_guard_findings(self):  # each was allowed, at b511007 or since a269ca5
+        ok, no = self.assertIsNone, self.assertIsNotNone
+        w = tempfile.mkdtemp()
+        # agy-1: a package-manager phrase in quotes hides no file tool after it
+        no(g.check("A='npm i' tee x.sh <<< 'acli jira workitem create --summary x'; source ./x.sh", w))
+        no(g.check('A="x npm i" tee x.sh <<< \'acli jira workitem create --summary x\'; source ./x.sh', w))
+        # agy-2: a file named FD:1 is a file, not an fd
+        no(g.check("echo 'playwright-cli goto https://evil.com' > FD:1; bash FD:1", w))
+        no(g.check("echo 'playwright-cli goto https://evil.com' >FD:1- ; source ./FD:1-", w))
+        ok(g.check(f"source {w}/missing 2>&1 >/dev/null; qa-mem doctor", w))
+        # agy-3: an rc file that hands its own variable the -x flag
+        Path(w, "rc.sh").write_text('F=-x; A=PLAYWRIGHT_MCP_; V="${A}HEADLESS=0"; declare $F $V\n')
+        no(g.check(f"source {w}/rc.sh && playwright-cli --version", w))
+        # agy-15: a bare export or -x of a variable in an rc file still exports it
+        for i, line in enumerate(['export "$V"', 'declare -x "$V"', 'typeset -gx "$V"']):
+            Path(w, f"rx{i}").write_text(f"f() {{ {line}; }}\n")
+            no(g.check(f"source {w}/rx{i} && playwright-cli --version", w), line)
+        # agy-4: `${X:-path}` runs its default when X's only assignment is a comment (`+=` too); `${X:+alt}` is alt
+        out = Path(RUN, "qa-out/2026-11-24-r")
+        for sub in ("bugs", "evidence"):
+            (out / sub).mkdir(parents=True, exist_ok=True)
+        bug, shot = out / "bugs/BUG-1.md", out / "evidence/TC-1.png"
+        for cmd in [f"echo {{}} > ${{X:-{g.CONFIG}}} # X={bug}", f"rm ${{X:-{RUN}/qa-out/.active}} # X={bug}",
+                    f"echo x > ${{X:-{RUN}/README.md}} # X+={bug}", f"echo x > ${{X:={RUN}/README.md}} # X={bug}",
+                    f"playwright-cli -s=qa screenshot --filename=${{X:-/tmp/evil.png}} # X={shot}",
+                    f"X={bug}; echo x > ${{X:+{RUN}/README.md}}"]:  # X is set: the shell writes README.md
+            no(g.check(cmd, RUN, explorer=True), cmd)
+        no(g.check(f"playwright-cli -s=qa open --profile=${{P:-/tmp/evil}} # P={sorted(g.main_profiles())[0]}", RUN))
+        ok(g.check(f"X={shot}; playwright-cli -s=qa screenshot --filename=$X", RUN, explorer=True))
+        # agy-5: a session file or the DB folder behind a variable in --opt=, a copy destination or a screenshot name
+        sess = os.path.join(os.path.dirname(os.environ["QA_SDET_CONFIG"]), "qa-state.json")
+        for cmd in [f"F={sess}; grep --file=$F /dev/null", f"F={sess}; cp /tmp/x $F",
+                    f"D={g.DATA_DIR}; playwright-cli -s=qa screenshot --filename=$D/x.png"]:
+            no(g.check(cmd, w), cmd)
+        ok(g.check(f"F={w}/notes.txt; cp /tmp/x $F", w))
 
     def test_nul_and_lone_surrogates_do_not_crash_the_guard_open(self):  # audit 3 r7
         data = os.path.join(TMP, "data")

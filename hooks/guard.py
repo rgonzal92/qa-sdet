@@ -47,6 +47,7 @@ CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json"))
 DATA_DIR = os.path.realpath(Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser())
 PUNCT = ";&|()\n"
 QUOTED_GT, QUOTED_LT = "\x01", "\x02"  # quoted '>' / '<' are data, not redirections
+FD_DUP = "\x03"  # `2>&1` comes out as `2>\x031`: an fd, never a file (a file may be named `FD:1`)
 
 
 class _LazyRe:
@@ -302,8 +303,8 @@ def host_ok(url, hosts):
 
 
 def expand(path):
-    # `${XDG_DATA_HOME:-$HOME/.local/share}`: expandvars leaves it as is; take the value, else the default
-    path = re.sub(r"\$\{(\w+):?-([^{}]*)\}", lambda m: os.environ.get(m.group(1)) or m.group(2), path)
+    # `${XDG_DATA_HOME:-$HOME/.local/share}` (or `:=`): expandvars leaves it as is; take the value, else the default
+    path = re.sub(r"\$\{(\w+):?[-=]([^{}]*)\}", lambda m: os.environ.get(m.group(1)) or m.group(2), path)
     return os.path.expandvars(os.path.expanduser(path))
 
 
@@ -371,9 +372,13 @@ def var_variants(word, raw):
     for name in set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", word)):
         vals = known[1].get(name)
         if vals:
-            # also `${X:-default}`: with X assigned in the command the shell takes the assigned value
-            pat = re.compile(rf"\$(?:\{{{name}(?::?[-=+?][^{{}}]*)?\}}|{name}(?![A-Za-z0-9_]))")
-            out = [pat.sub(lambda _, v=v: v, w) for w in out for v in vals][:32]
+            # `${X:-d}` / `${X:=d}` stays too: d is what runs when the assignment never does (`… # X=…`, a skipped
+            # branch); expand() fills it in
+            keep = [w for w in out if re.search(rf"\$\{{{name}:?[-=]", w)]
+            # with X assigned in the command, `${X:-default}` is the assigned value, and `${X:+alt}` is alt
+            pat = re.compile(rf"\$(?:\{{{name}(?:(:?[-=+?])([^{{}}]*))?\}}|{name}(?![A-Za-z0-9_]))")
+            out = (keep + [pat.sub(lambda m, v=v: m.group(2) if (m.group(1) or "").endswith("+") else v, w)
+                           for w in out for v in vals])[:32]
     return out
 
 
@@ -643,7 +648,7 @@ def spend_budget(path, n, explorer=False):
 def normalize(cmd):
     """Quote-aware pass before tokenising: drop '#' comments that start a word, turn unquoted newlines
     into ';', mark quoted '<' '>' as data, and rewrite redirections whose '&' or '|' would split the
-    command: `2>&1` -> `2>FD:1`, `&>f` -> `>f`, `>|f` -> `>f`."""
+    command: `2>&1` -> `2>` FD_DUP `1`, `&>f` -> `>f`, `>|f` -> `>f`."""
     out, q, i = [], None, 0
     while i < len(cmd):
         c = cmd[i]
@@ -685,7 +690,7 @@ def normalize(cmd):
         elif c == "\n":
             c = ";"
         elif c in "<>" and cmd[i + 1:i + 2] == "&":
-            out.append(c + "FD:")
+            out.append(c + FD_DUP)
             i += 2
             continue
         elif c == ">" and cmd[i + 1:i + 2] == "|":
@@ -845,7 +850,7 @@ def tokens(cmd):
 
 
 def split_redirects(seg):
-    """(words, output targets, input targets). Fd duplications (FD:n) aren't files."""
+    """(words, output targets, input targets). Fd duplications (FD_DUP n) aren't files."""
     words, outs, ins, i = [], [], [], 0
     while i < len(seg):
         m = REDIRECT_RE.match(seg[i])
@@ -854,9 +859,9 @@ def split_redirects(seg):
             if not target and i + 1 < len(seg):
                 i += 1
                 target = seg[i]
-            if target.startswith("FD:") and not re.fullmatch(r"FD:(\d+-?|-)", target):
-                target = target[3:]  # `>&file` writes stdout and stderr to a file, not to an fd
-            if target and not target.startswith("FD:"):
+            if target.startswith(FD_DUP) and not re.fullmatch(r"\d+-?|-", target[1:]):
+                target = target[1:]  # `>&file` writes stdout and stderr to a file, not to an fd
+            if target and not target.startswith(FD_DUP):
                 if m.group(2) == "<" and target.startswith(">"):  # `<>file` opens it read-write (`exec 3<>f`)
                     ins.append(target[1:])
                     target, kind = target[1:], ">"
@@ -1025,7 +1030,7 @@ def check_pw(rest, hosts, cwds, ctx, via_loop):
             return SECRET_UPLOAD_REASON
         if ctx.explorer and not sent and verb != "state-load" and not run_output_ok(f, cwds, ctx.raw):
             return RUN_OUTPUT_REASON
-        if touches_db(f, cwds, False):
+        if touches_db(f, cwds, False, ctx.raw):  # `D=<data dir>; … --filename=$D/x.png` too
             return "playwright-cli writing into the qa-sdet memory DB directory is blocked"
         if verb != "state-load" and is_session_ref(f, cwds, ctx.raw):
             return "the saved browser session holds live cookies; only state-load may use it"
@@ -1125,10 +1130,11 @@ def qamem_positionals(sub, rest):
     return out
 
 
-def sets_pw_env(words, i, in_file=False):
-    """Does this simple command set or export a variable that steers playwright-cli's browser? in_file (a sourced rc
-    file on disk): a bare `local $2`, `typeset -ga ${x}` declares a variable there and sets nothing. A `$name=value`
-    still counts: assigning to a name the shell already exports changes what playwright-cli sees."""
+def sets_pw_env(words, i, file_text=None):
+    """Does this simple command set or export a variable that steers playwright-cli's browser? file_text (a sourced rc
+    file on disk): a bare `local $2`, `typeset -ga ${x}` declares a variable there and sets nothing, unless the file
+    gives that variable its value (`F=-x; declare $F $V` exports). A `$name=value` still counts: assigning to a name
+    the shell already exports changes what playwright-cli sees."""
     if any(PW_ENV_RE.search(a) for a in words):
         return True
     if i is None:
@@ -1137,8 +1143,10 @@ def sets_pw_env(words, i, in_file=False):
     if name == "set":  # `set -a`: every later assignment is exported
         return "allexport" in rest or any(re.match(r"^-[a-zA-Z]*a", a) for a in rest)
     if name in EXPORTERS:  # `export PLAYWRIGHT_MCP_CONFIG`, `export "$V"`
-        bare_ok = in_file and name != "export" and not any(re.match(r"^-[a-zA-Z]*x", a) for a in rest)
-        return any(PW_ENV_NAME_RE.match(n) or (("$" in n or "SUBST" in n) and not (bare_ok and "=" not in a))
+        bare_ok = bool(file_text) and name != "export" and not any(re.match(r"^-[a-zA-Z]*x", a) for a in rest)
+        # shortcut: a value given by `for`, `read` or `set --` isn't seen; deny every variable argument if one is abused
+        return any(PW_ENV_NAME_RE.match(n) or (("$" in n or "SUBST" in n) and not (
+                       bare_ok and "=" not in a and var_variants(a, file_text) == [a]))
                    for a in rest if not a.startswith("-") for n in [a.split("=", 1)[0]])
     return False
 
@@ -1860,7 +1868,8 @@ def shell_script_texts(name, rest, seg, ins, cwds, docs, ctx):
 # a package manager's arguments are package names (`apt-get install tar zsh`), not file tools at work; a `$(...)` or
 # backquote in them still runs
 PKG_CMD_RE = _LazyRe(r"\b(?:npm|pnpm|yarn|bun|pip3?|pipx|uv|apt(?:-get)?|brew|dnf|yum|zypper|pacman|apk|gem|cargo|go|"
-                        r"composer|poetry|snap|flatpak|port|choco|scoop|winget)[ \t]+(?:install|add|i|-S\w*)\b[^;&|\n$`<>()]*")
+                        r"composer|poetry|snap|flatpak|port|choco|scoop|winget)[ \t]+(?:install|add|i|-S\w*)\b[^;&|\n$`<>()'\"]*")
+# (it stops at a quote: in `A='npm i' tee x.sh` the package manager is data and `tee` is the command)
 _WRITES = {}
 
 
@@ -1869,16 +1878,16 @@ def makes_file(raw, names):
     or a file tool or download (`tar x`, `cp a b`, `| tee f`, `curl -o f`) outside a package manager's arguments.
     Not `2>/dev/null` or `2>&1`. Worked out once per command text (an rc file may source dozens of missing files)."""
     if _WRITES.get("raw") is not raw:
-        # normalize: a quoted `>` (`eval 'x => x'`) is data, and `2>&1` / `>&f` / `&>f` / `>|f` come out as `>FD:1` / `>FD:f` / `>f`.
+        # normalize: a quoted `>` (`eval 'x => x'`) is data, and `2>&1` / `>&f` / `&>f` / `>|f` come out as `>` FD_DUP `1` / `>` FD_DUP `f` / `>f`.
         # Heredoc bodies stay as written: a shell may run one, so every `>` and file tool in them counts.
         cmd, docs = split_heredocs(raw.replace("\\\n", ""))
         text, targets, any_target = "\n".join([normalize(cmd), *docs]), set(), False
         for m in re.finditer(r">>?[ \t]*([^\s;&|()<>]+)", text):  # also `1<>f` and `y=>f`
             t = m.group(1)
-            if t.startswith("FD:"):
-                if re.fullmatch(r"\d+-?|-", t[3:]):
+            if t.startswith(FD_DUP):
+                if re.fullmatch(r"\d+-?|-", t[1:]):
                     continue  # `2>&1`: an fd, not a file
-                t = t[3:]
+                t = t[1:]
             any_target = any_target or bool(re.search(r"[\"'\\$`]", t) or GLOB_RE.search(t))
             targets.add(os.path.basename(t))
         _WRITES.update(raw=raw, targets=targets, any=any_target or bool(FILE_MAKER_RE.search(PKG_CMD_RE.sub(" ", text))))
@@ -2047,7 +2056,7 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
         return r
     if any(is_session_ref(a, cwds, ctx.raw) for a in ins):  # `cat < f`, `$(< f)`, `done < f`, bare `< f`: all print it
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
-    ctx.pw_env |= sets_pw_env(words, i, getattr(ctx, "scope", None) is not None)
+    ctx.pw_env |= sets_pw_env(words, i, getattr(ctx, "scope", None))
     if ctx.explorer and any(CLI_CONFIG_RE.search(a) for a in words + outs + ins + docs) and not (
             i is not None and prog_name(words[i]) in READ_ONLY_TOOLS and not outs):
         return ("playwright-cli reads its browser and profile from .playwright/cli.config.json; the explorer leaves "
@@ -2096,7 +2105,8 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                 for x in {a.split("=", 1)[-1].lstrip("@"), a.lstrip("@")} - {a, ""}]
     if name in COPY_TOOLS and checked[1:]:  # `cp x ~/.config/qa-sdet/`: a session folder as the destination is fine
         last = checked[-1]
-        if not any(realpath(os.path.join(c, expand(last))) in session_files() for c in local):
+        if not any(realpath(os.path.join(c, expand(t))) in session_files()
+                   for t in {last, *var_variants(last, ctx.raw)} for c in local):  # `F=<session>; cp x $F` too
             checked = checked[:-1]
     if name in GREP_TOOLS and checked[1:] and not {"-e", "-f", "--regexp", "--file"} & set(rest):
         checked.pop(1)  # `grep -rn "qa-state" src`: the first word is the pattern, not a file
@@ -2110,7 +2120,8 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
     opt_values = [a.split("=", 1)[1] for a in words[i + 1:] if a.startswith("-") and "=" in a]  # --from-file=PATH
     if not (pw_session_verb or lists_names) and name not in SESSION_FILE_OK and (
             any(is_session_ref(a, local, ctx.raw) for a in checked)
-            or any(realpath(os.path.join(c, expand(v))) in session_files() for v in opt_values for c in local)):
+            or any(realpath(os.path.join(c, expand(t))) in session_files()  # `--file=$F` with F set earlier too
+                   for v in opt_values for t in {v, *var_variants(v, ctx.raw)} for c in local)):
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
     if env_dir and any(is_session_ref(a, local, ctx.raw) for a in ins):  # `env -C dir cat < f`
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"

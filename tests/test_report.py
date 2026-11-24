@@ -1352,7 +1352,7 @@ class Layout(Base):
         a = {**RUN1, "target": "/a", "cases": [], "questions": ["Is the limit inclusive?"] + RUN1["questions"]}
         b = {**RUN1, "target": "/b", "cases": [], "questions": ["is the limit  inclusive?"]}
         _, r = self.render_run([("a", a), ("b", b)], plan={**PLAN1, "questions": []})
-        self.assertEqual(r.count("Is the limit inclusive?"), 1)  # merged, case and spaces ignored
+        self.assertEqual(r.lower().count("is the limit inclusive?"), 1)  # merged, case and spaces ignored
         self.assertIn("_(from /a, /b)_", r)
         self.assertIn("<details><summary>Resolved questions (1)</summary>\n\n- Units? — answer: km/h, as the label says.", r)
 
@@ -1375,6 +1375,90 @@ class Layout(Base):
         self.assertIn("| ✅ PASS | Saved | [image](evidence/TC-1.png) |", r)
         self.assertIn("![TC-1](evidence/TC-1.png)", r)
         self.assertIn("1 evidence image(s)", r)
+
+    def test_a_folder_named_like_a_case_image_is_not_one(self):  # audit pi-10
+        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        (d / "evidence" / "TC-1.png").mkdir(parents=True)
+        r = qm.render_report(d)
+        self.assertIn("0 evidence image(s)", r)
+        self.assertNotIn("![TC-1]", r)
+
+    def test_build_check_uses_the_builds_of_the_tickets_own_runs(self):  # audit pi-5: another ticket's build hid it
+        plan = {**PLAN1, "tickets": PLAN1["tickets"] + [{"key": "STUDIO-2", "summary": "List", "fix_version": "3.4",
+                                                          "fixed_note": "The list loads."}],
+                "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "STUDIO-2", "title": "List loads", "route": "/list"}]}
+        runs = [("form", {**RUN1, "build": "unknown"}),
+                ("list", {**RUN1, "target": "/list", "build": "3.4.0", "cases": [{"id": "TC-3", "status": "PASS"}]})]
+        d, _ = self.render_run(runs, plan=plan)
+        self.assertIn("- Build: unknown in this run.", (d / "jira-comment-STUDIO-1.md").read_text())
+        self.assertNotIn("Build: unknown", (d / "jira-comment-STUDIO-2.md").read_text())
+
+    def test_draft_takes_one_passing_image_per_route(self):  # audit agy-16: one route and two passes proved neither
+        plan = {**PLAN1, "cases": PLAN1["cases"] + [{"id": "TC-3", "ticket": "STUDIO-1", "ac": "AC-1", "title": "List",
+                                                     "route": "/list"}]}
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "QUESTION", "notes": "Order?"},
+                                            {"id": "TC-2", "status": "PASS"}]}),
+                ("list", {**RUN1, "target": "/list", "cases": [{"id": "TC-3", "status": "PASS"}]})]
+        d = self.rundir("2026-11-23-STUDIO-1", plan=plan, runs=runs)
+        for cid in ("TC-1", "TC-2", "TC-3"):
+            (d / "evidence" / f"{cid}.png").write_bytes(b"png")
+        self.config(releaseTemplates=TEMPLATES)
+        qm.write_report(d)
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertIn(f"Paste this image: {d}/evidence/TC-2.png (/form)", draft)  # TC-1 is first, but no pass
+        self.assertIn(f"Paste this image: {d}/evidence/TC-3.png (/list)", draft)
+        self.assertNotIn("TC-1.png", draft)
+
+    def test_case_fold_opens_when_a_case_did_not_pass(self):  # audit agy-16: the outer fold was never checked
+        runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"}]})]
+        _, r = self.render_run(runs)
+        self.assertIn("<details open><summary>Steps, expected results and evidence (2 cases)</summary>", r)
+        _, r = self.render_run([("form", RUN1)])
+        self.assertIn("<details><summary>Steps, expected results and evidence (2 cases)</summary>", r)
+
+    def test_open_beats_resolved_and_blocking_comes_first(self):  # audit agy-16
+        a = {**RUN1, "target": "/a", "cases": [], "questions": [{"text": "Same?", "status": "resolved", "answer": "x"},
+                                                                "[HIGH] B?", "C?"]}
+        b = {**RUN1, "target": "/b", "cases": [], "questions": ["same?", "[BLOCKING] A?"]}
+        _, r = self.render_run([("a", a), ("b", b)], plan={**PLAN1, "questions": []})
+        self.assertNotIn("Resolved questions", r)  # asked open on /b: still open
+        opened = r.split("### Open questions (4)", 1)[1].split("###", 1)[0]
+        self.assertLess(opened.index("[BLOCKING] A?"), opened.index("[HIGH] B?"))
+        self.assertLess(opened.index("[HIGH] B?"), opened.index("C?"))
+        self.assertIn("Same?", opened)
+
+    def test_plan_only_lists_a_resolved_question_once(self):  # audit agy-8: once bare (looked open), once answered
+        plan = {**PLAN1, "kind": "plan", "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h"}]}
+        r = qm.render_report(self.rundir("2026-11-23-STUDIO-1", plan=plan))
+        self.assertEqual(r.count("Units?"), 1, r)
+        self.assertIn("- Units? — answer: km/h", r)
+
+    def test_string_steps_cannot_fence_off_the_report(self):  # audit agy-10
+        plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "steps": "```js\nalert(1)"}, PLAN1["cases"][1]]}
+        _, r = self.render_run([("form", RUN1)], plan=plan)
+        self.assertIn("\n\\```js<br>alert(1)\n", r)
+
+    def test_bug_evidence_naming_a_folder_has_no_image(self):  # audit agy-11
+        bugs = [{"title": t, "severity": "LOW", "classification": "CONFIRMED", "evidence": ev}
+                for t, ev in (("b1", ".."), ("b2", "."), ("b3", "/"))]
+        r = qm.render_report(self.rundir("2026-11-24-r", runs=[("f", {"mode": "explore", "target": "/f",
+                                                                      "status": "COMPLETED", "bugs": bugs})]))
+        self.assertIn("| b1 |", r)
+        self.assertNotIn("[image](evidence/", r)
+
+    def test_draft_lines_stay_single_and_true_is_no_text(self):  # audit agy-12
+        plan = {**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": True}],
+                "cases": [{**c, "route": "/form\ninjected"} for c in PLAN1["cases"]]}
+        d, r = self.render_run([("form", {**RUN1, "not_tested": [True, "Real gap"], "questions": [True]})], plan=plan)
+        draft = (d / "jira-comment-STUDIO-1.md").read_text()
+        self.assertIn("Passed on <release name>", draft)
+        self.assertIn("screenshot for /form injected", draft)
+        self.assertNotIn("- True", r)
+        self.assertIn("Real gap", r)
+        self.config(releaseTemplates=["Rel-\n{version}"])
+        d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
+        qm.write_report(d)
+        self.assertIn("Passed on Rel- 3.5.0\n", (d / "jira-comment-STUDIO-1.md").read_text())
 
     def test_draft_shows_one_image_per_route_and_no_markup(self):
         d = self.rundir("2026-11-23-STUDIO-1", plan=PLAN1, runs=[("form", RUN1)])
@@ -1408,6 +1492,42 @@ class Layout(Base):
         draft = (d / "jira-comment-STUDIO-1.md").read_text()
         self.assertIn("TC-2 - QUESTION: Reject 131", draft)
         self.assertIn("Notes: TC-2 open question", draft)
+
+    def test_summary_lines_are_html_escaped_once(self):  # audit r4: `\|` showed as typed; a case title was escaped twice
+        plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "title": "a|b <i>x</i> & c\\d"}, PLAN1["cases"][1]]}
+        _, r = self.render_run([("form", {**RUN1, "target": "/f|g"})], plan=plan)
+        self.assertIn("<summary>TC-1 — a|b &lt;i&gt;x&lt;/i&gt; &amp; c\\d</summary>", r)
+        self.assertIn("<summary>/f|g (run-form.json: COMPLETED, build 1.42)</summary>", r)
+        self.assertNotIn("<i>", r)
+
+    def test_action_list_escapes_case_id_and_ac(self):  # audit r5: the only place ids reached the report unescaped
+        plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "id": "<img src=x onerror=alert(1)>", "ac": "<b>AC</b>"}]}
+        _, r = self.render_run([("form", {**RUN1, "cases": [{"id": "<img src=x onerror=alert(1)>", "status": "FAIL"}]})],
+                               plan=plan)
+        self.assertIn("- &lt;img src=x onerror=alert(1)> ❌ FAIL (&lt;b>AC&lt;/b>)", r)
+        self.assertNotIn("<img", r)
+        self.assertNotIn("<b>", r)
+
+    def test_odd_not_tested_shapes(self):  # audit r1: a string listed its letters; a list category raised TypeError
+        _, r = self.render_run([("form", {**RUN1, "not_tested": "keyboard"})])
+        self.assertNotIn("## Not tested", r)  # each case alone: one failure must not hide the other
+        self.assertIn("run-form.json: `not_tested` should be a list", r)
+        _, r = self.render_run([("b", {**RUN1, "target": "/b", "not_tested": [{"category": ["safety"], "text": "t1"}]})])
+        self.assertIn("<details><summary>Other (1)</summary>\n\n- t1", r)
+
+    def test_not_tested_groups_by_category_in_order(self):  # FEAT-2: no test caught categories being ignored
+        items = [{"category": "heuristic", "text": "h1"}, "plain", {"category": "safety", "text": "s1"},
+                 {"category": "safety", "text": "s2"}, {"category": "bogus", "text": "b1"},
+                 {"category": "out_of_scope", "text": "o1"}]
+        _, r = self.render_run([("form", {**RUN1, "not_tested": items})])
+        sec = r[r.index("## Not tested"):]
+        heads = ["Safety rules (not done on purpose) (2)", "Out of scope for this ticket (1)", "Heuristics not run (1)",
+                 "Other (2)"]
+        self.assertEqual([sec.index(f"<summary>{h}</summary>") for h in heads],
+                         sorted(sec.index(f"<summary>{h}</summary>") for h in heads))
+        self.assertIn("<summary>Safety rules (not done on purpose) (2)</summary>\n\n- s1\n- s2", sec)
+        self.assertIn("<summary>Other (2)</summary>\n\n- plain\n- b1", sec)  # unknown category: Other
+        self.assertNotIn("Not reached", sec)  # empty groups are left out
 
     def test_release_names_fill_the_version(self):
         self.assertEqual(qm._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))

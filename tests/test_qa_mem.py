@@ -418,10 +418,16 @@ class QaMem(unittest.TestCase):
         proj, other = base / "proj", base / "other"
         for d in (proj, other):
             d.mkdir()
-        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT), "CLAUDE_PROJECT_DIR": str(proj), "QA_MEM_DB": str(base / "db/x.db")}
+        stub = base / "bin"  # a python3 that notes it was started (audit pi-11: no db alone can't tell)
+        stub.mkdir()
+        (stub / "python3").write_text(f'#!/bin/sh\ntouch "{base}/python-started"\nexec "{sys.executable}" "$@"\n')
+        (stub / "python3").chmod(0o755)
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT), "CLAUDE_PROJECT_DIR": str(proj), "QA_MEM_DB": str(base / "db/x.db"),
+               "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"}
         sh = lambda cwd: subprocess.run(["bash", "-c", cmd], cwd=cwd, env=env, input="{}", capture_output=True, text=True)
         self.assertEqual(sh(other).returncode, 0)
         self.assertFalse((base / "db").exists())
+        self.assertFalse((base / "python-started").exists())
         (proj / "qa-out/a").mkdir(parents=True)  # the project's folder, reached from another cwd
         (proj / "qa-out/a/run.json").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
         self.assertEqual(sh(other).returncode, 0)

@@ -114,6 +114,7 @@ Bash(command -v playwright-cli*)
 Bash(acli jira auth status*)
 Bash(acli jira workitem view *)
 Bash(acli jira workitem search *)
+Bash(acli jira workitem comment list *)
 Skill(qa-sdet:*)
 Read(~/.config/qa-sdet/config.json)
 ```

@@ -10,7 +10,7 @@ Always use the one named session `playwright-cli -s=qa <cmd>`, so the browser st
 | Stable locator to save | `generate-locator <ref>` | hand-written CSS |
 | Did it fail silently? | `console error`, `requests`, then `response-body <n>` / `request-body <n>` for one call; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | screenshots, `request <n>` / `response-headers <n>` (blocked: they print cookies) |
 | Bug evidence | box recipe below, `screenshot --filename='<out>/evidence/BUG-<n>.png'`, then `qa-mem annotate` (always pass `--filename`: the default location is `.playwright-cli/`) | screenshot per step |
-| See canvas/map | `screenshot --filename='<out>/.data/map-<n>.png'` | screenshots in `evidence/` (bug images only) |
+| See canvas/map | `screenshot --filename='<out>/.data/map-<n>.png'` | screenshots in `evidence/` (bug and case images only) |
 | Repro script | `recording-start` … `recording-stop` → paste into repro/*.spec.ts | rewriting steps by hand |
 | Read a value | `eval "document.querySelector('#x').textContent"` | snapshot + reading |
 | Many input values | one `--raw eval` loop in the page (recipe below) | one fill + one read command per value; `run-code` (blocked: it runs Node) |
@@ -36,9 +36,9 @@ playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelecto
 Reproduce a suspicious value with real `fill`/`click` commands before calling it a bug: the recording and the repro spec need them.
 
 ## Box for a case image in the app frame (not yet checked on a live page)
-When the app shell loads each page in a frame, the bug-image recipe below cannot see inside that frame. Find the frame's selector once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : f.name).join(' ')"` (no frame: use the bug-image recipe). Then one eval reads the element through the frame and adds the frame's offset, so the box is in page coordinates (`run-code` would be simpler, but the guard denies it: it runs outside the page sandbox):
+When the app shell loads each page in a frame, the bug-image recipe below cannot see inside that frame. Find the frame's selector once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : '[name=' + f.name + ']').join(' ')"` (no frame: use the bug-image recipe). Then one eval reads the element through the frame and adds the frame's offset, so the box is in page coordinates (`run-code` would be simpler, but the guard denies it: it runs outside the page sandbox):
 ```
-playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<#id of the frame>');
+playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<selector from the lookup>');
   const el = f.contentDocument.querySelector('<css of the element>'); el.scrollIntoView({block: 'center'});
   const o = f.getBoundingClientRect(), r = el.getBoundingClientRect();
   return [o.x + f.clientLeft + r.x, o.y + f.clientTop + r.y, r.width, r.height].map(Math.round).join(','); })()"
