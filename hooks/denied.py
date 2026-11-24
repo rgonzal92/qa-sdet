@@ -14,6 +14,6 @@ except ValueError:
     data = None
 if isinstance(data, dict):
     project = os.environ.get("CLAUDE_PROJECT_DIR") or str(data.get("cwd") or os.getcwd())
-    if (guard.agent_role(data).startswith("qa-") or guard.GUARDED_ANY_RE.search(json.dumps(data.get("tool_input") or {}))
-            or guard.MCP_BROWSER_RE.match(str(data.get("tool_name") or "")) or os.path.isdir(os.path.join(project, "qa-out"))):
+    if (guard.agent_role(data).startswith("qa-") or guard.mentions_guarded(json.dumps(data.get("tool_input") or {}), True)
+            or os.path.isdir(os.path.join(project, "qa-out"))):
         guard.log_denial(data, data.get("reason") or "denied by Claude Code", layer="claude-code")

@@ -493,6 +493,18 @@ class Annotate(Base):
         (p.parent / "same.png").symlink_to(p)  # a link within the same project stays allowed
         self.assertEqual(qm.evidence_png(p.parent / "same.png"), p.resolve())
 
+    def test_refuses_all_but_a_png_in_a_run_evidence_folder(self):  # these were the guard's checks until v0.5
+        p = self.png()
+        ev, other, loose = p.parent, self.t / "other", self.proj / "qa-out" / "evidence"
+        for d in (other, ev / "sub", loose):
+            d.mkdir()
+        (ev / "linkdir").symlink_to(other)
+        for f in (other / "x.png", ev / "BUG-1.jpg", ev / "BUG-1.png.sh", ev / "sub" / "x.png", loose / "x.png"):
+            f.write_bytes(p.read_bytes())
+        for target in (ev / "BUG-1.jpg", ev / "BUG-1.png.sh", ev / "sub" / "x.png", ev / "linkdir" / "x.png", ev,
+                       loose / "x.png", f"{ev}/../../../x.png", ev / "*.png", "-x.png"):
+            self.assertEqual(cli("annotate", str(target), "--box", "1,1,5,5", "--label", "x")[0], 2, target)
+
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_bad_input_is_exit_2_and_image_kept(self):  # r9: inf box, non-PNG, truncated, huge -> tracebacks
         from PIL import Image
