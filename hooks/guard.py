@@ -319,8 +319,8 @@ def var_variants(word, raw):
         if len(_ASSIGNED) > 8:
             _ASSIGNED.clear()
         known = _ASSIGNED[id(raw)] = (raw, {})
-        for n, v in re.findall(r"(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s;&|()]+)", raw):
-            known[1].setdefault(n, []).append(v.strip("\"'"))
+        for n, v in re.findall(r"(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)\+?=(\"[^\"]*\"|'[^']*'|[^\s;&|()]+)", raw):
+            known[1].setdefault(n, []).append(re.sub(r"[\"']", "", v))
     for name in set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", word)):
         vals = known[1].get(name)
         if vals:
@@ -429,7 +429,12 @@ def is_session_file(path, cwd="/"):
     return os.path.realpath(os.path.join(cwd, expand(path))) in session_files()
 
 
-def is_session_ref(token, cwds):
+def is_session_ref(token, cwds, raw=""):
+    """raw = the whole command: a `$F` also counts with the values assigned there (`F=<session file>; cat $F`)."""
+    return any(_is_session_ref(t, cwds) for t in {token, *var_variants(token, raw)})  # `echo HOME=/x; cat $HOME/…`
+
+
+def _is_session_ref(token, cwds):
     t = expand(token)
     if t.startswith("file:"):
         t = t[5:].split("?")[0]
@@ -491,7 +496,7 @@ def db_names():
 
 def touches_db(path, cwds, parent_counts, raw=""):
     """raw = the whole command: a `$X` in the path also counts with the values assigned there (`X=<db dir>; rm -rf $X`)."""
-    return any(_touches_db(p, cwds, parent_counts) for p in var_variants(path, raw))
+    return any(_touches_db(p, cwds, parent_counts) for p in {path, *var_variants(path, raw)})
 
 
 def long_text(word):
@@ -973,7 +978,7 @@ def check_pw(rest, hosts, cwds, ctx, via_loop):
             return RUN_OUTPUT_REASON
         if touches_db(f, cwds, False):
             return "playwright-cli writing into the qa-sdet memory DB directory is blocked"
-        if verb != "state-load" and is_session_ref(f, cwds):
+        if verb != "state-load" and is_session_ref(f, cwds, ctx.raw):
             return "the saved browser session holds live cookies; only state-load may use it"
     for v in pw_profile_values(rest):
         if verb != "open" or not is_main_profile(v, cwds, ctx.raw):
@@ -1071,8 +1076,10 @@ def qamem_positionals(sub, rest):
     return out
 
 
-def sets_pw_env(words, i):
-    """Does this simple command set or export a variable that steers playwright-cli's browser?"""
+def sets_pw_env(words, i, in_file=False):
+    """Does this simple command set or export a variable that steers playwright-cli's browser? in_file (a sourced rc
+    file on disk): a bare `local $2`, `typeset -ga ${x}` declares a variable there and sets nothing. A `$name=value`
+    still counts: assigning to a name the shell already exports changes what playwright-cli sees."""
     if any(PW_ENV_RE.search(a) for a in words):
         return True
     if i is None:
@@ -1081,8 +1088,9 @@ def sets_pw_env(words, i):
     if name == "set":  # `set -a`: every later assignment is exported
         return "allexport" in rest or any(re.match(r"^-[a-zA-Z]*a", a) for a in rest)
     if name in EXPORTERS:  # `export PLAYWRIGHT_MCP_CONFIG`, `export "$V"`
-        names = [a.split("=", 1)[0] for a in rest if not a.startswith("-")]
-        return any(PW_ENV_NAME_RE.match(n) or "$" in n or "SUBST" in n for n in names)
+        bare_ok = in_file and name != "export" and not any(re.match(r"^-[a-zA-Z]*x", a) for a in rest)
+        return any(PW_ENV_NAME_RE.match(n) or (("$" in n or "SUBST" in n) and not (bare_ok and "=" not in a))
+                   for a in rest if not a.startswith("-") for n in [a.split("=", 1)[0]])
     return False
 
 
@@ -1746,7 +1754,8 @@ def read_script(path, cwds, raw="", strict=False):
     if "SUBST" in path or any("$" in t or GLOB_RE.search(t) for t in paths):
         return None
     reals = [os.path.realpath(os.path.join(c, t)) for c in cwds for t in paths]
-    if not strict and not any(os.path.lexists(p) for p in reals) and ">" not in raw and not WRITER_WORD_RE.search(raw):
+    if not strict and not any(os.path.lexists(p) for p in reals) and not makes_file(
+            raw, {os.path.basename(t) for t in paths + reals}):  # (a dangling link's target too)
         return ""  # `. "$HOME/.cargo/env"` where there is none, and nothing in the command makes it: nothing runs
     texts = []
     for p in reals:
@@ -1797,8 +1806,37 @@ def shell_script_texts(name, rest, seg, ins, cwds, docs, ctx):
     return texts, unknown
 
 
+# a package manager's arguments are package names (`apt-get install tar zsh`), not file tools at work; a `$(...)` or
+# backquote in them still runs
+PKG_CMD_RE = re.compile(r"\b(?:npm|pnpm|yarn|bun|pip3?|pipx|uv|apt(?:-get)?|brew|dnf|yum|zypper|pacman|apk|gem|cargo|go|"
+                        r"composer|poetry|snap|flatpak|port|choco|scoop|winget)[ \t]+(?:install|add|i|-S\w*)\b[^;&|\n$`<>()]*")
+_WRITES = {}
+
+
+def makes_file(raw, names):
+    """Could this command create one of these files? An output redirection to it, to a quoted, escaped or computed path,
+    or a file tool or download (`tar x`, `cp a b`, `| tee f`, `curl -o f`) outside a package manager's arguments.
+    Not `2>/dev/null` or `2>&1`. Worked out once per command text (an rc file may source dozens of missing files)."""
+    if _WRITES.get("raw") is not raw:
+        # normalize: a quoted `>` (`eval 'x => x'`) is data, and `2>&1` / `>&f` / `&>f` / `>|f` come out as `>FD:1` / `>FD:f` / `>f`.
+        # Heredoc bodies stay as written: a shell may run one, so every `>` and file tool in them counts.
+        cmd, docs = split_heredocs(raw.replace("\\\n", ""))
+        text, targets, any_target = "\n".join([normalize(cmd), *docs]), set(), False
+        for m in re.finditer(r">>?[ \t]*([^\s;&|()<>]+)", text):  # also `1<>f` and `y=>f`
+            t = m.group(1)
+            if t.startswith("FD:"):
+                if re.fullmatch(r"\d+-?|-", t[3:]):
+                    continue  # `2>&1`: an fd, not a file
+                t = t[3:]
+            any_target = any_target or bool(re.search(r"[\"'\\$`]", t) or GLOB_RE.search(t))
+            targets.add(os.path.basename(t))
+        _WRITES.update(raw=raw, targets=targets, any=any_target or bool(FILE_MAKER_RE.search(PKG_CMD_RE.sub(" ", text))))
+    return _WRITES["any"] or bool(_WRITES["targets"] & names)
+
+
 STDIN_FEED_RE = re.compile(r"(?<!\|)\|(?!\|)|<")  # a pipe or an input redirection anywhere in the command
 WRITER_WORD_RE = re.compile(r"(?<![\w.-])(unzip|tar|bsdtar|7za?|cpio|cp|mv|ln|rsync|install|dd|tee)(?![\w.-])")
+FILE_MAKER_RE = re.compile(WRITER_WORD_RE.pattern.replace("|tee)", "|tee|curl|wget|sponge|aria2c)"))
 UNKNOWN_SCRIPT_REASON = ("a shell reading its script from a pipe, a variable or a file made in the same command can't be "
                          "checked; run the commands directly")
 
@@ -1956,9 +1994,9 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                 return r
     if env_split and (r := _check(unmark(env_split), here, ctx, depth + 1)):
         return r
-    if any(is_session_ref(a, cwds) for a in ins):  # `cat < f`, `$(< f)`, `done < f`, bare `< f`: all print it
+    if any(is_session_ref(a, cwds, ctx.raw) for a in ins):  # `cat < f`, `$(< f)`, `done < f`, bare `< f`: all print it
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
-    ctx.pw_env |= sets_pw_env(words, i)
+    ctx.pw_env |= sets_pw_env(words, i, getattr(ctx, "scope", None) is not None)
     if ctx.explorer and any(CLI_CONFIG_RE.search(a) for a in words + outs + ins + docs) and not (
             i is not None and prog_name(words[i]) in READ_ONLY_TOOLS and not outs):
         return ("playwright-cli reads its browser and profile from .playwright/cli.config.json; the explorer leaves "
@@ -2020,10 +2058,10 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                 checked.remove(pat)  # one occurrence: `git grep -e x x` still checks the path x
     opt_values = [a.split("=", 1)[1] for a in words[i + 1:] if a.startswith("-") and "=" in a]  # --from-file=PATH
     if not (pw_session_verb or lists_names) and name not in SESSION_FILE_OK and (
-            any(is_session_ref(a, local) for a in checked)
+            any(is_session_ref(a, local, ctx.raw) for a in checked)
             or any(os.path.realpath(os.path.join(c, expand(v))) in session_files() for v in opt_values for c in local)):
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
-    if env_dir and any(is_session_ref(a, local) for a in ins):  # `env -C dir cat < f`
+    if env_dir and any(is_session_ref(a, local, ctx.raw) for a in ins):  # `env -C dir cat < f`
         return "the saved browser session holds live cookies; only playwright-cli state-load/state-save may use it"
     recursive_copy = name in ARCHIVERS or (name in ("cp", "scp") and any(
         re.match(r"^-[a-zA-Z]*[rRa]", a) or a in ("--recursive", "--archive") for a in rest))
@@ -2107,7 +2145,8 @@ def check_segment(seg, cwds, start, hosts, docs, depth, mentions_guarded, ctx):
                     not STDIN_FEED_RE.search(split_heredocs(scope_text(ctx))[0]):
                 unknown = None  # `brew install bash`: found by the launcher re-check, nothing after it and nothing piped in
             # `source ~/.zshrc`: a file on disk, read as its own scope (its `. "$NVM_DIR/nvm.sh"` names nothing guarded)
-            from_file = bool(texts) and unknown is None and not docs and not any(REDIRECT_RE.match(t) for t in seg)
+            from_file = bool(texts) and unknown is None and not any(
+                (m := REDIRECT_RE.match(t)) and m.group(2).startswith("<") for t in seg)  # `2>/dev/null` keeps it
             r = check_scripts(texts, unknown, here, ctx, depth, mentions_guarded, from_file)
     elif name in ("make", "gmake") and re.search(r"(^|\s)-f\s*(-|/dev/stdin)(\s|$)", " ".join(rest)):
         # `make -f - <<< $'x:\n\tcmd'`: the recipe lines of a makefile on stdin are shell commands

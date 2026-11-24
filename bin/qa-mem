@@ -597,6 +597,25 @@ def _assigned_secret(v):
         and not re.fullmatch(r"v?\d+([-–.,:/]\d+)*[A-Za-z%]{0,5}[.,;]?|[@\w.]+\(.*|[a-z_][A-Za-z_]*(\.[A-Za-z_]+)+[,;]?", v))  # user.password
 
 
+# `user / password: qa / Passw0rd!`: up to six labels and as many values, each joined by `/`; a value goes with its
+# label. A label starts a word (not after `-`), so a long hyphenated or base64url run is scanned once, not from every `-`.
+PAIRED_RE = re.compile(r"(?i)(?<![\w-])((?:[\w-]+(?:[ \t][\w-]+)?[ \t]*/[ \t]*){1,5}[\w-]+(?:[ \t][\w-]+)?)"
+                       r"([ \t]*[*_]{0,3}[ \t]*[:=][*_]{0,3}[ \t]*)((?:[^\s/|]+[ \t]*/[ \t]*){1,5}[^\s/|]+)")
+SECRET_LABEL_RE = re.compile(rf"(?i)(?:{SECRET_KEYS})$")  # a label ending in a secret name: `Confirm password`, `API key`
+
+
+def _paired(m):
+    labels, values = m.group(1).split("/"), m.group(3).split("/")
+    if len(labels) != len(values):
+        return m.group(0)
+    judge = _assigned_secret if "=" in m.group(2) else _secret_looking  # as KEY_VALUE_RE: `password: invalid` is a word
+    out = []
+    for label, v in zip(labels, values):
+        core = v.strip().rstrip("&;,.})")  # closing punctuation is not part of the value
+        out.append(v.replace(core, "[REDACTED]", 1) if core and SECRET_LABEL_RE.search(label.strip()) and judge(core) else v)
+    return m.group(1) + m.group(2) + "/".join(out)
+
+
 TABLE_ROW_RE = re.compile(rf"(?im)(\|[ \t]*`?(?:{SECRET_HEADERS}|{SECRET_KEYS})`?[ \t]*\|[ \t]*`?)(?!\[REDACTED)([^|\n`]+?)(`?[ \t]*\|)")
 
 
@@ -619,6 +638,7 @@ def redact(text):
         text = QUOTED_SECRET_RE.sub(_quoted_secret, text)
         text = HEADER_VALUE_RE.sub(lambda m: m.group(1) + m.group(2) + _header_value(m.group(3), m.group(1)), text)
         text = KEY_VALUE_RE.sub(sub, text)
+        text = PAIRED_RE.sub(_paired, text)
         text = TABLE_ROW_RE.sub(lambda m: m.group(1) + ("[REDACTED]" if (_secret_looking if " " in m.group(2).strip()
                                                                           else _assigned_secret)(m.group(2)) else m.group(2))
                                 + m.group(3), text)  # `| api_key | 4f3c… |`

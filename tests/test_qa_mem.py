@@ -230,6 +230,34 @@ class QaMem(unittest.TestCase):
                              ('{"apiKey": "correct horse battery"}', "horse")):
             self.assertNotIn(secret, qm.redact(text), text)
 
+    def test_paired_labels_and_values(self):  # known issue in 0.4.0: `user / password: qa / Passw0rd!`
+        for text, secret, kept in (("user / password: qa / Passw0rd!", "Passw0rd", "qa /"),
+                                   ("Login / Password: qa@x.com / Hunter22", "Hunter22", "qa@x.com"),
+                                   ("username/password = qa/Sommerregen", "Sommerregen", "username/password"),
+                                   ("Account: user / API key: qa / 4f3c2b1a0d9e", "4f3c2b1a", "Account")):
+            out = qm.redact(text)
+            self.assertNotIn(secret, out, text)
+            self.assertIn(kept, out, text)
+        for keep in ("pass/fail: 3/1", "user / password: required / required", "src/api/token: x/y", "min / max: 8 / 64",
+                     "user / role: qa / admin", "Date / time: 2026-11-23 / 10:00", "Email / Password: valid / invalid",
+                     "login/password: success/failure", "token/scope: read/write", "token / expiry: JWT / 15 min",
+                     "Username / Password: email / text", "/auth/password: GET/POST"):
+            self.assertEqual(qm.redact(keep), keep)
+        # values KEY_VALUE_RE redacted before stay redacted; multi-word and bold labels; punctuation after the value stays
+        for text, secret in (("Password/Confirm password: Passw0rd!/Winter2024!", "Winter2024"),
+                             ("token/refresh token: 8a7b6c5d4e3f2a1b0c9d/1f2e3d4c5b6a79880a1b", "1f2e3d4c"),
+                             ("Client secret/password: 9f8e7d6c5b4a39281706/Passw0rd!", "9f8e7d6c"),
+                             ("**Username / Password:** qa / Passw0rd!", "Passw0rd"), ("admin user / admin password: qa / Hunter22", "Hunter22")):
+            self.assertNotIn(secret, qm.redact(text), text)
+        self.assertEqual(qm.redact("(user / password: qa / Passw0rd!)."), "(user / password: qa / [REDACTED]).")
+        self.assertEqual(qm.redact("user / password: qa / Passw0rd!, then click Login"), "user / password: qa / [REDACTED], then click Login")
+        # linear on long hyphenated, base64url and slash runs
+        for big in ("-".join(["550e8400e29b41d4a716446655440000"] * 3000), "a-" * 50000, "foo-bar-baz-" * 9000, "a/" * 100000,
+                    "x" * 60 + ("Ab3_-" * 20000), "user / password " * 20000):
+            t0 = time.time()
+            qm.redact(big)
+            self.assertLess(time.time() - t0, 2, big[:40])
+
     def test_unparseable_url_is_no_route_not_a_traceback(self):  # audit 3 r1
         self.assertEqual(qm.norm_route("http://[x"), "")
         self.assertIn("NO CARD", qm.card(self.con, "http://[x"))
