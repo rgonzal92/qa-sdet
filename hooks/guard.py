@@ -6,7 +6,7 @@ PLAYWRIGHT_MCP_*/PWTEST_* variable; --profile only on `open`, only the main prof
 cookie/storage/header reads, traces, state-save, run-code, the browser profile folder, uploads of secret files or globs.
 R4 The qa-explorer uses only its tools (no MCP), writes only its run files, leaves the qa-sdet config and
 .playwright/cli.config.json alone, fetches only from allowedHosts and
-runs no script file or package (a page it read could have steered it to write or name one). R5 Nobody changes the qa-sdet data folder
+runs no script file, inline code or package (a page it read could have steered it to write or name one). R5 Nobody changes the qa-sdet data folder
 (memory DB); sqlite3 on it only -readonly. R6 A run marker (qa-out/.active) with a budget or deadline limits browser
 commands; faults need `faults: true`; the explorer neither writes nor removes it. R7 The qa-mapper reads source
 (no secrets) and writes only its code map. R8 A Bash
@@ -1041,13 +1041,29 @@ def config_files(cwds):
     """R4: the qa-sdet config (allowedHosts) and the playwright-cli config files that would pick its browser."""
     return {os.path.realpath(CONFIG), real("~/.playwright/cli.config.json", "/")} | {real(".playwright/cli.config.json", c) for c in cwds}
 # ---------- 8. odd forms ----------
+INLINE_REASON = ("the explorer runs no inline code (python -c, node -e, perl -e, a pipe or heredoc into an interpreter): a "
+                 "page it read could have steered it, and the guard can't read what the code does (rewrite the run marker, "
+                 "reach another host); read files with Read or jq, and use qa-mem and playwright-cli for the rest")
+def inline_code(name, rest, kind):
+    """An interpreter (not awk) given its code inline or on stdin, as how_run reads it; a module (python -m json.tool) and
+    --version/--help are not inline code."""
+    if not INTERP_RE.fullmatch(name) or "awk" in name or kind not in ("code", "stdin"):
+        return False
+    for a in rest:
+        if a in ("--version", "-V", "--help", "-h") or name.startswith("python") and re.fullmatch(r"-[A-Za-z]*m", a):
+            return False
+        if not a.startswith("-"):
+            break
+    return True
 def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None, cwds=()):
-    """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file."""
+    """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file or inline code."""
     kind, val = run
     by_path = i is not None and "/" in words[i] and not (any(real(words[i], c) == PLUGIN_QA_MEM for c in cwds)
                                                      or re.match(r"/(usr|bin|sbin|opt|snap)/", words[i]))
     if ctx.explorer and (kind == "file" or kind == "stdin" and ins or by_path):  # ./x.sh: may not exist yet
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
+    if ctx.explorer and inline_code(name, rest, kind):
+        return INLINE_REASON
     if ctx.explorer and (PKG_RE.fullmatch(name) or "npx" in wrappers or re.fullmatch(r"python[\d.]*", name)  # npx is a wrapper
                          and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(rest))):
         return ("the explorer installs and runs no packages (npm, npx, pip, ...: they download code from other hosts and run "

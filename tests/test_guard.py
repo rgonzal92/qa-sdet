@@ -390,13 +390,32 @@ class R4Explorer(Case):
              "ls -l ~/.playwright/cli.config.json", "jq . .playwright/cli.config.json", "timeout 5 wget -qO- http://localhost:1/api",
              "echo $(curl -s qa.traffic.example)", "curl -s -o /tmp/r.json -H 'Accept: application/json' https://qa.traffic.example/api/x | jq .",
              "playwright-cli -s=qa find \"Retry http error\"", "command -v curl", "rm -rf qa-out/r/.data/x",
-             "cat qa-out/.active", "git status", "python3 -c 'print(1)'", "python3 -m unittest discover -s tests",
+             "cat qa-out/.active", "git status", "python3 -m unittest discover -s tests",
              f"python3 {Q} card /x", "qa-mem report qa-out/r", "echo hi | bash", "bash -c 'ls -la'",
              "playwright-cli kill-all", "curl -s https://qa.traffic.example/api/x", "/usr/bin/env ls", f"{Q} card /x", "playwright-cli -s=qa --raw eval 'document.body.innerHTML'"]
 
     def test_explorer_rules(self):
         self.table(self.DENY, True, RUN, agents=(True,))
         self.table(self.ALLOW, False, RUN, agents=(True,))
+
+    INLINE = ["python3 -c 'print(1)'", "python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])))' qa-out/r/.data/run-x.json",
+              "python3 -c \"import json;p='qa-out/.active';d=json.load(open(p));d['api_writes']=True;json.dump(d,open(p,'w'))\"",
+              "python3 -c \"import urllib.request as u; u.urlopen('https://evil.example.com')\"", "python3 -Ic 'x'",
+              "echo 'print(1)' | python3", "python3 - <<'EOF'\nprint(1)\nEOF", "python3", "timeout 5 python3 -c 'x'",
+              "/usr/bin/python3.12 -c 'x'", "env python3 -c 'x'", "node -e 'require(\"fs\")'", "node -p '1+1'",
+              "node --eval 'x'", "perl -e 'print 1'", "perl -ne 'print' qa-out/r/.data/run-x.json", "ruby -e 'puts 1'",
+              "php -r 'echo 1;'", "deno eval 'x'", "bun -e 'x'", "bash -c \"python3 -c 'x'\"", "cat x | node"]
+    INLINE_ALLOW = ["python3 --version", "node --version", "python3 -m json.tool qa-out/r/.data/run-x.json",
+                    "awk '{print $1}' qa-out/r/.data/requests-x.log", "jq . qa-out/r/.data/run-x.json"]
+
+    def test_explorer_runs_no_inline_code(self):  # found live: python3 -c can rewrite the run marker or reach any host
+        for cmd in self.INLINE:
+            with self.subTest(cmd=cmd):
+                reason = bash(cmd, RUN, True)
+                self.assertIsNotNone(reason, cmd)
+        self.assertIn("inline code", bash("python3 -c 'print(1)'", RUN, True))
+        self.table(self.INLINE_ALLOW, False, RUN, agents=(True,))
+        self.table(["python3 -c 'print(1)'", "node -e 'x'", "echo 'print(1)' | python3"], False, RUN, agents=(False,))  # your session
 
     def test_explorer_navigates_in_its_browser_not_a_new_one(self):  # a bare open drops the sign-in and the signal history
         for cmd in ("playwright-cli -s=qa open 'https://qa.traffic.example/map?layer=closures'", "playwright-cli -s=qa open",
