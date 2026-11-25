@@ -30,8 +30,10 @@ EVENT_TYPES = ("denial", "hook_error", "nudge", "tool_fail", "stop_bounce", "cli
 _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 _VERSION_CACHE = None
 
-# Extra CLI secret forms beyond scrub.py (mirrors hooks/guard.py mask() so denial/tool_fail calls stay clean).
+# The secret forms hooks/guard.py mask() covers and scrub.py doesn't, so tool_fail and cli_error calls stay as clean as
+# denials; credential-shaped values only, so notes stay readable (tests/test_guard.py LibMirrorsGuard pins the two).
 _CLI_MASKS = (
+    (re.compile(r"(?i)\b(basic)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}=*"), r"\1\2[REDACTED]"),
     (re.compile(r"(?i)(token|password|passwd|pwd|secret|api[_-]?key)(\\?['\"]?\s*[=:]\s*\\?['\"]?)[^\s'\"&\\]+"),
      r"\1\2[REDACTED]"),
     (re.compile(r"(?i)(\s--?[\w-]*(?:token|password|passwd|secret|api[_-]?key)\s+['\"]?)[^\s'\"]+"), r"\1[REDACTED]"),

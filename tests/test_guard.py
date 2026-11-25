@@ -1279,7 +1279,32 @@ class Plumbing(Case):
 
 class LibMirrorsGuard(Case):
     """The guard imports nothing from lib (it is the trust root and starts fast); lib's copy of its host rules, used by
-    `session-check` and `doctor`, must decide exactly as it does."""
+    `session-check` and `doctor`, must decide exactly as it does, and lib's plugin-log writer (every other hook and
+    qa-mem) must mask and mute like the guard's."""
+    def test_lib_plugin_log_keeps_out_the_secrets_the_guard_masks(self):  # a Basic credential reached the log and digest
+        from qa_sdet import plugin_log as pl
+        cred = "dXNlcjpTM2NyM3RQYXNz"
+        for text in (f"curl -H 'Authorization: Bearer {cred}' https://qa.example",
+                     f"playwright-cli -s=qa eval \"fetch(u, {{headers: {{'X-Auth': 'Basic {cred}='}}}})\"",
+                     f"qa-mem api-probe GET https://qa.example/api --header 'X-Upstream: Bearer {cred}'",
+                     f"JIRA_API_TOKEN={cred} acli jira workitem view X-1", f"acli jira workitem view X-1 --password {cred}",
+                     f"curl -u bob:{cred} https://qa.example", f"curl https://bob:{cred}@qa.example/",
+                     f"curl -H 'Cookie: sid={cred}' https://qa.example", f"curl -H 'X-Api-Key: {cred}' https://qa.example"):
+            with self.subTest(text=text):
+                self.assertNotIn(cred, g.mask(text))
+                self.assertNotIn(cred, pl.scrub_text(text, 0))
+        for prose in ("the basic search drops results", "Bearer of bad news on /closures"):  # user notes stay readable
+            self.assertEqual(pl.scrub_text(prose, 0), prose)
+
+    def test_lib_plugin_log_writes_and_mutes_like_the_guard(self):
+        from qa_sdet import plugin_log as pl
+        self.assertEqual((g.PLUGIN_LOG_NAME, g.DENIAL_LOG_LINES), (pl.LOG_NAME, pl.MAX_EVENTS))
+        cfg = TMP / "mirror-plugin-log.json"
+        for body in ("{}", '{"pluginLog": false}', '{"pluginLog": 0}', '{"pluginLog": "false"}', "[]", "not json"):
+            cfg.write_text(body)
+            with self.subTest(config=body), mock.patch.object(g, "CONFIG", cfg):
+                self.assertEqual(g._plugin_log_enabled(), pl.enabled(cfg))
+
     def test_lib_reads_hosts_and_urls_by_the_guards_rules(self):  # session-check took user@host and a backslash host
         from qa_sdet import core
         lists = [["qa.example.com"], ["QA.Example.com.", "*.api.example.com"], ["localhost"], [" ", 7], "qa.example.com"]
