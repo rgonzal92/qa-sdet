@@ -1,6 +1,7 @@
-"""PostToolUse entry point (hooks.json): feedback an agent can still act on, as additionalContext.
+"""PostToolUse and PostToolUseFailure entry point (hooks.json): feedback an agent can still act on, as additionalContext.
 - The qa-explorer hears once when its run's budget or time is nearly used up: step 9 deletes its test records through
-  the UI, which the guard refuses once the budget or time is gone.
+  the UI, which the guard refuses once the budget or time is gone. A failed Bash call spent its commands too, and fires
+  only PostToolUseFailure.
 - A qa-mapper hears at once when the code map it just wrote can't be saved. At its stop it could be too late: a parallel
   mapper's stop hook may have read the file first.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
@@ -28,7 +29,7 @@ def wind_down(data):
         return None
     budget, used, deadline = int(float(m.get("budget") or 0)), int(float(m.get("used") or 0)), float(m.get("deadline") or 0)
     left, secs, low = budget - used, deadline - time.time(), []
-    if budget and left <= max(3, budget * 15 // 100):
+    if budget and left <= guard.cleanup_reserve(budget):
         low.append(f"{max(left, 0)} browser command{'' if left == 1 else 's'}")
     if deadline and secs <= 120:
         low.append(f"{max(int(secs), 0)} seconds")
@@ -78,7 +79,8 @@ def main():
         elif isinstance(data, dict) and data.get("tool_name") == "Write" and role(data) == "qa-mapper":
             note = code_map_feedback(data)
         if note:
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": note}}))
+            event = "PostToolUseFailure" if data.get("hook_event_name") == "PostToolUseFailure" else "PostToolUse"
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": note}}))
     except Exception:  # noqa: BLE001 - feedback is best effort
         pass
     return 0

@@ -90,7 +90,11 @@ class Hooks(Base):
         r = subprocess.run([sys.executable, str(ROOT / "hooks/posttooluse.py")], input=json.dumps(data), capture_output=True,
                            text=True, cwd=self.proj, env={**os.environ, **(env or {})})
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else ""
+        if not r.stdout.strip():
+            return ""
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["hookEventName"], data.get("hook_event_name") or "PostToolUse")
+        return out["additionalContext"]
 
     def test_post_tool_use_wiring(self):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
@@ -98,6 +102,8 @@ class Hooks(Base):
         self.assertEqual(entry["matcher"], "Bash|Write")
         self.assertIn("/hooks/posttooluse.py", entry["hooks"][0]["command"])
         self.assertIn('[ -d qa-out ]', entry["hooks"][0]["command"])  # no Python start in unrelated projects
+        failed = hooks["PostToolUseFailure"][0]  # a failed Bash call spends budget too, and fires only this event
+        self.assertEqual((failed["matcher"], failed["hooks"][0]["command"]), ("Bash", entry["hooks"][0]["command"]))
 
     def test_explorer_is_warned_once_before_the_budget_runs_out(self):
         """Step 9 deletes test data through the UI, which the guard refuses once the budget is used up: warn first."""
@@ -114,6 +120,8 @@ class Hooks(Base):
         self.assertIn("3 browser commands left", note)
         self.assertIn("qa-sdet-", note)
         self.assertEqual(self.post(call), "")  # once per run
+        marker.write_text(json.dumps({"expires": time.time() + 3601, "budget": 20, "used": 20}))  # a new run, a failed call
+        self.assertIn("0 browser commands left", self.post({**call, "hook_event_name": "PostToolUseFailure", "error": "Exit code 1"}))
         marker.write_text(json.dumps({"expires": time.time() + 7200, "deadline": time.time() + 90}))  # a new run, by time
         self.assertIn("left", self.post(call))
         marker.unlink()

@@ -620,6 +620,15 @@ class R6Marker(Case):
         marker(cwd, budget=15, used=15)
         self.assertIn("is used up", bash("playwright-cli -s=qa click e1", cwd))
 
+    def test_one_call_cannot_jump_over_the_cleanup_warning(self):  # a 9-command && chain took a live run from 9 left to 0
+        cwd = project(budget=12, used=3)
+        chain = lambda n: " && ".join(["playwright-cli -s=qa click e1"] * n)
+        self.assertIn("send at most 6 now", bash(chain(9), cwd, True))
+        self.assertIsNone(bash(chain(6), cwd, True))  # down to the reserve: the warning comes with 3 left
+        self.assertIsNone(bash(chain(3), cwd, True))  # inside it, as before
+        self.assertIn("used up", bash("playwright-cli -s=qa click e1", cwd, True))
+        self.assertEqual((g.cleanup_reserve(2), g.cleanup_reserve(12), g.cleanup_reserve(100)), (3, 3, 15))
+
     def test_used_is_untouched_without_a_budget(self):
         for m in ({}, {"deadline": time.time() + 600}, {"budget": 0, "deadline": time.time() + 600}):
             cwd = project()

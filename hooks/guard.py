@@ -217,6 +217,9 @@ def read_marker(cwd):
         if ok and nums["expires"] > time.time():
             return path, marker
     return None, None
+def cleanup_reserve(budget):
+    """The run's last browser commands, kept for step 9's UI cleanup: the PostToolUse hook warns on reaching them."""
+    return max(3, int(budget) * 15 // 100)
 def spend_budget(path, n, explorer=False):
     """Count n browser commands against the run (locked); deny reason when used up. `used` is kept only with a budget."""
     path = Path(path)  # no truncation, no symlink following (a planted `.active.lock -> ~/.bashrc`), no blocking (FIFO)
@@ -247,6 +250,10 @@ def spend_budget(path, n, explorer=False):
                         f"({used} used); send fewer per call, or close the browser and write <out>/.data/run-<slug>.json if done")
             if budget and used + n > budget:
                 return f"the run's budget of {budget} browser commands is used up ({used} used): close the browser, {done}"
+            reserve = cleanup_reserve(budget)
+            if budget and budget - used > reserve > budget - used - n:  # one call must not skip the warning
+                return (f"this call has {n} browser commands; send at most {budget - used - reserve} now: the run's last "
+                        f"{reserve} are kept for step 9 (delete your qa-sdet- records), and you are told when you reach them")
             if budget:
                 marker["used"] = used + n
                 import tempfile  # here, not at the top: it costs ~4 ms of start-up on every call, and only a budget needs it
