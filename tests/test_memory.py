@@ -477,10 +477,11 @@ class Card(MemBase):
     def test_untested_targets_line_is_capped_and_absent_without_rules(self):
         memory.ingest(self.con, run())
         self.assertNotIn("UNTESTED TARGETS", memory.card(self.con, "/form"))
-        self.rules("/form", *(f"field {i:02}" for i in range(12)))
-        line = self.untested(memory.card(self.con, "/form"))
-        self.assertEqual(line.count(";"), 10)  # 10 labels, then the remainder
-        self.assertTrue(line.endswith("+2 more (qa-mem code '/form')"), line)
+        labels = [f"field {i:02} " + "x" * 41 for i in range(12)]  # 50 characters each
+        self.rules("/form", *labels)
+        shown, more = self.untested(memory.card(self.con, "/form")).split("; +")
+        self.assertEqual(shown.split("; "), labels[:7])  # whole labels, at most ~400 characters
+        self.assertEqual(more, "5 more (qa-mem code '/form')")
 
     def test_untested_targets_on_a_code_only_page_name_no_build(self):
         self.rules("/zones/new", "speed")
@@ -544,12 +545,50 @@ class Card(MemBase):
         c = memory.card(self.con, "/form")
         self.assertRegex(c, r"\(\+\d+ more verified")
 
+    def fixed_bug(self, draft="/proj/qa-out/run/bugs/BUG-1.md"):
+        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999 saved",
+                                           "draft_path": draft}]), "2026-01-01T00:00:00Z")
+        h = core.bug_hash("/form", "speed 999 saved")
+        cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+        return h
+
+    @staticmethod
+    def fixed_line(card, h):
+        return next(x for x in card.split("PREVIOUSLY FIXED", 1)[1].splitlines() if x.startswith(f"- {h} "))
+
+    def test_fixed_bug_drafts_are_listed_by_the_bugs_command(self):
+        """The explorer re-checks a fixed bug by its draft's steps: `qa-mem bugs FIXED` names the draft."""
+        self.fixed_bug()
+        self.assertIn("/proj/qa-out/run/bugs/BUG-1.md", memory.bugs(self.con, "FIXED"))
+
+    def test_fixed_bug_rechecked_on_this_build_is_marked(self):
+        h = self.fixed_bug(draft=None)
+        memory.ingest(self.con, run(coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
+                      "2026-01-02T00:00:00Z")
+        c = memory.card(self.con, "/form")
+        self.assertTrue(self.fixed_line(c, h).endswith(" | re-checked on build 1.0"), c)
+        self.assertIn(f"other:regression({h}:pass)", c)
+        self.assertEqual(c.split("UNTRIED: ")[1].splitlines()[0], ", ".join(core.HEURISTICS))  # regression is no heuristic
+        memory.ingest(self.con, run("2.0"), "2026-01-03T00:00:00Z")  # a new build: check it again
+        self.assertNotIn("re-checked", self.fixed_line(memory.card(self.con, "/form"), h))
+
     def test_card_size_is_bounded(self):
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": f"fact {i} " + "y" * 280} for i in range(30)],
                                 locators=[{"name": f"loc{i} " + "n" * 250, "locator": "x" * 290} for i in range(30)],
                                 coverage=[{"heuristic": h, "target": f"t{i} " + "z" * 280} for h in core.HEURISTICS for i in range(6)],
-                                bugs=[{"route": "/form", "title": "b" * 300, "symptom": f"s{i} " + "q" * 280} for i in range(12)]))
-        self.assertLess(len(memory.card(self.con, "/form")), 15000)  # ~3.5k tokens at worst
+                                bugs=[{"route": "/form", "title": "b" * 300, "symptom": f"s{i} " + "q" * 280,
+                                       "draft_path": "/d/" + "p" * 2000} for i in range(12)]))
+        with self.con:
+            self.con.execute("UPDATE bugs SET status='FIXED' WHERE rowid IN (SELECT rowid FROM bugs LIMIT 6)")
+        self.rules("/form", *(f"rule {i:02} " + "r" * 110 for i in range(12)))
+        for page in ("/form", "/other"):  # another page on the same endpoint, with bugs of its own
+            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                             (page, "api", "save", "POST /api/x", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
+        memory.ingest(self.con, {"run_id": "other", "build": "1.0", "pages": [{"route": "/other"}], "bugs": [
+            {"route": "/other", "title": "o" * 300, "symptom": f"o{i} " + "q" * 280} for i in range(8)]})
+        c = memory.card(self.con, "/form")
+        self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT", c)
+        self.assertLess(len(c), 15000)  # ~3.5k tokens at worst
 
 
 class Search(MemBase):

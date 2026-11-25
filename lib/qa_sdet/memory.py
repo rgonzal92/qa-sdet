@@ -356,19 +356,20 @@ def card(con, q):
             f"{h}({', '.join(t[:4])}{f', +{len(t) - 4} more' if len(t) > 4 else ''})" for h, t in cov.items()))
     out.append("UNTRIED: " + (", ".join(h for h in core.HEURISTICS if h not in tried) or "none"))
     untested = _untested_rules(con, r, targets)
-    if untested:  # labels stay whole: the explorer copies them as coverage targets
-        more = f"; +{len(untested) - 10} more (qa-mem code '{r}')" if len(untested) > 10 else ""
+    if untested:  # labels stay whole (the explorer copies them as coverage targets), so the line stops at ~400 chars
+        shown_n = next((n for n in range(len(untested), 0, -1) if len("; ".join(untested[:n])) <= 400), 1)
+        more = f"; +{len(untested) - shown_n} more (qa-mem code '{r}')" if len(untested) > shown_n else ""
         on = f"build {b}" if b and b != core.UNKNOWN else "this build"
         out.append(f"UNTESTED TARGETS (code rules no run covered on {on}; write the label as the coverage target): "
-                   + "; ".join(untested[:10]) + more)
-    out.append(bug_lines(con, r))
+                   + "; ".join(untested[:shown_n]) + more)
+    out.append(bug_lines(con, r, b))
     sharing = codemap.sharing_pages(con, r)
     if sharing:
         rows = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?,'FIXED') AND page IN "
-                           f"({','.join('?' * len(sharing))}) ORDER BY last_seen DESC LIMIT 5", [*core.VISIBLE, *sharing]).fetchall()
+                           f"({','.join('?' * len(sharing))}) ORDER BY last_seen DESC LIMIT 3", [*core.VISIBLE, *sharing]).fetchall()
         if rows:
             out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
-                + [_bug_line(x, True) for x in rows]
+                + [_bug_line(x, True, 60) for x in rows]
     return "\n".join(x for x in out if x)
 
 
@@ -401,15 +402,17 @@ def _untested_rules(con, route, targets):
     return out
 
 
-BUG_COLS = "hash,page,severity,status,title,symptom,seen_count,draft_path"
+BUG_COLS = "hash,page,severity,status,title,symptom,seen_count"
 
 
-def _bug_line(x, with_page):
-    return (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] " + (f"{x['page']} " if with_page else "")
-            + f"{core.short(x['title'], 100)} | symptom: {core.short(x['symptom'] or x['title'], 120)} (seen {x['seen_count']})")
+def _bug_line(x, with_page, n=100):
+    return (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] " + (f"{core.short(x['page'], n)} " if with_page else "")
+            + f"{core.short(x['title'], n)} | symptom: {core.short(x['symptom'] or x['title'], n + 20)} (seen {x['seen_count']})")
 
 
-def bug_lines(con, route):
+def bug_lines(con, route, build=None):
+    """The bug blocks of a card (route) or of a first visit (route None). A FIXED bug some run re-checked on `build`
+    (coverage `regression` with its hash as the target) says so: the explorer re-checks the others."""
     q = f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?)"
     args = list(core.VISIBLE)
     if route is not None:
@@ -423,8 +426,12 @@ def bug_lines(con, route):
     out = []
     if rows:
         out += ["KNOWN BUGS (don't re-draft; to report a sighting put its hash in run.json):"] + [line(x) for x in rows]
+    rechecked = lambda h: build and build != core.UNKNOWN and con.execute(
+        "SELECT 1 FROM coverage WHERE page=? AND build=? AND heuristic='other:regression' AND lower(trim(target))=? "
+        "AND result!='blocked'", (route, build, h)).fetchone()
     if fixed:
-        out += ["PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):"] + [line(x) for x in fixed]
+        out += ["PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):"] + [
+            line(x) + (f" | re-checked on build {build}" if rechecked(x["hash"]) else "") for x in fixed]
     invalid = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='INVALID'"
                           + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
                           [route] if route is not None else []).fetchall()
