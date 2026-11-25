@@ -12,6 +12,7 @@
   (Bash and Write calls only: a Read or Grep is not seen here, so the line is drawn early).
 - An explorer whose same playwright-cli command failed 3 times since its last real progress hears once to change approach.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
+
 import contextlib
 import hashlib
 import io
@@ -43,6 +44,7 @@ def _log_event(qa_out, event_type, fields):
     try:
         _lib()
         from qa_sdet import plugin_log
+
         plugin_log.append_event(qa_out, event_type, fields, create=False)
     except Exception:  # noqa: BLE001 - logging is best effort
         pass
@@ -75,7 +77,12 @@ def turn_line(limit):
 def wind_down(path, m, who, turns):
     """The one wind-down warning: the budget or time nearly used up, else (any run) the turn limit near."""
     import guard
-    budget, used, deadline = int(float(m.get("budget") or 0)), int(float(m.get("used") or 0)), float(m.get("deadline") or 0)
+
+    budget, used, deadline = (
+        int(float(m.get("budget") or 0)),
+        int(float(m.get("used") or 0)),
+        float(m.get("deadline") or 0),
+    )
     left, secs, low = budget - used, deadline - time.time(), []
     if budget and left <= guard.cleanup_reserve(budget):
         low.append(f"{max(left, 0)} browser command{'' if left == 1 else 's'}")
@@ -87,15 +94,35 @@ def wind_down(path, m, who, turns):
     if guard.warned(path, m):  # one warning per run marker (the guard may have given it by refusing a call)
         return None
     guard.mark_warned(path, m)
-    trigger = "+".join(k for k, cond in (("budget", budget and left <= guard.cleanup_reserve(budget)),
-                                         ("time", deadline and secs <= 120)) if cond) or "turn_limit"
-    _log_event(path.parent, "nudge", {"agent": who, "kind": "wind_down", "trigger": trigger, "turns": turns,
-                                      "run": os.path.basename(m["run_dir"]) if m.get("run_dir") else None,
-                                      "slug": m.get("slug")})
+    trigger = (
+        "+".join(
+            k
+            for k, cond in (
+                ("budget", budget and left <= guard.cleanup_reserve(budget)),
+                ("time", deadline and secs <= 120),
+            )
+            if cond
+        )
+        or "turn_limit"
+    )
+    _log_event(
+        path.parent,
+        "nudge",
+        {
+            "agent": who,
+            "kind": "wind_down",
+            "trigger": trigger,
+            "turns": turns,
+            "run": os.path.basename(m["run_dir"]) if m.get("run_dir") else None,
+            "slug": m.get("slug"),
+        },
+    )
     if low:
         return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
-    done = ("Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
-            "browser and write run-<slug>.json with stop_reason turn_limit")
+    done = (
+        "Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
+        "browser and write run-<slug>.json with stop_reason turn_limit"
+    )
     return f"qa-sdet: {turns} of the {limit} turns you have are used, and the run ends at {limit} however much budget is left. {done}."
 
 
@@ -107,17 +134,25 @@ def code_map_feedback(data):
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
     from pathlib import Path
     from qa_sdet import memory
+
     p = Path(str(data.get("cwd") or os.getcwd()), f)
-    with contextlib.redirect_stderr(io.StringIO()):  # its notes are for the user's terminal; the agent gets the error below
+    with contextlib.redirect_stderr(
+        io.StringIO()
+    ):  # its notes are for the user's terminal; the agent gets the error below
         memory.ingest_pending(p.parent)
     err = memory.parked(p)  # whoever read it first: a sibling's hook may have parked it a moment ago
     if not err:
         return None
-    _log_event(p.parent.parent if p.parent.name == "init" else _qa_out(data), "nudge",
-               {"agent": "qa-mapper", "kind": "code_map_lint", "detail": f"{p.name}: {err}"})
+    _log_event(
+        p.parent.parent if p.parent.name == "init" else _qa_out(data),
+        "nudge",
+        {"agent": "qa-mapper", "kind": "code_map_lint", "detail": f"{p.name}: {err}"},
+    )
     refs = os.path.join(os.path.dirname(HERE), "references", "code-map.md")
-    return (f"qa-sdet memory could not save {p.name}: {err}. Fix the rows or fields it names (rules: {refs}), then Write "
-            "the whole file again; it is re-read automatically.")
+    return (
+        f"qa-sdet memory could not save {p.name}: {err}. Fix the rows or fields it names (rules: {refs}), then Write "
+        "the whole file again; it is re-read automatically."
+    )
 
 
 def _lib():
@@ -137,14 +172,23 @@ def draft_match(name, text):
     try:
         import sqlite3
         from qa_sdet import core, memory
+
         db = core.db_path()
         if not db.is_file():
             return None
         con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
         con.row_factory = sqlite3.Row
         try:
-            hits = [x for _, x in memory.bug_matches(con, route.group(1), f"{title.group(1)} {(actual.group(1) if actual else '')[:300]}",
-                                                     net.group(1) if net else None) if x["status"] in memory.MATCH_ADVICE][:2]
+            hits = [
+                x
+                for _, x in memory.bug_matches(
+                    con,
+                    route.group(1),
+                    f"{title.group(1)} {(actual.group(1) if actual else '')[:300]}",
+                    net.group(1) if net else None,
+                )
+                if x["status"] in memory.MATCH_ADVICE
+            ][:2]
         finally:
             con.close()
     except Exception:  # noqa: BLE001 - a lookup that fails is no advice
@@ -152,9 +196,14 @@ def draft_match(name, text):
     if not hits:
         return None
     cmd = f"`qa-mem bug-match '{route.group(1)}' '<symptom>'`"
-    return f"qa-sdet: {name[:-3]} looks like " + "; ".join(
-        f"{x['hash']} ({x['page']} {memory.core.short(x['title'], 60)}): {memory.MATCH_ADVICE[x['status']]}" for x in hits
-    ) + f". Check it with {cmd}; if it is the same bug, leave this draft out of the run JSON's bugs and say so in notes."
+    return (
+        f"qa-sdet: {name[:-3]} looks like "
+        + "; ".join(
+            f"{x['hash']} ({x['page']} {memory.core.short(x['title'], 60)}): {memory.MATCH_ADVICE[x['status']]}"
+            for x in hits
+        )
+        + f". Check it with {cmd}; if it is the same bug, leave this draft out of the run JSON's bugs and say so in notes."
+    )
 
 
 def file_lint(data):
@@ -164,12 +213,20 @@ def file_lint(data):
     if not isinstance(f, str):
         return None
     from pathlib import Path
+
     p = Path(str(data.get("cwd") or os.getcwd()), f)
     where, name = p.parent.name, p.name
-    kind = ("draft" if where == "bugs" and re.fullmatch(r"BUG-\d+\.md", name) else
-            "spec" if where == "repro" and re.fullmatch(r"BUG-\d+\.spec\.ts", name) else
-            "run" if where == ".data" and re.fullmatch(r"run-.+\.json", name) else
-            "plan" if where == ".data" and name == "plan.json" else None)
+    kind = (
+        "draft"
+        if where == "bugs" and re.fullmatch(r"BUG-\d+\.md", name)
+        else "spec"
+        if where == "repro" and re.fullmatch(r"BUG-\d+\.spec\.ts", name)
+        else "run"
+        if where == ".data" and re.fullmatch(r"run-.+\.json", name)
+        else "plan"
+        if where == ".data" and name == "plan.json"
+        else None
+    )
     if not kind or p.parent.parent.parent.name != "qa-out":
         return None
     try:
@@ -178,13 +235,18 @@ def file_lint(data):
         return None
     _lib()
     from qa_sdet import memory, report
+
     qa_out, run_name = p.parent.parent.parent, p.parent.parent.name
     note = None
     if kind in ("draft", "spec"):
         problems = [t for _, t in (report.draft_issues(text) if kind == "draft" else report.spec_issues(text))]
         rules = os.path.join(os.path.dirname(HERE), "references", "bug-draft.md")
-        notes = [f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again." if problems else None,
-                 draft_match(name, text) if kind == "draft" else None]
+        notes = [
+            f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
+            if problems
+            else None,
+            draft_match(name, text) if kind == "draft" else None,
+        ]
         note = " ".join(x for x in notes if x) or None
     else:
         try:
@@ -203,8 +265,11 @@ def file_lint(data):
                 report.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
                 note = f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
     if note:
-        _log_event(qa_out, "nudge", {"agent": role(data) or "main", "kind": "file_lint", "file_kind": kind,
-                                     "run": run_name, "detail": note})
+        _log_event(
+            qa_out,
+            "nudge",
+            {"agent": role(data) or "main", "kind": "file_lint", "file_kind": kind, "run": run_name, "detail": note},
+        )
     return note
 
 
@@ -251,7 +316,13 @@ def classify(data, recs):
     key = hashlib.sha1(cmd.encode("utf-8", "replace")).hexdigest()[:12]  # never the text: it can hold a typed value
     seen = {r.get("k") for r in [r for r in recs if r.get("t") == "pw"][-NOVELTY_WINDOW:]}
     interacts = any(verb not in OBSERVE for verb, _ in calls)
-    return {"t": "pw", "s": " ".join(x for x in calls[0] if x), "k": key, "ok": int(ok), "p": int(ok and interacts and key not in seen)}
+    return {
+        "t": "pw",
+        "s": " ".join(x for x in calls[0] if x),
+        "k": key,
+        "ok": int(ok),
+        "p": int(ok and interacts and key not in seen),
+    }
 
 
 def replay(recs):
@@ -280,6 +351,7 @@ def run_feedback(data, who):
     """Count this call in the run's progress file, then: the same failing call repeated, a spin, the wind-down."""
     sys.path.insert(0, HERE)
     import guard
+
     path, m = guard.read_marker(guard._cwd(data))
     if not path:
         return None
@@ -291,19 +363,36 @@ def run_feedback(data, who):
     notes, sig = [], rec.get("s")
     run_name = os.path.basename(m["run_dir"]) if m.get("run_dir") else None
     if sig and fails.get(sig, 0) >= STUCK_AFTER:
-        notes.append(f"qa-sdet: `{sig}` failed {fails[sig]} times since you last got anywhere. Change approach: take a fresh "
-                     "`snapshot` or `find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark "
-                     "the case BLOCKED with why and go on.")
+        notes.append(
+            f"qa-sdet: `{sig}` failed {fails[sig]} times since you last got anywhere. Change approach: take a fresh "
+            "`snapshot` or `find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark "
+            "the case BLOCKED with why and go on."
+        )
         append_progress(state, expires, {"t": "n", "n": "stuck", "s": sig})  # it counts again from here
-        _log_event(path.parent, "nudge", {"agent": who, "kind": "stuck", "detail": sig, "count": fails[sig],
-                                          "run": run_name, "slug": m.get("slug")})
+        _log_event(
+            path.parent,
+            "nudge",
+            {"agent": who, "kind": "stuck", "detail": sig, "count": fails[sig], "run": run_name, "slug": m.get("slug")},
+        )
     elif spin >= SPIN_AFTER and "spin" not in given:
-        notes.append(f"qa-sdet: your last {spin} browser calls opened no new page state, sent no new interaction and wrote no "
-                     "file. If you are not in the middle of a check, change approach: another heuristic or element, or wrap up "
-                     "and list what you did not test in not_tested.")
+        notes.append(
+            f"qa-sdet: your last {spin} browser calls opened no new page state, sent no new interaction and wrote no "
+            "file. If you are not in the middle of a check, change approach: another heuristic or element, or wrap up "
+            "and list what you did not test in not_tested."
+        )
         append_progress(state, expires, {"t": "n", "n": "spin"})
-        _log_event(path.parent, "nudge", {"agent": who, "kind": "spin", "detail": f"{spin} calls without progress",
-                                          "count": spin, "run": run_name, "slug": m.get("slug")})
+        _log_event(
+            path.parent,
+            "nudge",
+            {
+                "agent": who,
+                "kind": "spin",
+                "detail": f"{spin} calls without progress",
+                "count": spin,
+                "run": run_name,
+                "slug": m.get("slug"),
+            },
+        )
     notes.append(wind_down(path, m, who, turns))
     return " ".join(x for x in notes if x) or None
 
@@ -329,7 +418,10 @@ def main():
         if isinstance(data, dict) and data.get("hook_event_name") == "PostToolUseFailure" and tool == "Bash":
             _log_tool_failure(data, who)
         if tool in ("Bash", "Write") and who in AGENTS:
-            note = " ".join(x for x in (run_feedback(data, who), file_lint(data) if tool == "Write" else None) if x) or None
+            note = (
+                " ".join(x for x in (run_feedback(data, who), file_lint(data) if tool == "Write" else None) if x)
+                or None
+            )
         elif tool == "Write" and who == "qa-mapper":
             note = code_map_feedback(data)
         elif tool == "Write":
@@ -339,10 +431,16 @@ def main():
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": note}}))
     except Exception as e:  # noqa: BLE001 - feedback is best effort
         try:
-            _log_event(_qa_out(data), "hook_error", {
-                "hook": "posttooluse", "agent": role(data) if isinstance(data, dict) else "main",
-                "error_type": type(e).__name__, "detail": str(e),
-            })
+            _log_event(
+                _qa_out(data),
+                "hook_error",
+                {
+                    "hook": "posttooluse",
+                    "agent": role(data) if isinstance(data, dict) else "main",
+                    "error_type": type(e).__name__,
+                    "detail": str(e),
+                },
+            )
         except Exception:  # noqa: BLE001
             pass
     return 0

@@ -1,4 +1,5 @@
 """Browser checks, `doctor` and the `setup-permissions` rules."""
+
 import json
 import os
 import re
@@ -17,7 +18,10 @@ from . import core, ops
 def installed_browsers(names=core.BROWSERS):
     """{name: (installed, where or how to install)}. chrome and msedge are the system browsers (Playwright's
     channel paths); firefox and webkit are Playwright's own builds: a system Firefox can't be driven."""
-    system = {"chrome": ("Google Chrome", "/opt/google/chrome/chrome"), "msedge": ("Microsoft Edge", "/opt/microsoft/msedge/msedge")}
+    system = {
+        "chrome": ("Google Chrome", "/opt/google/chrome/chrome"),
+        "msedge": ("Microsoft Edge", "/opt/microsoft/msedge/msedge"),
+    }
     pw, out = shutil.which("playwright-cli"), {}
     for name in names:
         if name in system:
@@ -25,20 +29,30 @@ def installed_browsers(names=core.BROWSERS):
             ok = os.path.isfile(path)
             out[name] = (ok, path if ok else f"install {label} the usual way for this system")
             continue
-        loc, why = None, "can't check: playwright-cli isn't working (npm i -g @playwright/cli), then install-browser " + name
+        loc, why = (
+            None,
+            "can't check: playwright-cli isn't working (npm i -g @playwright/cli), then install-browser " + name,
+        )
         if pw:
             why = f"can't check: `playwright-cli install-browser --dry-run {name}` gave no install location"
             try:
-                dry = subprocess.run([pw, "install-browser", "--dry-run", name], capture_output=True, text=True,
-                                     errors="replace", timeout=30).stdout
+                dry = subprocess.run(
+                    [pw, "install-browser", "--dry-run", name],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=30,
+                ).stdout
                 m = re.search(r"Install location:\s*(.+)", dry)
                 loc = m.group(1).strip() if m else None
             except (subprocess.TimeoutExpired, OSError):
                 pass
         # Playwright writes INSTALLATION_COMPLETE last: a folder without it is an interrupted download
         ok = bool(loc) and (Path(loc) / "INSTALLATION_COMPLETE").is_file()
-        out[name] = (ok, f"Playwright build {Path(loc).name}" if ok else f"playwright-cli install-browser {name}" if loc
-                     else why)
+        out[name] = (
+            ok,
+            f"Playwright build {Path(loc).name}" if ok else f"playwright-cli install-browser {name}" if loc else why,
+        )
     return out
 
 
@@ -59,7 +73,9 @@ def doctor():
         problems += not ok
         print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
 
-    line(sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)")
+    line(
+        sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)"
+    )
     cfg, cfg_err = {}, None
     try:
         cfg = core.config(strict=True)
@@ -73,14 +89,24 @@ def doctor():
             pw = pw if subprocess.run([pw, "--version"], capture_output=True, timeout=15).returncode == 0 else None
         except (subprocess.TimeoutExpired, OSError):
             pw = None
-    line(bool(pw), "playwright-cli runs (--version)" if on_path else "playwright-cli on PATH",
-         "reinstall: npm i -g @playwright/cli" if on_path else "npm i -g @playwright/cli")
+    line(
+        bool(pw),
+        "playwright-cli runs (--version)" if on_path else "playwright-cli on PATH",
+        "reinstall: npm i -g @playwright/cli" if on_path else "npm i -g @playwright/cli",
+    )
     if pw:  # runs open the browser the user chose (config `browser`); C1 asks for it from what's installed
         if chosen is None:
-            line(False, "config has browser (chrome, msedge, firefox or webkit)",
-                 "qa-explore / qa-ticket / qa-login ask you which installed browser to use (`qa-mem browsers` lists them)")
+            line(
+                False,
+                "config has browser (chrome, msedge, firefox or webkit)",
+                "qa-explore / qa-ticket / qa-login ask you which installed browser to use (`qa-mem browsers` lists them)",
+            )
         elif chosen not in core.BROWSERS:
-            line(False, f"config browser {chosen!r} is one of {', '.join(core.BROWSERS)}", "`qa-mem browsers` lists what's installed")
+            line(
+                False,
+                f"config browser {chosen!r} is one of {', '.join(core.BROWSERS)}",
+                "`qa-mem browsers` lists what's installed",
+            )
         else:
             ok_b, how = installed_browsers((chosen,))[chosen]
             if how.startswith("can't check"):  # the CLI works; only the lookup failed
@@ -90,33 +116,59 @@ def doctor():
     acli = shutil.which("acli")
     if acli:
         try:
-            ok = subprocess.run([acli, "jira", "auth", "status"], capture_output=True, encoding="utf-8",
-                                errors="replace", timeout=30).returncode == 0
+            ok = (
+                subprocess.run(
+                    [acli, "jira", "auth", "status"],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=30,
+                ).returncode
+                == 0
+            )
         except (subprocess.TimeoutExpired, OSError):
             ok = False
         line(ok, "acli signed in to Jira", "acli jira auth login")
     else:
         print("info no acli: tickets are pasted (optional: install acli)")
     if cfg_err:
-        line(False, f"config {core.CONFIG} ({cfg_err.__class__.__name__})",
-             f"fix the JSON ({cfg_err})" if isinstance(cfg_err, ValueError) else
-             f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}" if isinstance(cfg_err, PermissionError) else
-             "run any qa-sdet skill once; it asks for the values")
+        line(
+            False,
+            f"config {core.CONFIG} ({cfg_err.__class__.__name__})",
+            f"fix the JSON ({cfg_err})"
+            if isinstance(cfg_err, ValueError)
+            else f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}"
+            if isinstance(cfg_err, PermissionError)
+            else "run any qa-sdet skill once; it asks for the values",
+        )
     else:
         line(True, f"config {core.CONFIG}")
         missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost", "buildSource") if not cfg.get(k)]
         line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost, buildSource", f"add {missing}")
         bs = cfg.get("buildSource")
-        line(isinstance(bs, dict) and bs.get("type") in ("selector", "url", "header")
-             and isinstance(bs.get("value"), str) and bool(bs["value"].strip()),
-             "buildSource is {type: selector|url|header, value}", 'e.g. {"type": "selector", "value": "footer .version"}')
+        line(
+            isinstance(bs, dict)
+            and bs.get("type") in ("selector", "url", "header")
+            and isinstance(bs.get("value"), str)
+            and bool(bs["value"].strip()),
+            "buildSource is {type: selector|url|header, value}",
+            'e.g. {"type": "selector", "value": "footer .version"}',
+        )
         hosts = cfg.get("allowedHosts")
-        line(isinstance(hosts, list) and all(isinstance(h, str) for h in hosts), "allowedHosts is a list of hosts",
-             'e.g. "allowedHosts": ["qa.example.com"]')
-        odd = sorted(h for h in core.allowed_hosts(cfg) if not re.fullmatch(r"[a-z0-9._-]+|::1", h))  # the guard matches host names only
+        line(
+            isinstance(hosts, list) and all(isinstance(h, str) for h in hosts),
+            "allowedHosts is a list of hosts",
+            'e.g. "allowedHosts": ["qa.example.com"]',
+        )
+        odd = sorted(
+            h for h in core.allowed_hosts(cfg) if not re.fullmatch(r"[a-z0-9._-]+|::1", h)
+        )  # the guard matches host names only
         if odd:
-            line(False, f"allowedHosts entries are host names ({', '.join(core.short(h, 40) for h in odd[:3])} can never match)",
-                 'just the host, no https://, port or path: "https://qa.example.com:8443/app" -> "qa.example.com"')
+            line(
+                False,
+                f"allowedHosts entries are host names ({', '.join(core.short(h, 40) for h in odd[:3])} can never match)",
+                'just the host, no https://, port or path: "https://qa.example.com:8443/app" -> "qa.example.com"',
+            )
         try:
             base_url = urlsplit(str(cfg.get("qaBaseUrl") or ""))
             base, base_host = (base_url.hostname or "").rstrip("."), base_url.netloc.rpartition("@")[2].lower()
@@ -125,41 +177,70 @@ def doctor():
         if cfg.get("qaBaseUrl") and not (base and str(cfg["qaBaseUrl"]).lower().startswith(("http://", "https://"))):
             line(False, "qaBaseUrl is a full URL", 'e.g. "qaBaseUrl": "https://qa.example.com"')
         elif base:
-            line(core.url_allowed(cfg["qaBaseUrl"], core.allowed_hosts(cfg)),  # the guard's rules: what it will let open
-                 "qaBaseUrl host is in allowedHosts", "add the qaBaseUrl host to allowedHosts")
+            line(
+                core.url_allowed(cfg["qaBaseUrl"], core.allowed_hosts(cfg)),  # the guard's rules: what it will let open
+                "qaBaseUrl host is in allowedHosts",
+                "add the qaBaseUrl host to allowedHosts",
+            )
         sso = cfg.get("ssoHost")
         if sso and not (isinstance(sso, str) and re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?\.?", sso.strip())):
-            line(False, "ssoHost is a host name", 'just the host, no https:// or path: e.g. "ssoHost": "login.microsoftonline.com"')
+            line(
+                False,
+                "ssoHost is a host name",
+                'just the host, no https:// or path: e.g. "ssoHost": "login.microsoftonline.com"',
+            )
         elif sso:  # runs compare it with location.host
-            line(sso.lower().strip().rstrip(".") not in (base.lower(), base_host), "ssoHost differs from the qaBaseUrl host",
-                 "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED")
+            line(
+                sso.lower().strip().rstrip(".") not in (base.lower(), base_host),
+                "ssoHost differs from the qaBaseUrl host",
+                "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED",
+            )
         prefix = cfg.get("jiraKeyPrefix")
         if prefix not in (None, ""):  # optional: lets the user type ticket numbers without the project key
-            line(isinstance(prefix, str) and prefix.isascii() and bool(re.fullmatch(
-                 r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"), re.ASCII)),
-                 "jiraKeyPrefix is a Jira project key", 'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"')
+            line(
+                isinstance(prefix, str)
+                and prefix.isascii()
+                and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"), re.ASCII)),
+                "jiraKeyPrefix is a Jira project key",
+                'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"',
+            )
         temps = cfg.get("releaseTemplates")
         if temps not in (None, []):  # optional: the Jira pass-comment draft fills {version} into these
             ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
-            line(ok_t, "releaseTemplates lists release names with {version}",
-                 'a list such as ["Release-A-{version}"]: the pass-comment draft fills in the fix version')
+            line(
+                ok_t,
+                "releaseTemplates lists release names with {version}",
+                'a list such as ["Release-A-{version}"]: the pass-comment draft fills in the fix version',
+            )
         ac_field = cfg.get("jiraAcField")
         if ac_field not in (None, ""):
-            line(isinstance(ac_field, str) and bool(re.fullmatch(r"customfield_\d+", ac_field.strip())),
-                 "jiraAcField is a Jira custom field id", 'e.g. "jiraAcField": "customfield_10042"')
+            line(
+                isinstance(ac_field, str) and bool(re.fullmatch(r"customfield_\d+", ac_field.strip())),
+                "jiraAcField is a Jira custom field id",
+                'e.g. "jiraAcField": "customfield_10042"',
+            )
         jql = cfg.get("inboxJql")
         if jql not in (None, ""):
-            line(isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
-                 "inboxJql is a single-line JQL query", 'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"')
+            line(
+                isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
+                "inboxJql is a single-line JQL query",
+                'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"',
+            )
         link = cfg.get("jiraBugLinkType")
         if link in (None, ""):  # optional, and team-specific: never guessed
-            print('note jiraBugLinkType not set: filing commands print no command linking a new bug to its story '
-                  '(set your Jira\'s link type, e.g. "jiraBugLinkType": "Blocks"; `acli jira workitem link type` lists them)')
+            print(
+                "note jiraBugLinkType not set: filing commands print no command linking a new bug to its story "
+                '(set your Jira\'s link type, e.g. "jiraBugLinkType": "Blocks"; `acli jira workitem link type` lists them)'
+            )
         else:
-            line(isinstance(link, str) and bool(link.strip()) and "\n" not in link and "'" not in link,
-                 "jiraBugLinkType names a Jira link type", 'e.g. "jiraBugLinkType": "Blocks" (acli jira workitem link type)')
+            line(
+                isinstance(link, str) and bool(link.strip()) and "\n" not in link and "'" not in link,
+                "jiraBugLinkType names a Jira link type",
+                'e.g. "jiraBugLinkType": "Blocks" (acli jira workitem link type)',
+            )
     try:
         import PIL
+
         line(True, f"Pillow {PIL.__version__}")
     except ImportError:
         line(False, "Pillow (annotated bug images need it)", pillow_fix())
@@ -181,18 +262,32 @@ def doctor():
         paths = [x for x in paths if isinstance(x, str) and x] if isinstance(paths, list) else []
         gone = [x for x in paths if not os.path.isdir(os.path.expanduser(x))]
         if gone:
-            line(False, f"sourcePaths folders exist ({', '.join(core.short(x, 60) for x in gone)} not found)",
-                 "fix the path in the config, or run /qa-sdet:qa-init with the right folders")
-        print(f"ok   code map: {n_rows} rows on {n_pages} pages" if n_rows else
-              "info no code map yet: /qa-sdet:qa-init maps routes, locators, rules and endpoints from your source"
-              + (f" ({len(paths)} source folders configured)" if paths else ""))
-        line(core.db_path().parent.stat().st_mode & 0o077 == 0, "memory DB folder readable only by you",
-             f"chmod 700 {core.db_path().parent}")
+            line(
+                False,
+                f"sourcePaths folders exist ({', '.join(core.short(x, 60) for x in gone)} not found)",
+                "fix the path in the config, or run /qa-sdet:qa-init with the right folders",
+            )
+        print(
+            f"ok   code map: {n_rows} rows on {n_pages} pages"
+            if n_rows
+            else "info no code map yet: /qa-sdet:qa-init maps routes, locators, rules and endpoints from your source"
+            + (f" ({len(paths)} source folders configured)" if paths else "")
+        )
+        line(
+            core.db_path().parent.stat().st_mode & 0o077 == 0,
+            "memory DB folder readable only by you",
+            f"chmod 700 {core.db_path().parent}",
+        )
     except core.BadInput as e:  # a DB from before 0.4
         line(False, f"memory DB {core.db_path()}", str(e))
     except (OSError, sqlite3.Error) as e:
-        line(False, f"memory DB {core.db_path()} ({e})", "use a python3 whose sqlite3 has FTS5 (the distro's python3 normally does)"
-             if "fts5" in str(e).lower() else f"check you can write to {core.db_path().parent}")
+        line(
+            False,
+            f"memory DB {core.db_path()} ({e})",
+            "use a python3 whose sqlite3 has FTS5 (the distro's python3 normally does)"
+            if "fts5" in str(e).lower()
+            else f"check you can write to {core.db_path().parent}",
+        )
     return problems
 
 
@@ -201,11 +296,16 @@ def doctor():
 # command: the plugin's bin/ folder is on the Bash tool's PATH while the plugin is enabled.
 PERMISSION_RULES = [
     "Bash(qa-mem *)",
-    "Bash(playwright-cli -s=qa *)", "Bash(playwright-cli -s=qa-login *)", "Bash(playwright-cli --version)",
+    "Bash(playwright-cli -s=qa *)",
+    "Bash(playwright-cli -s=qa-login *)",
+    "Bash(playwright-cli --version)",
     "Bash(command -v playwright-cli*)",
-    "Bash(acli jira auth status*)", "Bash(acli jira workitem view *)", "Bash(acli jira workitem search *)",
+    "Bash(acli jira auth status*)",
+    "Bash(acli jira workitem view *)",
+    "Bash(acli jira workitem search *)",
     "Bash(acli jira workitem comment list *)",  # C8 reads a ticket's comments too
-    "Bash(playwright-cli kill-all*)", "Bash(playwright-cli close-all*)",  # cleanup after a stuck run (C4)
+    "Bash(playwright-cli kill-all*)",
+    "Bash(playwright-cli close-all*)",  # cleanup after a stuck run (C4)
     "Skill(qa-sdet:*)",
     # every skill/explorer reads it (hosts/URLs, no secrets). Read only: allowedHosts is the guard's trust root, so an
     # auto-allowed Edit/Write would let a prompt-injected agent widen it silently
@@ -231,9 +331,16 @@ def merge_permissions(path, stamp=None):
             return []
         settings.setdefault("permissions", {})["allow"] = allow + added
         data = (json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-    except (OSError, ValueError, AttributeError, RecursionError) as e:  # not JSON, not an object, no allow list, too deep
-        raise core.BadInput(f"setup-permissions: {path} isn't valid JSON with a permissions.allow list "
-                            f"({type(e).__name__}: {core.short(str(e), 120)}); fix it first, nothing changed")
+    except (
+        OSError,
+        ValueError,
+        AttributeError,
+        RecursionError,
+    ) as e:  # not JSON, not an object, no allow list, too deep
+        raise core.BadInput(
+            f"setup-permissions: {path} isn't valid JSON with a permissions.allow list "
+            f"({type(e).__name__}: {core.short(str(e), 120)}); fix it first, nothing changed"
+        )
     tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

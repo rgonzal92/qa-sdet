@@ -1,20 +1,36 @@
 """`qa-mem crawl` and `qa-mem discover`: the read-only map passes, run by the coordinator in one call (no agent, no turn
 limit). A fake playwright-cli stands in for the browser: pages by URL, each with the locators it holds."""
+
 import json, os, subprocess, time, unittest
 from unittest import mock
 
 from support import Base, cli, done
 from qa_sdet import core, crawl, memory, ops
 
-CFG = dict(app="x", browser="chrome", qaBaseUrl="https://qa.example.com/app", allowedHosts=["qa.example.com"],
-           ssoHost="login.microsoftonline.com", buildSource={"type": "selector", "value": "footer .version"})
+CFG = dict(
+    app="x",
+    browser="chrome",
+    qaBaseUrl="https://qa.example.com/app",
+    allowedHosts=["qa.example.com"],
+    ssoHost="login.microsoftonline.com",
+    buildSource={"type": "selector", "value": "footer .version"},
+)
 BASE = CFG["qaBaseUrl"]
 
 
 def page(found=(), frames=(), status=200, host="qa.example.com", password=False, invalid=(), links=(), states=()):
     """A fake page: the locator values its top document holds, one set per iframe, and what its harvester returns."""
-    return dict(found=set(found), frames=[set(f) for f in frames], status=status, host=host, password=password,
-                invalid=set(invalid), links=list(links), states=list(states), frame_count=None)
+    return dict(
+        found=set(found),
+        frames=[set(f) for f in frames],
+        status=status,
+        host=host,
+        password=password,
+        invalid=set(invalid),
+        links=list(links),
+        states=list(states),
+        frame_count=None,
+    )
 
 
 class Browser:
@@ -59,9 +75,21 @@ class Browser:
                 held = pg["found"]
             have = {json.dumps(crawl.parse_locator(v)) for v in held}
             bad = {json.dumps(crawl.parse_locator(v)) for v in pg["invalid"]}
-            out = {"found": [k for k, s in enumerate(spec) if json.dumps(s) in have],
-                   "invalid": [k for k, s in enumerate(spec) if json.dumps(s) in bad]}
-            return done(0, out=json.dumps(out | ({} if target else state | {"frames": len(pg["frames"]) if pg["frame_count"] is None else pg["frame_count"]})))
+            out = {
+                "found": [k for k, s in enumerate(spec) if json.dumps(s) in have],
+                "invalid": [k for k, s in enumerate(spec) if json.dumps(s) in bad],
+            }
+            return done(
+                0,
+                out=json.dumps(
+                    out
+                    | (
+                        {}
+                        if target
+                        else state | {"frames": len(pg["frames"]) if pg["frame_count"] is None else pg["frame_count"]}
+                    )
+                ),
+            )
         if "a[href]" in js:
             return done(0, out=json.dumps(state | {"links": pg["links"], "states": pg["states"]}))
         if "hasPassword" in js:  # page-start's sign-in check
@@ -94,7 +122,7 @@ class Translate(unittest.TestCase):
         self.assertEqual(p("#msg"), ["css", "#msg"])
 
     def test_quotes_reach_the_page_as_json_data(self):
-        self.assertEqual(crawl.parse_locator(r"""getByLabel('Driver\'s "id"')"""), ["label", "Driver's \"id\"", False])
+        self.assertEqual(crawl.parse_locator(r"""getByLabel('Driver\'s "id"')"""), ["label", 'Driver\'s "id"', False])
         spec = crawl.parse_locator("getByTestId('x\\'); fetch(\\'//evil')")
         self.assertEqual(spec, ["testid", "x'); fetch('//evil"])
         js = crawl.check_js([spec])
@@ -102,9 +130,17 @@ class Translate(unittest.TestCase):
         self.assertEqual(json.JSONDecoder().raw_decode(js, js.index("const spec = ") + 13)[0], [spec])
 
     def test_other_forms_are_unchecked_never_missing(self):
-        for loc in ("getByText('Save')", "page.locator('#x')", "getByRole('button', { name: /save/i })",
-                    "getByRole('button', { name: 'Save' }).first()", "getByRole('checkbox', { checked: true })",
-                    "getByTestId(id)", "getByRole('b\"]x', { name: 'y' })", "", "getByLabel(`Name ${n}`)"):
+        for loc in (
+            "getByText('Save')",
+            "page.locator('#x')",
+            "getByRole('button', { name: /save/i })",
+            "getByRole('button', { name: 'Save' }).first()",
+            "getByRole('checkbox', { checked: true })",
+            "getByTestId(id)",
+            "getByRole('b\"]x', { name: 'y' })",
+            "",
+            "getByLabel(`Name ${n}`)",
+        ):
             self.assertIsNone(crawl.parse_locator(loc), loc)
 
 
@@ -116,44 +152,85 @@ class Crawl(Base):
         self.config(**CFG)
         self.run_dir = self.rundir("2026-11-25-init-crawl")
         con = core.connect()
-        rows = [("/zones", "route", "Zones", ""), ("/zones/:id", "route", "Zone", ""), ("/about", "route", "About", ""),
-                ("/alarms", "route", "Alarms", ""),
-                ("/zones", "locator", "Save", "getByTestId('save')"), ("/zones", "locator", "Speed", "getByLabel('Speed limit')"),
-                ("/zones", "locator", "Name", "getByRole('textbox', { name: 'Name' })"),
-                ("/zones", "locator", "Msg", "#msg"), ("/zones", "locator", "Hi", "getByText('Hi')"),
-                ("/zones/:id", "locator", "Edit", "getByTestId('edit')"), ("/alarms", "locator", "Ack", "getByTestId('ack')")]
+        rows = [
+            ("/zones", "route", "Zones", ""),
+            ("/zones/:id", "route", "Zone", ""),
+            ("/about", "route", "About", ""),
+            ("/alarms", "route", "Alarms", ""),
+            ("/zones", "locator", "Save", "getByTestId('save')"),
+            ("/zones", "locator", "Speed", "getByLabel('Speed limit')"),
+            ("/zones", "locator", "Name", "getByRole('textbox', { name: 'Name' })"),
+            ("/zones", "locator", "Msg", "#msg"),
+            ("/zones", "locator", "Hi", "getByText('Hi')"),
+            ("/zones/:id", "locator", "Edit", "getByTestId('edit')"),
+            ("/alarms", "locator", "Ack", "getByTestId('ack')"),
+        ]
         with con:
             for pg, kind, label, value in rows:
-                con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                            (pg, kind, label, value, "src/x.tsx", "/repo", "frontend", "t", "s"))
-            con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                        ("/zones", "locator", "Save", "getByTestId('save')", "e2e/zones.ts", "/repo", "tests", "t", "s"))
+                con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (pg, kind, label, value, "src/x.tsx", "/repo", "frontend", "t", "s"),
+                )
+            con.execute(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("/zones", "locator", "Save", "getByTestId('save')", "e2e/zones.ts", "/repo", "tests", "t", "s"),
+            )
         con.close()
-        self.pages = {BASE: page(), f"{BASE}/zones": page(found=["getByTestId('save')", "getByLabel('Speed limit')", "#msg"],
-                                            frames=[["getByRole('textbox', { name: 'Name' })"]]),
-                      f"{BASE}/alarms": page(found=["getByTestId('ack')"])}
+        self.pages = {
+            BASE: page(),
+            f"{BASE}/zones": page(
+                found=["getByTestId('save')", "getByLabel('Speed limit')", "#msg"],
+                frames=[["getByRole('textbox', { name: 'Name' })"]],
+            ),
+            f"{BASE}/alarms": page(found=["getByTestId('ack')"]),
+        }
 
     def crawl(self, *routes, browser=None):
         browser = browser or Browser(self.pages, start=BASE)
         with mock.patch.object(subprocess, "run", side_effect=browser):
             code, out, err = cli("crawl", str(self.run_dir), *routes)
         f = self.run_dir / ".data/run-init-crawl.json"
-        return code, (json.loads(out) if out.strip() else None), (json.loads(f.read_text()) if f.exists() else None), browser, err
+        return (
+            code,
+            (json.loads(out) if out.strip() else None),
+            (json.loads(f.read_text()) if f.exists() else None),
+            browser,
+            err,
+        )
 
     def test_crawl_checks_every_mapped_locator_of_every_static_route(self):
         code, out, run, b, err = self.crawl()
         self.assertEqual(code, 0, err)
-        self.assertEqual((run["mode"], run["status"], run["build"], run["env"]),
-                         ("map", "COMPLETED", "1.43.0", {"url": BASE, "browser": "chrome"}))
+        self.assertEqual(
+            (run["mode"], run["status"], run["build"], run["env"]),
+            ("map", "COMPLETED", "1.43.0", {"url": BASE, "browser": "chrome"}),
+        )
         self.assertTrue(run["run_id"].startswith("map-init-crawl-"))
         self.assertEqual(b.gotos(), [f"{BASE}/alarms", f"{BASE}/zones"])  # no :id route, no route without locators
         zones = next(p for p in run["pages"] if p["route"] == "/zones")
-        self.assertEqual(sorted(map(tuple, (x.values() for x in zones["locators"]))),  # verbatim from the code map
-                         sorted([("Save", "getByTestId('save')"), ("Speed", "getByLabel('Speed limit')"), ("Msg", "#msg"),
-                                 ("Name", "getByRole('textbox', { name: 'Name' })")]))
+        self.assertEqual(
+            sorted(map(tuple, (x.values() for x in zones["locators"]))),  # verbatim from the code map
+            sorted(
+                [
+                    ("Save", "getByTestId('save')"),
+                    ("Speed", "getByLabel('Speed limit')"),
+                    ("Msg", "#msg"),
+                    ("Name", "getByRole('textbox', { name: 'Name' })"),
+                ]
+            ),
+        )
         self.assertNotIn("name", zones)
-        self.assertEqual((out["status"], out["routes"], out["loaded"], out["locators_checked"], out["locators_confirmed"],
-                          out["unchecked"]), ("COMPLETED", 2, 2, 5, 5, 1))
+        self.assertEqual(
+            (
+                out["status"],
+                out["routes"],
+                out["loaded"],
+                out["locators_checked"],
+                out["locators_confirmed"],
+                out["unchecked"],
+            ),
+            ("COMPLETED", 2, 2, 5, 5, 1),
+        )
         self.assertIn("1 unchecked", run["notes"])
         self.assertIn("/about", run["notes"])  # skipped without locators: said, not silent
         self.assertIn("crawl 2/2 /zones: 4 of 4 confirmed, 1 unchecked", err)  # progress, one line per route
@@ -177,12 +254,19 @@ class Crawl(Base):
         self.pages[f"{BASE}/zones"]["frames"] = [[], ["getByRole('textbox', { name: 'Name' })"]]
         code, _, run, b, _ = self.crawl("/zones")
         targets = [c[5] for c in b.evals() if len(c) > 5]
-        self.assertEqual(targets, ["iframe >> nth=0 >> internal:control=enter-frame >> :root",
-                                   "iframe >> nth=1 >> internal:control=enter-frame >> :root"])
+        self.assertEqual(
+            targets,
+            [
+                "iframe >> nth=0 >> internal:control=enter-frame >> :root",
+                "iframe >> nth=1 >> internal:control=enter-frame >> :root",
+            ],
+        )
         self.assertIn("Name", [x["name"] for x in run["pages"][0]["locators"]])
         self.pages[f"{BASE}/zones"].update(frames=[], frame_count=2)  # counted, then gone before its eval
         code, _, run, b, _ = self.crawl("/zones")
-        self.assertEqual((code, run["status"], len(b.evals())), (0, "COMPLETED", 2))  # nth=0 said no frame: nth=1 not tried
+        self.assertEqual(
+            (code, run["status"], len(b.evals())), (0, "COMPLETED", 2)
+        )  # nth=0 said no frame: nth=1 not tried
         self.assertNotIn("failed", run["notes"])
 
     def test_no_frame_eval_when_the_top_document_confirms_all(self):
@@ -200,9 +284,11 @@ class Crawl(Base):
     def test_a_checkpoint_is_written_after_every_page(self):
         seen = []
         f = self.run_dir / ".data/run-init-crawl.json"
+
         def on_goto(url):
             if url.endswith("/zones"):
                 seen.append(json.loads(f.read_text()))
+
         self.crawl(browser=Browser(self.pages, start=BASE, on_goto=on_goto))
         self.assertEqual(seen[0]["status"], "INCOMPLETE")
         self.assertEqual([p["route"] for p in seen[0]["pages"]], ["/alarms"])
@@ -211,15 +297,21 @@ class Crawl(Base):
         con = core.connect()
         with con:
             for n in range(5):
-                con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                            (f"/p{n}", "locator", "Ack", "getByTestId('ack')", "f", "/repo", "frontend", "t", "s"))
-                con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                            (f"/p{n}", "route", f"P{n}", "", "f", "/repo", "frontend", "t", "s"))
+                con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (f"/p{n}", "locator", "Ack", "getByTestId('ack')", "f", "/repo", "frontend", "t", "s"),
+                )
+                con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (f"/p{n}", "route", f"P{n}", "", "f", "/repo", "frontend", "t", "s"),
+                )
                 self.pages[f"{BASE}/p{n}"] = page(found=["getByTestId('ack')"])
         con.close()
         ops.marker_start(self.proj, budget=10)  # reserve 3: page-start 1, then 2 per route: 3 routes
         code, out, run, b, _ = self.crawl()
-        self.assertEqual((code, run["status"], run["stop_reason"], len(run["pages"])), (0, "INCOMPLETE", "budget_limit", 3))
+        self.assertEqual(
+            (code, run["status"], run["stop_reason"], len(run["pages"])), (0, "INCOMPLETE", "budget_limit", 3)
+        )
         self.assertEqual(json.loads((self.proj / "qa-out/.active").read_text())["used"], 7)
         self.assertEqual(b.calls[-1], ["playwright-cli", "-s=qa", "close"])  # the finish ran, uncharged
         self.assertTrue((self.run_dir / ".data/requests-init-crawl.log").exists())
@@ -254,7 +346,9 @@ class Crawl(Base):
     def test_sign_in_page_blocks_and_keeps_the_pages_so_far(self):
         self.pages[f"{BASE}/zones"] = page(host="login.microsoftonline.com")
         code, out, run, b, _ = self.crawl()
-        self.assertEqual((code, run["status"], run["block_scope"], run["stop_reason"]), (1, "BLOCKED", "session", "blocked"))
+        self.assertEqual(
+            (code, run["status"], run["block_scope"], run["stop_reason"]), (1, "BLOCKED", "session", "blocked")
+        )
         self.assertIn("/qa-sdet:qa-login", run["summary"])
         self.assertEqual([p["route"] for p in run["pages"]], ["/alarms"])
         self.assertEqual(b.calls[-1], ["playwright-cli", "-s=qa", "close"])
@@ -284,8 +378,10 @@ class Crawl(Base):
         with con:
             for n in range(4):
                 for kind, value in (("route", ""), ("locator", "getByTestId('ack')")):
-                    con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                                (f"/f{n}", kind, "Ack", value, "f", "/repo", "frontend", "t", "s"))
+                    con.execute(
+                        "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (f"/f{n}", kind, "Ack", value, "f", "/repo", "frontend", "t", "s"),
+                    )
         con.close()
         fail = {f"{BASE}/f{n}" for n in range(4)}
         code, out, run, b, _ = self.crawl(browser=Browser(self.pages, start=BASE, fail=fail))
@@ -310,43 +406,75 @@ class Discover(Base):
         return code, (json.loads(f.read_text()) if f.exists() else None), b, err
 
     def test_discover_is_breadth_first_to_depth(self):
-        pages = {BASE: page(links=[["/app/zones", "Zones"], ["/app/alarms", "Alarms"]], states=[["tab", "Active"], ["tab", "Active"], ["button", ""]]),
-                 f"{BASE}/zones": page(links=[["/app/zones/new", "New zone"]]),
-                 f"{BASE}/alarms": page(links=[["/app/alarms/history", "History"]]),
-                 f"{BASE}/zones/new": page(links=[["/app/deep", "Deep"]])}
+        pages = {
+            BASE: page(
+                links=[["/app/zones", "Zones"], ["/app/alarms", "Alarms"]],
+                states=[["tab", "Active"], ["tab", "Active"], ["button", ""]],
+            ),
+            f"{BASE}/zones": page(links=[["/app/zones/new", "New zone"]]),
+            f"{BASE}/alarms": page(links=[["/app/alarms/history", "History"]]),
+            f"{BASE}/zones/new": page(links=[["/app/deep", "Deep"]]),
+        }
         code, run, b, err = self.discover(pages, "--depth", "1")
         self.assertEqual(code, 0, err)
         self.assertEqual(b.gotos(), [f"{BASE}/zones", f"{BASE}/alarms"])  # the start page is already open
         self.assertEqual([p["route"] for p in run["pages"]], ["/app", "/app/zones", "/app/alarms"])
         start = run["pages"][0]
-        self.assertEqual(start["states"], [{"key": "tab: Active", "kind": "tab", "trigger": "Active", "status": "unvisited"}])
-        self.assertEqual(start["transitions"][0], {"to": "/app/zones", "trigger": "Zones", "kind": "link", "sample_path": "/app/zones"})
+        self.assertEqual(
+            start["states"], [{"key": "tab: Active", "kind": "tab", "trigger": "Active", "status": "unvisited"}]
+        )
+        self.assertEqual(
+            start["transitions"][0],
+            {"to": "/app/zones", "trigger": "Zones", "kind": "link", "sample_path": "/app/zones"},
+        )
         self.assertEqual(run["pages"][1]["transitions"][0]["to"], "/app/zones/new")  # depth 2: recorded, not visited
         self.assertEqual((run["mode"], run["status"]), ("map", "COMPLETED"))
         memory.check_run(run)
 
     def test_query_string_dropped_and_one_sample_per_detail_pattern(self):
-        pages = {BASE: page(links=[["/app/incidents/12", "A"], ["/app/incidents/34", "B"], ["/app/list?page=2", "2"],
-                                   ["/app/list", "List"]])}
+        pages = {
+            BASE: page(
+                links=[
+                    ["/app/incidents/12", "A"],
+                    ["/app/incidents/34", "B"],
+                    ["/app/list?page=2", "2"],
+                    ["/app/list", "List"],
+                ]
+            )
+        }
         _, run, b, _ = self.discover(pages)
         self.assertEqual(b.gotos(), [f"{BASE}/incidents/12", f"{BASE}/list"])
         self.assertEqual(len(run["pages"][0]["transitions"]), 4)  # every link is a transition; one sample is visited
 
     def test_logout_delete_and_auth_links_never_followed(self):
-        pages = {BASE: page(links=[["/app/logout", "Log out"], ["/app/items/7/delete", "x"], ["/app/x", "Delete all"],
-                                   ["/app/oauth/callback", "SSO"], ["/app/ok", "OK"]])}
+        pages = {
+            BASE: page(
+                links=[
+                    ["/app/logout", "Log out"],
+                    ["/app/items/7/delete", "x"],
+                    ["/app/x", "Delete all"],
+                    ["/app/oauth/callback", "SSO"],
+                    ["/app/ok", "OK"],
+                ]
+            )
+        }
         _, run, b, _ = self.discover(pages)
         self.assertEqual(b.gotos(), [f"{BASE}/ok"])
         self.assertEqual([t["to"] for t in run["pages"][0]["transitions"]], ["/app/ok"])
 
     def test_off_host_links_skipped(self):
-        pages = {BASE: page(links=[["//evil.example.com/x", "x"], ["https://evil.example.com/y", "y"], ["app/rel", "r"]])}
+        pages = {
+            BASE: page(links=[["//evil.example.com/x", "x"], ["https://evil.example.com/y", "y"], ["app/rel", "r"]])
+        }
         _, run, b, _ = self.discover(pages)
         self.assertFalse([c for c in b.calls if any("evil" in a for a in c)])
         self.assertEqual(run["pages"][0]["transitions"], [])
 
     def test_stops_at_max_pages(self):
-        pages = {BASE: page(links=[[f"/app/p{n}", str(n)] for n in range(10)]), **{f"{BASE}/p{n}": page() for n in range(10)}}
+        pages = {
+            BASE: page(links=[[f"/app/p{n}", str(n)] for n in range(10)]),
+            **{f"{BASE}/p{n}": page() for n in range(10)},
+        }
         _, run, b, _ = self.discover(pages, "--max-pages", "3")
         self.assertEqual(len(run["pages"]), 3)
         self.assertEqual(len(b.gotos()), 2)
@@ -364,8 +492,18 @@ class LocatorCap(Base):
     def test_two_hundred_confirmed_locators_on_one_page_survive_ingest(self):
         con = core.connect()
         locs = [{"name": f"L{n}", "locator": f"getByTestId('l{n}')"} for n in range(200)]
-        memory.ingest(con, {"run_id": "map-1", "mode": "map", "target": BASE, "build": "1.0", "status": "COMPLETED",
-                            "summary": "s", "pages": [{"route": "/zones", "locators": locs}]})
+        memory.ingest(
+            con,
+            {
+                "run_id": "map-1",
+                "mode": "map",
+                "target": BASE,
+                "build": "1.0",
+                "status": "COMPLETED",
+                "summary": "s",
+                "pages": [{"route": "/zones", "locators": locs}],
+            },
+        )
         self.assertEqual(con.execute("SELECT count(*) FROM locators WHERE page='/zones'").fetchone()[0], 200)
         con.close()
 

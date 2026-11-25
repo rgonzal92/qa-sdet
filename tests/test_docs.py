@@ -1,4 +1,5 @@
 """The instruction files and the code must agree: drift here makes agents fail quietly. Contracts only, no wording pins."""
+
 import json
 import os
 import re
@@ -14,13 +15,15 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from qa_sdet import cli, core, doctor, ops, report
+
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
 DOCS = SKILLS + AGENTS + sorted(ROOT.glob("references/*.md"))
 ALL = DOCS + [ROOT / "README.md"]
 text = lambda rel: (ROOT / rel).read_text()
 # every playwright-cli verb the docs may name (`playwright-cli --help`, 0.1.24, plus the hidden config-print)
-PW_VERBS = set("""attach check clear-color-scheme clear-contrast clear-forced-colors clear-media clear-reduced-motion click close
+PW_VERBS = set(
+    """attach check clear-color-scheme clear-contrast clear-forced-colors clear-media clear-reduced-motion click close
 close-all config-print console cookie-clear cookie-delete cookie-get cookie-list cookie-set dblclick delete-data detach
 dialog-accept dialog-dismiss drag drop eval fill find generate-locator go-back go-forward goto highlight hover install
 install-browser keydown keyup kill-all list localstorage-clear localstorage-delete localstorage-get localstorage-list
@@ -29,7 +32,8 @@ recording-stop reload request request-body request-headers requests resize respo
 route-list run-code screenshot select sessionstorage-clear sessionstorage-delete sessionstorage-get sessionstorage-list
 sessionstorage-set set-color-scheme set-contrast set-forced-colors set-media set-reduced-motion show snapshot state-load
 state-save step-over tab-close tab-list tab-new tab-select tracing-start tracing-stop type uncheck unroute upload
-video-chapter video-hide-actions video-show-actions video-start video-stop webmcp-call webmcp-list""".split())
+video-chapter video-hide-actions video-show-actions video-start video-stop webmcp-call webmcp-list""".split()
+)
 
 
 def load_guard(tmp):
@@ -44,16 +48,22 @@ def load_guard(tmp):
 
 class Docs(unittest.TestCase):
     def test_heuristic_ids_match_code(self):
-        self.assertEqual(re.findall(r"^\| ([a-z][a-z0-9-]+) \|", text("references/heuristics.md"), re.M), core.HEURISTICS)
+        self.assertEqual(
+            re.findall(r"^\| ([a-z][a-z0-9-]+) \|", text("references/heuristics.md"), re.M), core.HEURISTICS
+        )
 
     def test_every_referenced_file_exists(self):
         for f in ALL:
             body = f.read_text()
             for rel in re.findall(r"\$\{CLAUDE_SKILL_DIR\}/\.\./\.\./([\w./-]+)", body):
                 self.assertTrue((ROOT / rel).exists(), f"{f.name}: {rel}")
-            for name in re.findall(r"`[^`\s]*?([\w-]+\.md)`", body):  # run outputs and the user's qa-rules.md are not plugin files
+            for name in re.findall(
+                r"`[^`\s]*?([\w-]+\.md)`", body
+            ):  # run outputs and the user's qa-rules.md are not plugin files
                 if name not in ("REPORT.md", "INBOX.md", "qa-rules.md", "plugin-digest-YYYY-MM-DD.md"):
-                    self.assertTrue(any((ROOT / d / name).exists() for d in ("references", "agents", ".")), f"{f.name}: {name}")
+                    self.assertTrue(
+                        any((ROOT / d / name).exists() for d in ("references", "agents", ".")), f"{f.name}: {name}"
+                    )
             for link in re.findall(r"\]\(([^)#<>\s]+)\)", body):
                 self.assertTrue(link.startswith("http") or (f.parent / link).exists(), f"{f.name}: {link}")
         self.assertIn("## Reading REPORT.md", text("README.md"))
@@ -71,15 +81,22 @@ class Docs(unittest.TestCase):
     def test_statuses_and_categories_match_code(self):
         explorer, run_json = text("agents/qa-explorer.md"), text("references/run-json.md")
         listed = re.findall(r"^   - ([A-Z_]+):", explorer, re.M)
-        self.assertEqual(listed, ["FAIL", "BLOCKED", "QUESTION", "PASS", "NOT_RUN"])  # first that fits: FAIL beats BLOCKED
+        self.assertEqual(
+            listed, ["FAIL", "BLOCKED", "QUESTION", "PASS", "NOT_RUN"]
+        )  # first that fits: FAIL beats BLOCKED
         self.assertEqual(sorted(listed), sorted(core.CASE_STATUSES))
-        self.assertEqual(re.search(r'"category": "([\w |]+)"', run_json).group(1).split(" | "),
-                         [k for k, _ in report.NOT_TESTED_CATEGORIES])
+        self.assertEqual(
+            re.search(r'"category": "([\w |]+)"', run_json).group(1).split(" | "),
+            [k for k, _ in report.NOT_TESTED_CATEGORIES],
+        )
         for status in re.findall(r"\b(OPEN|FILED|FIXED|INVALID|REGRESSED)\b", text("skills/qa-memory/SKILL.md")):
             self.assertIn(status, core.STATUSES)
 
     def test_explorer_reports_the_categories_browser_open_prints(self):
-        step1, ops_src = re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0), text("lib/qa_sdet/ops.py")
+        step1, ops_src = (
+            re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0),
+            text("lib/qa_sdet/ops.py"),
+        )
         for category in ("browser profile in use:", "can't start:", "browser tool failed:"):
             self.assertIn(category, step1)
         for printed in ('"browser profile in use:', "can't start\"", '"browser tool failed'):
@@ -95,7 +112,9 @@ class Docs(unittest.TestCase):
         for icon in report.VERDICT_ICON.values():
             self.assertIn(icon, readme)
         rules = readme.split("## Reading REPORT.md", 1)[1].split("**Verdict per ticket**", 1)[1].split("\n\n", 1)[0]
-        self.assertEqual(re.findall(r"^\d\. \S+ ([A-Z ]+?):", rules, re.M), ["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS"])
+        self.assertEqual(
+            re.findall(r"^\d\. \S+ ([A-Z ]+?):", rules, re.M), ["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS"]
+        )
         t = {"key": "AB-1", "acs": [{"id": "AC-1"}]}
         case = lambda s: {"id": f"TC-{s}", "ticket": "AB-1", "ac": "AC-1", "status": s}
         self.assertEqual(report.verdict(t, [case("FAIL"), case("BLOCKED")], [])[0], "FAIL")
@@ -108,7 +127,10 @@ class Docs(unittest.TestCase):
 
     def test_planning_example_parses_and_renders(self):
         plan = json.loads(re.search(r"```json\n(.*?)```", text("references/planning.md"), re.S).group(1))
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"QA_SDET_CONFIG": f"{d}/c.json", "QA_SDET_DATA": f"{d}/data"}):
+        with (
+            tempfile.TemporaryDirectory() as d,
+            mock.patch.dict(os.environ, {"QA_SDET_CONFIG": f"{d}/c.json", "QA_SDET_DATA": f"{d}/data"}),
+        ):
             run = Path(d) / "qa-out/2026-11-24-example"
             (run / ".data").mkdir(parents=True)
             (run / ".data/plan.json").write_text(json.dumps(plan))
@@ -120,11 +142,15 @@ class Docs(unittest.TestCase):
     def test_code_map_examples_ingest_whole(self):
         """Each example in code-map.md is one mapper's file: the hook ingests it with no row rejected or dropped."""
         from qa_sdet import memory
+
         blocks = re.findall(r"```json\n(.*?)```", text("references/code-map.md"), re.S)
         self.assertTrue(blocks)
         for n, block in enumerate(blocks):
-            with self.subTest(example=n), tempfile.TemporaryDirectory() as d, \
-                    mock.patch.dict(os.environ, {"QA_MEM_DB": f"{d}/t.db", "HOME": d}):
+            with (
+                self.subTest(example=n),
+                tempfile.TemporaryDirectory() as d,
+                mock.patch.dict(os.environ, {"QA_MEM_DB": f"{d}/t.db", "HOME": d}),
+            ):
                 cm, files = json.loads(block.replace("/abs/path/", f"{d}/")), {}
                 for r in cm["rows"]:  # the repo files the rows cite, and a scan listing exactly those
                     src = Path(r["repo"], re.sub(r":\d+$", "", r["file"]))
@@ -133,8 +159,15 @@ class Docs(unittest.TestCase):
                     files.setdefault(r["repo"], set()).add(str(src.relative_to(r["repo"])))
                 init = Path(d) / "qa-out/init"
                 init.mkdir(parents=True)
-                (init / f"scan-{cm['area']}.json").write_text(json.dumps({"scan_id": cm["scan_id"], "area": cm["area"], "repos": [
-                    {"path": p, "files": sorted(f)} for p, f in files.items()]}))
+                (init / f"scan-{cm['area']}.json").write_text(
+                    json.dumps(
+                        {
+                            "scan_id": cm["scan_id"],
+                            "area": cm["area"],
+                            "repos": [{"path": p, "files": sorted(f)} for p, f in files.items()],
+                        }
+                    )
+                )
                 (init / f"code-map-{cm['area']}.json").write_text(json.dumps(cm))
                 self.assertEqual(memory.ingest_pending(init.parent), 1, memory.PARKED)
                 self.assertTrue(Path(d, "t.db").exists())
@@ -149,22 +182,38 @@ class Docs(unittest.TestCase):
             blocks = re.findall(r"```\n(.*?)```", text("references/run-setup.md"), re.S)
             self.assertEqual(len(blocks), 2)  # setup, teardown
             for block in blocks:
-                cmd = block.strip().replace("<project>", str(proj)).replace("<run>", f"{proj}/qa-out/run").replace("<route>", "/form")
+                cmd = (
+                    block.strip()
+                    .replace("<project>", str(proj))
+                    .replace("<run>", f"{proj}/qa-out/run")
+                    .replace("<route>", "/form")
+                )
                 cmd = re.sub(r" \[[^\]]*\]", " --budget 5 --faults", cmd)  # the optional flags
                 with mock.patch.dict(os.environ, env):
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                    ev = lambda agent: g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                                   "agent_type": agent})
+                    ev = lambda agent: g.evaluate(
+                        {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj), "agent_type": agent}
+                    )
                     self.assertEqual(ev(""), (None, True), cmd)
                     self.assertIn("coordinator", ev("qa-sdet:qa-explorer")[0] or "", cmd)  # they set the run marker
-                    self.assertIn("host", g.check("playwright-cli -s=qa goto /form", str(proj)))  # a bare path has no host
-                    self.assertIn("--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj)))  # also with no run
+                    self.assertIn(
+                        "host", g.check("playwright-cli -s=qa goto /form", str(proj))
+                    )  # a bare path has no host
+                    self.assertIn(
+                        "--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj))
+                    )  # also with no run
 
     def test_inbox_command_passes_a_custom_jql_whole(self):  # doctor's own example broke the double-quoted --jql
         import ast, shlex
-        hint = next(n.value for n in ast.walk(ast.parse((ROOT / "lib/qa_sdet/doctor.py").read_text()))
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str) and '"inboxJql":' in n.value)
-        jql = json.loads("{" + hint.removeprefix("e.g. ") + "}")["inboxJql"]  # status = "Ready for QA" ORDER BY updated DESC
+
+        hint = next(
+            n.value
+            for n in ast.walk(ast.parse((ROOT / "lib/qa_sdet/doctor.py").read_text()))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and '"inboxJql":' in n.value
+        )
+        jql = json.loads("{" + hint.removeprefix("e.g. ") + "}")[
+            "inboxJql"
+        ]  # status = "Ready for QA" ORDER BY updated DESC
         self.assertIn('"', jql)
         line = next(x for x in text("skills/qa-inbox/SKILL.md").splitlines() if "acli jira workitem search --jql" in x)
         with tempfile.TemporaryDirectory() as d:
@@ -172,12 +221,19 @@ class Docs(unittest.TestCase):
             proj = Path(os.path.realpath(d)) / "my project"
             (proj / "qa-out").mkdir(parents=True)
             for value in (jql, "summary ~ 'it''s' ORDER BY updated DESC"):  # the skill's rule: each ' written '\''
-                cmd = line.strip("`").replace("<JQL>", value.replace("'", "'\\''")).replace("${CLAUDE_PROJECT_DIR}", str(proj))
+                cmd = (
+                    line.strip("`")
+                    .replace("<JQL>", value.replace("'", "'\\''"))
+                    .replace("${CLAUDE_PROJECT_DIR}", str(proj))
+                )
                 words = shlex.split(cmd.split(" | ")[0])
                 self.assertEqual(words[words.index("--jql") + 1], value, cmd)
                 with mock.patch.dict(os.environ, env):
-                    self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}),
-                                     (None, True), cmd)  # still approved without a prompt
+                    self.assertEqual(
+                        g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}),
+                        (None, True),
+                        cmd,
+                    )  # still approved without a prompt
 
     def test_explorer_signal_dump_is_approved_by_the_guard(self):
         """Step 9 saves the browser signals and closes the browser in one call: the guard must approve all of it."""
@@ -193,8 +249,18 @@ class Docs(unittest.TestCase):
                 cmd = chain.replace("<out>", f"{proj}/qa-out/run").replace("<slug>", "form")
                 with mock.patch.dict(os.environ, env):
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                    self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                                 "agent_type": "qa-sdet:qa-explorer"}), (None, True), cmd)
+                    self.assertEqual(
+                        g.evaluate(
+                            {
+                                "tool_name": "Bash",
+                                "tool_input": {"command": cmd},
+                                "cwd": str(proj),
+                                "agent_type": "qa-sdet:qa-explorer",
+                            }
+                        ),
+                        (None, True),
+                        cmd,
+                    )
 
     def test_the_body_check_pipeline_is_approved_and_named_by_the_explorer_and_the_tips(self):
         """Step 9 reads a body into `qa-mem body-check`: the verb exists, the guard lets the pipe through, both docs name it."""
@@ -215,9 +281,19 @@ class Docs(unittest.TestCase):
         tips = text("references/playwright-cli-tips.md")
         probe = tips.split("## Look for broken output")[1].split("```")[1].strip()
         self.assertNotIn("offsetParent", probe)
-        for want in ("getBoundingClientRect", "getComputedStyle", "elementFromPoint", "duplicate id", r"\{\{", "NaN", "zero count"):
+        for want in (
+            "getBoundingClientRect",
+            "getComputedStyle",
+            "elementFromPoint",
+            "duplicate id",
+            r"\{\{",
+            "NaN",
+            "zero count",
+        ):
             self.assertIn(want, probe)
-        self.assertEqual(probe.count('"'), 2)  # one double-quoted shell word: no inner `"`, backtick or `$` the shell would expand
+        self.assertEqual(
+            probe.count('"'), 2
+        )  # one double-quoted shell word: no inner `"`, backtick or `$` the shell would expand
         self.assertNotIn("`", probe)
         self.assertNotRegex(probe, r"\$[{(\w]")
         step5 = text("agents/qa-explorer.md").split("5. **Cases, then the check loop.**")[1].split("\n6. ")[0]
@@ -247,13 +323,19 @@ class Docs(unittest.TestCase):
             cmds = []
             for block in section.split("```")[1::2]:  # a command starts at `playwright-cli`; a script may span lines
                 for line in block.strip().splitlines():
-                    cmds.append(line) if line.startswith("playwright-cli") else cmds.__setitem__(-1, cmds[-1] + "\n" + line)
+                    cmds.append(line) if line.startswith("playwright-cli") else cmds.__setitem__(
+                        -1, cmds[-1] + "\n" + line
+                    )
             self.assertEqual(len(cmds), 7)  # window size, narrow chain, dark eval, dark chain, three uploads
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
                 for cmd in cmds:
-                    cmd = cmd.replace("<the broken-output probe's script>", script).replace("<the same script>", "1") \
-                        .replace("<refs>", str(ROOT / "references")).replace("<the width> <the height>", "1280 800")
+                    cmd = (
+                        cmd.replace("<the broken-output probe's script>", script)
+                        .replace("<the same script>", "1")
+                        .replace("<refs>", str(ROOT / "references"))
+                        .replace("<the width> <the height>", "1280 800")
+                    )
                     self.assertIsNone(g.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
         self.assertIn("Never `dialog-accept`", section)
         self.assertIn("FOCUS:", section.split("**Dark mode**")[1].split("**Unsaved edits**")[0])
@@ -263,8 +345,12 @@ class Docs(unittest.TestCase):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)
         title = "Status shows `id` and $(echo INJECTED) after Save"
-        line = cmd.replace("acli ", "printf '%s\\n' ", 1).replace("<the draft's # title>", title) \
-            .replace("<absolute draft path>", "/p/bugs/BUG-1.md").replace("<PROJ>", "DEMO")
+        line = (
+            cmd.replace("acli ", "printf '%s\\n' ", 1)
+            .replace("<the draft's # title>", title)
+            .replace("<absolute draft path>", "/p/bugs/BUG-1.md")
+            .replace("<PROJ>", "DEMO")
+        )
         out = subprocess.run(["bash", "-c", line], capture_output=True, text=True).stdout
         self.assertIn(title + "\n", out)
         self.assertNotIn("INJECTED after", out.replace(title, ""))
@@ -296,7 +382,11 @@ class Docs(unittest.TestCase):
         for f in DOCS:
             self.assertNotRegex(f.read_text(), r"(?i)\bmcp\b", f.name)
         for f in ALL:
-            self.assertNotRegex(f.read_text(), r"--browser\s*[= ]\s*(chrome|chromium|msedge|firefox|webkit)\b|\"browser\":\s*\"(chrome|msedge|firefox|webkit)\"", f.name)
+            self.assertNotRegex(
+                f.read_text(),
+                r"--browser\s*[= ]\s*(chrome|chromium|msedge|firefox|webkit)\b|\"browser\":\s*\"(chrome|msedge|firefox|webkit)\"",
+                f.name,
+            )
 
     def test_playwright_cli_verbs_in_docs_exist(self):
         for f in ALL:
@@ -315,10 +405,13 @@ class Docs(unittest.TestCase):
         harvester = tips.split("## Map the page's states and links")[1].split("```")[1]
         self.assertNotIn("u.search", harvester)  # one path is one page: ?page=2 and ?sort=x are not new pages
         from qa_sdet import crawl  # qa-mem discover runs this harvester: one copy for the explorer and the crawl
+
         said = harvester.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
         self.assertEqual(" ".join(crawl.HARVESTER_JS.split()), " ".join(said.split()))
 
-    def test_no_doc_passes_cursor_to_video_show_actions(self):  # 0.1.24 reads `--cursor none` as a boolean plus an argument
+    def test_no_doc_passes_cursor_to_video_show_actions(
+        self,
+    ):  # 0.1.24 reads `--cursor none` as a boolean plus an argument
         for f in ALL:
             self.assertNotRegex(f.read_text(), r"video-show-actions[^\n`]*--cursor", f.name)
 
@@ -346,13 +439,24 @@ class Docs(unittest.TestCase):
             g, env = load_guard(os.path.realpath(d))
             proj = Path(os.path.realpath(d)) / "proj"
             (proj / "qa-out").mkdir(parents=True)
-            marker = lambda **m: (proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600, "budget": 100, **m}))
+            marker = lambda **m: (proj / "qa-out/.active").write_text(
+                json.dumps({"expires": time.time() + 3600, "budget": 100, **m})
+            )
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                ev = lambda cmd: g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                             "agent_type": "qa-sdet:qa-explorer"})
-                cmds = [re.sub("<qaBaseUrl>", "https://qa.example.com", c.replace("<#>", "3").replace("<id>", "7"))
-                        for b in blocks for c in re.split(r"\n(?=playwright-cli |qa-mem )", b.strip())]
+                ev = lambda cmd: g.evaluate(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": cmd},
+                        "cwd": str(proj),
+                        "agent_type": "qa-sdet:qa-explorer",
+                    }
+                )
+                cmds = [
+                    re.sub("<qaBaseUrl>", "https://qa.example.com", c.replace("<#>", "3").replace("<id>", "7"))
+                    for b in blocks
+                    for c in re.split(r"\n(?=playwright-cli |qa-mem )", b.strip())
+                ]
                 writes = [c for c in cmds if re.match(r"qa-mem api-probe (POST|PUT|PATCH|DELETE) ", c)]
                 self.assertEqual(len(writes), 2)
                 for api_writes in (True, False):
@@ -373,7 +477,9 @@ class Docs(unittest.TestCase):
                 self.assertIn("Use when", meta["description"], path.parent.name)
             for flag in re.findall(r"--[a-z]+", meta.get("argument-hint", "")):
                 self.assertIn(flag, body, f"{path.parent.name}: {flag}")
-        self.assertEqual(fm(ROOT / "skills/qa-setup/SKILL.md").get("disable-model-invocation"), "true")  # it edits Claude Code's settings
+        self.assertEqual(
+            fm(ROOT / "skills/qa-setup/SKILL.md").get("disable-model-invocation"), "true"
+        )  # it edits Claude Code's settings
         for path in AGENTS:
             meta = fm(path)
             self.assertEqual(meta["name"], path.stem)
@@ -395,8 +501,16 @@ class Docs(unittest.TestCase):
             g, env = load_guard(os.path.realpath(d))
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": "qa-mem session-check --record"},
-                                             "cwd": os.path.realpath(d)}), (None, True))
+                self.assertEqual(
+                    g.evaluate(
+                        {
+                            "tool_name": "Bash",
+                            "tool_input": {"command": "qa-mem session-check --record"},
+                            "cwd": os.path.realpath(d),
+                        }
+                    ),
+                    (None, True),
+                )
 
     def test_retest_cases_come_from_the_prior_plan_with_their_steps(self):
         """plan-find's retest_cases name the cases (no steps or expected result); prior_passed entries are complete. The
@@ -404,13 +518,29 @@ class Docs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"QA_SDET_CONFIG": f"{d}/c.json"}):
             run = Path(d) / "qa-out/2026-11-24-PROJ-1"
             (run / ".data").mkdir(parents=True)
-            case = {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "t", "route": "/f", "steps": ["s"], "expected": "e"}
-            (run / ".data/plan.json").write_text(json.dumps({"kind": "ticket", "tickets": [{"key": "PROJ-1"}], "cases": [case]}))
-            (run / ".data/run-f.json").write_text(json.dumps({"target": "/f", "cases": [{"id": "TC-1", "status": "FAIL"}]}))
+            case = {
+                "id": "TC-1",
+                "ticket": "PROJ-1",
+                "ac": "AC-1",
+                "title": "t",
+                "route": "/f",
+                "steps": ["s"],
+                "expected": "e",
+            }
+            (run / ".data/plan.json").write_text(
+                json.dumps({"kind": "ticket", "tickets": [{"key": "PROJ-1"}], "cases": [case]})
+            )
+            (run / ".data/run-f.json").write_text(
+                json.dumps({"target": "/f", "cases": [{"id": "TC-1", "status": "FAIL"}]})
+            )
             entry = report._run_state(run)["retest_cases"][0]
-        self.assertFalse({"steps", "expected"} & set(entry))  # copying these verbatim would drop what the explorer checks
+        self.assertFalse(
+            {"steps", "expected"} & set(entry)
+        )  # copying these verbatim would drop what the explorer checks
         retest = next(x for x in text("skills/qa-ticket/SKILL.md").splitlines() if x.startswith("- **`--retest"))
-        self.assertIn("the prior plan's case objects (steps and expected included) whose ids are in `retest_cases`", retest)
+        self.assertIn(
+            "the prior plan's case objects (steps and expected included) whose ids are in `retest_cases`", retest
+        )
 
     def test_batch_explore_skips_routes_that_need_a_record_id(self):
         """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""
@@ -429,7 +559,6 @@ class Docs(unittest.TestCase):
         for name in re.findall(r"`<out>/(bugs|repro|evidence|\.data)/([^`]+)`", text("agents/qa-explorer.md")):
             self.assertIn(name[0], g.EXPLORER_FILES)
 
-
     def test_leftover_test_data_line_is_the_one_the_report_reads(self):
         explorer = text("agents/qa-explorer.md")
         self.assertIn("`Left in the app: ", explorer)
@@ -437,14 +566,21 @@ class Docs(unittest.TestCase):
 
     def test_bug_sync_search_reads_every_page_and_is_approved(self):  # without --paginate acli stops at its first page
         line = next(x for x in text("skills/qa-inbox/SKILL.md").splitlines() if "| qa-mem bug-sync" in x)
-        cmd = re.search(r"`(acli jira workitem search [^`]+\| qa-mem bug-sync)`", line).group(1).replace("<that JQL>", "key in (P-1)")
+        cmd = (
+            re.search(r"`(acli jira workitem search [^`]+\| qa-mem bug-sync)`", line)
+            .group(1)
+            .replace("<that JQL>", "key in (P-1)")
+        )
         self.assertIn("--paginate", cmd)
         with tempfile.TemporaryDirectory() as d:
             g, env = load_guard(os.path.realpath(d))
             (Path(os.path.realpath(d)) / "qa-out").mkdir()
             with mock.patch.dict(os.environ, env):
-                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": os.path.realpath(d)}),
-                                 (None, True), cmd)
+                self.assertEqual(
+                    g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": os.path.realpath(d)}),
+                    (None, True),
+                    cmd,
+                )
 
     def test_crawl_and_discover_are_qa_mem_commands_not_an_agent(self):
         # found live: one 20-turn agent for 19 routes and ~1,280 locators ran out of turns twice and saved almost nothing
@@ -508,6 +644,7 @@ class Docs(unittest.TestCase):
 
     def test_stop_reason_and_the_expansion_gate_are_documented(self):
         from qa_sdet import memory
+
         for reason in memory.STOP_REASONS:
             self.assertIn(reason, text("references/run-json.md"), reason)
         self.assertIn("stop_reason", text("agents/qa-explorer.md"))
@@ -525,7 +662,9 @@ class Docs(unittest.TestCase):
             self.assertIn(flag, cli.COMMANDS["spend"])
         self.assertIn("qa-mem spend", text("skills/qa-explore/SKILL.md"))
         self.assertIn("--more-budget 120 --more-minutes 20", text("skills/qa-explore/SKILL.md"))
-        self.assertIn("--more-budget 120 --more-minutes 20", text("references/run-setup.md"))  # the ceiling the docs state
+        self.assertIn(
+            "--more-budget 120 --more-minutes 20", text("references/run-setup.md")
+        )  # the ceiling the docs state
         self.assertIn("spend.jsonl", text("references/run-setup.md"))
         self.assertIn(ops.SPEND_LEDGER, text("README.md") + text("references/run-setup.md"))
 
@@ -540,17 +679,27 @@ class Docs(unittest.TestCase):
         self.assertIn("blindspots", cli.COMMANDS)
         for doc in ("README.md", "skills/qa-memory/SKILL.md", "CHANGELOG.md"):
             self.assertIn("blindspots", text(doc), doc)
-        for section in ("UNVISITED STATES", "UNEXERCISED ENDPOINTS", "UNTESTED TARGETS"):  # what the stop check reads in the brief
+        for section in (
+            "UNVISITED STATES",
+            "UNEXERCISED ENDPOINTS",
+            "UNTESTED TARGETS",
+        ):  # what the stop check reads in the brief
             self.assertIn(section, text("lib/qa_sdet/report.py"))
             self.assertIn(section, text("README.md") + text("lib/qa_sdet/memory.py"))
 
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
+
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
-        body = tmpl + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
+        body = (
+            tmpl
+            + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
+        )
         self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
 
-    def test_agents_have_a_turn_limit(self):  # a looping agent burned turns until its context ran out, results unwritten
+    def test_agents_have_a_turn_limit(
+        self,
+    ):  # a looping agent burned turns until its context ran out, results unwritten
         limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-reviewer": 4}
         for path in AGENTS:
             meta = dict(re.findall(r"^([\w-]+): (.*)$", path.read_text().split("---\n")[1], re.M))
@@ -580,10 +729,20 @@ class Docs(unittest.TestCase):
             proj.mkdir()
             with mock.patch.dict(os.environ, env):
                 cmd = f"qa-mem plugin-log note --project '{proj}' 'test note'"
-                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}),
-                                 (None, True))
-                self.assertIsNotNone(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                                 "agent_type": "qa-sdet:qa-explorer"})[0])
+                self.assertEqual(
+                    g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}), (None, True)
+                )
+                self.assertIsNotNone(
+                    g.evaluate(
+                        {
+                            "tool_name": "Bash",
+                            "tool_input": {"command": cmd},
+                            "cwd": str(proj),
+                            "agent_type": "qa-sdet:qa-explorer",
+                        }
+                    )[0]
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

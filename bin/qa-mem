@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """qa-mem: compact SQLite memory of the app under test. The code is in ../lib/qa_sdet."""
+
 import os
 import sys
 

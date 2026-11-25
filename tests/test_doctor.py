@@ -1,4 +1,5 @@
 """`qa-mem doctor`, browser detection and `qa-mem setup-permissions`."""
+
 import builtins, contextlib, io, json, os, stat, subprocess, tempfile, unittest
 from pathlib import Path
 from unittest import mock
@@ -18,8 +19,11 @@ class Doctor(Base):
 
     def test_doctor_reports_config_problems(self):
         import io, contextlib
+
         cfg = Path(self.tmp.name) / "config.json"
-        cfg.write_text(json.dumps({"app": "x", "qaBaseUrl": "https://qa.example.com", "allowedHosts": "qa.example.com"}))
+        cfg.write_text(
+            json.dumps({"app": "x", "qaBaseUrl": "https://qa.example.com", "allowedHosts": "qa.example.com"})
+        )
         real = core.CONFIG
         core.CONFIG = cfg
         try:
@@ -35,14 +39,17 @@ class Doctor(Base):
 
     def test_doctor_empty_config_and_source_folders(self):
         import io, contextlib, shutil
+
         cfg = Path(self.tmp.name) / "config.json"
         real, real_which = core.CONFIG, shutil.which
         core.CONFIG = cfg
         shutil.which = lambda name, *a, **k: None  # no playwright-cli, no acli
         try:
-            for body, want in (({}, "FIX  config has app"),
-                               ({"sourcePaths": "/x"}, "FIX  sourcePaths is a list"),
-                               ({"sourcePaths": [str(Path(self.tmp.name) / "gone")]}, "not found")):
+            for body, want in (
+                ({}, "FIX  config has app"),
+                ({"sourcePaths": "/x"}, "FIX  sourcePaths is a list"),
+                ({"sourcePaths": [str(Path(self.tmp.name) / "gone")]}, "not found"),
+            ):
                 cfg.write_text(json.dumps(body))
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -56,10 +63,14 @@ class Doctor(Base):
 
     def test_doctor_acli_signed_in_or_out(self):
         import io, contextlib, shutil, subprocess
+
         real_which, real_run = shutil.which, subprocess.run
         shutil.which = lambda name, *a, **k: "/x/acli" if name == "acli" else None
         try:
-            for code, want in ((1, "FIX  acli signed in to Jira  -> acli jira auth login"), (0, "ok   acli signed in to Jira")):
+            for code, want in (
+                (1, "FIX  acli signed in to Jira  -> acli jira auth login"),
+                (0, "ok   acli signed in to Jira"),
+            ):
                 subprocess.run = lambda cmd, *a, code=code, **k: type("R", (), {"returncode": code, "stdout": ""})()
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -70,9 +81,19 @@ class Doctor(Base):
 
     def test_odd_config_types_still_name_the_db_and_pass_the_host_check(self):
         import io, contextlib
+
         cfg = Path(self.tmp.name) / "config.json"
-        cfg.write_text(json.dumps({"app": 123, "qaBaseUrl": "https://qa.Example.com", "ssoHost": "sso",
-                                   "buildSource": {}, "allowedHosts": [8080, "*.example.com"]}))
+        cfg.write_text(
+            json.dumps(
+                {
+                    "app": 123,
+                    "qaBaseUrl": "https://qa.Example.com",
+                    "ssoHost": "sso",
+                    "buildSource": {},
+                    "allowedHosts": [8080, "*.example.com"],
+                }
+            )
+        )
         real, real_data = core.CONFIG, core.DATA_DIR
         core.CONFIG, core.DATA_DIR = cfg, Path(self.tmp.name) / "data"  # never touch the real data dir
         os.environ.pop("QA_MEM_DB")
@@ -88,8 +109,10 @@ class Doctor(Base):
 
     def test_doctor_agrees_with_the_guard_and_stops_at_a_json_error(self):
         good = dict(app="x", ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
-        for cfg in (dict(qaBaseUrl="https://qa_app.example.com", allowedHosts=["qa_app.example.com"]),
-                    dict(qaBaseUrl="http://127.0.0.1:8765", allowedHosts=["localhost"])):
+        for cfg in (
+            dict(qaBaseUrl="https://qa_app.example.com", allowedHosts=["qa_app.example.com"]),
+            dict(qaBaseUrl="http://127.0.0.1:8765", allowedHosts=["localhost"]),
+        ):
             self.config(**good, **cfg)
             out = self.doctor_out()
             self.assertNotIn("FIX  allowedHosts", out, cfg)
@@ -101,28 +124,48 @@ class Doctor(Base):
         self.assertNotIn("FIX  buildSource", out)
 
     def test_allowed_hosts_with_scheme_or_port_and_sso_host_with_port(self):
-        good = dict(app="x", qaBaseUrl="https://qa.example.com:8443/app", allowedHosts=["qa.example.com", "*.api.example.com"],
-                    ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
+        good = dict(
+            app="x",
+            qaBaseUrl="https://qa.example.com:8443/app",
+            allowedHosts=["qa.example.com", "*.api.example.com"],
+            ssoHost="login.x.com",
+            buildSource={"type": "selector", "value": "footer"},
+        )
         self.config(**good)
         self.assertNotIn("FIX  allowedHosts", self.doctor_out())
-        for bad, want in [(dict(allowedHosts=["https://qa.example.com/"]), "FIX  allowedHosts entries are host names (https://qa.example.com/"),
-                          (dict(allowedHosts=["qa.example.com:8443"]), "FIX  allowedHosts entries are host names (qa.example.com:8443"),
-                          (dict(ssoHost="qa.example.com:8443"), "FIX  ssoHost differs from the qaBaseUrl host"),
-                          (dict(buildSource={"type": "selector", "value": ["x"]}), "FIX  buildSource is")]:
+        for bad, want in [
+            (
+                dict(allowedHosts=["https://qa.example.com/"]),
+                "FIX  allowedHosts entries are host names (https://qa.example.com/",
+            ),
+            (
+                dict(allowedHosts=["qa.example.com:8443"]),
+                "FIX  allowedHosts entries are host names (qa.example.com:8443",
+            ),
+            (dict(ssoHost="qa.example.com:8443"), "FIX  ssoHost differs from the qaBaseUrl host"),
+            (dict(buildSource={"type": "selector", "value": ["x"]}), "FIX  buildSource is"),
+        ]:
             self.config(**{**good, **bad})
             self.assertIn(want, self.doctor_out(), bad)
 
     def test_odd_config_values_get_a_fix_line_not_a_crash(self):
-        good = dict(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"], ssoHost="login.x.com",
-                    buildSource={"type": "selector", "value": "footer"})
+        good = dict(
+            app="x",
+            qaBaseUrl="https://qa.example.com",
+            allowedHosts=["qa.example.com"],
+            ssoHost="login.x.com",
+            buildSource={"type": "selector", "value": "footer"},
+        )
         self.config(**good, sourcePaths=5)  # was: TypeError, no len()
         self.assertNotIn("source folders configured", self.doctor_out())
-        for bad, want in [(dict(qaBaseUrl="qa.example.com"), 'FIX  qaBaseUrl is a full URL  -> e.g. "qaBaseUrl"'),
-                          (dict(qaBaseUrl=5), "FIX  qaBaseUrl is a full URL"),
-                          (dict(ssoHost="https://login.x.com/"), "FIX  ssoHost is a host name  -> just the host"),
-                          (dict(ssoHost={"x": 1}), "FIX  ssoHost is a host name"),
-                          (dict(jiraKeyPrefix=["PROJ"]), "FIX  jiraKeyPrefix is a Jira project key"),
-                          (dict(jiraKeyPrefix="PROJ-1234"), "FIX  jiraKeyPrefix is a Jira project key")]:
+        for bad, want in [
+            (dict(qaBaseUrl="qa.example.com"), 'FIX  qaBaseUrl is a full URL  -> e.g. "qaBaseUrl"'),
+            (dict(qaBaseUrl=5), "FIX  qaBaseUrl is a full URL"),
+            (dict(ssoHost="https://login.x.com/"), "FIX  ssoHost is a host name  -> just the host"),
+            (dict(ssoHost={"x": 1}), "FIX  ssoHost is a host name"),
+            (dict(jiraKeyPrefix=["PROJ"]), "FIX  jiraKeyPrefix is a Jira project key"),
+            (dict(jiraKeyPrefix="PROJ-1234"), "FIX  jiraKeyPrefix is a Jira project key"),
+        ]:
             self.config(**{**good, **bad})
             out = self.doctor_out()
             self.assertIn(want, out, bad)
@@ -144,8 +187,11 @@ class Doctor(Base):
             with contextlib.redirect_stdout(out):
                 doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
-            self.assertIn(f"FIX  old cookie file {core.CONFIG.with_name('qa-state.json')} (nothing uses it any more)  -> delete "
-                          f"{core.CONFIG.with_name('qa-state.json')} yourself", out.getvalue())
+            self.assertIn(
+                f"FIX  old cookie file {core.CONFIG.with_name('qa-state.json')} (nothing uses it any more)  -> delete "
+                f"{core.CONFIG.with_name('qa-state.json')} yourself",
+                out.getvalue(),
+            )
             self.assertIn("Pillow", out.getvalue())
             ops.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
             (ops.profile_dir() / "Default").mkdir()
@@ -154,16 +200,23 @@ class Doctor(Base):
                 doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
             self.assertNotIn("signed-in profile present", out.getvalue())
-            self.config(app="x", browser="chrome", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
-                        ssoHost="login.example.com")  # qa-login verifies the sign-in and records it in one call
+            self.config(
+                app="x",
+                browser="chrome",
+                qaBaseUrl="https://qa.example.com",
+                allowedHosts=["qa.example.com"],
+                ssoHost="login.example.com",
+            )  # qa-login verifies the sign-in and records it in one call
             seq = [done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false}'), done(0)]
             with mock.patch.object(subprocess, "run", side_effect=seq):
                 self.assertEqual(cli("session-check", "--record")[0], 0)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 doctor.doctor()
-            self.assertIn("ok   signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)",
-                          out.getvalue())
+            self.assertIn(
+                "ok   signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)",
+                out.getvalue(),
+            )
             self.assertEqual(cli("login-ok")[0], 2)  # gone: it recorded a sign-in without checking one
             with mock.patch.object(subprocess, "run", return_value=done(0)):
                 self.config(app="x", browser="chrome")
@@ -177,10 +230,12 @@ class Doctor(Base):
         self.config(app="x")
         core.CONFIG.with_name("qa-state.json").write_text("SECRET-COOKIE")
         real_open = builtins.open
+
         def no_cookie(f, *a, **k):
             if "qa-state" in str(f):
                 raise AssertionError("doctor opened the cookie file")
             return real_open(f, *a, **k)
+
         with mock.patch("builtins.open", no_cookie):
             self.assertIn("FIX  old cookie file", self.doctor_out())
         for folder in (core.CONFIG.parent, core.DATA_DIR):  # Path.exists/is_file raised here on python < 3.12
@@ -191,20 +246,29 @@ class Doctor(Base):
             finally:
                 os.chmod(folder, 0o700)
             self.assertIn("python", out)
-        self.assertIn("make it readable: chmod", (os.chmod(core.CONFIG.parent, 0), self.doctor_out(),
-                                                  os.chmod(core.CONFIG.parent, 0o700))[1])
+        self.assertIn(
+            "make it readable: chmod",
+            (os.chmod(core.CONFIG.parent, 0), self.doctor_out(), os.chmod(core.CONFIG.parent, 0o700))[1],
+        )
 
     def test_doctor_validates_jira_ac_field_and_inbox_jql(self):
-        good = dict(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
-                    ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
+        good = dict(
+            app="x",
+            qaBaseUrl="https://qa.example.com",
+            allowedHosts=["qa.example.com"],
+            ssoHost="login.x.com",
+            buildSource={"type": "selector", "value": "footer"},
+        )
         self.config(**good, jiraAcField="customfield_10042", inboxJql='status = "Ready for QA" ORDER BY updated DESC')
         out = self.doctor_out()
         self.assertIn("ok   jiraAcField is a Jira custom field id", out)
         self.assertIn("ok   inboxJql is a single-line JQL query", out)
-        for bad, want in [(dict(jiraAcField="bad field"), "FIX  jiraAcField"),
-                          (dict(jiraAcField=123), "FIX  jiraAcField"),
-                          (dict(inboxJql="a\nb"), "FIX  inboxJql"),
-                          (dict(inboxJql=["x"]), "FIX  inboxJql")]:
+        for bad, want in [
+            (dict(jiraAcField="bad field"), "FIX  jiraAcField"),
+            (dict(jiraAcField=123), "FIX  jiraAcField"),
+            (dict(inboxJql="a\nb"), "FIX  inboxJql"),
+            (dict(inboxJql=["x"]), "FIX  inboxJql"),
+        ]:
             self.config(**{**good, **bad})
             self.assertIn(want, self.doctor_out(), bad)
 
@@ -215,27 +279,47 @@ class Browsers(Base):
     def test_browser_choice_detection_and_doctor(self):
         """Runs use the browser the user chose from what's installed (config `browser`), never an assumed Firefox."""
         import io, contextlib, shutil, subprocess
+
         tmp = Path(self.tmp.name)
-        chrome = tmp / "chrome"; chrome.write_text("")
-        build = tmp / "webkit-1"; build.mkdir(); (build / "INSTALLATION_COMPLETE").write_text("")
+        chrome = tmp / "chrome"
+        chrome.write_text("")
+        build = tmp / "webkit-1"
+        build.mkdir()
+        (build / "INSTALLATION_COMPLETE").write_text("")
         real_isfile, real_which, real_run = os.path.isfile, shutil.which, subprocess.run
-        os.path.isfile = lambda x: x == "/opt/google/chrome/chrome" or (str(x).endswith("INSTALLATION_COMPLETE") and real_isfile(x))  # only the stub's browsers, not this machine's
+        os.path.isfile = lambda x: (
+            x == "/opt/google/chrome/chrome" or (str(x).endswith("INSTALLATION_COMPLETE") and real_isfile(x))
+        )  # only the stub's browsers, not this machine's
         shutil.which = lambda name, *a, **k: "/x/playwright-cli" if name == "playwright-cli" else None
+
         def fake_run(cmd, *a, **k):
-            out = f"Install location: {build if 'webkit' in cmd else tmp / 'firefox-missing'}\n" if "install-browser" in cmd else ""
+            out = (
+                f"Install location: {build if 'webkit' in cmd else tmp / 'firefox-missing'}\n"
+                if "install-browser" in cmd
+                else ""
+            )
             return type("R", (), {"returncode": 0, "stdout": out})()
+
         subprocess.run = fake_run
         try:
             got = doctor.installed_browsers()
-            self.assertEqual({k: v[0] for k, v in got.items()}, {"chrome": True, "msedge": False, "firefox": False, "webkit": True})
+            self.assertEqual(
+                {k: v[0] for k, v in got.items()}, {"chrome": True, "msedge": False, "firefox": False, "webkit": True}
+            )
             self.assertIn("playwright-cli install-browser firefox", got["firefox"][1])
             cfg = tmp / "config.json"
             real_cfg = core.CONFIG
             core.CONFIG = cfg
             try:
-                for conf, want in (({}, "FIX  config has browser"), ({"browser": "opera"}, "FIX  config browser 'opera'"),
-                                   ({"browser": "webkit"}, "ok   browser webkit installed"),
-                                   ({"browser": "firefox"}, "FIX  browser firefox installed  -> playwright-cli install-browser firefox")):
+                for conf, want in (
+                    ({}, "FIX  config has browser"),
+                    ({"browser": "opera"}, "FIX  config browser 'opera'"),
+                    ({"browser": "webkit"}, "ok   browser webkit installed"),
+                    (
+                        {"browser": "firefox"},
+                        "FIX  browser firefox installed  -> playwright-cli install-browser firefox",
+                    ),
+                ):
                     cfg.write_text(json.dumps(conf))
                     buf = io.StringIO()
                     with contextlib.redirect_stdout(buf):
@@ -250,23 +334,32 @@ class Browsers(Base):
     def test_browser_detection_edge_cases(self):
         """Review findings: interrupted downloads, failed lookups, the browsers command."""
         import io, contextlib, shutil, subprocess
+
         tmp = Path(self.tmp.name)
-        half = tmp / "firefox-9"; half.mkdir()  # no INSTALLATION_COMPLETE: an interrupted download
+        half = tmp / "firefox-9"
+        half.mkdir()  # no INSTALLATION_COMPLETE: an interrupted download
         real_isfile, real_which, real_run = os.path.isfile, shutil.which, subprocess.run
+
         def runner(mode):
             def fake(cmd, *a, **k):
                 if mode == "timeout" and "install-browser" in cmd:  # only the lookup fails; --version works
                     raise subprocess.TimeoutExpired(cmd, 30)
                 out = f"Install location: {half}\n" if mode == "half" else "nothing useful\n"
                 return type("R", (), {"returncode": 0, "stdout": out})()
+
             return fake
+
         shutil.which = lambda name, *a, **k: "/x/playwright-cli" if name == "playwright-cli" else None
         try:
-            for mode, want in (("half", "playwright-cli install-browser firefox"), ("timeout", "can't check: `playwright-cli"),
-                               ("noloc", "gave no install location")):
+            for mode, want in (
+                ("half", "playwright-cli install-browser firefox"),
+                ("timeout", "can't check: `playwright-cli"),
+                ("noloc", "gave no install location"),
+            ):
                 subprocess.run = runner(mode)
                 ok, how = doctor.installed_browsers(("firefox",))["firefox"]
-                self.assertFalse(ok, mode); self.assertIn(want, how, mode)
+                self.assertFalse(ok, mode)
+                self.assertIn(want, how, mode)
             os.path.isfile = lambda x: x == "/opt/microsoft/msedge/msedge"
             got = doctor.installed_browsers(("chrome", "msedge"))
             self.assertEqual((got["chrome"][0], got["msedge"]), (False, (True, "/opt/microsoft/msedge/msedge")))
@@ -313,8 +406,15 @@ class SetupPermissions(Base):
 
     def test_merge_keeps_keys_no_dupes_backup_mode(self):
         s = self.t / "settings.json"
-        s.write_text(json.dumps({"model": "x", "permissions": {"allow": ["Bash(ls)", "Skill(qa-sdet:*)"],
-                                                                 "deny": ["Bash(rm *)"]}, "hooks": {"a": 1}}))
+        s.write_text(
+            json.dumps(
+                {
+                    "model": "x",
+                    "permissions": {"allow": ["Bash(ls)", "Skill(qa-sdet:*)"], "deny": ["Bash(rm *)"]},
+                    "hooks": {"a": 1},
+                }
+            )
+        )
         os.chmod(s, 0o640)
         code, out, _ = cli("setup-permissions", "--settings", str(s), "--apply")
         self.assertEqual(code, 0)
@@ -328,11 +428,12 @@ class SetupPermissions(Base):
         self.assertEqual(set(allow), {"Bash(ls)"} | set(doctor.PERMISSION_RULES))
         self.assertNotIn("Skill(qa-sdet:*)", out)  # only what was added
         self.assertIn("Bash(qa-mem *)", out)
-        self.assertFalse(any(r.startswith("Agent(") or "python" in r for r in doctor.PERMISSION_RULES))  # auto mode drops them
+        self.assertFalse(
+            any(r.startswith("Agent(") or "python" in r for r in doctor.PERMISSION_RULES)
+        )  # auto mode drops them
         # the config read every run is allowed, but never Edit/Write (allowedHosts is the guard's trust root)
         self.assertIn("Read(~/.config/qa-sdet/config.json)", doctor.PERMISSION_RULES)
-        self.assertFalse(any(r.startswith(("Edit(", "Write(", "MultiEdit("))
-                             for r in doctor.PERMISSION_RULES))
+        self.assertFalse(any(r.startswith(("Edit(", "Write(", "MultiEdit(")) for r in doctor.PERMISSION_RULES))
         self.assertEqual(stat.S_IMODE(s.stat().st_mode), 0o640)
         backups = list(self.t.glob("settings.json.bak-*"))
         self.assertEqual(len(backups), 1)
@@ -355,13 +456,20 @@ class SetupPermissions(Base):
         self.assertEqual(list(self.t.glob("bad.json*")), [bad])  # no backup, no temp file
         bad.write_text('{"permissions": {"allow": "Bash(ls)"}}')
         self.assertEqual(cli("setup-permissions", "--settings", str(bad), "--apply")[0], 2)
-        for text in ('{"x": NaN}', '{"x": -Infinity}', '{"x": 1e999}', '{"x": "\\ud800"}'):  # Claude Code can't read these back
+        for text in (
+            '{"x": NaN}',
+            '{"x": -Infinity}',
+            '{"x": 1e999}',
+            '{"x": "\\ud800"}',
+        ):  # Claude Code can't read these back
             bad.write_text(text)
             code, _, err = cli("setup-permissions", "--settings", str(bad), "--apply")
             self.assertEqual(code, 2, text)
             self.assertIn("nothing changed", err)
             self.assertEqual(bad.read_text(), text)
-            self.assertEqual(sorted(p.name for p in self.t.iterdir() if p.name.startswith((".bad", "bad"))), ["bad.json"])
+            self.assertEqual(
+                sorted(p.name for p in self.t.iterdir() if p.name.startswith((".bad", "bad"))), ["bad.json"]
+            )
 
     def test_unwritable_folder_changes_nothing(self):
         d = self.t / "cfg"
@@ -391,16 +499,23 @@ class SetupPermissions(Base):
         doctor.merge_permissions(s, stamp="20261124000000")
         self.assertFalse(victim.exists())
         # L4: non-ASCII jiraKeyPrefix 'ß' fails doctor check (matching ops.expand_keys)
-        good = dict(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
-                    ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
+        good = dict(
+            app="x",
+            qaBaseUrl="https://qa.example.com",
+            allowedHosts=["qa.example.com"],
+            ssoHost="login.x.com",
+            buildSource={"type": "selector", "value": "footer"},
+        )
         self.config(**good, jiraKeyPrefix="ß")
         out = io.StringIO()
         with mock.patch("shutil.which", lambda *a, **k: None), contextlib.redirect_stdout(out):
             doctor.doctor()
         self.assertIn("FIX  jiraKeyPrefix is a Jira project key", out.getvalue())
         # L6: installed_browsers passes errors='replace' so non-UTF-8 output never crashes
-        with mock.patch("shutil.which", return_value="/x/playwright-cli"), \
-                mock.patch("subprocess.run", return_value=done(0, out="")) as mrun:
+        with (
+            mock.patch("shutil.which", return_value="/x/playwright-cli"),
+            mock.patch("subprocess.run", return_value=done(0, out="")) as mrun,
+        ):
             doctor.installed_browsers(("firefox",))
         self.assertEqual(mrun.call_args.kwargs.get("errors"), "replace")
 

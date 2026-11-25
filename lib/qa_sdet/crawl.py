@@ -3,6 +3,7 @@ coordinator in one Bash call. Python drives playwright-cli as page-start does: n
 retypes a locator. Page text never steers it: a page only answers which locators exist and which links it holds, and
 every link is checked against allowedHosts before it is followed. The guard can't see these browser commands, so each
 one is charged to the run marker here, with the guard's own locked counter."""
+
 import json
 import re
 import subprocess
@@ -25,14 +26,22 @@ SKIP_LINK_RE = re.compile(r"logout|sign-?out|delete|remove", re.I)  # as the har
 
 # ---------- locators: the four documented forms (references/code-map.md) become DOM checks ----------
 _STR = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
-_CALL_RE = re.compile(rf"(?:[A-Za-z_$][\w$]*\.)*(getByTestId|getByRole|getByLabel)\(\s*({_STR})\s*(?:,\s*\{{(.*)\}}\s*)?\)", re.S)
+_CALL_RE = re.compile(
+    rf"(?:[A-Za-z_$][\w$]*\.)*(getByTestId|getByRole|getByLabel)\(\s*({_STR})\s*(?:,\s*\{{(.*)\}}\s*)?\)", re.S
+)
 _OPT_RE = re.compile(rf"\s*(name|exact)\s*:\s*({_STR}|true|false)\s*,?\s*", re.S)
 
 
 def _js_str(token):
     """The value of a quoted JS string token."""
-    return re.sub(r"\\(u[0-9a-fA-F]{4}|.)", lambda m: chr(int(m.group(1)[1:], 16)) if len(m.group(1)) == 5
-                  else {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), token[1:-1], flags=re.S)
+    return re.sub(
+        r"\\(u[0-9a-fA-F]{4}|.)",
+        lambda m: (
+            chr(int(m.group(1)[1:], 16)) if len(m.group(1)) == 5 else {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1))
+        ),
+        token[1:-1],
+        flags=re.S,
+    )
 
 
 def _options(body):
@@ -54,8 +63,11 @@ def parse_locator(text):
     m = _CALL_RE.fullmatch(t)
     if m:
         kind, arg, opts = m.group(1), _js_str(m.group(2)), _options(m.group(3))
-        if opts is None or opts.get("exact", "false") not in ("true", "false") or (
-                "name" in opts and opts["name"] in ("true", "false")):
+        if (
+            opts is None
+            or opts.get("exact", "false") not in ("true", "false")
+            or ("name" in opts and opts["name"] in ("true", "false"))
+        ):
             return None
         exact = opts.get("exact") == "true"
         if kind == "getByTestId":
@@ -116,8 +128,10 @@ def check_js(spec, frame=False):
     body = CHECK_BODY.replace("__SPEC__", json.dumps(spec))
     if frame:
         return f"async el => {{ const d = el.ownerDocument; {body} return JSON.stringify(r); }}"
-    return (f"(async () => {{ const d = document; {body} return JSON.stringify({{...r, frames: "
-            f"d.querySelectorAll('iframe').length, ...{ops.PAGE_STATE_JS}}}); }})()")
+    return (
+        f"(async () => {{ const d = document; {body} return JSON.stringify({{...r, frames: "
+        f"d.querySelectorAll('iframe').length, ...{ops.PAGE_STATE_JS}}}); }})()"
+    )
 
 
 # The harvester of references/playwright-cli-tips.md ("Map the page's states and links"), verbatim: tests/test_docs.py
@@ -144,6 +158,7 @@ class _Marker:
         if str(HOOKS) not in sys.path:
             sys.path.insert(0, str(HOOKS))
         import guard  # its locked counter: --budget and --minutes mean what they mean for every other browser command
+
         self.guard = guard
         self.path, m = guard.read_marker(str(project))
         if self.path and Path(self.path).resolve() != (Path(project) / "qa-out" / ".active").resolve():
@@ -158,8 +173,14 @@ class _Marker:
 def _pw(args, timeout):
     """(ok, output) of one `playwright-cli -s=qa` command: its stdout, or the error text."""
     try:
-        r = subprocess.run(["playwright-cli", "-s=qa", *args], env=ops._pw_env(), capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+        r = subprocess.run(
+            ["playwright-cli", "-s=qa", *args],
+            env=ops._pw_env(),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+        )
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
     if r.returncode or (r.stdout or "").lstrip().startswith("### Error"):
@@ -178,9 +199,17 @@ class _Run:
 
     def __init__(self, run, slug, target, cfg):
         self.file, self.notes = run / ".data" / f"run-{slug}.json", []
-        self.doc = {"run_id": f"map-{slug}-{datetime.now(timezone.utc):%Y%m%d-%H%M}", "mode": "map", "target": target,
-                    "build": core.UNKNOWN, "status": "INCOMPLETE", "summary": "", "env": {"url": target,
-                    "browser": cfg.get("browser")}, "notes": "", "pages": []}
+        self.doc = {
+            "run_id": f"map-{slug}-{datetime.now(timezone.utc):%Y%m%d-%H%M}",
+            "mode": "map",
+            "target": target,
+            "build": core.UNKNOWN,
+            "status": "INCOMPLETE",
+            "summary": "",
+            "env": {"url": target, "browser": cfg.get("browser")},
+            "notes": "",
+            "pages": [],
+        }
 
     def save(self, **fields):
         self.doc.update(fields, notes=core.short("; ".join(self.notes), NOTES_CAP))
@@ -206,15 +235,20 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
         opened = started["status"] == "ok" or started["block_scope"] == "page"
         rec.doc["build"] = started.get("build") or core.UNKNOWN
         if started["status"] != "ok" and (started["block_scope"] != "page" or page_blocks):
-            status, fields = "BLOCKED", {"block_scope": started["block_scope"], "stop_reason": "blocked",
-                                         "summary": started["reason"]}
+            status, fields = (
+                "BLOCKED",
+                {"block_scope": started["block_scope"], "stop_reason": "blocked", "summary": started["reason"]},
+            )
         else:
             if started["status"] != "ok":
                 rec.notes.append(f"start page {url}: {started['reason']}")
             status, fields = walk(rec, marker)
     except _Stop as e:
-        fields = {"stop_reason": str(e), "summary": f"stopped early: the run's {'time' if str(e) == 'time_limit' else 'budget'} "
-                                                    f"is used up; {len(rec.doc['pages'])} pages saved"}
+        fields = {
+            "stop_reason": str(e),
+            "summary": f"stopped early: the run's {'time' if str(e) == 'time_limit' else 'budget'} "
+            f"is used up; {len(rec.doc['pages'])} pages saved",
+        }
     finally:
         if opened:
             for name, args in (("requests", ["requests", "--all"]), ("console", ["console", "error", "--all"])):
@@ -229,7 +263,11 @@ def _land(rec, cfg, hosts, where, state):
     """None when the page is a signed-in, allowed, loaded page; else ('blocked', fields) or ('skip', None)."""
     signed_in, status = ops._signed_in(cfg, state)
     if not signed_in:
-        return "blocked", {"block_scope": "session", "stop_reason": "blocked", "summary": "session expired, run /qa-sdet:qa-login"}
+        return "blocked", {
+            "block_scope": "session",
+            "stop_reason": "blocked",
+            "summary": "session expired, run /qa-sdet:qa-login",
+        }
     host = str(state.get("host") or "")
     if not core.url_allowed(f"https://{host}/", hosts):
         rec.notes.append(f"{where}: landed on {core.short(host, 80)}, outside allowedHosts")
@@ -244,10 +282,12 @@ def _check(marker, idx, specs, target=None):
     """((found, invalid, first answer), None) of specs[idx] in the top document or a frame, or (None, error text)."""
     found, invalid, state = set(), set(), {}
     for k in range(0, len(idx), CHUNK):
-        part = idx[k:k + CHUNK]
+        part = idx[k : k + CHUNK]
         marker.charge()
-        ok, out = _pw(["--raw", "eval", check_js([specs[i] for i in part], frame=bool(target))] + ([target] if target else []),
-                      EVAL_SECONDS)
+        ok, out = _pw(
+            ["--raw", "eval", check_js([specs[i] for i in part], frame=bool(target))] + ([target] if target else []),
+            EVAL_SECONDS,
+        )
         r = _parsed(out) if ok else None
         if r is None:
             return None, out
@@ -268,22 +308,38 @@ def crawl(con, run, routes=()):
     if not core.url_allowed(base, hosts):
         raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
     if routes:
-        bad = next((r for r in routes if not core.norm_route(r).startswith(("/", "#")) or ":" in core.norm_route(r)), None)
+        bad = next(
+            (r for r in routes if not core.norm_route(r).startswith(("/", "#")) or ":" in core.norm_route(r)), None
+        )
         if bad is not None:
-            raise core.BadInput(f"crawl: {bad!r} is not a static route (a path like /zones; a page with :id needs a record)")
+            raise core.BadInput(
+                f"crawl: {bad!r} is not a static route (a path like /zones; a page with :id needs a record)"
+            )
         routes = list(dict.fromkeys(core.norm_route(r) for r in routes))
     else:
-        routes = [x[0] for x in con.execute("SELECT DISTINCT page FROM codemap WHERE kind='route' AND area='frontend' "
-                                            "AND page!='*' ORDER BY page") if ":" not in x[0]]
+        routes = [
+            x[0]
+            for x in con.execute(
+                "SELECT DISTINCT page FROM codemap WHERE kind='route' AND area='frontend' AND page!='*' ORDER BY page"
+            )
+            if ":" not in x[0]
+        ]
     plan, skipped = [], []
     for route in routes:
-        locs = list(dict.fromkeys((x["label"], x["value"]) for x in codemap._codemap_rows(con, route)
-                                  if x["kind"] == "locator" and x["value"]))
+        locs = list(
+            dict.fromkeys(
+                (x["label"], x["value"])
+                for x in codemap._codemap_rows(con, route)
+                if x["kind"] == "locator" and x["value"]
+            )
+        )
         specs = [parse_locator(v) for _, v in locs]
         if any(specs):
             plan.append((route, locs, specs))
         else:
-            skipped.append(f"{route}: " + (f"{len(locs)} locators, none checkable here" if locs else "no locators in the code map"))
+            skipped.append(
+                f"{route}: " + (f"{len(locs)} locators, none checkable here" if locs else "no locators in the code map")
+            )
     n = dict(routes=len(plan), loaded=0, locators_checked=0, locators_confirmed=0, unchecked=0)
 
     def walk(rec, marker):
@@ -299,8 +355,10 @@ def crawl(con, run, routes=()):
                 rec.notes.append(f"{route}: failed ({core.short(' '.join(err.split()), 120)})")
                 rec.save()
                 if fails >= FAILS_IN_A_ROW:
-                    return "INCOMPLETE", {"summary": f"{FAILS_IN_A_ROW} routes in a row failed to load or answer; "
-                                                     f"{len(rec.doc['pages'])} routes saved (is the app up?)"}
+                    return "INCOMPLETE", {
+                        "summary": f"{FAILS_IN_A_ROW} routes in a row failed to load or answer; "
+                        f"{len(rec.doc['pages'])} routes saved (is the app up?)"
+                    }
                 continue
             fails = 0
             found, invalid, state = res
@@ -322,20 +380,38 @@ def crawl(con, run, routes=()):
                     break
                 found, invalid = found | res[0], invalid | res[1]
             checked, unchecked = len(todo) - len(invalid), len(specs) - len(todo) + len(invalid)
-            n.update(loaded=n["loaded"] + 1, locators_checked=n["locators_checked"] + checked,
-                     locators_confirmed=n["locators_confirmed"] + len(found), unchecked=n["unchecked"] + unchecked)
-            rec.doc["pages"].append({"route": route, "locators": [{"name": locs[i][0], "locator": locs[i][1]} for i in sorted(found)]})
+            n.update(
+                loaded=n["loaded"] + 1,
+                locators_checked=n["locators_checked"] + checked,
+                locators_confirmed=n["locators_confirmed"] + len(found),
+                unchecked=n["unchecked"] + unchecked,
+            )
+            rec.doc["pages"].append(
+                {"route": route, "locators": [{"name": locs[i][0], "locator": locs[i][1]} for i in sorted(found)]}
+            )
             said = f"{route}: {len(found)} of {checked} confirmed" + (f", {unchecked} unchecked" if unchecked else "")
             rec.notes.append(said)
             print(f"crawl {k}/{len(plan)} {said}" + ("" if unchecked else ", 0 unchecked"), file=sys.stderr)
             rec.save()
-        return "COMPLETED", {"summary": f"{n['loaded']} of {len(plan)} routes loaded; {n['locators_confirmed']} of "
-                                        f"{n['locators_checked']} locators confirmed, {n['unchecked']} unchecked"}
+        return "COMPLETED", {
+            "summary": f"{n['loaded']} of {len(plan)} routes loaded; {n['locators_confirmed']} of "
+            f"{n['locators_checked']} locators confirmed, {n['unchecked']} unchecked"
+        }
 
     rec = _session(run, "init-crawl", base, cfg, hosts, walk, page_blocks=False)
     d = rec.doc
-    print(json.dumps({"status": d["status"], "stop_reason": d.get("stop_reason"), "build": d["build"], "run_file": str(rec.file),
-                      **n, "skipped": len(skipped)}))
+    print(
+        json.dumps(
+            {
+                "status": d["status"],
+                "stop_reason": d.get("stop_reason"),
+                "build": d["build"],
+                "run_file": str(rec.file),
+                **n,
+                "skipped": len(skipped),
+            }
+        )
+    )
     return 1 if d["status"] == "BLOCKED" else 0
 
 
@@ -386,16 +462,24 @@ def discover(run, url=None, depth=2, max_pages=25):
                 if not raw.startswith("/") or raw.startswith("//"):  # a path on this host only
                     continue
                 to = urlsplit(raw).path
-                if not core.url_allowed(origin + to, hosts) or ops._auth_segment(origin + to) or SKIP_LINK_RE.search(f"{to} {label}"):
+                if (
+                    not core.url_allowed(origin + to, hosts)
+                    or ops._auth_segment(origin + to)
+                    or SKIP_LINK_RE.search(f"{to} {label}")
+                ):
                     continue
                 links.append({"to": to, "trigger": label, "kind": "link", "sample_path": to})
-                if level < depth and core.norm_route(to) not in seen:  # one sample per pattern: /x/12 and /x/34 are /x/:id
+                if (
+                    level < depth and core.norm_route(to) not in seen
+                ):  # one sample per pattern: /x/12 and /x/34 are /x/:id
                     seen.add(core.norm_route(to))
                     queue.append((to, level + 1))
             for st in h.get("states") if isinstance(h.get("states"), list) else []:
                 if isinstance(st, list) and len(st) == 2 and all(isinstance(x, str) for x in st) and st[1].strip():
-                    states.setdefault(f"{st[0]}: {st[1]}", {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1],
-                                                            "status": "unvisited"})
+                    states.setdefault(
+                        f"{st[0]}: {st[1]}",
+                        {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1], "status": "unvisited"},
+                    )
             rec.doc["pages"].append({"route": path, "states": list(states.values()), "transitions": links})
             n.update(pages=n["pages"] + 1, states=n["states"] + len(states), links=n["links"] + len(links))
             print(f"discover {n['pages']} {path}: {len(links)} links, {len(states)} states", file=sys.stderr)
@@ -404,6 +488,15 @@ def discover(run, url=None, depth=2, max_pages=25):
 
     rec = _session(run, "discover", start, cfg, hosts, walk, page_blocks=True)
     d = rec.doc
-    print(json.dumps({"status": d["status"], "stop_reason": d.get("stop_reason"), "build": d["build"],
-                      "run_file": str(rec.file), **n}))
+    print(
+        json.dumps(
+            {
+                "status": d["status"],
+                "stop_reason": d.get("stop_reason"),
+                "build": d["build"],
+                "run_file": str(rec.file),
+                **n,
+            }
+        )
+    )
     return 1 if d["status"] == "BLOCKED" else 0

@@ -1,4 +1,5 @@
 """The stored code map: apply, card block, `code`, forget."""
+
 import json
 import os
 import re
@@ -15,8 +16,9 @@ CODEMAP_PAGE_CAP = 200  # rows per page, route rows not counted; page '*' (the w
 def _route_pages_by_file(con, repo):
     """{src: {pages}} for the files that define routes (frontend route rows)."""
     out = {}
-    for src, page in con.execute("SELECT src, page FROM codemap WHERE repo=? AND kind='route' AND area='frontend' "
-                                 "AND page!='*'", (repo,)):
+    for src, page in con.execute(
+        "SELECT src, page FROM codemap WHERE repo=? AND kind='route' AND area='frontend' AND page!='*'", (repo,)
+    ):
         out.setdefault(src, set()).add(page)
     return out
 
@@ -36,16 +38,18 @@ def _set_hashes(con, area, repo, hashes):
 
 def _drop_code_only_pages(con):
     """Pages that exist only because of the code map, once their rows are gone (a route removed from the code)."""
-    con.execute("DELETE FROM pages WHERE build IS NULL AND route NOT IN (SELECT page FROM codemap) "
-                "AND route NOT IN (SELECT page FROM facts) AND route NOT IN (SELECT page FROM locators) "
-                "AND route NOT IN (SELECT page FROM coverage) AND route NOT IN (SELECT coalesce(page,'') FROM bugs)")
+    con.execute(
+        "DELETE FROM pages WHERE build IS NULL AND route NOT IN (SELECT page FROM codemap) "
+        "AND route NOT IN (SELECT page FROM facts) AND route NOT IN (SELECT page FROM locators) "
+        "AND route NOT IN (SELECT page FROM coverage) AND route NOT IN (SELECT coalesce(page,'') FROM bugs)"
+    )
 
 
 def _row_src(repo, file):
     """'src/x.tsx' from 'src/x.tsx:12', './src/x.tsx' or '<repo>/src/x.tsx:12'."""
     rel = re.sub(r":\d[\d:-]*$", "", str(file or "").strip()[:500])  # capped, no backtracking
     if os.path.isabs(rel) and rel.startswith(repo.rstrip("/") + "/"):
-        rel = rel[len(repo.rstrip("/")) + 1:]
+        rel = rel[len(repo.rstrip("/")) + 1 :]
     return rel[2:] if rel.startswith("./") else rel
 
 
@@ -66,8 +70,10 @@ def load_scan(cm, f):
     if not isinstance(scan, dict) or (scan.get("repos") is not None and not isinstance(scan.get("repos"), list)):
         raise ValueError(f"{scan_path.name} is not a scan file; run qa-mem codemap-scan again")
     if cm.get("scan_id") != scan.get("scan_id"):
-        raise ValueError(f"scan_id {cm.get('scan_id')!r} doesn't match {scan_path.name} ({scan.get('scan_id')!r}): "
-                         "the map is from an older scan; map the current scan file")
+        raise ValueError(
+            f"scan_id {cm.get('scan_id')!r} doesn't match {scan_path.name} ({scan.get('scan_id')!r}): "
+            "the map is from an older scan; map the current scan file"
+        )
     if scan.get("area") != area:
         raise ValueError(f"area {area!r} doesn't match {scan_path.name} ({scan.get('area')!r})")
     return scan
@@ -94,15 +100,29 @@ def apply_codemap(con, cm, scan, ts=None):
     kept, dropped = [], {}
     for x in rows:
         raw_repo = str(x.get("repo") or "").rstrip("/")
-        repo = os.path.realpath(os.path.expanduser(raw_repo)) if raw_repo else (with_files[0] if len(with_files) == 1 else "")
+        repo = (
+            os.path.realpath(os.path.expanduser(raw_repo))
+            if raw_repo
+            else (with_files[0] if len(with_files) == 1 else "")
+        )
         kind, label = str(x.get("kind") or "").lower(), core.cap(x.get("label"))[:120]
         src = _row_src(repo, x.get("file")) if repo else ""
         page_raw = str(x.get("page") or "*").strip()
-        why = ("unknown repo" if repo not in repos else "unknown kind" if kind not in CODEMAP_KINDS
-               else "no label" if not label else "file not in the scan" if src not in read[repo]
-               else "route outside frontend" if kind == "route" and (area != "frontend" or page_raw in ("*", ""))
-               else "page * outside backend (no card shows it)" if area != "backend" and page_raw in ("*", "")
-               else None)
+        why = (
+            "unknown repo"
+            if repo not in repos
+            else "unknown kind"
+            if kind not in CODEMAP_KINDS
+            else "no label"
+            if not label
+            else "file not in the scan"
+            if src not in read[repo]
+            else "route outside frontend"
+            if kind == "route" and (area != "frontend" or page_raw in ("*", ""))
+            else "page * outside backend (no card shows it)"
+            if area != "backend" and page_raw in ("*", "")
+            else None
+        )
         if why:
             dropped[why] = dropped.get(why, 0) + 1
         else:
@@ -110,9 +130,11 @@ def apply_codemap(con, cm, scan, ts=None):
     path_drops = dropped.get("unknown repo", 0) + dropped.get("file not in the scan", 0)
     if path_drops:  # rows that can't be placed would be lost for good (their files count as read): have them fixed
         bad = sorted({str(x.get("file")) for x in rows if not any(x is k[0] for k in kept)})[:5]
-        raise ValueError(f"{path_drops} of {len(rows)} rows have a repo or file that isn't in the scan file "
-                         f"(e.g. {bad}); every row's repo and file must be one listed there, relative to repos[].path. "
-                         "Only the mapper whose out= is this file fixes it; others ignore this")
+        raise ValueError(
+            f"{path_drops} of {len(rows)} rows have a repo or file that isn't in the scan file "
+            f"(e.g. {bad}); every row's repo and file must be one listed there, relative to repos[].path. "
+            "Only the mapper whose out= is this file fixes it; others ignore this"
+        )
     with con:
         for path, r in repos.items():
             if r.get("full"):
@@ -129,28 +151,39 @@ def apply_codemap(con, cm, scan, ts=None):
             ident = re.split(r"[\s./:\[\]]+", label.strip())[-1] if label.strip() else ""
             # only a bare token is a secret (12+ letters and digits): 'min 8, max 64', 'string|min:8', 'digits:6',
             # 'z.string().min(8)' and 'POST /api/auth/reset-password' are rules and endpoints, the map itself
-            named = scrub.SECRET_NAME_RE.match(ident) or re.search(rf"(?i)\b(?:{scrub.SECRET_KEYS})\b", label)  # 'Mapbox API key'
-            if kind == "rule" and named and re.fullmatch(r"(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9._~+-]{12,}", value.strip()) \
-                    and not re.match(r"(?i)(min|max|len|required|pattern)", value.strip()):
+            named = scrub.SECRET_NAME_RE.match(ident) or re.search(
+                rf"(?i)\b(?:{scrub.SECRET_KEYS})\b", label
+            )  # 'Mapbox API key'
+            if (
+                kind == "rule"
+                and named
+                and re.fullmatch(r"(?=.*\d)(?=.*[A-Za-z])[A-Za-z0-9._~+-]{12,}", value.strip())
+                and not re.match(r"(?i)(min|max|len|required|pattern)", value.strip())
+            ):
                 value = "[REDACTED]"
             n, base_label = 2, label  # two rows of one file under one label: both kept
             while (page, kind, label, repo, src) in placed:
                 label, n = f"{base_label[:114]} ({n})", n + 1
             placed.add((page, kind, label, repo, src))
-            con.execute("INSERT OR REPLACE INTO codemap(page,kind,label,value,file,repo,area,src,ts) "
-                        "VALUES(?,?,?,?,?,?,?,?,?)",
-                        (page, kind, label, value, core.cap(x.get("file")), repo, area, src, ts))
+            con.execute(
+                "INSERT OR REPLACE INTO codemap(page,kind,label,value,file,repo,area,src,ts) VALUES(?,?,?,?,?,?,?,?,?)",
+                (page, kind, label, value, core.cap(x.get("file")), repo, area, src, ts),
+            )
             if page != "*":  # cards and page-name lookups resolve it, whichever kind of row named the page
                 pages.add(page)
                 # a page only the code knows (no build) takes its current route label: a renamed menu title moves
-                con.execute("INSERT INTO pages(route, name) VALUES(?,?) ON CONFLICT(route) DO UPDATE SET name=CASE WHEN "
-                            "pages.build IS NULL THEN coalesce(excluded.name, name) ELSE coalesce(name, excluded.name) END",
-                            (page, label if kind == "route" else None))
+                con.execute(
+                    "INSERT INTO pages(route, name) VALUES(?,?) ON CONFLICT(route) DO UPDATE SET name=CASE WHEN "
+                    "pages.build IS NULL THEN coalesce(excluded.name, name) ELSE coalesce(name, excluded.name) END",
+                    (page, label if kind == "route" else None),
+                )
         for page in pages:  # page '*' holds the whole backend: never capped; route rows are never evicted
             # nor counted: a route added to a full page (a shell menu path) must not push out another file's locator
-            con.execute("DELETE FROM codemap WHERE page=? AND kind!='route' AND rowid NOT IN (SELECT rowid FROM codemap "
-                        "WHERE page=? AND kind!='route' ORDER BY ts DESC, kind='api' DESC, rowid LIMIT ?)",
-                        (page, page, CODEMAP_PAGE_CAP))
+            con.execute(
+                "DELETE FROM codemap WHERE page=? AND kind!='route' AND rowid NOT IN (SELECT rowid FROM codemap "
+                "WHERE page=? AND kind!='route' ORDER BY ts DESC, kind='api' DESC, rowid LIMIT ?)",
+                (page, page, CODEMAP_PAGE_CAP),
+            )
         for path, r in repos.items():
             files, gone = set(r.get("files") or []), set(r.get("deleted") or [])
             hashes = {} if r.get("full") else {k: v for k, v in _hashes(con, area, path).items() if k not in gone}
@@ -173,8 +206,14 @@ def _codemap_behind(con, rows):
             continue
         if (repo, commit) not in counted:
             # a card is read on every page: a slow or hung git (network share) costs 2 s once, then counts are left out
-            counted[repo, commit] = "" if core.GIT_SLOW else (core._git(repo, "rev-list", "--count", "--end-of-options",
-                                                              f"{commit}..HEAD", "--", ".", timeout=2) or "").strip()
+            counted[repo, commit] = (
+                ""
+                if core.GIT_SLOW
+                else (
+                    core._git(repo, "rev-list", "--count", "--end-of-options", f"{commit}..HEAD", "--", ".", timeout=2)
+                    or ""
+                ).strip()
+            )
         behind = counted[repo, commit]
         n = int(behind) if behind.isdigit() else 0
         if repo not in notes or n > notes[repo][0]:  # areas of one repo: the furthest behind
@@ -207,15 +246,23 @@ def _api_ref(text):
     t = re.sub(r"(:\w+)\([^)]*\)", r"\1", t)  # :id(\d+)
     t = re.sub(r"(['\"`])\s*\+\s*[^'\"`+]+?\s*\+\s*['\"`]", ":id", t)  # '/a/' + id + '/b' -> '/a/:id/b'
     t = re.sub(r"(['\"`])\s*\+\s*[\w.()]+", r":id\1", t) if re.search(r"/['\"`]\s*\+", t) else t  # '/api/zones/' + id
-    m = re.search(r"(?:^|[\s'\"`(])/?((?:[\w.{}$:\[\]<>-]+/)+[\w.{}$:\[\]<>-]+)", t) or \
-        re.search(rf"(?:^(?:{HTTP_METHODS})\s+/|['\"`]/)([\w.-]+)", t, re.I) or \
-        re.search(rf"\.(?:{HTTP_METHODS})\s*(?:<[^()]*?>)?\s*\(\s*['\"`]/?([\w.-]+)['\"`]", t, re.I)  # api.get('zones')
+    m = (
+        re.search(r"(?:^|[\s'\"`(])/?((?:[\w.{}$:\[\]<>-]+/)+[\w.{}$:\[\]<>-]+)", t)
+        or re.search(rf"(?:^(?:{HTTP_METHODS})\s+/|['\"`]/)([\w.-]+)", t, re.I)
+        or re.search(rf"\.(?:{HTTP_METHODS})\s*(?:<[^()]*?>)?\s*\(\s*['\"`]/?([\w.-]+)['\"`]", t, re.I)
+    )  # api.get('zones')
     if not m:
         return method, ""
     path = re.sub(r"\.(json|xml)$", "", m.group(1).split("?")[0].strip("/"))
-    segs = [seg if seg.lower() in ("[controller]", "[action]") else
-            ":id" if re.fullmatch(r"\{\w+\}|:\w+|\d+|\[\.{0,3}\w+\]|<[^>]+>", seg) else seg
-            for seg in path.replace(":id:id", ":id").split("/") if seg]
+    segs = [
+        seg
+        if seg.lower() in ("[controller]", "[action]")
+        else ":id"
+        if re.fullmatch(r"\{\w+\}|:\w+|\d+|\[\.{0,3}\w+\]|<[^>]+>", seg)
+        else seg
+        for seg in path.replace(":id:id", ":id").split("/")
+        if seg
+    ]
     return method, "/".join(segs).lower()
 
 
@@ -232,8 +279,12 @@ def _same_endpoint(a, b):
     if a == b:
         return True
     s, l = sorted((a.split("/"), b.split("/")), key=len)
-    return len(s) < len(l) and s[0] != ":id" and l[len(l) - len(s):] == s \
-        and all(API_BASE_SEG_RE.fullmatch(x) for x in l[:len(l) - len(s)])
+    return (
+        len(s) < len(l)
+        and s[0] != ":id"
+        and l[len(l) - len(s) :] == s
+        and all(API_BASE_SEG_RE.fullmatch(x) for x in l[: len(l) - len(s)])
+    )
 
 
 def _called(rows):
@@ -261,7 +312,9 @@ def module_bindings(con):
     """{shell route: (module id, module page)} from the app shell menu's route rows (`module m1 at /m/daily`): the shell
     path users open and the page its module is mounted at. One hop: a module that is itself a shell route is not chained."""
     out = {}
-    for x in con.execute("SELECT page, value FROM codemap WHERE kind='route' AND value LIKE 'module %at %' ORDER BY page"):
+    for x in con.execute(
+        "SELECT page, value FROM codemap WHERE kind='route' AND value LIKE 'module %at %' ORDER BY page"
+    ):
         m = MODULE_RE.fullmatch(x["value"])
         target = core.norm_route(m.group(2)) if m else ""
         if target and target != x["page"]:
@@ -283,12 +336,16 @@ def _codemap_rows(con, route):
     """This page's rows (a shell route's include its module page's) plus the backend rows ('*') for the endpoints its
     frontend calls (same path; same method when both sides name one)."""
     module = module_target(con, route) if route != "*" else None
-    rows = con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page IN (?,?) ORDER BY kind, label",
-                       (route, module or route)).fetchall()
+    rows = con.execute(
+        "SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page IN (?,?) ORDER BY kind, label",
+        (route, module or route),
+    ).fetchall()
     called = _called(rows)
     if called and route != "*":
-        for x in con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
-                             "ORDER BY kind, label"):
+        for x in con.execute(
+            "SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
+            "ORDER BY kind, label"
+        ):
             ref = _api_ref(x["label"])
             ref = ref if ref[1] else _api_ref(x["value"])
             if ref[1] and any(_same_call(ref, c) for c in called):
@@ -320,8 +377,12 @@ def _calls_by_page(con):
 
 
 def _group_calls(con, group):
-    return _called(con.execute(f"SELECT kind,label,value FROM codemap WHERE kind='api' AND page IN ({','.join('?' * len(group))})",
-                               sorted(group)))
+    return _called(
+        con.execute(
+            f"SELECT kind,label,value FROM codemap WHERE kind='api' AND page IN ({','.join('?' * len(group))})",
+            sorted(group),
+        )
+    )
 
 
 def sharing_pages(con, route):
@@ -395,8 +456,10 @@ def resource_links(con, calls, group=()):
     out = {"producers": {}, "consumers": {}, "siblings": {}}
     by_page = {p: refs for p, refs in _calls_by_page(con).items() if p not in group}
     for root, methods in roots.items():
-        called = {p: [(m, path) for m, path in refs if (r := resource_root(path)) and _same_endpoint(r, root)]
-                  for p, refs in by_page.items()}
+        called = {
+            p: [(m, path) for m, path in refs if (r := resource_root(path)) and _same_endpoint(r, root)]
+            for p, refs in by_page.items()
+        }
         called = {p: refs for p, refs in called.items() if refs}
         if len(called) + bool(group) > RESOURCE_FANOUT:
             continue
@@ -434,9 +497,20 @@ def component_neighbors(con, route):
     group = page_group(con, route, bound)
     where = "area='frontend' AND kind IN ('locator','rule') AND src!='' AND page!='*'"
     found = {}
-    for repo, src in con.execute(f"SELECT DISTINCT repo, src FROM codemap WHERE {where} AND page IN "
-                                 f"({','.join('?' * len(group))})", sorted(group)).fetchall() if route != "*" else []:
-        pages = {p for (p,) in con.execute(f"SELECT DISTINCT page FROM codemap WHERE {where} AND repo=? AND src=?", (repo, src))}
+    for repo, src in (
+        con.execute(
+            f"SELECT DISTINCT repo, src FROM codemap WHERE {where} AND page IN ({','.join('?' * len(group))})",
+            sorted(group),
+        ).fetchall()
+        if route != "*"
+        else []
+    ):
+        pages = {
+            p
+            for (p,) in con.execute(
+                f"SELECT DISTINCT page FROM codemap WHERE {where} AND repo=? AND src=?", (repo, src)
+            )
+        }
         if 2 <= len(pages) <= COMPONENT_FANOUT:
             for page in _shown(pages - group, bound):
                 found.setdefault(page, src)
@@ -461,12 +535,16 @@ def codemap_block(con, route, shown, first=()):
     limits, out = {"locator": 15, "rule": 6, "api": 4}, []
     out.append(f"FROM CODE (hints from source, not requirements; unverified; {_codemap_behind(con, all_rows)}):")
     if by["locator"]:
-        out.append("- locators to try: " + "; ".join(f"{core.short(x['label'], 40)}={x['value']}"
-                                                  for x in by["locator"][:limits["locator"]]))
+        out.append(
+            "- locators to try: "
+            + "; ".join(f"{core.short(x['label'], 40)}={x['value']}" for x in by["locator"][: limits["locator"]])
+        )
     for k, title in (("rule", "rules in code"), ("api", "endpoints called")):
         if by[k]:
-            out.append(f"- {title}: " + "; ".join(f"{core.short(x['label'], 50)}: {core.short(x['value'], 80)}"
-                                                 for x in by[k][:limits[k]]))
+            out.append(
+                f"- {title}: "
+                + "; ".join(f"{core.short(x['label'], 50)}: {core.short(x['value'], 80)}" for x in by[k][: limits[k]])
+            )
     more = sum(max(0, len(by[k]) - limits[k]) for k in limits)
     if more:
         out.append(f"- (+{more} more: qa-mem code '{route}')")
@@ -495,7 +573,9 @@ def codemap_forget(con, repo):
         for key in known:
             n += con.execute("DELETE FROM codemap WHERE repo=?", (key,)).rowcount
             for a in CODEMAP_AREAS:
-                con.execute("DELETE FROM meta WHERE key IN (?,?)", (f"codemap_commit:{a}:{key}", f"codemap_hashes:{a}:{key}"))
+                con.execute(
+                    "DELETE FROM meta WHERE key IN (?,?)", (f"codemap_commit:{a}:{key}", f"codemap_hashes:{a}:{key}")
+                )
         _drop_code_only_pages(con)
     return n
 
@@ -506,18 +586,25 @@ def code(con, q=""):
     if q.strip() == "--repos" and codemap_repos(con):  # also folders with bookkeeping only (a map that never landed)
         return "MAPPED SOURCE FOLDERS:\n" + "\n".join(
             f"{repo}  {n} rows" + ("" if exists else "  (folder no longer exists: qa-mem codemap-forget '<it>')")
-            for repo, n, exists in codemap_repos(con))
+            for repo, n, exists in codemap_repos(con)
+        )
     if not con.execute("SELECT 1 FROM codemap LIMIT 1").fetchone():
         return "no code map yet: run /qa-sdet:qa-init to map routes, locators, rules and endpoints from the source"
     if not q.strip():
-        rows = con.execute("SELECT page,label,file FROM codemap WHERE kind='route' AND area='frontend' AND page!='*' "
-                           "ORDER BY page").fetchall()
+        rows = con.execute(
+            "SELECT page,label,file FROM codemap WHERE kind='route' AND area='frontend' AND page!='*' ORDER BY page"
+        ).fetchall()
         n = {k: c for k, c in con.execute("SELECT kind, count(*) FROM codemap GROUP BY kind")}
         n_star = con.execute("SELECT count(*) FROM codemap WHERE page='*' AND kind='api'").fetchone()[0]
-        return ("ROUTES FROM CODE:\n" + ("\n".join(f"{x['page']}  {x['label']}  ({x['file']})" for x in rows)
-                                         or "(none: no frontend routes mapped yet)")
-                + f"\nTOTAL: {len(rows)} routes, {n.get('locator', 0)} locators, {n.get('rule', 0)} rules, "
-                  f"{n.get('api', 0)} endpoints ({n_star} backend: qa-mem code '*')")
+        return (
+            "ROUTES FROM CODE:\n"
+            + (
+                "\n".join(f"{x['page']}  {x['label']}  ({x['file']})" for x in rows)
+                or "(none: no frontend routes mapped yet)"
+            )
+            + f"\nTOTAL: {len(rows)} routes, {n.get('locator', 0)} locators, {n.get('rule', 0)} rules, "
+            f"{n.get('api', 0)} endpoints ({n_star} backend: qa-mem code '*')"
+        )
     if q.strip() == "*":
         route = "*"
     else:
@@ -527,7 +614,8 @@ def code(con, q=""):
     if not rows:
         return f"no code-map rows for '{q}'"
     return f"CODE MAP {route} ({_codemap_behind(con, rows)}; hints from source, not requirements):\n" + "\n".join(
-        f"[{x['kind']}] {x['label']} = {x['value']}  ({x['file']})" for x in rows)
+        f"[{x['kind']}] {x['label']} = {x['value']}  ({x['file']})" for x in rows
+    )
 
 
 def find_page(con, q):
@@ -541,9 +629,11 @@ def find_page(con, q):
     like, seg = f"%{esc}%", f"%/{esc}%"
     # Best first: the route itself (/zones, /zones.html), the exact page name, a route segment starting with
     # the word (/map.html before /roadmap), then the shortest route.
-    return con.execute("SELECT * FROM pages WHERE route LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR route IN "
-                       "(SELECT page FROM codemap WHERE kind='route' AND label LIKE ? ESCAPE '\\') "
-                       "ORDER BY (route = ? OR route LIKE ? ESCAPE '\\') DESC, lower(coalesce(name, '')) = lower(?) DESC, "
-                       "route IN (SELECT page FROM codemap WHERE kind='route' AND lower(label)=lower(?)) DESC, "
-                       "route LIKE ? ESCAPE '\\' DESC, length(route) LIMIT 1",
-                       (like, like, like, "/" + q, f"/{esc}.%", q, q, seg)).fetchone()
+    return con.execute(
+        "SELECT * FROM pages WHERE route LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR route IN "
+        "(SELECT page FROM codemap WHERE kind='route' AND label LIKE ? ESCAPE '\\') "
+        "ORDER BY (route = ? OR route LIKE ? ESCAPE '\\') DESC, lower(coalesce(name, '')) = lower(?) DESC, "
+        "route IN (SELECT page FROM codemap WHERE kind='route' AND lower(label)=lower(?)) DESC, "
+        "route LIKE ? ESCAPE '\\' DESC, length(route) LIMIT 1",
+        (like, like, like, "/" + q, f"/{esc}.%", q, q, seg),
+    ).fetchone()

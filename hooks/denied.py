@@ -2,6 +2,7 @@
 guard's own denials (<project>/qa-out/plugin-log.jsonl, layer claude-code) when it concerns qa-sdet: its tools, its
 agents, or a project that already has a qa-out folder, and the browser commands the guard counted for it are given back
 to the run's budget (the call never ran). The denial stands."""
+
 import json
 import os
 import sys
@@ -19,9 +20,11 @@ if isinstance(data, dict):
     except OSError:
         cwd = ""
     project = guard.clean(os.environ.get("CLAUDE_PROJECT_DIR") or "") or cwd
-    if (guard.agent_role(data).startswith("qa-")
-            or guard.mentions_guarded(json.dumps(data.get("tool_input") or {}, ensure_ascii=False, default=str), True)
-            or (project and os.path.isdir(os.path.join(project, "qa-out")))):
+    if (
+        guard.agent_role(data).startswith("qa-")
+        or guard.mentions_guarded(json.dumps(data.get("tool_input") or {}, ensure_ascii=False, default=str), True)
+        or (project and os.path.isdir(os.path.join(project, "qa-out")))
+    ):
         guard.log_denial(data, data.get("reason") or "denied by Claude Code", layer="claude-code")
     marker_path, _ = guard.read_marker(cwd)
     if marker_path and data.get("tool_name") == "Bash":

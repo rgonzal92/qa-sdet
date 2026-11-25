@@ -1,4 +1,5 @@
 """The Stop and SubagentStop hooks (`qa-mem ingest-pending`) and the hooks.json wiring."""
+
 import json, os, re, subprocess, sys, unittest
 from pathlib import Path
 
@@ -16,7 +17,9 @@ class Hooks(Base):
         self.assertIn(f"{plugin}:{agent}", hooks["SubagentStop"][0]["matcher"].split("|"))
         # every tool: MCP names vary in case and server name, and the explorer's tool allowlist is enforced here
         self.assertEqual(hooks["PreToolUse"][0]["matcher"], "*")
-        self.assertIn("/hooks/pretooluse.py", hooks["PreToolUse"][0]["hooks"][0]["command"])  # guard.py, bytecode cached
+        self.assertIn(
+            "/hooks/pretooluse.py", hooks["PreToolUse"][0]["hooks"][0]["command"]
+        )  # guard.py, bytecode cached
         for event in ("SubagentStop", "Stop"):
             self.assertIn('"$CLAUDE_PROJECT_DIR/qa-out"', hooks[event][0]["hooks"][0]["command"])
 
@@ -31,9 +34,16 @@ class Hooks(Base):
         stub.mkdir()
         (stub / "python3").write_text(f'#!/bin/sh\ntouch "{base}/python-started"\nexec "{sys.executable}" "$@"\n')
         (stub / "python3").chmod(0o755)
-        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT), "CLAUDE_PROJECT_DIR": str(proj), "QA_MEM_DB": str(base / "db/x.db"),
-               "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}"}
-        sh = lambda cwd: subprocess.run(["bash", "-c", cmd], cwd=cwd, env=env, input="{}", capture_output=True, text=True)
+        env = {
+            **os.environ,
+            "CLAUDE_PLUGIN_ROOT": str(ROOT),
+            "CLAUDE_PROJECT_DIR": str(proj),
+            "QA_MEM_DB": str(base / "db/x.db"),
+            "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+        sh = lambda cwd: subprocess.run(
+            ["bash", "-c", cmd], cwd=cwd, env=env, input="{}", capture_output=True, text=True
+        )
         self.assertEqual(sh(other).returncode, 0)
         self.assertFalse((base / "db").exists())
         self.assertFalse((base / "python-started").exists())
@@ -57,20 +67,31 @@ class Hooks(Base):
         out.mkdir(parents=True)
         runfile(out).write_text(json.dumps({"run_id": "r", "build": "1", "pages": [{"route": "/x", "facts": "oops"}]}))
         env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
-        r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
-                           input='{"stop_hook_active": false}', capture_output=True, text=True, env=env)
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
+            input='{"stop_hook_active": false}',
+            capture_output=True,
+            text=True,
+            env=env,
+        )
         self.assertEqual(r.returncode, 2)
         self.assertIn("could not save this", r.stderr)
         self.assertIn(str(ROOT / "references" / "run-json.md"), r.stderr)  # absolute, the project has no references/
         self.assertIn("did not write", r.stderr)  # a sibling explorer's parked file is not this agent's to fix
         runfile(out).write_text(json.dumps({"run_id": "r2", "build": "1", "pages": [{"route": "/x", "facts": 5}]}))
-        r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
-                           input='{"stop_hook_active": true}', capture_output=True, text=True, env=env)
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(out.parent)],
+            input='{"stop_hook_active": true}',
+            capture_output=True,
+            text=True,
+            env=env,
+        )
         self.assertEqual(r.returncode, 0)  # already blocked once this turn: no loop
 
     def test_hook_entrypoint_never_fails(self):
-        r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", "/nonexistent"],
-                           capture_output=True)
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", "/nonexistent"], capture_output=True
+        )
         self.assertEqual(r.returncode, 0)
 
     def test_stop_hook_ignores_unset_project_dir(self):
@@ -87,8 +108,14 @@ class Hooks(Base):
 
     def post(self, data, env=None):
         """Run the PostToolUse hook as Claude Code does: JSON on stdin, from the project folder."""
-        r = subprocess.run([sys.executable, str(ROOT / "hooks/posttooluse.py")], input=json.dumps(data), capture_output=True,
-                           text=True, cwd=self.proj, env={**os.environ, **(env or {})})
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "hooks/posttooluse.py")],
+            input=json.dumps(data),
+            capture_output=True,
+            text=True,
+            cwd=self.proj,
+            env={**os.environ, **(env or {})},
+        )
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         if not r.stdout.strip():
             return ""
@@ -101,17 +128,23 @@ class Hooks(Base):
         entry = hooks["PostToolUse"][0]
         self.assertEqual(entry["matcher"], "Bash|Write")
         self.assertIn("/hooks/posttooluse.py", entry["hooks"][0]["command"])
-        self.assertIn('[ -d qa-out ]', entry["hooks"][0]["command"])  # no Python start in unrelated projects
+        self.assertIn("[ -d qa-out ]", entry["hooks"][0]["command"])  # no Python start in unrelated projects
         failed = hooks["PostToolUseFailure"][0]  # a failed Bash call spends budget too, and fires only this event
         self.assertEqual((failed["matcher"], failed["hooks"][0]["command"]), ("Bash", entry["hooks"][0]["command"]))
 
     def test_explorer_is_warned_once_before_the_budget_runs_out(self):
         """Step 9 deletes test data through the UI, which the guard refuses once the budget is used up: warn first."""
         import time
+
         (self.proj / "qa-out").mkdir(exist_ok=True)
         marker = self.proj / "qa-out/.active"
-        call = {"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
-                "tool_input": {"command": "playwright-cli -s=qa click e1"}, "tool_response": {}}
+        call = {
+            "tool_name": "Bash",
+            "agent_type": "qa-sdet:qa-explorer",
+            "cwd": str(self.proj),
+            "tool_input": {"command": "playwright-cli -s=qa click e1"},
+            "tool_response": {},
+        }
         marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 10}))
         self.assertEqual(self.post(call), "")
         marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 17}))
@@ -120,9 +153,16 @@ class Hooks(Base):
         self.assertIn("3 browser commands left", note)
         self.assertIn("qa-sdet-", note)
         self.assertEqual(self.post(call), "")  # once per run
-        marker.write_text(json.dumps({"expires": time.time() + 3601, "budget": 20, "used": 20}))  # a new run, a failed call
-        self.assertIn("0 browser commands left", self.post({**call, "hook_event_name": "PostToolUseFailure", "error": "Exit code 1"}))
-        marker.write_text(json.dumps({"expires": time.time() + 7200, "deadline": time.time() + 90}))  # a new run, by time
+        marker.write_text(
+            json.dumps({"expires": time.time() + 3601, "budget": 20, "used": 20})
+        )  # a new run, a failed call
+        self.assertIn(
+            "0 browser commands left",
+            self.post({**call, "hook_event_name": "PostToolUseFailure", "error": "Exit code 1"}),
+        )
+        marker.write_text(
+            json.dumps({"expires": time.time() + 7200, "deadline": time.time() + 90})
+        )  # a new run, by time
         self.assertIn("left", self.post(call))
         marker.unlink()
         self.assertEqual(self.post(call), "")
@@ -130,14 +170,20 @@ class Hooks(Base):
     def default_run(self, **m):
         """A run marker with no budget and no deadline (a default `qa-explore`), as the hook reads it."""
         import time
+
         (self.proj / "qa-out").mkdir(exist_ok=True)
         marker = self.proj / "qa-out/.active"
         marker.write_text(json.dumps({"expires": time.time() + 3600, **m}))
         return marker
 
     def pw(self, cmd="playwright-cli -s=qa snapshot", agent="qa-sdet:qa-explorer", failed=False, tool="Bash"):
-        data = {"tool_name": tool, "agent_type": agent, "cwd": str(self.proj), "tool_input": {"command": cmd},
-                "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse"}
+        data = {
+            "tool_name": tool,
+            "agent_type": agent,
+            "cwd": str(self.proj),
+            "tool_input": {"command": cmd},
+            "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
+        }
         return self.post(data | ({"error": "Exit code 1"} if failed else {}))
 
     def test_a_default_run_is_warned_once_before_the_turn_limit(self):
@@ -157,11 +203,15 @@ class Hooks(Base):
             self.pw(f"playwright-cli -s=qa click e{n}", failed=True)  # a failed Bash call fires only PostToolUseFailure
         for n in range(6):
             self.pw(tool="Write", cmd="")  # an explorer's Write is a turn as well
-        self.assertIn("12 of the 20 turns", self.pw("qa-mem signals-triage qa-out/r --slug x"))  # any Bash call, the 12th
+        self.assertIn(
+            "12 of the 20 turns", self.pw("qa-mem signals-triage qa-out/r --slug x")
+        )  # any Bash call, the 12th
 
     def test_the_turn_limit_defaults_to_the_agents_frontmatter(self):
         self.default_run()  # no max_turns in the marker
-        limit = lambda agent: int(re.search(r"^maxTurns:\s*(\d+)", (ROOT / f"agents/{agent}.md").read_text(), re.M).group(1))
+        limit = lambda agent: int(
+            re.search(r"^maxTurns:\s*(\d+)", (ROOT / f"agents/{agent}.md").read_text(), re.M).group(1)
+        )
         for agent, role in (("qa-explorer", "qa-sdet:qa-explorer"),):
             (self.proj / "qa-out/.active.progress").unlink(missing_ok=True)
             (self.proj / "qa-out/.active.warned").unlink(missing_ok=True)
@@ -183,10 +233,13 @@ class Hooks(Base):
 
     def test_a_new_run_counts_its_turns_from_zero(self):
         import time
+
         marker = self.default_run(max_turns=20)
         for n in range(1, 12):
             self.pw(f"playwright-cli -s=qa click e{n}")
-        marker.write_text(json.dumps({"expires": time.time() + 7200, "max_turns": 20}))  # the next explorer; stale progress stays
+        marker.write_text(
+            json.dumps({"expires": time.time() + 7200, "max_turns": 20})
+        )  # the next explorer; stale progress stays
         self.assertEqual(self.pw("playwright-cli -s=qa click e50"), "")
 
     def test_a_planted_or_malformed_progress_file_is_never_followed_and_never_fails(self):
@@ -215,8 +268,15 @@ class Hooks(Base):
     def test_a_mapper_hears_about_its_own_code_map_when_it_writes_it(self):
         env = {"QA_MEM_DB": str(Path(self.tmp.name) / "hook.db")}
         sibling, mine = self.bad_map(1), self.bad_map(2)
-        note = self.post({"tool_name": "Write", "agent_type": "qa-sdet:qa-mapper", "cwd": str(self.proj),
-                          "tool_input": {"file_path": str(mine), "content": "x"}}, env)
+        note = self.post(
+            {
+                "tool_name": "Write",
+                "agent_type": "qa-sdet:qa-mapper",
+                "cwd": str(self.proj),
+                "tool_input": {"file_path": str(mine), "content": "x"},
+            },
+            env,
+        )
         self.assertIn(mine.name, note)
         self.assertNotIn(sibling.name, note)  # a sibling's file is the sibling's to fix
         self.assertTrue(mine.with_name(mine.name + ".error").exists())
@@ -225,8 +285,12 @@ class Hooks(Base):
         env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
         f1, f2 = self.bad_map(1), self.bad_map(2)
         stop = lambda event, agent="qa-sdet:qa-mapper": subprocess.run(
-            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")], capture_output=True,
-            text=True, env=env, input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": False}))
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")],
+            capture_output=True,
+            text=True,
+            env=env,
+            input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": False}),
+        )
         first = stop("SubagentStop")  # the first mapper to stop ingests both files
         self.assertEqual(first.returncode, 2)
         later = stop("SubagentStop")  # the author of the other file stops next: it still hears about it
@@ -239,41 +303,75 @@ class Hooks(Base):
         f = self.proj / "qa-out/r" / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(body)
-        return self.post({"tool_name": "Write", "agent_type": agent, "cwd": str(self.proj),
-                          "tool_input": {"file_path": str(f), "content": body}},
-                         {"QA_MEM_DB": str(Path(self.tmp.name) / "hook.db")})
+        return self.post(
+            {
+                "tool_name": "Write",
+                "agent_type": agent,
+                "cwd": str(self.proj),
+                "tool_input": {"file_path": str(f), "content": body},
+            },
+            {"QA_MEM_DB": str(Path(self.tmp.name) / "hook.db")},
+        )
 
     def test_a_broken_file_is_flagged_the_moment_it_is_written(self):
         """While the browser and the context are still there, not after the explorer stopped."""
         spec = "import { test } from '@playwright/test';\ntest.use({ baseURL: 'x', ...(process.env.STORAGE_STATE ? {} : {}) });\n"
         self.assertIn("no expect(", self.written("repro/BUG-1.spec.ts", spec))
         self.assertIn("## Steps", self.written("bugs/BUG-1.md", "# Title\n\n## Expected\nx — **Oracle:** AC-1\n"))
-        self.assertIn("facts", self.written(".data/run-form.json", json.dumps({"run_id": "r", "pages": [{"route": "/x", "facts": "oops"}]})))
+        self.assertIn(
+            "facts",
+            self.written(
+                ".data/run-form.json", json.dumps({"run_id": "r", "pages": [{"route": "/x", "facts": "oops"}]})
+            ),
+        )
         self.assertIn("not valid JSON", self.written(".data/run-form.json", "{oops"))
         self.assertIn("stop_reason", self.written(".data/run-form.json", json.dumps({**run(), "stop_reason": "bored"})))
-        plan = {"kind": "ticket", "tickets": [{"key": "P-1"}], "cases": [{"id": "TC-1", "title": "a"}, {"id": "TC-1", "title": "b"}]}
+        plan = {
+            "kind": "ticket",
+            "tickets": [{"key": "P-1"}],
+            "cases": [{"id": "TC-1", "title": "a"}, {"id": "TC-1", "title": "b"}],
+        }
         self.assertIn("repeats id TC-1", self.written(".data/plan.json", json.dumps(plan), agent=""))
         good = dict(run(facts=[{"kind": "note", "text": "ok"}]))
         self.assertEqual(self.written(".data/run-form.json", json.dumps(good)), "")
 
-    GOOD_DRAFT = ("# {title}\n\n**Classification:** CONFIRMED · **Severity:** LOW · **Env:** http://localhost:8765 · "
-                  "**Route:** {route} · **Build:** 1 · **Browser:** x\n\n## Steps\n1. Open http://localhost:8765{route}\n\n"
-                  "## Expected\nx — **Oracle:** AC-1\n\n## Actual\n{actual}\n\n## Impact\nx\n\n"
-                  "## Evidence\n- Network: `{net}` → 500\n\n## Notes\nx\n")
+    GOOD_DRAFT = (
+        "# {title}\n\n**Classification:** CONFIRMED · **Severity:** LOW · **Env:** http://localhost:8765 · "
+        "**Route:** {route} · **Build:** 1 · **Browser:** x\n\n## Steps\n1. Open http://localhost:8765{route}\n\n"
+        "## Expected\nx — **Oracle:** AC-1\n\n## Actual\n{actual}\n\n## Impact\nx\n\n"
+        "## Evidence\n- Network: `{net}` → 500\n\n## Notes\nx\n"
+    )
 
     def stored(self, status, route="/zones/new", title="Speed label typo", symptom="speed field label typo", **extra):
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "hook.db")  # the DB the hook subprocess opens
         con = memory.core.connect()
-        memory.ingest(con, {"run_id": f"r-{symptom}", "build": "1", "pages": [{"route": route}],
-                            "bugs": [{"route": route, "title": title, "symptom": symptom, "severity": "LOW", **extra}]})
+        memory.ingest(
+            con,
+            {
+                "run_id": f"r-{symptom}",
+                "build": "1",
+                "pages": [{"route": route}],
+                "bugs": [{"route": route, "title": title, "symptom": symptom, "severity": "LOW", **extra}],
+            },
+        )
         con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, memory.core.bug_hash(route, symptom)))
         con.commit()
         con.close()
         return memory.core.bug_hash(route, symptom)
 
     def draft(self, **kw):
-        return self.written("bugs/BUG-3.md", self.GOOD_DRAFT.format(**{"title": "Typo in the speed field label",
-                            "route": "/zones/new", "actual": "The speed field label says speeed", "net": "GET /api/x", **kw}))
+        return self.written(
+            "bugs/BUG-3.md",
+            self.GOOD_DRAFT.format(
+                **{
+                    "title": "Typo in the speed field label",
+                    "route": "/zones/new",
+                    "actual": "The speed field label says speeed",
+                    "net": "GET /api/x",
+                    **kw,
+                }
+            ),
+        )
 
     def test_a_draft_matching_a_not_a_bug_or_a_fixed_bug_is_flagged_as_it_is_written(self):
         invalid = self.stored("INVALID")
@@ -306,20 +404,32 @@ class Hooks(Base):
 
     def test_a_draft_with_problems_still_hears_them_and_the_match_too(self):
         invalid = self.stored("INVALID")
-        note = self.written("bugs/BUG-3.md", "# Typo in the speed field label\n\n**Route:** /zones/new\n\nspeed field label typo\n")
+        note = self.written(
+            "bugs/BUG-3.md", "# Typo in the speed field label\n\n**Route:** /zones/new\n\nspeed field label typo\n"
+        )
         self.assertIn("## Steps", note)
         self.assertIn(invalid, note)
 
     def test_a_stuck_explorer_is_told_once_to_change_approach(self):
         import time
+
         (self.proj / "qa-out").mkdir(exist_ok=True)
         (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600}))
-        call = lambda cmd, failed=True: self.post({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
-                                                   "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
-                                                   "tool_input": {"command": cmd}, "error": "Exit code 1"})
+        call = lambda cmd, failed=True: self.post(
+            {
+                "tool_name": "Bash",
+                "agent_type": "qa-sdet:qa-explorer",
+                "cwd": str(self.proj),
+                "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
+                "tool_input": {"command": cmd},
+                "error": "Exit code 1",
+            }
+        )
         click = "playwright-cli -s=qa click e5"
         self.assertEqual((call(click), call(click)), ("", ""))
-        self.assertEqual(call("playwright-cli -s=qa click e9", failed=False), "")  # real progress in between: it counts again
+        self.assertEqual(
+            call("playwright-cli -s=qa click e9", failed=False), ""
+        )  # real progress in between: it counts again
         self.assertEqual((call(click), call(click)), ("", ""))
         note = call(click)
         self.assertIn("click e5", note)
@@ -378,22 +488,30 @@ class Hooks(Base):
 
     def explorer_stop(self, run_dir, event="SubagentStop", agent="qa-sdet:qa-explorer", active=False):
         env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
-        return subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")],
-                              capture_output=True, text=True, env=env,
-                              input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": active}))
+        return subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")],
+            capture_output=True,
+            text=True,
+            env=env,
+            input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": active}),
+        )
 
     def test_an_explorer_that_stops_unfinished_gets_one_turn_to_finish(self):
         import time
         from support import PLAN
+
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
         (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
-        (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d),
-                                                              "slug": "form"}))
+        (self.proj / "qa-out/.active").write_text(
+            json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d), "slug": "form"})
+        )
         r = self.explorer_stop(d)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("run-form.json", r.stderr)
         self.assertEqual(self.explorer_stop(d, active=True).returncode, 0)  # one extra turn, never a loop
-        self.assertEqual(self.explorer_stop(d, event="Stop", agent="").returncode, 0)  # the main session isn't the explorer
+        self.assertEqual(
+            self.explorer_stop(d, event="Stop", agent="").returncode, 0
+        )  # the main session isn't the explorer
         (d / "bugs/BUG-1.md").write_text("# t\n")
         runfile_ = d / ".data/run-form.json"
         runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS"}]}))
@@ -404,30 +522,48 @@ class Hooks(Base):
         for kind in ("requests", "console"):
             (d / f".data/{kind}-form.log").write_text("")
         (d / "bugs/BUG-1.md").unlink()
-        runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"},
-                                                                           {"id": "TC-2", "status": "NOT_RUN", "notes": "time"}]}))
+        runfile_.write_text(
+            json.dumps(
+                {
+                    **run(),
+                    "run_id": "r1",
+                    "cases": [
+                        {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+                        {"id": "TC-2", "status": "NOT_RUN", "notes": "time"},
+                    ],
+                }
+            )
+        )
         r = self.explorer_stop(d)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 
     def test_a_pass_or_fail_without_what_was_seen_and_a_fail_without_a_bug_are_sent_back(self):
         import time
         from support import PLAN
+
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:3]})
         (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
         for kind in ("requests", "console"):
             (d / f".data/{kind}-form.log").write_text("")
-        (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d),
-                                                              "slug": "form"}))
-        cases = [{"id": "TC-1", "status": "PASS", "actual": " "}, {"id": "TC-2", "status": "FAIL", "actual": "Saved 131"},
-                 {"id": "TC-3", "status": "fail", "actual": "", "bug": "BUG-1"}]
+        (self.proj / "qa-out/.active").write_text(
+            json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d), "slug": "form"})
+        )
+        cases = [
+            {"id": "TC-1", "status": "PASS", "actual": " "},
+            {"id": "TC-2", "status": "FAIL", "actual": "Saved 131"},
+            {"id": "TC-3", "status": "fail", "actual": "", "bug": "BUG-1"},
+        ]
         (d / ".data/run-form.json").write_text(json.dumps({**run(), "run_id": "r1", "cases": cases}))
         r = self.explorer_stop(d)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("TC-1, TC-3 need `actual`", r.stderr)
         self.assertIn("TC-2 failed without a `bug`", r.stderr)
         self.assertNotIn("TC-2 need", r.stderr)
-        cases = [{"id": "TC-1", "status": "PASS", "actual": "Saved"}, {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
-                 {"id": "TC-3", "status": "NOT_RUN", "notes": "time"}]
+        cases = [
+            {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+            {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
+            {"id": "TC-3", "status": "NOT_RUN", "notes": "time"},
+        ]
         (d / ".data/run-form.json").write_text(json.dumps({**run(), "run_id": "r1", "cases": cases}))
         r = self.explorer_stop(d)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
@@ -439,6 +575,7 @@ class Hooks(Base):
     def test_hooks_and_marker_stop_record_nudges_tool_fails_bounces_and_run_summaries(self):
         from qa_sdet import ops
         from support import PLAN
+
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
         (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
         ops.marker_start(self.proj, budget=20, run_dir=d, slug="form", max_turns=20)
@@ -446,19 +583,43 @@ class Hooks(Base):
         for _ in range(3):
             self.pw("playwright-cli -s=qa click e5", failed=True)
         # Unrelated main-session Bash failure is NOT logged; qa-mem failure IS logged
-        self.post({"tool_name": "Bash", "agent_type": "", "cwd": str(self.proj),
-                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "git status"}, "error": "Exit 1"})
-        self.post({"tool_name": "Bash", "agent_type": "", "cwd": str(self.proj),
-                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "qa-mem doctor"}, "error": "Exit 1"})
+        self.post(
+            {
+                "tool_name": "Bash",
+                "agent_type": "",
+                "cwd": str(self.proj),
+                "hook_event_name": "PostToolUseFailure",
+                "tool_input": {"command": "git status"},
+                "error": "Exit 1",
+            }
+        )
+        self.post(
+            {
+                "tool_name": "Bash",
+                "agent_type": "",
+                "cwd": str(self.proj),
+                "hook_event_name": "PostToolUseFailure",
+                "tool_input": {"command": "qa-mem doctor"},
+                "error": "Exit 1",
+            }
+        )
         # Broken bug draft -> file_lint nudge
         self.written("bugs/BUG-1.md", "# Title\n")
         # Explorer stop bounce -> stop_bounce
         self.assertEqual(self.explorer_stop(d).returncode, 2)
         # Write a run file and stop marker -> run_summary
-        (d / ".data/run-form.json").write_text(json.dumps({
-            **run(build="unknown"), "run_id": "r1", "mode": "ticket", "status": "INCOMPLETE", "stop_reason": "turn_limit",
-            "cases": [{"id": "TC-1", "status": "PASS", "actual": "ok"}, {"id": "TC-2", "status": "NOT_RUN"}],
-        }))
+        (d / ".data/run-form.json").write_text(
+            json.dumps(
+                {
+                    **run(build="unknown"),
+                    "run_id": "r1",
+                    "mode": "ticket",
+                    "status": "INCOMPLETE",
+                    "stop_reason": "turn_limit",
+                    "cases": [{"id": "TC-1", "status": "PASS", "actual": "ok"}, {"id": "TC-2", "status": "NOT_RUN"}],
+                }
+            )
+        )
         ops.marker_stop(self.proj)
 
         recs = self._read_plugin_log()
@@ -476,8 +637,15 @@ class Hooks(Base):
         self.assertIn(("file_lint", "draft"), nudges)
         summaries = [r for r in recs if r["type"] == "run_summary"]
         self.assertEqual(len(summaries), 1)
-        self.assertEqual((summaries[0]["status"], summaries[0]["stop_reason"], summaries[0]["build_known"], summaries[0]["missing_run_file"]),
-                         ("INCOMPLETE", "turn_limit", False, False))
+        self.assertEqual(
+            (
+                summaries[0]["status"],
+                summaries[0]["stop_reason"],
+                summaries[0]["build_known"],
+                summaries[0]["missing_run_file"],
+            ),
+            ("INCOMPLETE", "turn_limit", False, False),
+        )
         self.assertGreaterEqual(summaries[0]["turns"], 3)
 
         # Missing run file on marker_stop is explicitly flagged
@@ -488,12 +656,21 @@ class Hooks(Base):
 
     def test_plugin_log_off_switch_silences_hooks(self):
         from qa_sdet import ops
+
         self.config(pluginLog=False)
         d = self.rundir("2026-11-25-PROJ-2")
         ops.marker_start(self.proj, run_dir=d, slug="form")
-        self.post({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
-                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "playwright-cli -s=qa click e1"}, "error": "Exit 1"},
-                  env={"QA_SDET_CONFIG": str(self.t / "config/config.json")})
+        self.post(
+            {
+                "tool_name": "Bash",
+                "agent_type": "qa-sdet:qa-explorer",
+                "cwd": str(self.proj),
+                "hook_event_name": "PostToolUseFailure",
+                "tool_input": {"command": "playwright-cli -s=qa click e1"},
+                "error": "Exit 1",
+            },
+            env={"QA_SDET_CONFIG": str(self.t / "config/config.json")},
+        )
         ops.marker_stop(self.proj)
         self.assertFalse((self.proj / "qa-out/plugin-log.jsonl").exists())
 

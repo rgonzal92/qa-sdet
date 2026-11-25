@@ -1,5 +1,6 @@
 """Shared test helpers: a sandbox (config, data folder, HOME and memory DB in a temp folder), the qa-mem runner, the
 sample plan and run files, and the git helpers of the code-map tests. Not a test module."""
+
 import contextlib, io, json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
@@ -14,8 +15,11 @@ FIX = ROOT / "tests/fixture-src"
 def cli(*argv, stdin=None):
     """(exit code, stdout, stderr) of qa-mem main() in-process."""
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-            mock.patch.object(sys, "stdin", io.StringIO(stdin or "")):
+    with (
+        contextlib.redirect_stdout(out),
+        contextlib.redirect_stderr(err),
+        mock.patch.object(sys, "stdin", io.StringIO(stdin or "")),
+    ):
         code = cli_mod.main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
@@ -33,46 +37,131 @@ def runfile(folder):
 
 def run(build="1.0", bugs=None, **page):
     """A one-page explore run on `build`; page fields (facts, locators, coverage) go on the page."""
-    return {"run_id": f"r-{build}-{time.time_ns()}", "mode": "explore", "target": "/form", "build": build,
-            "status": "COMPLETED", "summary": "s",
-            "pages": [{"route": "/form", "name": "Form", **page}], "bugs": bugs or []}
+    return {
+        "run_id": f"r-{build}-{time.time_ns()}",
+        "mode": "explore",
+        "target": "/form",
+        "build": build,
+        "status": "COMPLETED",
+        "summary": "s",
+        "pages": [{"route": "/form", "name": "Form", **page}],
+        "bugs": bugs or [],
+    }
 
 
 PLAN = {
-    "kind": "ticket", "title": "PROJ-1, PROJ-2", "created": "2026-11-23T18:00:00Z",
+    "kind": "ticket",
+    "title": "PROJ-1, PROJ-2",
+    "created": "2026-11-23T18:00:00Z",
     "env": {"url": "https://qa.example", "browser": "chrome"},
     "tickets": [
-        {"key": "PROJ-1", "summary": "Speed limit form", "acs": [{"id": "AC-1", "text": "Saves 0-130"},
-                                                                  {"id": "AC-2", "text": "Rejects 131"}],
-         "plan": {"scope": "speed field", "risks": ["rounding"], "out_of_scope": ["mobile"]}},
+        {
+            "key": "PROJ-1",
+            "summary": "Speed limit form",
+            "acs": [{"id": "AC-1", "text": "Saves 0-130"}, {"id": "AC-2", "text": "Rejects 131"}],
+            "plan": {"scope": "speed field", "risks": ["rounding"], "out_of_scope": ["mobile"]},
+        },
         {"key": "PROJ-2", "summary": "Incident list", "acs": [{"id": "AC-1", "text": "Sorted by date"}]},
     ],
     "cases": [
-        {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "Save 130", "route": "/form", "priority": "P1",
-         "steps": ["Open form", "Type 130 | save"], "expected": "Saved"},
-        {"id": "TC-2", "ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 131", "route": "/form",
-         "steps": ["Type 131"], "expected": "Error shown"},
-        {"id": "TC-3", "ticket": "PROJ-2", "ac": "AC-1", "title": "Sort", "route": "/list", "steps": ["Open"],
-         "expected": "Newest first"},
-        {"id": "TC-4", "ticket": "PROJ-2", "ac": "AC-1", "title": "Ties", "route": "/list", "steps": ["Open"],
-         "expected": "Stable"},
+        {
+            "id": "TC-1",
+            "ticket": "PROJ-1",
+            "ac": "AC-1",
+            "title": "Save 130",
+            "route": "/form",
+            "priority": "P1",
+            "steps": ["Open form", "Type 130 | save"],
+            "expected": "Saved",
+        },
+        {
+            "id": "TC-2",
+            "ticket": "PROJ-1",
+            "ac": "AC-2",
+            "title": "Reject 131",
+            "route": "/form",
+            "steps": ["Type 131"],
+            "expected": "Error shown",
+        },
+        {
+            "id": "TC-3",
+            "ticket": "PROJ-2",
+            "ac": "AC-1",
+            "title": "Sort",
+            "route": "/list",
+            "steps": ["Open"],
+            "expected": "Newest first",
+        },
+        {
+            "id": "TC-4",
+            "ticket": "PROJ-2",
+            "ac": "AC-1",
+            "title": "Ties",
+            "route": "/list",
+            "steps": ["Open"],
+            "expected": "Stable",
+        },
     ],
 }
-RUN_FORM = {"run_id": "ticket-form-1", "mode": "ticket", "target": "/form", "build": "1.42", "status": "COMPLETED",
-            "summary": "s", "notes": "Explored the speed field.", "env": {"url": "https://qa.example", "browser": "chrome"},
-            "pages": [{"route": "/form", "coverage": [{"target": "speed", "heuristic": "boundary", "result": "fail"},
-                                                      {"target": "speed", "heuristic": "happy-path", "result": "pass"}]}],
-            "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"},
-                      {"id": "TC-2", "status": "FAIL", "actual": "131 saved", "bug": "BUG-1"}],
-            "questions": ["Is 0 a valid speed?"], "not_tested": ["Keyboard only: out of time"],
-            "bugs": [{"route": "/form", "title": "Speed accepts 131", "severity": "HIGH", "classification": "CONFIRMED",
-                      "draft_path": "bugs/BUG-1.md", "evidence": "/x/evidence/BUG-1.png", "annotated": True,
-                      "ticket": "PROJ-1"}]}
-RUN_LIST = {"run_id": "ticket-list-1", "mode": "ticket", "target": "/list", "build": "1.42", "status": "COMPLETED",
-            "summary": "s", "cases": [{"id": "TC-3", "status": "pass"},
-                                      {"id": "TC-4", "status": "QUESTION", "notes": "Order of ties unspecified"}],
-            "bugs": [{"route": "/list", "title": "Header misaligned", "severity": "LOW", "classification": "CONFIRMED",
-                      "draft_path": "bugs/BUG-2.md", "annotated": False}]}
+RUN_FORM = {
+    "run_id": "ticket-form-1",
+    "mode": "ticket",
+    "target": "/form",
+    "build": "1.42",
+    "status": "COMPLETED",
+    "summary": "s",
+    "notes": "Explored the speed field.",
+    "env": {"url": "https://qa.example", "browser": "chrome"},
+    "pages": [
+        {
+            "route": "/form",
+            "coverage": [
+                {"target": "speed", "heuristic": "boundary", "result": "fail"},
+                {"target": "speed", "heuristic": "happy-path", "result": "pass"},
+            ],
+        }
+    ],
+    "cases": [
+        {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+        {"id": "TC-2", "status": "FAIL", "actual": "131 saved", "bug": "BUG-1"},
+    ],
+    "questions": ["Is 0 a valid speed?"],
+    "not_tested": ["Keyboard only: out of time"],
+    "bugs": [
+        {
+            "route": "/form",
+            "title": "Speed accepts 131",
+            "severity": "HIGH",
+            "classification": "CONFIRMED",
+            "draft_path": "bugs/BUG-1.md",
+            "evidence": "/x/evidence/BUG-1.png",
+            "annotated": True,
+            "ticket": "PROJ-1",
+        }
+    ],
+}
+RUN_LIST = {
+    "run_id": "ticket-list-1",
+    "mode": "ticket",
+    "target": "/list",
+    "build": "1.42",
+    "status": "COMPLETED",
+    "summary": "s",
+    "cases": [
+        {"id": "TC-3", "status": "pass"},
+        {"id": "TC-4", "status": "QUESTION", "notes": "Order of ties unspecified"},
+    ],
+    "bugs": [
+        {
+            "route": "/list",
+            "title": "Header misaligned",
+            "severity": "LOW",
+            "classification": "CONFIRMED",
+            "draft_path": "bugs/BUG-2.md",
+            "annotated": False,
+        }
+    ],
+}
 
 
 class Base(unittest.TestCase):
@@ -84,8 +173,12 @@ class Base(unittest.TestCase):
         self.saved = (core.CONFIG, core.DATA_DIR, dict(os.environ))
         core.CONFIG = self.t / "config" / "config.json"
         core.DATA_DIR = self.t / "data" / "qa-sdet"
-        os.environ.update(HOME=str(self.t / "home"), QA_MEM_DB=str(self.t / "m.db"),
-                          XDG_DATA_HOME=str(self.t / "xdg"), XDG_CONFIG_HOME=str(self.t / "xdgc"))
+        os.environ.update(
+            HOME=str(self.t / "home"),
+            QA_MEM_DB=str(self.t / "m.db"),
+            XDG_DATA_HOME=str(self.t / "xdg"),
+            XDG_CONFIG_HOME=str(self.t / "xdgc"),
+        )
         self.proj = self.t / "proj"
         self.proj.mkdir()
 
@@ -126,11 +219,20 @@ class MemBase(Base):
 
 
 def git(repo, *args):  # isolated from the developer's git config (signing, hooks, templates)
-    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
-                   check=True, capture_output=True,
-                   env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-                        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"})
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        },
+    )
 
 
 def git_repo(path, files):
@@ -154,6 +256,7 @@ class CodeMapCase(MemBase):
 
     def scan(self, *paths, full=False, stamp="s1"):
         from qa_sdet import scan
+
         return scan.codemap_scan(self.con, [str(p) for p in paths], self.out, full, stamp)
 
     def write_map(self, area, rows, scan_id=None):
@@ -173,6 +276,9 @@ class CodeMapCase(MemBase):
         for m in s["areas"]["frontend"]["mappers"]:
             scan = json.loads(Path(m["scan_file"]).read_text())
             files = [f for r in scan["repos"] for f in r["files"]]
-            Path(m["out"]).write_text(json.dumps({"scan_id": m["scan_id"], "area": "frontend",
-                                                  "rows": [x for f in files for x in rows_for(f)]}))
+            Path(m["out"]).write_text(
+                json.dumps(
+                    {"scan_id": m["scan_id"], "area": "frontend", "rows": [x for f in files for x in rows_for(f)]}
+                )
+            )
         return s["areas"]["frontend"]["mappers"]

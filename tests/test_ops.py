@@ -1,4 +1,5 @@
 """qa-mem operations: keys, rundir, the run marker, browser-open and prune."""
+
 import json, os, stat, subprocess, time, unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -12,8 +13,9 @@ class Keys(Base):
     """`qa-mem keys`: ticket numbers and keys become full Jira keys."""
 
     def test_expansion_validation_and_order(self):
-        self.assertEqual(ops.expand_keys(["1234", "ops-7,1250", "PROJ-1234"], "proj-"),
-                         ["PROJ-1234", "OPS-7", "PROJ-1250"])
+        self.assertEqual(
+            ops.expand_keys(["1234", "ops-7,1250", "PROJ-1234"], "proj-"), ["PROJ-1234", "OPS-7", "PROJ-1250"]
+        )
         self.assertEqual(ops.expand_keys(["1 2,3"], "PROJ"), ["PROJ-1", "PROJ-2", "PROJ-3"])
         for bad in ("abc", "PROJ-", "1-PROJ", "PROJ-12a", "S-1", "ß-12", "ﬀ-1"):  # ß.upper() is SS
             with self.assertRaises(core.BadInput) as e:
@@ -44,14 +46,23 @@ class RunDir(Base):
     """`qa-mem rundir`: the qa-out/<date>-<label> folder of one run."""
 
     def test_dot_leading_last_segment_keeps_its_name(self):
-        self.assertEqual([ops.route_slug(r) for r in ("/.well-known", "/form.html", "/", "/a/b.c.d")],
-                         [".well-known", "form", "home", "a-b.c"])
+        self.assertEqual(
+            [ops.route_slug(r) for r in ("/.well-known", "/form.html", "/", "/a/b.c.d")],
+            [".well-known", "form", "home", "a-b.c"],
+        )
 
     def test_labels(self):
         self.assertEqual(ops.run_label(["A-1", "B-2"]), "A-1+B-2")
         self.assertEqual(ops.run_label(["A-1", "A-2", "A-3", "A-4", "A-5"]), "A-1+A-2+A-3+2more")
-        for route, slug in (("/form.html", "form"), ("/incidents/list", "incidents-list"), ("/incidents/4521", "incidents-id"),
-                            ("/#/zones", "zones"), ("/#!/zones", "zones"), ("/", "home"), ("/a?x=1", "a")):
+        for route, slug in (
+            ("/form.html", "form"),
+            ("/incidents/list", "incidents-list"),
+            ("/incidents/4521", "incidents-id"),
+            ("/#/zones", "zones"),
+            ("/#!/zones", "zones"),
+            ("/", "home"),
+            ("/a?x=1", "a"),
+        ):
             self.assertEqual(ops.run_label(route=route), slug, route)
         self.assertEqual(ops.run_label(keys=["A-1"], prefix="plan-"), "plan-A-1")
         self.assertEqual(ops.run_label(label="init crawl/../x"), "init-crawl-..-x")
@@ -133,8 +144,15 @@ class Marker(Base):
             self.assertEqual(cli("marker", "start", str(self.proj), "--max-turns", bad)[0], 2, bad)
 
     def test_bad_input(self):
-        for argv in (("marker",), ("marker", "go", str(self.proj)), ("marker", "start", str(self.proj), "--budget", "-1"),
-                     ("marker", "start", str(self.proj), "--budget", "x"), ("marker", "start", str(self.proj), "--budget", ""), ("marker", "start", str(self.proj), "--minutes", ""), ("marker", "start", str(self.proj), "--bogus")):
+        for argv in (
+            ("marker",),
+            ("marker", "go", str(self.proj)),
+            ("marker", "start", str(self.proj), "--budget", "-1"),
+            ("marker", "start", str(self.proj), "--budget", "x"),
+            ("marker", "start", str(self.proj), "--budget", ""),
+            ("marker", "start", str(self.proj), "--minutes", ""),
+            ("marker", "start", str(self.proj), "--bogus"),
+        ):
             self.assertEqual(cli(*argv)[0], 2, argv)
         self.assertFalse((self.proj / "qa-out/.active").exists())
 
@@ -164,14 +182,27 @@ class BrowserOpen(Base):
 
     def test_command_env_and_profile(self):
         self.config(browser="msedge")
-        with mock.patch.object(subprocess, "run", return_value=done(3)) as run, \
-                mock.patch.dict(os.environ, PLAYWRIGHT_MCP_STORAGE_STATE="/tmp/s.json", PLAYWRIGHT_MCP_ISOLATED="true"):
+        with (
+            mock.patch.object(subprocess, "run", return_value=done(3)) as run,
+            mock.patch.dict(os.environ, PLAYWRIGHT_MCP_STORAGE_STATE="/tmp/s.json", PLAYWRIGHT_MCP_ISOLATED="true"),
+        ):
             code = cli_mod.main(["browser-open", "--session", "qa-login", "--headed", "https://qa.example/"])
         self.assertEqual(code, 3)  # playwright-cli's exit code
         profile = core.DATA_DIR / "profiles" / "main"
         argv, kw = run.call_args
-        self.assertEqual(argv[0], ["playwright-cli", "-s=qa-login", "open", "--browser=msedge", "--profile", str(profile),
-                                   "--headed", "https://qa.example/"])
+        self.assertEqual(
+            argv[0],
+            [
+                "playwright-cli",
+                "-s=qa-login",
+                "open",
+                "--browser=msedge",
+                "--profile",
+                str(profile),
+                "--headed",
+                "https://qa.example/",
+            ],
+        )
         self.assertNotIn("PLAYWRIGHT_MCP_STORAGE_STATE", kw["env"])
         self.assertNotIn("PLAYWRIGHT_MCP_ISOLATED", kw["env"])  # made the profile launch fail live
         close = run.call_args_list[0][0][0]
@@ -181,7 +212,9 @@ class BrowserOpen(Base):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
         with mock.patch.object(subprocess, "run", return_value=done(0)) as run:
             self.assertEqual(cli_mod.main(["browser-open"]), 0)
-        self.assertEqual(run.call_args[0][0], ["playwright-cli", "-s=qa", "open", "--browser=msedge", "--profile", str(profile)])
+        self.assertEqual(
+            run.call_args[0][0], ["playwright-cli", "-s=qa", "open", "--browser=msedge", "--profile", str(profile)]
+        )
         self.assertEqual(run.call_args_list[0][0][0], ["playwright-cli", "-s=qa-login", "close"])
 
     def test_profile_in_use_says_close_the_other_browser(self):  # playwright-cli's hint was --isolated (no login)
@@ -199,13 +232,22 @@ class BrowserOpen(Base):
     def test_errors_start_with_their_category(self):  # the explorer and qa-login report these three as they are
         self.config(browser="chrome")
         for out, err, code, first in (
-                ("### Error\nbrowserType.launchPersistentContext: Chromium distribution 'chrome' is not found at "
-                 "/opt/google/chrome/chrome\n", "", 1,
-                 "browser chrome can't start: browserType.launchPersistentContext: Chromium distribution 'chrome' is not found"),
-                ("", "Error: Executable doesn't exist at /x/ms-playwright/chrome-1/chrome\n", 1,
-                 "browser chrome can't start: Error: Executable doesn't exist"),
-                ("", "Error: daemon is not responding\n", 1, "browser tool failed: Error: daemon is not responding"),
-                ("", "", 7, "browser tool failed: playwright-cli exited 7")):
+            (
+                "### Error\nbrowserType.launchPersistentContext: Chromium distribution 'chrome' is not found at "
+                "/opt/google/chrome/chrome\n",
+                "",
+                1,
+                "browser chrome can't start: browserType.launchPersistentContext: Chromium distribution 'chrome' is not found",
+            ),
+            (
+                "",
+                "Error: Executable doesn't exist at /x/ms-playwright/chrome-1/chrome\n",
+                1,
+                "browser chrome can't start: Error: Executable doesn't exist",
+            ),
+            ("", "Error: daemon is not responding\n", 1, "browser tool failed: Error: daemon is not responding"),
+            ("", "", 7, "browser tool failed: playwright-cli exited 7"),
+        ):
             with mock.patch.object(subprocess, "run", side_effect=[done(0), done(code, out=out, err=err)]):
                 got, _, e = cli("browser-open", "https://qa.example/")
             self.assertEqual(got, code)
@@ -268,8 +310,16 @@ class Prune(Base):
         self.assertEqual(cli("prune", str(self.t / "empty"))[0], 0)  # nothing there: fine
         # with the run folder: this run's temp files go, what the report needs stays
         d = self.proj / "qa-out" / "2026-11-24-r"
-        for rel in (".data/plan.json", ".data/run-form.json", ".data/snapshot.md", ".data/map-1.png", "evidence/TC-1.png",
-                    "bugs/BUG-1.md", "repro/BUG-1.spec.ts", "REPORT.md"):
+        for rel in (
+            ".data/plan.json",
+            ".data/run-form.json",
+            ".data/snapshot.md",
+            ".data/map-1.png",
+            "evidence/TC-1.png",
+            "bugs/BUG-1.md",
+            "repro/BUG-1.spec.ts",
+            "REPORT.md",
+        ):
             (d / rel).parent.mkdir(parents=True, exist_ok=True)
             (d / rel).write_text("x")
         start = time.time() - 600
@@ -280,18 +330,28 @@ class Prune(Base):
         code, out, _ = cli("prune", str(self.proj), str(d))
         self.assertEqual((code, out.strip()), (0, "pruned 3 snapshot and temp files of this run"))
         self.assertEqual(sorted(p.name for p in cli_dir.iterdir()), ["link", "new.yml"])
-        self.assertEqual(sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()),
-                         [".data/plan.json", ".data/run-form.json", "REPORT.md", "bugs/BUG-1.md", "evidence/TC-1.png",
-                          "repro/BUG-1.spec.ts"])
+        self.assertEqual(
+            sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()),
+            [
+                ".data/plan.json",
+                ".data/run-form.json",
+                "REPORT.md",
+                "bugs/BUG-1.md",
+                "evidence/TC-1.png",
+                "repro/BUG-1.spec.ts",
+            ],
+        )
         self.assertEqual(cli("prune", str(self.proj), str(self.t))[0], 2)  # not a run folder
         # a transient temp file disappearing between os.walk and os.lstat must not crash prune
         real_lstat = os.lstat
         vanished = d / ".data/tmp.scrub"
         vanished.write_text("x")
+
         def disappearing(p, *a, **k):
             if str(p) == str(vanished):
                 raise FileNotFoundError(str(p))
             return real_lstat(p, *a, **k)
+
         with mock.patch.object(os, "lstat", side_effect=disappearing):
             self.assertEqual(ops.prune(self.proj, run=d), 0)
 
@@ -319,6 +379,7 @@ class Prune(Base):
         self.assertFalse((cli_dir / "after.yml").exists())
         # L6: Pillow ValueError (e.g. huge zTXt chunk) becomes BadInput, not uncaught traceback
         from PIL import Image
+
         png = empty_run / "evidence/BUG-1.png"
         png.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (20, 20)).save(png)
@@ -330,16 +391,25 @@ class Prune(Base):
 class SessionCheck(Base):
     """`qa-mem session-check`: headless SSO check, optional --record and --build."""
 
-    CFG = dict(app="x", browser="chrome", qaBaseUrl="https://qa.example.com/app",
-               allowedHosts=["qa.example.com"], ssoHost="login.microsoftonline.com",
-               buildSource={"type": "selector", "value": "footer .version"})
+    CFG = dict(
+        app="x",
+        browser="chrome",
+        qaBaseUrl="https://qa.example.com/app",
+        allowedHosts=["qa.example.com"],
+        ssoHost="login.microsoftonline.com",
+        buildSource={"type": "selector", "value": "footer .version"},
+    )
 
     def test_valid_session_record_and_build(self):
         self.config(**self.CFG)
         # browser_open (close qa-login, open qa) -> eval host/form -> eval build -> close qa
-        seq = [done(0), done(0, out="opened"),
-               done(0, out='{"host":"qa.example.com","hasPassword":false}\n'),
-               done(0, out="1.43.0\n"), done(0)]
+        seq = [
+            done(0),
+            done(0, out="opened"),
+            done(0, out='{"host":"qa.example.com","hasPassword":false}\n'),
+            done(0, out="1.43.0\n"),
+            done(0),
+        ]
         with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
             code, out, err = cli("session-check", "--record", "--build")
         self.assertEqual((code, err), (0, ""))
@@ -350,9 +420,11 @@ class SessionCheck(Base):
 
     def test_expired_sso_host_or_password_form_returns_1_without_stamp(self):
         self.config(**self.CFG)
-        for payload in ('{"host":"login.microsoftonline.com","hasPassword":false}',
-                        '{"host":"LOGIN.MICROSOFTONLINE.COM:443","hasPassword":false}',
-                        '{"host":"qa.example.com","hasPassword":true}'):
+        for payload in (
+            '{"host":"login.microsoftonline.com","hasPassword":false}',
+            '{"host":"LOGIN.MICROSOFTONLINE.COM:443","hasPassword":false}',
+            '{"host":"qa.example.com","hasPassword":true}',
+        ):
             ops.signed_in_stamp().unlink(missing_ok=True)
             seq = [done(0), done(0), done(0, out=payload), done(0)]
             with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
@@ -396,28 +468,55 @@ class PageStart(Base):
 
     def test_open_signed_in_page_reads_the_build_and_stays_open(self):
         self.config(**self.CFG)
-        code, out, mrun = self.start([done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}'),
-                                      done(0, out="1.43.0\n")])
-        self.assertEqual((code, out), (0, {"status": "ok", "build": "1.43.0", "url": "https://qa.example.com/app/form",
-                                           "browser": "chrome"}))
+        code, out, mrun = self.start(
+            [
+                done(0),
+                done(0, out="opened"),
+                done(0, out='{"host":"qa.example.com","hasPassword":false}'),
+                done(0, out="1.43.0\n"),
+            ]
+        )
+        self.assertEqual(
+            (code, out),
+            (0, {"status": "ok", "build": "1.43.0", "url": "https://qa.example.com/app/form", "browser": "chrome"}),
+        )
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
 
     def test_sign_in_page_is_a_session_blocker_and_closes(self):
         self.config(**self.CFG)
-        code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"login.microsoftonline.com","hasPassword":false}'),
-                                      done(0)])
+        code, out, mrun = self.start(
+            [done(0), done(0), done(0, out='{"host":"login.microsoftonline.com","hasPassword":false}'), done(0)]
+        )
         self.assertEqual((code, out["status"], out["block_scope"], out["browser"]), (1, "blocked", "session", "chrome"))
         self.assertIn("/qa-sdet:qa-login", out["reason"])
         self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
     def test_an_error_status_is_a_page_blocker_that_leaves_the_browser_open(self):  # the explorer's step 9 closes it
         self.config(**self.CFG)
-        code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":404}')])
-        self.assertEqual((code, out), (1, {"status": "blocked", "block_scope": "page", "reason": "the page returned HTTP 404",
-                                           "browser": "chrome"}))  # a crawl's run file names the browser from here
+        code, out, mrun = self.start(
+            [done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":404}')]
+        )
+        self.assertEqual(
+            (code, out),
+            (
+                1,
+                {
+                    "status": "blocked",
+                    "block_scope": "page",
+                    "reason": "the page returned HTTP 404",
+                    "browser": "chrome",
+                },
+            ),
+        )  # a crawl's run file names the browser from here
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
-        code, out, _ = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":0}'),
-                                   done(0, out="1.43.0\n")])  # 0: the browser doesn't expose it, so no blocker
+        code, out, _ = self.start(
+            [
+                done(0),
+                done(0),
+                done(0, out='{"host":"qa.example.com","hasPassword":false,"status":0}'),
+                done(0, out="1.43.0\n"),
+            ]
+        )  # 0: the browser doesn't expose it, so no blocker
         self.assertEqual((code, out["status"]), (0, "ok"))
 
     def test_browser_trouble_is_a_browser_blocker_and_bad_hosts_are_refused(self):
@@ -453,8 +552,14 @@ class ApiProbe(Base):
 
     def page(self, status=200, body="", headers=None, url=None, contains=None, **extra):
         """What the in-page script prints (--raw eval shows a string as a JSON string)."""
-        r = {"status": status, "ok": 200 <= status < 300, "headers": headers or {}, "body": body,
-             "url": url or self.URL, **extra}
+        r = {
+            "status": status,
+            "ok": 200 <= status < 300,
+            "headers": headers or {},
+            "body": body,
+            "url": url or self.URL,
+            **extra,
+        }
         if contains is not None:
             r["contains"] = contains
         return done(0, out=json.dumps(json.dumps(r)) + "\n")
@@ -466,13 +571,30 @@ class ApiProbe(Base):
 
     def test_get_prints_status_safe_headers_and_a_scrubbed_body(self):
         body = json.dumps({"name": "qa-sdet-zone-1", "apiToken": "abc123", "speed": 130})
-        page = self.page(200, body, {"content-type": "application/json", "etag": '"7"', "set-cookie": "sid=SECRET",
-                                    "x-ratelimit-remaining": "9", "x-internal": "nope", "location": "/api/zones?access_token=zzz"})
+        page = self.page(
+            200,
+            body,
+            {
+                "content-type": "application/json",
+                "etag": '"7"',
+                "set-cookie": "sid=SECRET",
+                "x-ratelimit-remaining": "9",
+                "x-internal": "nope",
+                "location": "/api/zones?access_token=zzz",
+            },
+        )
         code, out, _, mrun = self.probe("GET", self.URL, seq=[page])
         self.assertEqual(code, 0)
         self.assertEqual((out["status"], out["ok"]), (200, True))
-        self.assertEqual(out["headers"], {"content-type": "application/json", "etag": '"7"', "x-ratelimit-remaining": "9",
-                                          "location": "/api/zones?access_token=[REDACTED]"})  # no set-cookie, no unknown name
+        self.assertEqual(
+            out["headers"],
+            {
+                "content-type": "application/json",
+                "etag": '"7"',
+                "x-ratelimit-remaining": "9",
+                "location": "/api/zones?access_token=[REDACTED]",
+            },
+        )  # no set-cookie, no unknown name
         self.assertEqual(json.loads(out["body"]), {"name": "qa-sdet-zone-1", "apiToken": "[REDACTED]", "speed": 130})
         cmd = mrun.call_args[0][0]
         self.assertEqual(cmd[:4], ["playwright-cli", "-s=qa", "--raw", "eval"])
@@ -482,7 +604,7 @@ class ApiProbe(Base):
             self.assertNotIn(secret, cmd[4].replace("set-cookie", ""))
 
     def test_every_value_reaches_the_page_as_a_json_string(self):
-        evil = '");alert(1);//\u2028\'`${x}'
+        evil = "\");alert(1);//\u2028'`${x}"
         url = "https://qa.example.com/api/zones?q=%22);alert(1);//"
         body = '{"name":"qa-sdet-' + evil + '"}'
         self.marker(api_writes=True)
@@ -503,24 +625,47 @@ class ApiProbe(Base):
         self.assertEqual(out["headers"], {"content-type": "text/html"})
 
     def test_a_redirect_off_the_allowed_hosts_shows_no_body(self):
-        code, out, _, _ = self.probe("GET", self.URL, seq=[self.page(200, "<form>sign in</form>", url="https://login.example.org/x?a=1")])
+        code, out, _, _ = self.probe(
+            "GET", self.URL, seq=[self.page(200, "<form>sign in</form>", url="https://login.example.org/x?a=1")]
+        )
         self.assertEqual(code, 0)
         self.assertNotIn("body", out)
         self.assertEqual(out["redirected_to"], "login.example.org")
 
     def test_refusals_run_no_browser_command(self):
-        cases = [("a host that isn't allowed", ("GET", "https://evil.example.org/api/zones")),
-                 ("not http(s)", ("GET", "file:///etc/passwd")), ("a relative url", ("GET", "/api/zones")),
-                 ("a method it doesn't send", ("TRACE", self.URL)), ("a body on a GET", ("GET", self.URL, "--json", "{}"))]
-        for path in ("login", "logout", "signin", "sign-out", "oauth/token", "api/v1/session", "Auth", "sso", "saml", "password",
-                     "connect/token", "api/auth/me", "api/login.json"):
+        cases = [
+            ("a host that isn't allowed", ("GET", "https://evil.example.org/api/zones")),
+            ("not http(s)", ("GET", "file:///etc/passwd")),
+            ("a relative url", ("GET", "/api/zones")),
+            ("a method it doesn't send", ("TRACE", self.URL)),
+            ("a body on a GET", ("GET", self.URL, "--json", "{}")),
+        ]
+        for path in (
+            "login",
+            "logout",
+            "signin",
+            "sign-out",
+            "oauth/token",
+            "api/v1/session",
+            "Auth",
+            "sso",
+            "saml",
+            "password",
+            "connect/token",
+            "api/auth/me",
+            "api/login.json",
+        ):
             cases.append((f"the auth-like path {path}", ("GET", f"https://qa.example.com/{path}")))
         for name in ("Authorization", "cookie", "PROXY-AUTHORIZATION"):
             cases.append((f"a {name} header", ("GET", self.URL, "--header", f"{name}: x")))
         cases.append(("a header without a name", ("GET", self.URL, "--header", "no colon")))
         cases.append(("a header with a line break", ("GET", self.URL, "--header", "X-A: b\nC: d")))
-        cases.append(("two content types", ("POST", self.URL, "--json", "qa-sdet-", "--content-type", "text/plain",
-                                            "--header", "content-type: x")))
+        cases.append(
+            (
+                "two content types",
+                ("POST", self.URL, "--json", "qa-sdet-", "--content-type", "text/plain", "--header", "content-type: x"),
+            )
+        )
         self.marker(api_writes=True)
         for why, args in cases:
             code, _, err, mrun = self.probe(*args)
@@ -531,9 +676,13 @@ class ApiProbe(Base):
 
     def test_writes_need_the_run_flag_in_a_live_marker(self):
         body = '{"name":"qa-sdet-zone-1"}'
-        for why, setup in (("no marker", None), ("flag off", dict(api_writes=False)), ("flag absent", {}),
-                           ("expired", dict(api_writes=True, expires=int(time.time()) - 5)),
-                           ("a string", dict(api_writes="yes"))):
+        for why, setup in (
+            ("no marker", None),
+            ("flag off", dict(api_writes=False)),
+            ("flag absent", {}),
+            ("expired", dict(api_writes=True, expires=int(time.time()) - 5)),
+            ("a string", dict(api_writes="yes")),
+        ):
             (self.proj / "qa-out/.active").unlink(missing_ok=True)
             if setup is not None:
                 self.marker(**setup)
@@ -552,11 +701,15 @@ class ApiProbe(Base):
         self.assertIn("qa-sdet-", err)
         self.assertEqual(self.probe("POST", self.URL)[0], 2)  # no body at all
         mrun.assert_not_called()
-        code, out, _, mrun = self.probe("POST", self.URL, "--json", '{"name":"qa-sdet-zone-1","approved":true}', seq=[self.page(201)])
+        code, out, _, mrun = self.probe(
+            "POST", self.URL, "--json", '{"name":"qa-sdet-zone-1","approved":true}', seq=[self.page(201)]
+        )
         self.assertEqual((code, out["status"]), (0, 201))
         self.assertEqual(mrun.call_count, 1)
         self.assertIn('"Content-Type": "application/json"', mrun.call_args[0][0][4])  # the default for a body
-        code, _, _, mrun = self.probe("POST", self.URL, "--json", "qa-sdet-{broken", "--content-type", "text/plain", seq=[self.page(415)])
+        code, _, _, mrun = self.probe(
+            "POST", self.URL, "--json", "qa-sdet-{broken", "--content-type", "text/plain", seq=[self.page(415)]
+        )
         self.assertEqual(code, 0)  # a malformed body is a probe, not a refusal
         self.assertIn('"Content-Type": "text/plain"', mrun.call_args[0][0][4])
 
@@ -565,28 +718,38 @@ class ApiProbe(Base):
         url = self.URL + "/7"
         for m in ("PUT", "PATCH", "DELETE"):
             args = (m, url) + (("--json", '{"speed": 5}') if m != "DELETE" else ())
-            code, out, _, mrun = self.probe(*args, seq=[self.page(200, '{"name":"qa-sdet-zone-1"}', contains=True), self.page(204)])
+            code, out, _, mrun = self.probe(
+                *args, seq=[self.page(200, '{"name":"qa-sdet-zone-1"}', contains=True), self.page(204)]
+            )
             self.assertEqual((code, out["status"]), (0, 204), m)
             first, second = (c[0][0][4] for c in mrun.call_args_list)
             self.assertIn('"method": "GET"', first)
             self.assertIn('"qa-sdet-"', first)  # the page does the search over the whole text
             self.assertIn(f'"method": "{m}"', second)
-            for why, pre in (("someone else's record", self.page(200, '{"name":"Main street"}', contains=False)),
-                             ("no such record", self.page(404, "qa-sdet- not found", contains=True)),
-                             ("a collection", self.page(200, '[{"name":"qa-sdet-a"},{"name":"B"}]', contains=True))):
+            for why, pre in (
+                ("someone else's record", self.page(200, '{"name":"Main street"}', contains=False)),
+                ("no such record", self.page(404, "qa-sdet- not found", contains=True)),
+                ("a collection", self.page(200, '[{"name":"qa-sdet-a"},{"name":"B"}]', contains=True)),
+            ):
                 code, _, err, mrun = self.probe(*args, seq=[pre])
                 self.assertEqual(code, 2, (m, why))
                 self.assertIn("qa-sdet-", err)
                 self.assertEqual(mrun.call_count, 1, "the write itself never ran")
 
     def test_browser_trouble_is_exit_1_without_a_stack_trace(self):
-        for seq in ([done(1, err="Error: the browser 'qa' is not open")], [done(0, out="garbage")],
-                    [subprocess.TimeoutExpired("playwright-cli", 30)], [OSError("no playwright-cli")]):
+        for seq in (
+            [done(1, err="Error: the browser 'qa' is not open")],
+            [done(0, out="garbage")],
+            [subprocess.TimeoutExpired("playwright-cli", 30)],
+            [OSError("no playwright-cli")],
+        ):
             code, out, err, _ = self.probe("GET", self.URL, seq=seq)
             self.assertEqual((code, out), (1, None))
             self.assertIn("api-probe", err)
             self.assertNotIn("Traceback", err)
-        code, out, err, _ = self.probe("GET", self.URL, seq=[done(0, out=json.dumps(json.dumps({"error": "TypeError: Failed to fetch"})))])
+        code, out, err, _ = self.probe(
+            "GET", self.URL, seq=[done(0, out=json.dumps(json.dumps({"error": "TypeError: Failed to fetch"})))]
+        )
         self.assertEqual((code, out), (1, None))
         self.assertIn("Failed to fetch", err)
 
@@ -601,13 +764,17 @@ class Evidence(Base):
 
     def run_evidence(self, *args, outputs=(), annotate=True):
         calls, outs = [], list(outputs)
+
         def fake(cmd, **kw):
             calls.append(cmd)
             if "screenshot" in cmd:
                 self.png.write_bytes(b"png")
             return outs.pop(0) if outs else done(0)
-        with mock.patch.object(subprocess, "run", side_effect=fake), \
-                mock.patch.object(ops, "annotate", return_value=annotate) as ann:
+
+        with (
+            mock.patch.object(subprocess, "run", side_effect=fake),
+            mock.patch.object(ops, "annotate", return_value=annotate) as ann,
+        ):
             code, out, err = cli("evidence", str(self.png), *args)
         return code, (json.loads(out) if out.strip() else None), calls, ann, err
 
@@ -618,24 +785,29 @@ class Evidence(Base):
 
     def test_selector_box_is_drawn_with_pillow(self):
         sel = 'a[title="it\'s"]'
-        code, out, calls, ann, _ = self.run_evidence("--selector", sel, "--label", "TC-1 PASS: 130 saved",
-                                                     outputs=[done(0, out='"10,20,30,40"\n')])
+        code, out, calls, ann, _ = self.run_evidence(
+            "--selector", sel, "--label", "TC-1 PASS: 130 saved", outputs=[done(0, out='"10,20,30,40"\n')]
+        )
         self.assertEqual((code, out), (0, {"path": str(self.png), "annotated": True, "method": "pillow"}))
         self.assertIn(json.dumps(sel), calls[0][-1])  # the selector reaches the page as a JS string, never as code
         self.assertEqual(calls[1], ["playwright-cli", "-s=qa", "screenshot", f"--filename={self.png}"])
         self.assertEqual(ann.call_args[0][1:], ([(10, 20, 30, 40)], "TC-1 PASS: 130 saved"))
 
     def test_without_pillow_or_with_a_ref_the_browser_draws_the_box_and_always_hides_it(self):
-        code, out, calls, _, _ = self.run_evidence("--selector", "#msg", "--label", "x", outputs=[done(0, out="1,2,3,4")],
-                                                   annotate=False)
+        code, out, calls, _, _ = self.run_evidence(
+            "--selector", "#msg", "--label", "x", outputs=[done(0, out="1,2,3,4")], annotate=False
+        )
         self.assertEqual((code, out["method"], out["annotated"]), (0, "highlight", True))
         self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])
         self.assertIn(["playwright-cli", "-s=qa", "highlight", "#msg", "--style", "outline: 3px solid red"], calls)
-        code, out, calls, _, err = self.run_evidence("--ref", "f1e15", "--label", "x",
-                                                     outputs=[done(0), done(0), done(1, err="screenshot failed")])
+        code, out, calls, _, err = self.run_evidence(
+            "--ref", "f1e15", "--label", "x", outputs=[done(0), done(0), done(1, err="screenshot failed")]
+        )
         self.assertEqual(code, 1)
         self.assertIn("screenshot failed", err)
-        self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])  # no red box left for the next image
+        self.assertEqual(
+            calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"]
+        )  # no red box left for the next image
 
     def test_a_ref_image_gets_its_label_as_a_caption_when_pillow_is_there(self):
         code, out, calls, ann, _ = self.run_evidence("--ref", "f1e15", "--label", "Saved at 131")
@@ -657,11 +829,21 @@ class Dispatch(Base):
 
     def setUp(self):
         super().setUp()
-        self.config(app="x", browser="chrome", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
-                    ssoHost="sso.example.com", mapRoute="/map", buildSource={"type": "selector", "value": "#build"})
+        self.config(
+            app="x",
+            browser="chrome",
+            qaBaseUrl="https://qa.example.com",
+            allowedHosts=["qa.example.com"],
+            ssoHost="sso.example.com",
+            mapRoute="/map",
+            buildSource={"type": "selector", "value": "#build"},
+        )
         from support import PLAN
-        cases = [{**PLAN["cases"][0], "route": "/list?a=1", "steps": ["Open", "Authorization: Bearer abcdefghijklmnopqrst"]},
-                 {**PLAN["cases"][2], "route": "/list?a=2"}]
+
+        cases = [
+            {**PLAN["cases"][0], "route": "/list?a=1", "steps": ["Open", "Authorization: Bearer abcdefghijklmnopqrst"]},
+            {**PLAN["cases"][2], "route": "/list?a=2"},
+        ]
         self.run_dir = self.rundir("2026-11-25-PROJ-1+PROJ-2", plan={**PLAN, "cases": cases})
         (self.proj / "qa-rules.md").write_text("never click Confirm\n")
 
@@ -672,13 +854,27 @@ class Dispatch(Base):
     def test_brief_holds_this_routes_cases_its_tickets_acs_rules_and_card(self):
         code, out, _ = self.dispatch("/list?a=1", "--budget", "20", "--known-bugs", "PROJ-77 Sort breaks on ties")
         self.assertEqual(code, 0)
-        self.assertEqual({k: out[k] for k in ("slug", "target", "mode", "case_count")},
-                         {"slug": "list", "target": "https://qa.example.com/list?a=1", "mode": "ticket", "case_count": 1})
+        self.assertEqual(
+            {k: out[k] for k in ("slug", "target", "mode", "case_count")},
+            {"slug": "list", "target": "https://qa.example.com/list?a=1", "mode": "ticket", "case_count": 1},
+        )
         brief = Path(out["brief"]).read_text()
         self.assertEqual(Path(out["brief"]), self.run_dir / ".data/brief-list.md")
-        for want in ("out: " + str(self.run_dir), "slug: list", "budget: 20", "minutes: unlimited", "faults: no",
-                     "TC-1", "Saves 0-130", "Rejects 131", "RULES:\nnever click Confirm", "PROJ-77 Sort breaks on ties",
-                     "mapRoute: /map", "NO CARD for '/list?a=1'", str(ROOT / "references")):
+        for want in (
+            "out: " + str(self.run_dir),
+            "slug: list",
+            "budget: 20",
+            "minutes: unlimited",
+            "faults: no",
+            "TC-1",
+            "Saves 0-130",
+            "Rejects 131",
+            "RULES:\nnever click Confirm",
+            "PROJ-77 Sort breaks on ties",
+            "mapRoute: /map",
+            "NO CARD for '/list?a=1'",
+            str(ROOT / "references"),
+        ):
             self.assertIn(want, brief)
         for gone in ("TC-3", "Sorted by date", "abcdefghijklmnopqrst"):  # another route's case and ticket; a secret
             self.assertNotIn(gone, brief)
@@ -727,14 +923,20 @@ class Dispatch(Base):
         self.assertEqual(len((self.run_dir / ".data/spend.jsonl").read_text().splitlines()), 1)
 
     def test_spend_reports_the_run_so_far_and_the_limits_for_the_next_page(self):
-        self.assertEqual({k: self.spend()[k] for k in ("pages", "commands_used", "exhausted", "budget", "minutes")},
-                         {"pages": 0, "commands_used": 0, "exhausted": False, "budget": 0, "minutes": 0})
+        self.assertEqual(
+            {k: self.spend()[k] for k in ("pages", "commands_used", "exhausted", "budget", "minutes")},
+            {"pages": 0, "commands_used": 0, "exhausted": False, "budget": 0, "minutes": 0},
+        )
         self.spent("/list?a=1", 37)
         self.spent("/list?a=2", 20)
         got = self.spend()
-        self.assertEqual((got["pages"], got["commands_used"], got["commands_left"], got["exhausted"]), (2, 57, None, False))
+        self.assertEqual(
+            (got["pages"], got["commands_used"], got["commands_left"], got["exhausted"]), (2, 57, None, False)
+        )
         got = self.spend("--total-budget", "100")
-        self.assertEqual((got["commands_left"], got["budget"], got["exhausted"]), (43, 43, False))  # the next page can't pass it
+        self.assertEqual(
+            (got["commands_left"], got["budget"], got["exhausted"]), (43, 43, False)
+        )  # the next page can't pass it
         got = self.spend("--total-budget", "100", "--budget", "30")
         self.assertEqual(got["budget"], 30)  # the per-page limit still applies when it is the smaller
         got = self.spend("--total-budget", "60")
@@ -758,8 +960,13 @@ class Dispatch(Base):
         self.assertEqual(got["minutes_left"], 20)
 
     def test_spend_input_is_checked(self):
-        for argv in (("spend",), ("spend", str(self.t / "nope")), ("spend", str(self.run_dir), "--total-budget", "-1"),
-                     ("spend", str(self.run_dir), "--total-budget", "x"), ("spend", str(self.run_dir), "--bogus", "1")):
+        for argv in (
+            ("spend",),
+            ("spend", str(self.t / "nope")),
+            ("spend", str(self.run_dir), "--total-budget", "-1"),
+            ("spend", str(self.run_dir), "--total-budget", "x"),
+            ("spend", str(self.run_dir), "--bogus", "1"),
+        ):
             self.assertEqual(cli(*argv)[0], 2, argv)
 
     def test_a_ledger_line_with_a_wrong_type_or_a_planted_link_is_ignored(self):
@@ -781,11 +988,24 @@ class Dispatch(Base):
 
     def seed_list_and_detail(self):
         from qa_sdet import memory
+
         con = core.connect()
         try:
-            memory.ingest(con, {"run_id": "r", "build": "1", "target": "/incidents", "pages": [
-                {"route": "/incidents", "transitions": [{"to": "/incidents/4521", "trigger": "row click"}]},
-                {"route": "/incidents/4521", "facts": [{"kind": "rule", "text": "Detail page shows the severity badge"}]}]})
+            memory.ingest(
+                con,
+                {
+                    "run_id": "r",
+                    "build": "1",
+                    "target": "/incidents",
+                    "pages": [
+                        {"route": "/incidents", "transitions": [{"to": "/incidents/4521", "trigger": "row click"}]},
+                        {
+                            "route": "/incidents/4521",
+                            "facts": [{"kind": "rule", "text": "Detail page shows the severity badge"}],
+                        },
+                    ],
+                },
+            )
         finally:
             con.close()
 
@@ -828,14 +1048,38 @@ class Dispatch(Base):
 
     def seed_two_detail_pages(self):
         from qa_sdet import memory
+
         con = core.connect()
         try:
-            memory.ingest(con, {"run_id": "r", "build": "1", "target": "/incidents", "pages": [
-                {"route": "/incidents", "transitions": [{"to": "/incidents/4521", "trigger": "row click"},
-                                                        {"to": "/incidents/archive/77", "trigger": "archive row"}]},
-                {"route": "/incidents/4521", "transitions": [{"to": "/incidents/4521/history", "trigger": "History tab"}]},
-                {"route": "/incidents/4521/history", "facts": [{"kind": "rule", "text": "History lists every edit"}]},
-                {"route": "/incidents/archive/77", "facts": [{"kind": "rule", "text": "Archived records are read-only"}]}]})
+            memory.ingest(
+                con,
+                {
+                    "run_id": "r",
+                    "build": "1",
+                    "target": "/incidents",
+                    "pages": [
+                        {
+                            "route": "/incidents",
+                            "transitions": [
+                                {"to": "/incidents/4521", "trigger": "row click"},
+                                {"to": "/incidents/archive/77", "trigger": "archive row"},
+                            ],
+                        },
+                        {
+                            "route": "/incidents/4521",
+                            "transitions": [{"to": "/incidents/4521/history", "trigger": "History tab"}],
+                        },
+                        {
+                            "route": "/incidents/4521/history",
+                            "facts": [{"kind": "rule", "text": "History lists every edit"}],
+                        },
+                        {
+                            "route": "/incidents/archive/77",
+                            "facts": [{"kind": "rule", "text": "Archived records are read-only"}],
+                        },
+                    ],
+                },
+            )
         finally:
             con.close()
 
@@ -851,8 +1095,10 @@ class Dispatch(Base):
         self.assertIn("open it from /incidents: row click, then History tab", brief)
         self.assertIn("Archived records are read-only", Path(old["brief"]).read_text())
         self.assertIn("route: /incidents/archive/:id", Path(old["brief"]).read_text())
-        self.assertEqual(self.dispatch("/incidents", "--open-record", "--target-route", "/incidents/:id/history")[1]["slug"],
-                         "incidents-id-history")  # --resume: same files
+        self.assertEqual(
+            self.dispatch("/incidents", "--open-record", "--target-route", "/incidents/:id/history")[1]["slug"],
+            "incidents-id-history",
+        )  # --resume: same files
 
     def test_target_route_needs_open_record_and_a_path(self):
         self.assertEqual(self.dispatch("/incidents", "--target-route", "/incidents/:id")[0], 2)

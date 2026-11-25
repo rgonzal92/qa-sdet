@@ -10,6 +10,7 @@ v0.4 run folders (qa-out/<date>-<label>/): `rundir` makes one, explorers write .
 like run.json), and `report` renders REPORT.md + qa-out/README.md from .data/plan.json and those files.
 Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) keep skill commands to one shape.
 """
+
 import json
 import os
 import re
@@ -61,28 +62,66 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
-    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
-                   "annotate", "evidence", "report", "audit-bugs", "signals-triage", "body-check", "dup-check", "trace", "next-action", "explore-next", "plan-find",
-                   "setup-permissions", "spend", "plugin-log", "discover"):
+    if cmd not in (
+        "keys",
+        "rundir",
+        "marker",
+        "browser-open",
+        "session-check",
+        "page-start",
+        "api-probe",
+        "prune",
+        "annotate",
+        "evidence",
+        "report",
+        "audit-bugs",
+        "signals-triage",
+        "body-check",
+        "dup-check",
+        "trace",
+        "next-action",
+        "explore-next",
+        "plan-find",
+        "setup-permissions",
+        "spend",
+        "plugin-log",
+        "discover",
+    ):
         return None
     from . import ops
+
     if cmd == "keys":
         print(json.dumps(ops.expand_keys(args, core.config().get("jiraKeyPrefix"))))
     elif cmd == "rundir":
         o = _opts(args, valued=("--keys", "--route", "--label", "--prefix"))
         if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--route", "--label")) != 1:
-            raise core.BadInput("usage: qa-mem rundir <project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]")
+            raise core.BadInput(
+                "usage: qa-mem rundir <project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]"
+            )
         keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
-        print(ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or "")))
+        print(
+            ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or ""))
+        )
     elif cmd == "marker":
         o = _opts(args[1:], flags=("--faults", "--api-writes"), valued=("--budget", "--minutes", "--max-turns"))
         if not args or args[0] not in ("start", "stop") or len(o["_"]) != 1:
-            raise core.BadInput("usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] [--api-writes] "
-                                "[--max-turns N] | marker stop <project>")
+            raise core.BadInput(
+                "usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] [--api-writes] "
+                "[--max-turns N] | marker stop <project>"
+            )
         if args[0] == "start":
-            print(json.dumps(ops.marker_start(o["_"][0], _count(o, "--budget"), _count(o, "--minutes", ops.MARKER_HOURS * 60),
-                                              o.get("--faults", False), api_writes=o.get("--api-writes", False),
-                                              max_turns=_count(o, "--max-turns", 1000))))
+            print(
+                json.dumps(
+                    ops.marker_start(
+                        o["_"][0],
+                        _count(o, "--budget"),
+                        _count(o, "--minutes", ops.MARKER_HOURS * 60),
+                        o.get("--faults", False),
+                        api_writes=o.get("--api-writes", False),
+                        max_turns=_count(o, "--max-turns", 1000),
+                    )
+                )
+            )
         else:
             if len(o) > 1:
                 raise core.BadOption("marker stop takes no options")
@@ -100,9 +139,13 @@ def wrapper_cmd(cmd, args):
         if len(o["_"]) not in (1, 2):
             raise core.BadInput(f"usage: qa-mem discover {COMMANDS['discover']}")
         from . import crawl
-        return crawl.discover(o["_"][0], o["_"][1] if len(o["_"]) == 2 else None,
-                              _count(o, "--depth", 5) if "--depth" in o else 2,
-                              (_count(o, "--max-pages", 200) if "--max-pages" in o else 25) or 25)
+
+        return crawl.discover(
+            o["_"][0],
+            o["_"][1] if len(o["_"]) == 2 else None,
+            _count(o, "--depth", 5) if "--depth" in o else 2,
+            (_count(o, "--max-pages", 200) if "--max-pages" in o else 25) or 25,
+        )
     elif cmd == "page-start":
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem page-start <url>")
@@ -110,7 +153,9 @@ def wrapper_cmd(cmd, args):
     elif cmd == "api-probe":
         o = _opts(args, valued=("--json", "--content-type"), multi=("--header",))
         if len(o["_"]) != 2:
-            raise core.BadInput("usage: qa-mem api-probe <METHOD> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]")
+            raise core.BadInput(
+                "usage: qa-mem api-probe <METHOD> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]"
+            )
         return ops.api_probe(o["_"][0], o["_"][1], o.get("--json"), o.get("--content-type"), o.get("--header", []))
     elif cmd == "evidence":
         o = _opts(args, valued=("--selector", "--ref", "--label"))
@@ -138,68 +183,116 @@ def wrapper_cmd(cmd, args):
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem report <run dir>")
         from . import report
+
         print(report.write_report(args[0]))
     elif cmd == "signals-triage":
         o = _opts(args, valued=("--slug",))
         if len(o["_"]) != 1 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir():
             raise core.BadInput("usage: qa-mem signals-triage <run dir> --slug <slug>")
         from . import report
+
         data = Path(o["_"][0]) / ".data"
         try:
             run = json.loads((data / f"run-{o['--slug']}.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             run = {}  # step 9 writes the run file last: nothing named yet
         t = report.triage_signals(o["_"][0], o["--slug"], run if isinstance(run, dict) else {})
-        groups = (("severe", "SEVERE (5xx, failed requests, a 200 with an error body, a leak)"), ("client", "CLIENT 4xx"),
-                  ("other", "OTHER (request loops, console errors)"))
+        groups = (
+            ("severe", "SEVERE (5xx, failed requests, a 200 with an error body, a leak)"),
+            ("client", "CLIENT 4xx"),
+            ("other", "OTHER (request loops, console errors)"),
+        )
         lines = [f"- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
         sev = [report.signal_severity(key) for key, _, _ in t["app"]]
-        print(("APP SIGNALS NO BUG EXPLAINS YET (while the browser is open, read a body with `playwright-cli -s=qa response-body "
-               f"<#> | qa-mem body-check {shlex.quote(o['_'][0])} --slug {o['--slug']} <#>`; a real failure is a bug, a known one goes in notes by "
-               "method and path):\n"
-               + "\n".join(f"{title}:\n" + "\n".join(l for l, v in zip(lines, sev) if v == kind)
-                           for kind, title in groups if kind in sev))
-              if lines else "no unexplained app signals")
+        print(
+            (
+                "APP SIGNALS NO BUG EXPLAINS YET (while the browser is open, read a body with `playwright-cli -s=qa response-body "
+                f"<#> | qa-mem body-check {shlex.quote(o['_'][0])} --slug {o['--slug']} <#>`; a real failure is a bug, a known one goes in notes by "
+                "method and path):\n"
+                + "\n".join(
+                    f"{title}:\n" + "\n".join(l for l, v in zip(lines, sev) if v == kind)
+                    for kind, title in groups
+                    if kind in sev
+                )
+            )
+            if lines
+            else "no unexplained app signals"
+        )
         if t["suspect_200"]:
             slug, d = o["--slug"], o["_"][0]
-            print("SUSPECT 200 (a 200 can still be a failure the log can't show; read each body once, while the browser is "
-                  f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check {shlex.quote(d)} --slug {slug} <#>`):\n"
-                  + "\n".join(f"- #{i} {call}" for call, i in t["suspect_200"]))
+            print(
+                "SUSPECT 200 (a 200 can still be a failure the log can't show; read each body once, while the browser is "
+                f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check {shlex.quote(d)} --slug {slug} <#>`):\n"
+                + "\n".join(f"- #{i} {call}" for call, i in t["suspect_200"])
+            )
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
     elif cmd == "body-check":
         o = _opts(args, valued=("--slug",))
-        if len(o["_"]) != 2 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir() or not o["_"][1].isdigit():
-            raise core.BadInput("usage: <playwright-cli response-body <#>> | qa-mem body-check <run dir> --slug <slug> <#>")
+        if (
+            len(o["_"]) != 2
+            or not o.get("--slug")
+            or not (Path(o["_"][0]) / ".data").is_dir()
+            or not o["_"][1].isdigit()
+        ):
+            raise core.BadInput(
+                "usage: <playwright-cli response-body <#>> | qa-mem body-check <run dir> --slug <slug> <#>"
+            )
         from . import report
+
         what, findings = report.check_body(o["_"][0], o["--slug"], o["_"][1], sys.stdin.read(200_000))
-        print(f"body-check #{o['_'][1]}" + (f" {what}" if what else "") + ": "
-              + ("nothing suspicious (no error envelope, HTML page or leak signature)" if not findings
-                 else "\n" + "\n".join(f"- {f}" for f in findings)
-                 + "\nA real failure is a bug; a harmless one goes in notes by method and path."))
+        print(
+            f"body-check #{o['_'][1]}"
+            + (f" {what}" if what else "")
+            + ": "
+            + (
+                "nothing suspicious (no error envelope, HTML page or leak signature)"
+                if not findings
+                else "\n"
+                + "\n".join(f"- {f}" for f in findings)
+                + "\nA real failure is a bug; a harmless one goes in notes by method and path."
+            )
+        )
     elif cmd == "next-action":
         if len(args) != 2 or not (Path(args[0]) / ".data").is_dir():
             raise core.BadInput("usage: qa-mem next-action <run dir> <slug>")
         from . import report
+
         print(json.dumps(report.next_action(args[0], args[1])))
     elif cmd == "spend":
-        o = _opts(args, valued=("--total-budget", "--total-minutes", "--budget", "--minutes", "--more-budget", "--more-minutes"))
+        o = _opts(
+            args,
+            valued=("--total-budget", "--total-minutes", "--budget", "--minutes", "--more-budget", "--more-minutes"),
+        )
         if len(o["_"]) != 1:
-            raise core.BadInput("usage: qa-mem spend <run dir> [--total-budget N] [--total-minutes M] [--more-budget N] "
-                                "[--more-minutes M] [--budget N] [--minutes M]")
-        print(json.dumps(ops.spend(o["_"][0], *(_count(o, f"--{k}") for k in (
-            "total-budget", "total-minutes", "budget", "minutes", "more-budget", "more-minutes")))))
+            raise core.BadInput(
+                "usage: qa-mem spend <run dir> [--total-budget N] [--total-minutes M] [--more-budget N] "
+                "[--more-minutes M] [--budget N] [--minutes M]"
+            )
+        print(
+            json.dumps(
+                ops.spend(
+                    o["_"][0],
+                    *(
+                        _count(o, f"--{k}")
+                        for k in ("total-budget", "total-minutes", "budget", "minutes", "more-budget", "more-minutes")
+                    ),
+                )
+            )
+        )
     elif cmd == "explore-next":
         o = _opts(args, valued=("--run",))
         if len(o["_"]) != 1:
             raise core.BadInput("usage: qa-mem explore-next <project> [--run DIR]")
         from . import report
+
         print(json.dumps(report.explore_next(o["_"][0], o.get("--run"))))
     elif cmd == "trace":
         o = _opts(args, valued=("--keys", "--fix-version"))
         if len(o["_"]) != 1:
             raise core.BadInput("usage: qa-mem trace <project> [--keys K1,K2] [--fix-version VER]")
         from . import report
+
         keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if o.get("--keys") else None
         print(report.trace(o["_"][0], keys, o.get("--fix-version")))
     elif cmd == "dup-check":
@@ -209,11 +302,30 @@ def wrapper_cmd(cmd, args):
             data = json.loads(sys.stdin.read() or "[]")
         except ValueError as e:
             raise core.BadInput(f"dup-check: stdin is not the acli search JSON ({e})")
-        items = data if isinstance(data, list) else next((data[k] for k in ("issues", "workItems", "values")
-                                                          if isinstance(data, dict) and isinstance(data.get(k), list)), [])
-        hits = [{"key": str(x.get("key")), "summary": scrub.redact(" ".join(str(
-                    (x.get("fields") if isinstance(x.get("fields"), dict) else x).get("summary") or "").split()))[:200]}
-                for x in items[:10] if isinstance(x, dict) and x.get("key")]
+        items = (
+            data
+            if isinstance(data, list)
+            else next(
+                (
+                    data[k]
+                    for k in ("issues", "workItems", "values")
+                    if isinstance(data, dict) and isinstance(data.get(k), list)
+                ),
+                [],
+            )
+        )
+        hits = [
+            {
+                "key": str(x.get("key")),
+                "summary": scrub.redact(
+                    " ".join(
+                        str((x.get("fields") if isinstance(x.get("fields"), dict) else x).get("summary") or "").split()
+                    )
+                )[:200],
+            }
+            for x in items[:10]
+            if isinstance(x, dict) and x.get("key")
+        ]
         f = Path(args[0]) / ".data" / "jira-dups.json"
         try:
             saved = json.loads(f.read_text(encoding="utf-8"))
@@ -227,11 +339,17 @@ def wrapper_cmd(cmd, args):
         if len(args) != 1 or not Path(args[0]).is_dir():
             raise core.BadInput("usage: qa-mem audit-bugs <run dir>")
         from . import report
+
         found = report.audit_bugs(args[0])
-        print("\n".join(f"{bid}: {'CRITICAL ' if crit else ''}{text}" for bid, issues in found.items() for crit, text in issues)
-              or "bug drafts and repro specs: nothing to fix")
+        print(
+            "\n".join(
+                f"{bid}: {'CRITICAL ' if crit else ''}{text}" for bid, issues in found.items() for crit, text in issues
+            )
+            or "bug drafts and repro specs: nothing to fix"
+        )
     elif cmd == "plan-find":
         from . import report
+
         o = _opts(args, valued=("--keys", "--run"))
         if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--run")) != 1:
             raise core.BadInput("usage: qa-mem plan-find <project> (--keys K1,K2 | --run DIR)")
@@ -239,6 +357,7 @@ def wrapper_cmd(cmd, args):
         print(json.dumps(report.plan_find(o["_"][0], keys=keys, run_dir=o.get("--run")), indent=1))
     elif cmd == "setup-permissions":
         from . import doctor
+
         o = _opts(args, flags=("--apply",), valued=("--settings",))
         if o["_"]:
             raise core.BadInput("usage: qa-mem setup-permissions [--settings PATH] [--apply]")
@@ -246,19 +365,27 @@ def wrapper_cmd(cmd, args):
             print("\n".join(doctor.PERMISSION_RULES))
             return 0
         if "--settings" in o and not o["--settings"].strip():
-            raise core.BadOption("--settings needs a path")  # an empty shell variable must not fall back to the real file
+            raise core.BadOption(
+                "--settings needs a path"
+            )  # an empty shell variable must not fall back to the real file
         added = doctor.merge_permissions(o.get("--settings") or "~/.claude/settings.json")
-        print("added to permissions.allow:\n" + "\n".join(added) if added else "all rules already present; nothing changed")
+        print(
+            "added to permissions.allow:\n" + "\n".join(added)
+            if added
+            else "all rules already present; nothing changed"
+        )
     elif cmd == "plugin-log":
         from . import plugin_log
+
         if not args or args[0] not in ("note", "export", "show", "clear"):
             raise core.BadInput(f"usage: qa-mem plugin-log {COMMANDS['plugin-log']}")
         sub, rest = args[0], args[1:]
         if sub == "note":
             o = _opts(rest, valued=("--kind", "--severity", "--project"))
             proj = plugin_log.resolve_project(o.get("--project"))
-            rec = plugin_log.add_note(proj, " ".join(o["_"]), kind=o.get("--kind") or "nuisance",
-                                      severity=o.get("--severity"))
+            rec = plugin_log.add_note(
+                proj, " ".join(o["_"]), kind=o.get("--kind") or "nuisance", severity=o.get("--severity")
+            )
             tag = rec["kind"] + (f"/{rec['severity']}" if rec.get("severity") else "")
             ctx = f" ({rec['run']})" if rec.get("run") else ""
             print(f"logged [{tag}]{ctx} to {proj / 'qa-out' / plugin_log.LOG_NAME}")
@@ -269,8 +396,13 @@ def wrapper_cmd(cmd, args):
             if o.get("--all") and "--since" in o:
                 raise core.BadOption("give either --all or --since, not both")
             proj = plugin_log.resolve_project(o.get("--project"))
-            res = plugin_log.export_digest(proj, all_events=o.get("--all", False), since=o.get("--since"),
-                                           preview=o.get("--preview", False), stdout=o.get("--stdout", False))
+            res = plugin_log.export_digest(
+                proj,
+                all_events=o.get("--all", False),
+                since=o.get("--since"),
+                preview=o.get("--preview", False),
+                stdout=o.get("--stdout", False),
+            )
             if (o.get("--preview") or o.get("--stdout")) and res["markdown"]:
                 print(res["markdown"], end="")
             else:
@@ -296,38 +428,71 @@ def wrapper_cmd(cmd, args):
 
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
-    "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
-    "patterns": "[--min-pages N] [--json]", "signals": "[route] [--status ACTIVE|IGNORED|ALL]",
-    "signal-ignore": "<id>", "signal-unignore": "<id>", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']",
-    "impact": "<route|page name|METHOD /path> [--json]", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "doctor": "",
+    "browsers": "",
+    "where": "",
+    "card": "<route|page name> [--focus <terms>] [--ids]",
+    "patterns": "[--min-pages N] [--json]",
+    "signals": "[route] [--status ACTIVE|IGNORED|ALL]",
+    "signal-ignore": "<id>",
+    "signal-unignore": "<id>",
+    "history": "[route] [--builds N] [--json]",
+    "hotspots": "[--top N] [--json]",
+    "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']",
+    "impact": "<route|page name|METHOD /path> [--json]",
+    "questions": "[open|resolved|all]",
+    "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
-    "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
+    "forget": "fact <id> | forget page <route> [--force]",
+    "gaps": "[--changed] [--top N] [--json]",
     "blindspots": "[route] [--json]",
     "search": "<words> [-word to exclude]",
-    "bugs": "[STATUS]", "hash": "<route> <symptom>",
+    "bugs": "[STATUS]",
+    "hash": "<route> <symptom>",
     "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
     "bug-sync": "[--jql]",
-    "stale": "<build>", "ingest": "<run.json>", "ingest-pending": "<dir>...", "code": "[route] | code --repos",
-    "codemap-scan": "[--full] [--out DIR] <source folder>...", "init-status": "<init dir>", "codemap-forget": "<source folder>",
-    "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
+    "stale": "<build>",
+    "ingest": "<run.json>",
+    "ingest-pending": "<dir>...",
+    "code": "[route] | code --repos",
+    "codemap-scan": "[--full] [--out DIR] <source folder>...",
+    "init-status": "<init dir>",
+    "codemap-forget": "<source folder>",
+    "keys": "<number|KEY>...",
+    "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] [--api-writes] [--max-turns N] | marker stop <project>",
-    "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
-    "page-start": "<url>", "crawl": "<run dir> [<route>...]", "discover": "<run dir> [<url>] [--depth D] [--max-pages N]",
+    "browser-open": "[--session qa|qa-login] [--headed] [<url>]",
+    "session-check": "[--record] [--build]",
+    "page-start": "<url>",
+    "crawl": "<run dir> [<route>...]",
+    "discover": "<run dir> [<url>] [--depth D] [--max-pages N]",
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
-                "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
-                "[--hypothesis '<why this page>'] [--max-turns N]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
+    "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
+    "[--hypothesis '<why this page>'] [--max-turns N]",
+    "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]",
-    "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]", "signals-triage": "<run dir> --slug <slug>",
+    "annotate": "<png> [--box x,y,w,h ...] --label <text>",
+    "report": "<run dir>",
+    "audit-bugs": "<run dir>",
+    "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)",
+    "trace": "<project> [--keys K1,K2] [--fix-version VER]",
+    "next-action": "<run dir> <slug>",
+    "explore-next": "<project> [--run DIR]",
+    "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]",
+    "signals-triage": "<run dir> --slug <slug>",
     "body-check": "<run dir> --slug <slug> <#>   (the response body of request <#> on stdin)",
-    "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
-    "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
+    "plan-find": "<project> (--keys K1,K2 | --run DIR)",
+    "prep": "<project> <number|KEY>...",
+    "inbox": "<project>",
+    "setup-permissions": "[--settings PATH] [--apply]",
     "plugin-log": "note [--kind bug|nuisance|idea] [--severity low|med|high] [--project DIR] <text> | "
-                  "export [--all] [--since <ISO|Nd>] [--preview] [--stdout] [--project DIR] | "
-                  "show [--limit N] [--type TYPE] [--project DIR] | clear [--project DIR]",
+    "export [--all] [--since <ISO|Nd>] [--preview] [--stdout] [--project DIR] | "
+    "show [--limit N] [--type TYPE] [--project DIR] | clear [--project DIR]",
 }
-USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items())
+USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(
+    f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items()
+)
 
 
 def _log_cli_error(cmd, code, reason):
@@ -336,8 +501,13 @@ def _log_cli_error(cmd, code, reason):
         return
     try:
         from . import plugin_log
-        plugin_log.append_event(plugin_log.resolve_project() / "qa-out", "cli_error",
-                                {"cmd": cmd, "exit_code": code, "reason": str(reason)}, create=False)
+
+        plugin_log.append_event(
+            plugin_log.resolve_project() / "qa-out",
+            "cli_error",
+            {"cmd": cmd, "exit_code": code, "reason": str(reason)},
+            create=False,
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -356,7 +526,12 @@ def _run_marker(roots):
         qa_out = root if root.name == "qa-out" else next((p for p in root.parents if p.name == "qa-out"), root)
         try:
             m = json.loads((qa_out / ".active").read_text())
-            if isinstance(m, dict) and m.get("run_dir") and m.get("slug") and float(m.get("expires") or 0) > time.time():
+            if (
+                isinstance(m, dict)
+                and m.get("run_dir")
+                and m.get("slug")
+                and float(m.get("expires") or 0) > time.time()
+            ):
                 return m
         except (OSError, ValueError, TypeError):
             continue
@@ -388,8 +563,11 @@ def main(argv):
         if "locked" not in str(e) and "busy" not in str(e):
             print(f"qa-mem: the memory DB {core.db_path()} failed: {e}", file=sys.stderr)
             return 1
-        print(f"qa-mem: the memory DB {core.db_path()} stayed busy (another qa-mem or a run's hook is writing to it); "
-              "the command did not finish: run it again in a minute", file=sys.stderr)
+        print(
+            f"qa-mem: the memory DB {core.db_path()} stayed busy (another qa-mem or a run's hook is writing to it); "
+            "the command did not finish: run it again in a minute",
+            file=sys.stderr,
+        )
         return 1
 
 
@@ -428,50 +606,85 @@ def _main(argv):
         skip = a in valued
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
         from . import plugin_log
+
         memory.PARKED.clear()
         roots = list(dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a))  # cwd + project dir
         for root in roots:
             try:
                 memory.ingest_pending(root)
             except Exception as e:  # noqa: BLE001
-                plugin_log.append_event(root, "hook_error",
-                                        {"hook": "ingest-pending", "error_type": type(e).__name__, "detail": str(e)},
-                                        create=False)
+                plugin_log.append_event(
+                    root,
+                    "hook_error",
+                    {"hook": "ingest-pending", "error_type": type(e).__name__, "detail": str(e)},
+                    create=False,
+                )
                 print(f"qa-mem: {e}", file=sys.stderr)
         # parallel mappers: the first to stop parks every bad code map, so each mapper hears about all still parked
-        stale = [x for root in roots for x in memory.parked_codemaps(root)
-                 if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)]
+        stale = [
+            x
+            for root in roots
+            for x in memory.parked_codemaps(root)
+            if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)
+        ]
         marker = _run_marker(roots)  # an explorer's run (dispatch wrote run_dir and slug)
         hin = hook_input() if memory.PARKED or stale or marker else {}
         role = str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip()
         if stale and hin.get("hook_event_name") == "SubagentStop" and role == "qa-mapper":
             memory.PARKED.extend(stale)
         todo = []
-        if marker and hin.get("hook_event_name") == "SubagentStop" and role == "qa-explorer" \
-                and not hin.get("stop_hook_active"):
+        if (
+            marker
+            and hin.get("hook_event_name") == "SubagentStop"
+            and role == "qa-explorer"
+            and not hin.get("stop_hook_active")
+        ):
             from . import ops, report  # the marker was started MARKER_HOURS before it expires
-            todo = report.verify_run(marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600)
+
+            todo = report.verify_run(
+                marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600
+            )
         if todo:
-            plugin_log.append_event(Path(marker["run_dir"]).parent, "stop_bounce", {
-                "agent": role, "kind": "verify_run", "run": Path(marker["run_dir"]).name,
-                "slug": marker.get("slug"), "items": todo,
-            }, create=False)
-            print("qa-sdet: before you stop, finish these (then stop again):\n" + "\n".join(f"- {t}" for t in todo),
-                  file=sys.stderr)
+            plugin_log.append_event(
+                Path(marker["run_dir"]).parent,
+                "stop_bounce",
+                {
+                    "agent": role,
+                    "kind": "verify_run",
+                    "run": Path(marker["run_dir"]).name,
+                    "slug": marker.get("slug"),
+                    "items": todo,
+                },
+                create=False,
+            )
+            print(
+                "qa-sdet: before you stop, finish these (then stop again):\n" + "\n".join(f"- {t}" for t in todo),
+                file=sys.stderr,
+            )
             if not memory.PARKED:
                 return 2
         if memory.PARKED and not hin.get("stop_hook_active"):
             qa_out = next((Path(r) for r in roots if Path(r).is_dir()), None)
             if qa_out:
-                plugin_log.append_event(qa_out, "stop_bounce", {
-                    "agent": role or "main", "kind": "parked", "items": memory.PARKED[:5],
-                }, create=False)
+                plugin_log.append_event(
+                    qa_out,
+                    "stop_bounce",
+                    {
+                        "agent": role or "main",
+                        "kind": "parked",
+                        "items": memory.PARKED[:5],
+                    },
+                    create=False,
+                )
             # Exit 2 from a Stop/SubagentStop hook shows this to the agent that just wrote the file, once.
             refs = Path(__file__).resolve().parent.parent.parent / "references"
-            print(f"qa-sdet memory could not save this (file(s) below). For each one YOU wrote this run: fix the field the "
-                  f"error names (rules: {refs / 'run-json.md'} for run JSON, {refs / 'code-map.md'} for code-map-*.json) "
-                  "and rewrite the whole file; it is re-read automatically. A file you did not write belongs to another "
-                  "agent: leave it.\n" + "\n".join(memory.PARKED), file=sys.stderr)
+            print(
+                f"qa-sdet memory could not save this (file(s) below). For each one YOU wrote this run: fix the field the "
+                f"error names (rules: {refs / 'run-json.md'} for run JSON, {refs / 'code-map.md'} for code-map-*.json) "
+                "and rewrite the whole file; it is re-read automatically. A file you did not write belongs to another "
+                "agent: leave it.\n" + "\n".join(memory.PARKED),
+                file=sys.stderr,
+            )
             return 2
         return 0
     if cmd == "init-status":
@@ -481,6 +694,7 @@ def _main(argv):
         return 0
     if cmd == "doctor":
         from . import doctor
+
         problems = doctor.doctor()
         if problems:
             _log_cli_error("doctor", 1, f"{problems} doctor gap(s)")
@@ -493,6 +707,7 @@ def _main(argv):
             return code_
         if cmd == "inbox":
             from . import report
+
             o = _opts(args)
             if len(o["_"]) != 1:
                 raise core.BadInput("usage: qa-mem inbox <project>   (the acli JSON on stdin)")
@@ -515,6 +730,7 @@ def _main(argv):
         return 2
     if cmd == "browsers":  # what C1 offers when it asks which browser to use
         from . import doctor
+
         for name, (ok, how) in doctor.installed_browsers().items():
             print(f"{name:8} {'installed' if ok else 'missing  '}  {how}")
         print("(firefox and webkit mean Playwright's own builds; a system Firefox can't be driven)")
@@ -575,12 +791,17 @@ def run_cmd(con, cmd, args):
         if not memory.set_signal(con, int(args[0].lstrip("#")), "IGNORED" if cmd == "signal-ignore" else "ACTIVE"):
             print(f"no signal #{args[0].lstrip('#')} (qa-mem signals lists them)")
             return 1
-        print(f"signal #{args[0].lstrip('#')} " + ("ignored: reports leave it out" if cmd == "signal-ignore" else "active again"))
+        print(
+            f"signal #{args[0].lstrip('#')} "
+            + ("ignored: reports leave it out" if cmd == "signal-ignore" else "active again")
+        )
     elif cmd == "patterns":
         o = _opts(args, flags=("--json",), valued=("--min-pages",))
         if o["_"]:
             return usage_error(cmd)
-        print(memory.patterns(con, max(2, _count(o, "--min-pages")) if "--min-pages" in o else 2, o.get("--json", False)))
+        print(
+            memory.patterns(con, max(2, _count(o, "--min-pages")) if "--min-pages" in o else 2, o.get("--json", False))
+        )
     elif cmd == "questions":
         if len(args) > 1 or (args and args[0] not in ("open", "resolved", "all")):
             return usage_error(cmd)
@@ -597,20 +818,33 @@ def run_cmd(con, cmd, args):
         if len(o["_"]) < 3:
             return usage_error(cmd)
         try:
-            fid = memory.remember(con, o["_"][0], o["_"][1], " ".join(o["_"][2:]), not o.get("--build-scoped", False),
-                                  o.get("--source") or "user")
+            fid = memory.remember(
+                con,
+                o["_"][0],
+                o["_"][1],
+                " ".join(o["_"][2:]),
+                not o.get("--build-scoped", False),
+                o.get("--source") or "user",
+            )
         except core.BadInput as e:
             print(f"qa-mem: {e}", file=sys.stderr)
             return 2
         print(f"remembered #{fid}" + ("" if o.get("--build-scoped") else " (pinned: kept across builds)"))
     elif cmd == "forget":
         o = _opts(args, flags=("--force",))
-        if len(o["_"]) != 2 or o["_"][0] not in ("fact", "page") or (o["_"][0] == "fact" and not o["_"][1].lstrip("#").isdigit()):
+        if (
+            len(o["_"]) != 2
+            or o["_"][0] not in ("fact", "page")
+            or (o["_"][0] == "fact" and not o["_"][1].lstrip("#").isdigit())
+        ):
             return usage_error(cmd)
         if o["_"][0] == "fact":
             row = memory.forget_fact(con, int(o["_"][1].lstrip("#")))
-            print(f"forgot fact #{o['_'][1].lstrip('#')}: {row['page']} [{row['kind']}] {row['text']}" if row
-                  else "no such fact (qa-mem card <route> --ids shows them)")
+            print(
+                f"forgot fact #{o['_'][1].lstrip('#')}: {row['page']} [{row['kind']}] {row['text']}"
+                if row
+                else "no such fact (qa-mem card <route> --ids shows them)"
+            )
             return 0 if row else 1
         done, why = memory.forget_page(con, o["_"][1], o.get("--force", False))
         print(why)
@@ -623,8 +857,10 @@ def run_cmd(con, cmd, args):
     elif cmd == "codemap-forget" and args:
         n = codemap.codemap_forget(con, " ".join(args))
         if n is None:
-            print(f"no mapped source folder '{' '.join(args)}'; give one exactly as `qa-mem code --repos` lists it",
-                  file=sys.stderr)
+            print(
+                f"no mapped source folder '{' '.join(args)}'; give one exactly as `qa-mem code --repos` lists it",
+                file=sys.stderr,
+            )
             return 2
         print(f"removed {n} code-map rows for {' '.join(args)}")
     elif cmd == "codemap-scan":
@@ -636,7 +872,10 @@ def run_cmd(con, cmd, args):
             print("give the source folder(s) to scan, e.g. qa-mem codemap-scan ~/work/traffic-ui ~/work/traffic-api")
             return 2
         from . import scan
-        print(json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1))
+
+        print(
+            json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1)
+        )
     elif cmd == "blindspots":
         o = _opts(args, flags=("--json",))
         if len(o["_"]) > 1:
@@ -656,20 +895,48 @@ def run_cmd(con, cmd, args):
         if not args:
             return usage_error(cmd)
         from . import crawl
+
         return crawl.crawl(con, args[0], args[1:])
     elif cmd == "dispatch":
-        o = _opts(args, flags=("--faults", "--open-record", "--api-writes"),
-                  valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs", "--target-route",
-                          "--hypothesis", "--max-turns"))
+        o = _opts(
+            args,
+            flags=("--faults", "--open-record", "--api-writes"),
+            valued=(
+                "--route",
+                "--mode",
+                "--focus",
+                "--budget",
+                "--minutes",
+                "--known-bugs",
+                "--target-route",
+                "--hypothesis",
+                "--max-turns",
+            ),
+        )
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
             return usage_error(cmd)
         from . import ops
-        print(json.dumps(ops.dispatch(
-            con, o["_"][0], o["--route"], mode=o.get("--mode"), focus=o.get("--focus"), budget=_count(o, "--budget"),
-            minutes=_count(o, "--minutes", ops.MARKER_HOURS * 60), faults=o.get("--faults", False),
-            known_bugs=o.get("--known-bugs") or "", open_record=o.get("--open-record", False),
-            api_writes=o.get("--api-writes", False), hypothesis=o.get("--hypothesis"), target_route=o.get("--target-route"),
-            max_turns=_count(o, "--max-turns", 1000))))
+
+        print(
+            json.dumps(
+                ops.dispatch(
+                    con,
+                    o["_"][0],
+                    o["--route"],
+                    mode=o.get("--mode"),
+                    focus=o.get("--focus"),
+                    budget=_count(o, "--budget"),
+                    minutes=_count(o, "--minutes", ops.MARKER_HOURS * 60),
+                    faults=o.get("--faults", False),
+                    known_bugs=o.get("--known-bugs") or "",
+                    open_record=o.get("--open-record", False),
+                    api_writes=o.get("--api-writes", False),
+                    hypothesis=o.get("--hypothesis"),
+                    target_route=o.get("--target-route"),
+                    max_turns=_count(o, "--max-turns", 1000),
+                )
+            )
+        )
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
@@ -714,12 +981,17 @@ def run_cmd(con, cmd, args):
         if len(args) < 2:
             return usage_error(cmd)
         from . import report
+
         print(json.dumps(report.prep(con, args[0], args[1:]), indent=1, ensure_ascii=False))
     elif cmd == "ingest" and len(args) == 1:
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:
-            memory.ingest(con, scrub.redact_json(json.loads(Path(args[0]).read_text(encoding="utf-8-sig"))),
-                          run_dir=Path(args[0]).resolve().parent, src=Path(args[0]).resolve())
+            memory.ingest(
+                con,
+                scrub.redact_json(json.loads(Path(args[0]).read_text(encoding="utf-8-sig"))),
+                run_dir=Path(args[0]).resolve().parent,
+                src=Path(args[0]).resolve(),
+            )
         except (OSError, ValueError, RecursionError) as e:  # ValueError: not JSON, or a field ingest rejects
             _log_cli_error("ingest", 2, f"{type(e).__name__}: {core.short(e, 200)}")
             print(f"qa-mem: ingest: can't save {args[0]} ({type(e).__name__}: {core.short(e, 200)})", file=sys.stderr)

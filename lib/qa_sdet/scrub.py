@@ -1,5 +1,6 @@
 """Redaction of secrets from text, JSON and files: tokens with a recognisable format, credentials in URLs, auth
 headers, and the values of secret-named JSON keys. Nothing here guesses from prose."""
+
 import json
 import os
 import re
@@ -10,13 +11,19 @@ from pathlib import Path
 
 
 # ---------- redaction: secrets must not reach drafts the user files, or the DB ----------
-SECRET_HEADERS = ("authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
-                  "x-xsrf-token|x-amz-security-token")
+SECRET_HEADERS = (
+    "authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
+    "x-xsrf-token|x-amz-security-token"
+)
 # Any name ending in one of these (PRIVATE_TOKEN, secret_key, bearerToken); not 'sid': site/segment IDs.
-SECRET_KEYS = ("[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
-               "access[ _-]?key|account[ _-]?key|subscription[ _-]?key|session[ _-]?id)")  # also 'API key', 'Session ID'
-SECRET_NAME_RE = re.compile(rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid|jwt|"
-                            rf"bearer)$")  # as a JSON key or header name only; in prose these are ordinary words
+SECRET_KEYS = (
+    "[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
+    "access[ _-]?key|account[ _-]?key|subscription[ _-]?key|session[ _-]?id)"
+)  # also 'API key', 'Session ID'
+SECRET_NAME_RE = re.compile(
+    rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid|jwt|"
+    rf"bearer)$"
+)  # as a JSON key or header name only; in prose these are ordinary words
 # Literal tokens: safe to replace anywhere, including inside code and JSON strings.
 LITERAL_REDACTIONS = [
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED-JWT]"),
@@ -26,19 +33,37 @@ LITERAL_REDACTIONS = [
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[REDACTED-SLACK-TOKEN]"),
     (re.compile(r"\bATATT[A-Za-z0-9_=-]{20,}"), "[REDACTED-ATLASSIAN-TOKEN]"),
     # sk-ant-…, sk-proj-…: a digit somewhere, so CSS classes like sk-folding-cube-container stay
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"), lambda m: "[REDACTED-API-KEY]" if re.search(r"\d", m.group(0)) else m.group(0)),
+    (
+        re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
+        lambda m: "[REDACTED-API-KEY]" if re.search(r"\d", m.group(0)) else m.group(0),
+    ),
     (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"), "[REDACTED-GITLAB-TOKEN]"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:(?!-----BEGIN )[\s\S]){0,20000}?-----END [A-Z ]*PRIVATE KEY-----|"
-                r"(?:\s*[A-Za-z0-9+/=]{16,})*)"), "[REDACTED-PRIVATE-KEY]"),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:(?!-----BEGIN )[\s\S]){0,20000}?-----END [A-Z ]*PRIVATE KEY-----|"
+            r"(?:\s*[A-Za-z0-9+/=]{16,})*)"
+        ),
+        "[REDACTED-PRIVATE-KEY]",
+    ),
     # a token, not a word: "Bearer acknowledgements" in prose stays
-    (re.compile(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9\-._~+/]*[0-9._~+/-])[A-Za-z0-9\-._~+/]{16,}=*"),
-     r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s?#:@\"'`]*:[^/\s?#@\"'`]+@"), r"\1[REDACTED]@"),  # user:pass@host
+    (
+        re.compile(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9\-._~+/]*[0-9._~+/-])[A-Za-z0-9\-._~+/]{16,}=*"),
+        r"\1\2[REDACTED]",
+    ),
+    (
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s?#:@\"'`]*:[^/\s?#@\"'`]+@"),
+        r"\1[REDACTED]@",
+    ),  # user:pass@host
     # not ?code=: usually an ordinary value (road/segment codes); an OAuth code is single-use and short-lived
-    (re.compile(r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey|"
-                r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=|"
-                r"\b(?:access_token|id_token|api_key|apikey)=)"  # also outside a URL: `GET /x api_key=…`, `export API_KEY=…`
-                r"(?!\[REDACTED|<|\$\{|\{|:\w)[^&\s\"'`#]+"), r"\1[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey|"
+            r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=|"
+            r"\b(?:access_token|id_token|api_key|apikey)=)"  # also outside a URL: `GET /x api_key=…`, `export API_KEY=…`
+            r"(?!\[REDACTED|<|\$\{|\{|:\w)[^&\s\"'`#]+"
+        ),
+        r"\1[REDACTED]",
+    ),
 ]
 # `Authorization: <anything>`: up to the end of the line or the next quote, the value is the credential
 HEADER_RE = re.compile(rf"(?im)\b((?:{SECRET_HEADERS}))\b([\"']?[ \t]*:[ \t]*[\"']?)(?!\[REDACTED)([^\s\"'][^\n\"']*)")
@@ -62,11 +87,13 @@ JSON_PAIR_RE = re.compile(r'("([^"\\\n]{1,60})"[ \t]*:[ \t]*)("(?:[^"\\\n]|\\.)*
 def redact_json_text(text):
     """Text that embeds JSON (`requests` output plus request/response bodies): values of secret-named keys, as
     redact_json does for parsed JSON. An object or array under a secret key is left; its own keys are still checked."""
+
     def mask(m):
         v = m.group(3)
         if not SECRET_NAME_RE.match(m.group(2)) or v in ('""', '"[REDACTED]"'):
             return m.group(0)
         return m.group(1) + '"[REDACTED]"'
+
     return JSON_PAIR_RE.sub(mask, text)
 
 
@@ -81,16 +108,32 @@ def redact_json(obj):
         named = isinstance(label, str) and "value" in obj and SECRET_NAME_RE.match(label)
         out = {}
         for k, v in obj.items():
-            if isinstance(k, str) and k.lower() == "cookies" and isinstance(v, (list, dict)):  # a cookie jar: every value
+            if (
+                isinstance(k, str) and k.lower() == "cookies" and isinstance(v, (list, dict))
+            ):  # a cookie jar: every value
                 hide = lambda x: "[REDACTED]" if _redactable(x) else x
-                out[k] = {n: hide(x) for n, x in v.items()} if isinstance(v, dict) else [
-                    {**redact_json(c), "value": hide(c["value"])} if isinstance(c, dict) and "value" in c else redact_json(c) for c in v]
+                out[k] = (
+                    {n: hide(x) for n, x in v.items()}
+                    if isinstance(v, dict)
+                    else [
+                        {**redact_json(c), "value": hide(c["value"])}
+                        if isinstance(c, dict) and "value" in c
+                        else redact_json(c)
+                        for c in v
+                    ]
+                )
                 continue
             secret = (isinstance(k, str) and SECRET_NAME_RE.match(k)) or (named and k == "value")
             out[k] = "[REDACTED]" if secret and _redactable(v) else redact_json(v)
         return out
     if isinstance(obj, list):
-        if len(obj) == 2 and isinstance(obj[0], str) and isinstance(obj[1], str) and obj[1] and SECRET_NAME_RE.match(obj[0]):
+        if (
+            len(obj) == 2
+            and isinstance(obj[0], str)
+            and isinstance(obj[1], str)
+            and obj[1]
+            and SECRET_NAME_RE.match(obj[0])
+        ):
             return [obj[0], "[REDACTED]"]  # a header as a [name, value] pair
         return [redact_json(v) for v in obj]
     return redact(obj.encode("utf-8", "surrogatepass").decode("utf-8", "replace")) if isinstance(obj, str) else obj
@@ -155,7 +198,9 @@ def scrub_tree(root, budget=4.0):
         since, cursor = 0.0, ""
     started = time.time()
     todo, suffixes = [], PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES
-    for folder, _, names in os.walk(root):  # no stat for folders, images or other files this never scrubs (sorted below)
+    for folder, _, names in os.walk(
+        root
+    ):  # no stat for folders, images or other files this never scrubs (sorted below)
         for name in names:
             # Path.suffix is '' or the text from the last dot: most names (images) fail the cheap test first
             dot = name.rfind(".")

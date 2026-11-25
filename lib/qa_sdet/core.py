@@ -1,4 +1,5 @@
 """Config, the DB connection and schema, constants, and helpers the other modules share."""
+
 import fcntl
 import hashlib
 import json
@@ -24,10 +25,21 @@ BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli --browser
 VISIBLE = ("OPEN", "FILED", "REGRESSED")  # bugs the explorer must know about
 # Must match the IDs in references/heuristics.md.
 HEURISTICS = [
-    "happy-path", "boundary", "empty-null", "invalid-format", "unicode-whitespace",
-    "duplicate", "sequence-repeat", "back-refresh", "sort-filter-paginate",
-    "error-handling", "loading-empty-states", "keyboard-a11y", "console-errors",
-    "network-failures", "permissions",
+    "happy-path",
+    "boundary",
+    "empty-null",
+    "invalid-format",
+    "unicode-whitespace",
+    "duplicate",
+    "sequence-repeat",
+    "back-refresh",
+    "sort-filter-paginate",
+    "error-handling",
+    "loading-empty-states",
+    "keyboard-a11y",
+    "console-errors",
+    "network-failures",
+    "permissions",
 ]
 
 SCHEMA = """
@@ -95,8 +107,10 @@ CREATE TABLE IF NOT EXISTS observed_endpoints(method TEXT NOT NULL, path TEXT NO
 FTS_VERSION = "2"  # porter-stemmed facts_fts, and bugs_fts
 
 # meta keys of the removed orphan-route bookkeeping of the code map
-STALE_META = ("(key IN ('codemap_routes_at_scan', 'codemap_lost', 'codemap_scan_repos') "
-              "OR key LIKE 'codemap_reread:%' OR key LIKE 'codemap_pending:%')")
+STALE_META = (
+    "(key IN ('codemap_routes_at_scan', 'codemap_lost', 'codemap_scan_repos') "
+    "OR key LIKE 'codemap_reread:%' OR key LIKE 'codemap_pending:%')"
+)
 
 
 def now():
@@ -142,22 +156,53 @@ def connect():
         have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
         if have and not cols <= have:
             con.close()
-            raise BadInput(f"{p} is from before qa-sdet 0.4 ({table} lacks {', '.join(sorted(cols - have))}): move it "
-                           "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again")
+            raise BadInput(
+                f"{p} is from before qa-sdet 0.4 ({table} lacks {', '.join(sorted(cols - have))}): move it "
+                "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again"
+            )
     old_fts = con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()
-    if old_fts and "porter" not in old_fts[0]:  # 0.4 indexed whole words only: rebuild with stemming ('date' finds 'dates')
-        con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE IF EXISTS facts_fts;")
+    if (
+        old_fts and "porter" not in old_fts[0]
+    ):  # 0.4 indexed whole words only: rebuild with stemming ('date' finds 'dates')
+        con.executescript(
+            "DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE IF EXISTS facts_fts;"
+        )
     con.executescript(SCHEMA)
     have = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
     backfill = {  # what rows from before a column get, instead of a later run's value
         "first_build": "UPDATE bugs SET first_build=''",  # found on a build nobody recorded: never "new" on a later one
-        "explored": "UPDATE pages SET explored=coalesce(last_verified, '') WHERE build IS NOT NULL"}
+        "explored": "UPDATE pages SET explored=coalesce(last_verified, '') WHERE build IS NOT NULL",
+    }
     todo = []  # run after the search index is rebuilt: an UPDATE of bugs fires its triggers
-    for table, cols in (("bugs", ("jira_key", "fixed_ts", "heuristic", "endpoint", "pattern", "ticket", "first_build",
-                                  "last_build", "fixed_build", "regressed_count:INTEGER DEFAULT 0", "regressed_by")),
-                        ("sightings", ("page", "build")), ("pages", ("explored",)),
-                        ("runs", ("cases_pass:INTEGER DEFAULT 0", "cases_fail:INTEGER DEFAULT 0",
-                                  "cases_blocked:INTEGER DEFAULT 0", "bugs_found:INTEGER DEFAULT 0"))):
+    for table, cols in (
+        (
+            "bugs",
+            (
+                "jira_key",
+                "fixed_ts",
+                "heuristic",
+                "endpoint",
+                "pattern",
+                "ticket",
+                "first_build",
+                "last_build",
+                "fixed_build",
+                "regressed_count:INTEGER DEFAULT 0",
+                "regressed_by",
+            ),
+        ),
+        ("sightings", ("page", "build")),
+        ("pages", ("explored",)),
+        (
+            "runs",
+            (
+                "cases_pass:INTEGER DEFAULT 0",
+                "cases_fail:INTEGER DEFAULT 0",
+                "cases_blocked:INTEGER DEFAULT 0",
+                "bugs_found:INTEGER DEFAULT 0",
+            ),
+        ),
+    ):
         have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}  # columns added within 0.4: added in place
         for col in cols:
             name, _, kind = col.partition(":")
@@ -174,7 +219,9 @@ def connect():
     for sql in todo:
         with con:
             con.execute(sql)
-    if con.execute(f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1").fetchone():  # one-time clean-up (read first: no write lock)
+    if con.execute(
+        f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1"
+    ).fetchone():  # one-time clean-up (read first: no write lock)
         with con:
             con.execute(f"DELETE FROM meta WHERE {STALE_META}")
     return con
@@ -213,7 +260,7 @@ def norm_route(r):
     path = _ids(parts.path) or "/"
     f = parts.fragment.split("?")[0]
     bang = "!" if f.startswith("!/") else ""  # AngularJS hashbang routes: #!/incidents
-    frag = _ids(f[len(bang):]) if f[len(bang):].startswith("/") else ""
+    frag = _ids(f[len(bang) :]) if f[len(bang) :].startswith("/") else ""
     return path + (f"#{bang}{frag}" if frag else "")
 
 
@@ -227,8 +274,11 @@ def route_key(r):
     return norm_route(r), q
 
 
-ID_SEGMENT = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
-                        r":\w+|\{\w+\}|\[\.{0,3}\w+\]|<[^/>]+>|\$\{[^}/]*\}", re.I)  # route params: :id, {id}, [id], <id>
+ID_SEGMENT = re.compile(
+    r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
+    r":\w+|\{\w+\}|\[\.{0,3}\w+\]|<[^/>]+>|\$\{[^}/]*\}",
+    re.I,
+)  # route params: :id, {id}, [id], <id>
 
 
 def _ids(path):
@@ -252,8 +302,11 @@ def allowed_hosts(cfg):
     """The config's allowedHosts as the guard reads them (hooks/guard.py allowed_hosts, which imports nothing from here):
     lower case, no trailing dot or '*.'; one loopback name allows all three. tests/test_guard.py pins the two together."""
     listed = cfg.get("allowedHosts") if isinstance(cfg, dict) else None
-    hosts = {h.lower().strip().rstrip(".").removeprefix("*.") for h in listed if isinstance(h, str) and h.strip()} \
-        if isinstance(listed, list) else set()
+    hosts = (
+        {h.lower().strip().rstrip(".").removeprefix("*.") for h in listed if isinstance(h, str) and h.strip()}
+        if isinstance(listed, list)
+        else set()
+    )
     return hosts | LOOPBACK if hosts & LOOPBACK else hosts
 
 
@@ -268,7 +321,12 @@ def url_allowed(url, hosts):
         host = (u.hostname or "").lower().rstrip(".")
     except ValueError:
         return False
-    return u.scheme in ("http", "https") and bool(host) and "%" not in host and any(host == h or host.endswith("." + h) for h in hosts)
+    return (
+        u.scheme in ("http", "https")
+        and bool(host)
+        and "%" not in host
+        and any(host == h or host.endswith("." + h) for h in hosts)
+    )
 
 
 def norm_build(v):
@@ -341,6 +399,8 @@ def case_status(v):
     """'pass', 'Not run', 'not-run' -> PASS / NOT_RUN; None when it isn't one of CASE_STATUSES."""
     s = re.sub(r"[\s-]+", "_", str(v or "").strip().upper())
     return s if s in CASE_STATUSES else None
+
+
 COMMIT_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 
@@ -350,8 +410,13 @@ GIT_SLOW = []
 def _git(repo, *args, timeout=30):
     """git output (text) or None. Paths stay unquoted (core.quotePath=false) so non-ASCII names round-trip."""
     try:
-        r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args], capture_output=True,
-                           encoding="utf-8", errors="surrogateescape", timeout=timeout)  # a file name may not be UTF-8
+        r = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
+            capture_output=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=timeout,
+        )  # a file name may not be UTF-8
     except subprocess.TimeoutExpired:
         GIT_SLOW.append(repo)  # the card stops asking (one hung git is usually all of them: a network share)
         return None
@@ -362,7 +427,7 @@ def _git(repo, *args, timeout=30):
 
 def short(s, n):
     s = _s(s)
-    return s if len(s) <= n else s[:n - 1] + "…"
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 class BadInput(ValueError):

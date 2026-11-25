@@ -1,5 +1,6 @@
 """Memory (qa_sdet.memory, core): ingest of run files, bug records, build staleness, the page card and search, the
 bug-status and hash commands, and the DB itself."""
+
 import contextlib, io, json, os, sqlite3, time, unittest
 from pathlib import Path
 from unittest import mock
@@ -12,8 +13,13 @@ class Bugs(MemBase):
     """How a bug in a run becomes one record: dedup, hash, sightings, status."""
 
     def test_bug_dedup_increments_seen_count(self):
-        bug = {"route": "/form", "title": "Speed accepts 999", "symptom": "speed accepts 999",
-               "severity": "HIGH", "classification": "CONFIRMED"}
+        bug = {
+            "route": "/form",
+            "title": "Speed accepts 999",
+            "symptom": "speed accepts 999",
+            "severity": "HIGH",
+            "classification": "CONFIRMED",
+        }
         memory.ingest(self.con, run(bugs=[bug]))
         memory.ingest(self.con, run(bugs=[{**bug, "symptom": "Speed  accepts 999!"}]))
         rows = self.con.execute("SELECT seen_count FROM bugs").fetchall()
@@ -54,10 +60,16 @@ class Bugs(MemBase):
         cov = lambda r: [{"target": "speed", "heuristic": "boundary", "result": r}]
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         memory.ingest(self.con, run(coverage=cov("fail"), bugs=[bug]), ts="2026-02-01T00:00:00Z")
-        memory.ingest(self.con, run(coverage=cov("pass"), bugs=[bug]), ts="2026-01-01T00:00:00Z")  # an older file, ingested late
-        self.assertEqual(self.con.execute("SELECT result, ts FROM coverage").fetchall()[0][:], ("fail", "2026-02-01T00:00:00Z"))
-        self.assertEqual(tuple(self.con.execute("SELECT first_seen, last_seen, seen_count FROM bugs").fetchone()),
-                         ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 2))
+        memory.ingest(
+            self.con, run(coverage=cov("pass"), bugs=[bug]), ts="2026-01-01T00:00:00Z"
+        )  # an older file, ingested late
+        self.assertEqual(
+            self.con.execute("SELECT result, ts FROM coverage").fetchall()[0][:], ("fail", "2026-02-01T00:00:00Z")
+        )
+        self.assertEqual(
+            tuple(self.con.execute("SELECT first_seen, last_seen, seen_count FROM bugs").fetchone()),
+            ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 2),
+        )
         memory.ingest(self.con, run(coverage=cov("pass")), ts="2026-03-01T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT result FROM coverage").fetchone()[0], "pass")
 
@@ -102,8 +114,10 @@ class Bugs(MemBase):
         memory.ingest(self.con, run(bugs=[bug]))
         h = core.bug_hash("/form", "speed 999 saved")
         self.assertEqual(cli.main(["bug-status", h[:6], "fixed"]), 0)
-        self.assertIn(f"PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):\n- {h} FIXED",
-                      memory.card(self.con, "/form"))
+        self.assertIn(
+            f"PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):\n- {h} FIXED",
+            memory.card(self.con, "/form"),
+        )
         memory.ingest(self.con, run("1.1", bugs=[{"route": "/form", "title": "other words", "hash": h}]))
         c = memory.card(self.con, "/form")
         self.assertIn(f"{h} REGRESSED", c)
@@ -112,7 +126,9 @@ class Bugs(MemBase):
     def test_empty_or_numeric_draft_path(self):
         bug = {"route": "/form", "title": "t", "symptom": "s", "draft_path": "/abs/bugs/BUG-1.md"}
         memory.ingest(self.con, run(bugs=[bug]))
-        memory.ingest(self.con, run(bugs=[{**bug, "draft_path": ""}]), run_dir=Path(self.tmp.name))  # a re-sighting without one
+        memory.ingest(
+            self.con, run(bugs=[{**bug, "draft_path": ""}]), run_dir=Path(self.tmp.name)
+        )  # a re-sighting without one
         self.assertEqual(self.con.execute("SELECT draft_path FROM bugs").fetchone()[0], "/abs/bugs/BUG-1.md")
         memory.ingest(self.con, run(bugs=[{**bug, "symptom": "other", "draft_path": 7}]), run_dir=Path(self.tmp.name))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
@@ -124,8 +140,10 @@ class Bugs(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*), max(seen_count) FROM bugs").fetchone()[:], (1, 2))
 
     def test_a_draft_id_in_hash_is_still_stored(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Save accepts 131", "symptom": "saved at 131",
-                                       "hash": "BUG-2"}]))
+        memory.ingest(
+            self.con,
+            run(bugs=[{"route": "/form", "title": "Save accepts 131", "symptom": "saved at 131", "hash": "BUG-2"}]),
+        )
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)
 
     def test_jira_key_in_hash_creates_no_local_bug(self):
@@ -141,7 +159,9 @@ class Bugs(MemBase):
         self.con.commit()
         for variant in [f"{h} ", f"#{h}", f"{h} (known)"]:
             memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "x", "hash": variant}]))
-        self.assertEqual(self.con.execute("SELECT status, seen_count FROM bugs WHERE hash=?", (h,)).fetchone()[:], ("REGRESSED", 4))
+        self.assertEqual(
+            self.con.execute("SELECT status, seen_count FROM bugs WHERE hash=?", (h,)).fetchone()[:], ("REGRESSED", 4)
+        )
         memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "jira dup", "hash": "PROJ-9"}]))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 5)
 
@@ -151,7 +171,10 @@ class Bugs(MemBase):
         self.con.close()
         cli.main(["bug-status", h, "INVALID"])
         self.con = core.connect()
-        self.assertIn(f"NOT BUGS (the user marked these INVALID: don't report them):\n- {h} INVALID", memory.card(self.con, "/form"))
+        self.assertIn(
+            f"NOT BUGS (the user marked these INVALID: don't report them):\n- {h} INVALID",
+            memory.card(self.con, "/form"),
+        )
 
     def test_filed_bugs_stay_visible(self):
         memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t"}]))
@@ -207,17 +230,24 @@ class BugStatus(MemBase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli.main(["hash", "/form", "500 with cookie: sid=abc123"])
-        memory.ingest(self.con, scrub.redact_json(run(bugs=[{"route": "/form", "title": "t", "symptom": "500 with cookie: sid=abc123"}])))
+        memory.ingest(
+            self.con,
+            scrub.redact_json(run(bugs=[{"route": "/form", "title": "t", "symptom": "500 with cookie: sid=abc123"}])),
+        )
         self.assertEqual(buf.getvalue().strip(), self.con.execute("SELECT hash FROM bugs").fetchone()[0])
 
     def test_bug_status_with_jira_key_and_v04_schema_upgrade(self):
         # Existing v0.4 DB (has last_run + symptom, lacks jira_key) upgrades in place
         v04 = Path(self.tmp.name) / "v04.db"
         c = sqlite3.connect(v04)
-        c.execute("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT, classification TEXT, "
-                  "status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT, seen_count INTEGER DEFAULT 1, "
-                  "last_run TEXT, symptom TEXT)")
-        c.execute("INSERT INTO bugs(hash,page,title,status,last_run,symptom) VALUES('abcd12345678','/form','old','OPEN','r1','s')")
+        c.execute(
+            "CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT, classification TEXT, "
+            "status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT, seen_count INTEGER DEFAULT 1, "
+            "last_run TEXT, symptom TEXT)"
+        )
+        c.execute(
+            "INSERT INTO bugs(hash,page,title,status,last_run,symptom) VALUES('abcd12345678','/form','old','OPEN','r1','s')"
+        )
         c.commit()
         c.close()
         os.environ["QA_MEM_DB"] = str(v04)
@@ -258,14 +288,29 @@ class BugSync(MemBase):
         code, jql, err = qa_mem("bug-sync", "--jql")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(jql.strip(), "key in (PROJ-10, PROJ-11, PROJ-12)")
-        payload = json.dumps([
-            {"key": "PROJ-10", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}},
-                                          "resolution": {"name": "Fixed"}}},
-            {"key": "PROJ-11", "fields": {"status": {"name": "Closed", "statusCategory": {"key": "done"}},
-                                          "resolution": {"name": "Won't Do"}}},
-            {"key": "PROJ-12", "fields": {"status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}}},
-            {"key": "PROJ-13", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
-        ])
+        payload = json.dumps(
+            [
+                {
+                    "key": "PROJ-10",
+                    "fields": {
+                        "status": {"name": "Done", "statusCategory": {"key": "done"}},
+                        "resolution": {"name": "Fixed"},
+                    },
+                },
+                {
+                    "key": "PROJ-11",
+                    "fields": {
+                        "status": {"name": "Closed", "statusCategory": {"key": "done"}},
+                        "resolution": {"name": "Won't Do"},
+                    },
+                },
+                {
+                    "key": "PROJ-12",
+                    "fields": {"status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}},
+                },
+                {"key": "PROJ-13", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
+            ]
+        )
         code, out, err = qa_mem("bug-sync", stdin=payload)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("PROJ-10", out)
@@ -281,28 +326,45 @@ class BugSync(MemBase):
     def test_bug_sync_fetches_resolution_via_view_when_search_omits_it(self):
         import subprocess
         from support import done
+
         h_dup = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
-        search_out = json.dumps([{"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}}])
+        search_out = json.dumps(
+            [{"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}}]
+        )
         view_out = json.dumps({"key": "PROJ-20", "fields": {"resolution": {"name": "Duplicate"}}})
-        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
-                mock.patch.object(subprocess, "run", return_value=done(0, out=view_out)) as mrun:
+        with (
+            mock.patch("shutil.which", return_value="/usr/bin/acli"),
+            mock.patch.object(subprocess, "run", return_value=done(0, out=view_out)) as mrun,
+        ):
             code, out, err = qa_mem("bug-sync", stdin=search_out)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("closed as Duplicate", out)
         self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h_dup,)).fetchone()[0], "FILED")
-        self.assertEqual(mrun.call_args[0][0], ["/usr/bin/acli", "jira", "workitem", "view", "PROJ-20", "--fields", "resolution", "--json"])
+        self.assertEqual(
+            mrun.call_args[0][0],
+            ["/usr/bin/acli", "jira", "workitem", "view", "PROJ-20", "--fields", "resolution", "--json"],
+        )
 
     def test_a_resolution_that_cannot_be_read_leaves_the_bug_filed(self):
         """A failed lookup is no 'Fixed' resolution: a Won't Do / Duplicate must not become FIXED because acli failed."""
         import subprocess
         from support import done
+
         h = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
         h_ok = self.add_bug("/list", "fixed bug", "FILED", "PROJ-21")
-        search_out = json.dumps([
-            {"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
-            {"key": "PROJ-21", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}, "resolution": None}}])
-        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
-                mock.patch.object(subprocess, "run", return_value=done(1, err="401")):
+        search_out = json.dumps(
+            [
+                {"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
+                {
+                    "key": "PROJ-21",
+                    "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}, "resolution": None},
+                },
+            ]
+        )
+        with (
+            mock.patch("shutil.which", return_value="/usr/bin/acli"),
+            mock.patch.object(subprocess, "run", return_value=done(1, err="401")),
+        ):
             code, out, err = qa_mem("bug-sync", stdin=search_out)
         self.assertEqual((code, err), (0, ""))
         statuses = dict(self.con.execute("SELECT hash, status FROM bugs").fetchall())
@@ -316,8 +378,10 @@ class Builds(MemBase):
     """A new build marks old knowledge stale; a plan or an unreadable build never does."""
 
     def test_new_build_marks_old_knowledge_stale(self):
-        memory.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "old rule"}],
-                                locators=[{"name": "Save", "locator": "x"}]))
+        memory.ingest(
+            self.con,
+            run("1.0", facts=[{"kind": "rule", "text": "old rule"}], locators=[{"name": "Save", "locator": "x"}]),
+        )
         memory.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "new rule"}]))
         c = memory.card(self.con, "/form")
         self.assertIn("old rule *", c)
@@ -341,8 +405,10 @@ class Builds(MemBase):
         self.assertEqual(self.con.execute("SELECT max(stale) FROM facts").fetchone()[0], 0)
 
     def test_unknown_build_plan_does_not_stale_real_knowledge(self):
-        memory.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "real"}],
-                                coverage=[{"target": "x", "heuristic": "boundary"}]))
+        memory.ingest(
+            self.con,
+            run("1.0", facts=[{"kind": "rule", "text": "real"}], coverage=[{"target": "x", "heuristic": "boundary"}]),
+        )
         memory.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "from ticket"}]))
         c = memory.card(self.con, "/form")
         self.assertIn("build=1.0", c)
@@ -377,10 +443,20 @@ class Builds(MemBase):
         self.assertNotIn("fresh *", c)
 
     def test_late_run_of_the_current_build_still_adds_what_it_saw(self):
-        memory.ingest(self.con, run("2.0", locators=[{"name": "Add", "locator": "getByRole('button', { name: 'Add' })"}]),
-                  "2026-11-22T10:00:00Z")
-        memory.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "code max 6"}],
-                                locators=[{"name": "Code", "locator": "getByLabel('Code')"}]), "2026-11-22T09:00:00Z")
+        memory.ingest(
+            self.con,
+            run("2.0", locators=[{"name": "Add", "locator": "getByRole('button', { name: 'Add' })"}]),
+            "2026-11-22T10:00:00Z",
+        )
+        memory.ingest(
+            self.con,
+            run(
+                "2.0",
+                facts=[{"kind": "rule", "text": "code max 6"}],
+                locators=[{"name": "Code", "locator": "getByLabel('Code')"}],
+            ),
+            "2026-11-22T09:00:00Z",
+        )
         names = {r[0] for r in self.con.execute("SELECT name FROM locators")}
         self.assertEqual(names, {"Add", "Code"})
         self.assertEqual(self.con.execute("SELECT stale FROM facts WHERE text='code max 6'").fetchone()[0], 0)
@@ -396,15 +472,24 @@ class Builds(MemBase):
     def test_coverage_of_an_unreadable_build_expires_after_a_week(self):
         memory.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "duplicate"}]))
         self.assertIn("duplicate(", memory.card(self.con, "/form"))
-        memory.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "boundary"}]), "2020-01-01T00:00:00Z")
+        memory.ingest(
+            self.con, run("unknown", coverage=[{"target": "t", "heuristic": "boundary"}]), "2020-01-01T00:00:00Z"
+        )
         self.assertNotIn("boundary(", memory.card(self.con, "/form"))
 
     def test_locators_of_an_unreadable_build_expire_after_a_week(self):  # as its coverage: a later deploy may drop them
         memory.ingest(self.con, run("unknown", locators=[{"name": "Old", "locator": "#old"}]), "2020-01-01T00:00:00Z")
         memory.ingest(self.con, run("unknown", locators=[{"name": "New", "locator": "#new"}]))
         self.assertIn("LOCATORS (fresh): New=#new\n", memory.card(self.con, "/form") + "\n")
-        memory.ingest(self.con, {"run_id": "k", "build": "1.0", "pages": [{"route": "/map", "locators": [
-            {"name": "Layer", "locator": "#layer"}]}]}, "2020-01-01T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "k",
+                "build": "1.0",
+                "pages": [{"route": "/map", "locators": [{"name": "Layer", "locator": "#layer"}]}],
+            },
+            "2020-01-01T00:00:00Z",
+        )
         self.assertIn("LOCATORS (fresh): Layer=#layer", memory.card(self.con, "/map"))  # a read build: no age limit
 
     def test_plan_does_not_mark_verified(self):
@@ -413,8 +498,20 @@ class Builds(MemBase):
 
     def test_unknown_build_page_keeps_its_card(self):
         memory.ingest(self.con, {"run_id": "a", "build": "1.42.0", "pages": [{"route": "/incidents"}]})
-        memory.ingest(self.con, {"run_id": "b", "build": "unknown", "pages": [{"route": "/map", "facts": [{"kind": "rule", "text": "layers switch"}],
-                  "locators": [{"name": "Layer", "locator": "getByLabel('Layer')"}]}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "b",
+                "build": "unknown",
+                "pages": [
+                    {
+                        "route": "/map",
+                        "facts": [{"kind": "rule", "text": "layers switch"}],
+                        "locators": [{"name": "Layer", "locator": "getByLabel('Layer')"}],
+                    }
+                ],
+            },
+        )
         c = memory.card(self.con, "/map")
         self.assertIn("LOCATORS (fresh): Layer=getByLabel('Layer')", c)
         self.assertIn("- [rule] layers switch\n", c + "\n")  # not marked stale
@@ -425,9 +522,17 @@ class Facts(MemBase):
     """What a run's facts, coverage and locators become."""
 
     def test_coverage_results_normalised(self):
-        cov = [{"target": "t", "heuristic": h, "result": r} for h, r in
-               [("boundary", "BLOCKED"), ("duplicate", "blocked (needs --faults)"), ("empty-null", "NOT_RUN"),
-                ("keyboard-a11y", "skipped"), ("happy-path", "PASS"), ("invalid-format", "Failed")]]
+        cov = [
+            {"target": "t", "heuristic": h, "result": r}
+            for h, r in [
+                ("boundary", "BLOCKED"),
+                ("duplicate", "blocked (needs --faults)"),
+                ("empty-null", "NOT_RUN"),
+                ("keyboard-a11y", "skipped"),
+                ("happy-path", "PASS"),
+                ("invalid-format", "Failed"),
+            ]
+        ]
         memory.ingest(self.con, run(coverage=cov))
         untried = memory.card(self.con, "/form").split("UNTRIED: ")[1].splitlines()[0]
         for h in ("boundary", "duplicate", "empty-null", "keyboard-a11y"):
@@ -437,44 +542,70 @@ class Facts(MemBase):
         self.assertEqual({r[0] for r in self.con.execute("SELECT result FROM coverage")}, {"pass", "fail", "blocked"})
 
     def test_heuristic_ids_normalised(self):
-        memory.ingest(self.con, run(coverage=[{"target": "x", "heuristic": "Boundary"},
-                                          {"target": "y", "heuristic": "Traffic time zone"}]))
+        memory.ingest(
+            self.con,
+            run(coverage=[{"target": "x", "heuristic": "Boundary"}, {"target": "y", "heuristic": "Traffic time zone"}]),
+        )
         c = memory.card(self.con, "/form")
         self.assertIn("other:traffic-time-zone", c)
         self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])
 
     def test_blocked_stays_untried_and_paraphrased_facts_collapse(self):
-        memory.ingest(self.con, run(coverage=[{"target": "api", "heuristic": "error-handling", "result": "blocked"}],
-                                facts=[{"kind": "rule", "text": "ID, Road and Type buttons sort ascending"}]), "2026-11-22T10:00:00Z")
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "ID, Road and Type header buttons sort ascending"}]),
-                  "2026-11-22T11:00:00Z")
+        memory.ingest(
+            self.con,
+            run(
+                coverage=[{"target": "api", "heuristic": "error-handling", "result": "blocked"}],
+                facts=[{"kind": "rule", "text": "ID, Road and Type buttons sort ascending"}],
+            ),
+            "2026-11-22T10:00:00Z",
+        )
+        memory.ingest(
+            self.con,
+            run(facts=[{"kind": "rule", "text": "ID, Road and Type header buttons sort ascending"}]),
+            "2026-11-22T11:00:00Z",
+        )
         c = memory.card(self.con, "/form")
         self.assertIn("error-handling", c.split("UNTRIED")[1])
         self.assertIn("header buttons", c)
         self.assertEqual(c.count("sort ascending"), 1)
 
     def test_distinct_rules_not_collapsed(self):
-        facts = ["Name field is required", "Email field is required", "Start date must be before end date",
-                 "Start time must be before end time", "Speed limit must be between 0 and 130 km/h",
-                 "Speed limit must be between 0 and 120 km/h"]
+        facts = [
+            "Name field is required",
+            "Email field is required",
+            "Start date must be before end date",
+            "Start time must be before end time",
+            "Speed limit must be between 0 and 130 km/h",
+            "Speed limit must be between 0 and 120 km/h",
+        ]
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": t} for t in facts]))
         c = memory.card(self.con, "/form")
         for t in facts:
             self.assertIn(t, c)
 
     def test_ticket_fact_becomes_observed(self):
-        memory.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "End date after start", "source": "PROJ-1"}]))
+        memory.ingest(
+            self.con, run("unknown", facts=[{"kind": "rule", "text": "End date after start", "source": "PROJ-1"}])
+        )
         self.assertIn("(from PROJ-1)", memory.card(self.con, "/form"))
-        memory.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "End date after start", "source": "observed"}]))
+        memory.ingest(
+            self.con, run("1.0", facts=[{"kind": "rule", "text": "End date after start", "source": "observed"}])
+        )
         self.assertNotIn("(from PROJ-1)", memory.card(self.con, "/form"))
-        memory.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "x", "source": "PROJ-2"}]))  # unverified stays 'from'
+        memory.ingest(
+            self.con, run("unknown", facts=[{"kind": "rule", "text": "x", "source": "PROJ-2"}])
+        )  # unverified stays 'from'
         self.assertIn("(from PROJ-2)", memory.card(self.con, "/form"))
 
     def test_size_caps(self):
         core.MAX_FACTS = 5
         try:
             for n in range(8):
-                memory.ingest(self.con, run(facts=[{"kind": "note", "text": f"fact number {n} " + "w" * n}]), f"2026-11-22T10:0{n}:00Z")
+                memory.ingest(
+                    self.con,
+                    run(facts=[{"kind": "note", "text": f"fact number {n} " + "w" * n}]),
+                    f"2026-11-22T10:0{n}:00Z",
+                )
             texts = [r[0] for r in self.con.execute("SELECT text FROM facts")]
             self.assertEqual(len(texts), 5)
             self.assertTrue(any("fact number 7" in t for t in texts))
@@ -483,15 +614,22 @@ class Facts(MemBase):
             core.MAX_FACTS = 100
 
     def test_bad_shapes_rejected(self):
-        for bad in ([], {"run_id": "x", "build": "1", "pages": {"route": "/a"}},
-                    {"run_id": "x", "build": "1", "bugs": ["oops"]}, {"build": "1"},
-                    {"run_id": "   ", "build": "1"},
-                    {"run_id": "x", "pages": {}}, {"run_id": "x", "bugs": ""},
-                    {"run_id": "x", "cases": False}, {"run_id": "x", "env": []},
-                    {"run_id": "x", "questions": {}}, {"run_id": "x", "not_tested": ""},
-                    {"run_id": "x", "bugs": [{"route": "http://[x", "title": "bad"}]},
-                    {"run_id": "x", "bugs": [{"route": "/a", "title": "   "}]},
-                    {"run_id": "x", "cases": [{"id": "TC-1", "status": "PASS", "annotated": "false"}]}):
+        for bad in (
+            [],
+            {"run_id": "x", "build": "1", "pages": {"route": "/a"}},
+            {"run_id": "x", "build": "1", "bugs": ["oops"]},
+            {"build": "1"},
+            {"run_id": "   ", "build": "1"},
+            {"run_id": "x", "pages": {}},
+            {"run_id": "x", "bugs": ""},
+            {"run_id": "x", "cases": False},
+            {"run_id": "x", "env": []},
+            {"run_id": "x", "questions": {}},
+            {"run_id": "x", "not_tested": ""},
+            {"run_id": "x", "bugs": [{"route": "http://[x", "title": "bad"}]},
+            {"run_id": "x", "bugs": [{"route": "/a", "title": "   "}]},
+            {"run_id": "x", "cases": [{"id": "TC-1", "status": "PASS", "annotated": "false"}]},
+        ):
             with self.assertRaises(ValueError, msg=str(bad)):
                 memory.ingest(self.con, bad)
 
@@ -501,36 +639,86 @@ class Facts(MemBase):
         self.assertNotEqual(core.bug_hash("/a", "日本語エラー"), core.bug_hash("/a", "한국어오류"))
         self.assertEqual(core.norm("Erreur: échec"), "erreur échec")
         # 2. whitespace symptom falls back to title (distinct bugs don't collide)
-        memory.ingest(self.con, {"run_id": "b1", "build": "1.0", "bugs": [
-            {"route": "/a", "title": "Bug A", "symptom": "   "},
-            {"route": "/a", "title": "Bug B", "symptom": "   "},
-        ]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "b1",
+                "build": "1.0",
+                "bugs": [
+                    {"route": "/a", "title": "Bug A", "symptom": "   "},
+                    {"route": "/a", "title": "Bug B", "symptom": "   "},
+                ],
+            },
+        )
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
         # 3. unknown-build plan does not overwrite/un-stale verified locators or store blank locators/heuristics
-        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [
-            {"route": "/loc", "locators": [{"name": "Save", "locator": "#old"}]}]}, "2026-01-01T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "r1",
+                "build": "1.0",
+                "pages": [{"route": "/loc", "locators": [{"name": "Save", "locator": "#old"}]}],
+            },
+            "2026-01-01T00:00:00Z",
+        )
         memory.ingest(self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/loc"}]}, "2026-01-02T00:00:00Z")
-        memory.ingest(self.con, {"run_id": "p1", "build": "unknown", "pages": [
-            {"route": "/loc", "locators": [{"name": "Save", "locator": "#guess"}, {"name": "  ", "locator": "  "}],
-             "coverage": [{"target": "t", "heuristic": "   ", "result": "pass"}]}]}, "2026-01-03T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "p1",
+                "build": "unknown",
+                "pages": [
+                    {
+                        "route": "/loc",
+                        "locators": [{"name": "Save", "locator": "#guess"}, {"name": "  ", "locator": "  "}],
+                        "coverage": [{"target": "t", "heuristic": "   ", "result": "pass"}],
+                    }
+                ],
+            },
+            "2026-01-03T00:00:00Z",
+        )
         rows = [dict(r) for r in self.con.execute("SELECT name, locator, build, stale FROM locators WHERE page='/loc'")]
         self.assertEqual(rows, [{"name": "Save", "locator": "#old", "build": "1.0", "stale": 1}])
         self.assertEqual(self.con.execute("SELECT count(*) FROM coverage WHERE page='/loc'").fetchone()[0], 0)
         # 4. fact dedup keeps numbers with attached units distinct
-        memory.ingest(self.con, {"run_id": "u1", "build": "2.0", "pages": [{"route": "/units", "facts": [
-            {"kind": "rule", "text": "Speed limit must be between 0 and 130km/h"},
-            {"kind": "rule", "text": "Speed limit must be between 0 and 120km/h"},
-        ]}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "u1",
+                "build": "2.0",
+                "pages": [
+                    {
+                        "route": "/units",
+                        "facts": [
+                            {"kind": "rule", "text": "Speed limit must be between 0 and 130km/h"},
+                            {"kind": "rule", "text": "Speed limit must be between 0 and 120km/h"},
+                        ],
+                    }
+                ],
+            },
+        )
         cu = memory.card(self.con, "/units")
         self.assertIn("130km/h", cu)
         self.assertIn("120km/h", cu)
         # 5. search multi-word negation excludes only the phrase, not individual words
-        memory.ingest(self.con, {"run_id": "s1", "build": "2.0", "pages": [{"route": "/s", "facts": [
-            {"kind": "note", "text": "speed chart loads slowly"},
-            {"kind": "rule", "text": "speed-limit max 130"},
-            {"kind": "api", "text": "GET /api/incidents returns 500"},
-            {"kind": "api", "text": "GET /api/zones returns 500"},
-        ]}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "s1",
+                "build": "2.0",
+                "pages": [
+                    {
+                        "route": "/s",
+                        "facts": [
+                            {"kind": "note", "text": "speed chart loads slowly"},
+                            {"kind": "rule", "text": "speed-limit max 130"},
+                            {"kind": "api", "text": "GET /api/incidents returns 500"},
+                            {"kind": "api", "text": "GET /api/zones returns 500"},
+                        ],
+                    }
+                ],
+            },
+        )
         self.assertIn("speed chart", memory.search(self.con, "speed -speed-limit"))
         self.assertNotIn("speed-limit", memory.search(self.con, "speed -speed-limit"))
         self.assertIn("/api/incidents", memory.search(self.con, "500 -/api/zones"))
@@ -541,9 +729,15 @@ class Facts(MemBase):
         try:
             memory.ingest(self.con, {"run_id": "m2", "build": "2.0", "bugs": []}, "2026-12-02T00:00:00Z")
             memory.ingest(self.con, {"run_id": "m3", "build": "2.0", "bugs": []}, "2026-12-03T00:00:00Z")
-            memory.ingest(self.con, {"run_id": "m1", "build": "2.0", "bugs": [{"route": "/m", "title": "old"}]},
-                          "2026-01-01T00:00:00Z", src="f1")
-            orphans = self.con.execute("SELECT count(*) FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)").fetchone()[0]
+            memory.ingest(
+                self.con,
+                {"run_id": "m1", "build": "2.0", "bugs": [{"route": "/m", "title": "old"}]},
+                "2026-01-01T00:00:00Z",
+                src="f1",
+            )
+            orphans = self.con.execute(
+                "SELECT count(*) FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)"
+            ).fetchone()[0]
             self.assertEqual(orphans, 0)
         finally:
             core.MAX_RUNS = orig_max
@@ -556,9 +750,14 @@ class Card(MemBase):
     """`qa-mem card`: what an explorer reads about a page."""
 
     def test_card_shows_facts_locators_coverage_untried(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Speed 0-130"}],
-                                locators=[{"name": "Save", "locator": "getByRole('button')"}],
-                                coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
+        memory.ingest(
+            self.con,
+            run(
+                facts=[{"kind": "rule", "text": "Speed 0-130"}],
+                locators=[{"name": "Save", "locator": "getByRole('button')"}],
+                coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}],
+            ),
+        )
         c = memory.card(self.con, "form")
         self.assertIn("Speed 0-130", c)
         self.assertIn("Save=getByRole('button')", c)
@@ -570,8 +769,10 @@ class Card(MemBase):
     def rules(self, page, *labels):
         with self.con:
             for i, label in enumerate(labels):
-                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                                 (page, "rule", label, "max 10", f"src/F.jsx:{i}", "/repo", "frontend", core.now(), "src/F.jsx"))
+                self.con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (page, "rule", label, "max 10", f"src/F.jsx:{i}", "/repo", "frontend", core.now(), "src/F.jsx"),
+                )
 
     @staticmethod
     def untested(card):
@@ -581,7 +782,9 @@ class Card(MemBase):
     def test_card_lists_code_rule_fields_no_run_covered(self):
         """One boundary-tested field must not hide the page's other validated fields."""
         self.rules("/form", "speed", "name", "start date")
-        memory.ingest(self.con, run(coverage=[{"target": "Speed limit field", "heuristic": "boundary", "result": "pass"}]))
+        memory.ingest(
+            self.con, run(coverage=[{"target": "Speed limit field", "heuristic": "boundary", "result": "pass"}])
+        )
         c = memory.card(self.con, "/form")
         self.assertEqual(self.untested(c), "name; start date")
         self.assertIn("covered on build 1.0", c)
@@ -589,17 +792,37 @@ class Card(MemBase):
 
     def test_untested_targets_match_one_way_and_ignore_blocked(self):
         self.rules("/form", "speed", "speed (2)", "start date", "name")
-        memory.ingest(self.con, run(coverage=[{"target": "date", "heuristic": "boundary", "result": "pass"},
-                                              {"target": "name", "heuristic": "empty-null", "result": "blocked"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; speed; start date")  # 'speed (2)': one field
+        memory.ingest(
+            self.con,
+            run(
+                coverage=[
+                    {"target": "date", "heuristic": "boundary", "result": "pass"},
+                    {"target": "name", "heuristic": "empty-null", "result": "blocked"},
+                ]
+            ),
+        )
+        self.assertEqual(
+            self.untested(memory.card(self.con, "/form")), "name; speed; start date"
+        )  # 'speed (2)': one field
         memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
         self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; start date")
 
     def row(self, page, kind, label, value, src="src/F.jsx"):
         with self.con:
-            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                             (page, kind, label, value, f"{src}:1", "/repo", "frontend" if page != "*" else "backend",
-                              core.now(), src))
+            self.con.execute(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    page,
+                    kind,
+                    label,
+                    value,
+                    f"{src}:1",
+                    "/repo",
+                    "frontend" if page != "*" else "backend",
+                    core.now(),
+                    src,
+                ),
+            )
 
     def test_only_an_adversarial_check_clears_a_rule(self):  # a happy-path save of a valid speed proved nothing
         self.rules("/form", "speed")
@@ -657,28 +880,49 @@ class Card(MemBase):
         return memory._client_server_differ(self.con, "/zones/new")
 
     def test_the_fixture_rules_differ_in_what_the_client_leaves_out(self):  # tests/fixture-src: the real values
-        differ = self.zones({"speed": "min 0, max 130", "name": "required, maxLength 80"},
-                             {"speedLimit": "integer, min 0, max 130, required (Joi)", "name": "trim, min 1, max 80, required (Joi)"})
+        differ = self.zones(
+            {"speed": "min 0, max 130", "name": "required, maxLength 80"},
+            {"speedLimit": "integer, min 0, max 130, required (Joi)", "name": "trim, min 1, max 80, required (Joi)"},
+        )
         self.assertEqual(len(differ), 2, differ)
-        self.assertTrue(any(d.startswith("speed:") and "server only: integer, required" in d and "max" not in d for d in differ), differ)
-        self.assertTrue(any(d.startswith("name:") and "server only: trim" in d and "required" not in d and "min 1" not in d
-                            for d in differ), differ)  # equal max 80 and required, and min 1 is the server's way of saying required
+        self.assertTrue(
+            any(d.startswith("speed:") and "server only: integer, required" in d and "max" not in d for d in differ),
+            differ,
+        )
+        self.assertTrue(
+            any(
+                d.startswith("name:") and "server only: trim" in d and "required" not in d and "min 1" not in d
+                for d in differ
+            ),
+            differ,
+        )  # equal max 80 and required, and min 1 is the server's way of saying required
 
     def test_a_limit_only_the_client_has_or_only_the_server_has(self):
-        differ = self.zones({"speed": "max 130", "age": "required"}, {"speedLimit": "integer", "age": "min 18, required"})
+        differ = self.zones(
+            {"speed": "max 130", "age": "required"}, {"speedLimit": "integer", "age": "min 18, required"}
+        )
         self.assertEqual(len(differ), 2, differ)
-        self.assertTrue(any(d.startswith("speed:") and "client only: max 130" in d and "server only: integer" in d for d in differ), differ)
+        self.assertTrue(
+            any(d.startswith("speed:") and "client only: max 130" in d and "server only: integer" in d for d in differ),
+            differ,
+        )
         self.assertTrue(any(d.startswith("age:") and "server only: min 18" in d for d in differ), differ)
 
     def test_enum_options_and_formats_are_compared(self):
-        differ = self.zones({"status": "one of: draft, active", "email": "required, email format"},
-                            {"status": "one of: draft, active, archived (Joi)", "email": "string"})
+        differ = self.zones(
+            {"status": "one of: draft, active", "email": "required, email format"},
+            {"status": "one of: draft, active, archived (Joi)", "email": "string"},
+        )
         self.assertEqual(len(differ), 2, differ)
-        self.assertTrue(any(d.startswith("status:") and "draft, active" in d and "archived" in d for d in differ), differ)
+        self.assertTrue(
+            any(d.startswith("status:") and "draft, active" in d and "archived" in d for d in differ), differ
+        )
         self.assertTrue(any(d.startswith("email:") and "client only: pattern, required" in d for d in differ), differ)
 
     def test_a_client_rule_with_no_server_rule_is_flagged_only_when_the_endpoint_is_mapped(self):
-        mapped = self.zones({"name": "required", "speed": "max 130"}, {"speedLimit": "max 130"})  # POST /api/zones is mapped, no rule for name
+        mapped = self.zones(
+            {"name": "required", "speed": "max 130"}, {"speedLimit": "max 130"}
+        )  # POST /api/zones is mapped, no rule for name
         self.assertEqual(len(mapped), 1, mapped)
         self.assertTrue(mapped[0].startswith("name: client only (required)") and "POST /api/zones" in mapped[0], mapped)
 
@@ -690,7 +934,9 @@ class Card(MemBase):
         self.assertEqual(len(differ), 1, differ)
         self.assertTrue(differ[0].startswith("POST /api/zones approved") and "server only" in differ[0], differ)
         self.con.execute("DELETE FROM codemap WHERE page='/zones/new' AND kind='rule'")
-        self.assertEqual(memory._client_server_differ(self.con, "/zones/new"), [])  # a page with no rules: nothing to compare to
+        self.assertEqual(
+            memory._client_server_differ(self.con, "/zones/new"), []
+        )  # a page with no rules: nothing to compare to
 
     def test_the_card_shows_at_most_four_hints_in_one_line(self):
         client = {f"f{i}": "required" for i in range(6)}
@@ -705,16 +951,27 @@ class Card(MemBase):
         self.row("/form", "rule", "speed", "max 130")
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         self.row("*", "rule", "POST /api/zones speed", "max 150", "api/zones.js")
-        memory.ingest(self.con, run(coverage=[{"target": "[server] POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")  # the form's own field is still untested
-        memory.ingest(self.con, run(coverage=[{"target": "POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]))
+        memory.ingest(
+            self.con,
+            run(coverage=[{"target": "[server] POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]),
+        )
+        self.assertEqual(
+            self.untested(memory.card(self.con, "/form")), "speed"
+        )  # the form's own field is still untested
+        memory.ingest(
+            self.con, run(coverage=[{"target": "POST /api/zones speed", "heuristic": "boundary", "result": "pass"}])
+        )
         self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")  # also without the [server] prefix
         memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "pass"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")  # the form's check clears it; the server rule was checked
+        self.assertEqual(
+            self.untested(memory.card(self.con, "/form")), ""
+        )  # the form's check clears it; the server rule was checked
 
     def test_untested_targets_reset_on_a_new_build(self):
         self.rules("/form", "speed")
-        memory.ingest(self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z")
+        memory.ingest(
+            self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z"
+        )
         self.assertEqual(self.untested(memory.card(self.con, "/form")), "")
         memory.ingest(self.con, run("2.0"), "2026-01-02T00:00:00Z")
         self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")
@@ -749,7 +1006,12 @@ class Card(MemBase):
         self.assertIn("matched from 'incidents'", memory.card(self.con, "incidents"))
 
     def test_page_name_lookup_prefers_segment_and_exact_name(self):
-        for route, name in [("/roadmap", "Roadmap"), ("/map.html", "Live map"), ("/zones", "Speed zones"), ("/z", "Zones")]:
+        for route, name in [
+            ("/roadmap", "Roadmap"),
+            ("/map.html", "Live map"),
+            ("/zones", "Speed zones"),
+            ("/z", "Zones"),
+        ]:
             memory.ingest(self.con, {"run_id": route, "build": "1", "pages": [{"route": route, "name": name}]})
         self.assertIn("PAGE /map.html", memory.card(self.con, "map"))
         self.assertIn("PAGE /zones ", memory.card(self.con, "zones"))  # the route itself first
@@ -764,10 +1026,18 @@ class Card(MemBase):
         self.assertEqual(core.norm_route("/app#section"), "/app")
         for r in ['"I #5ge', "a b ?x", "/x/ 12 /y#/z ?q"]:  # idempotent, so a stored route finds itself
             self.assertEqual(core.norm_route(core.norm_route(r)), core.norm_route(r))
-        memory.ingest(self.con, {"run_id": "d", "build": "1", "pages": [{"route": "/incidents/4521",
-                  "facts": [{"kind": "rule", "text": "detail shows road"}]}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "d",
+                "build": "1",
+                "pages": [{"route": "/incidents/4521", "facts": [{"kind": "rule", "text": "detail shows road"}]}],
+            },
+        )
         self.assertIn("detail shows road", memory.card(self.con, "/incidents/77"))
-        self.assertEqual(core.bug_hash(core.norm_route("/incidents/1"), "x"), core.bug_hash(core.norm_route("/incidents/2"), "x"))
+        self.assertEqual(
+            core.bug_hash(core.norm_route("/incidents/1"), "x"), core.bug_hash(core.norm_route("/incidents/2"), "x")
+        )
 
     def test_route_spellings_find_the_same_card(self):
         memory.ingest(self.con, run())
@@ -784,15 +1054,20 @@ class Card(MemBase):
             memory.ingest(self.con, {"run_id": "r", "pages": [{"route": "http://[x"}]})
 
     def test_card_says_when_verified_locators_did_not_fit(self):
-        locs = [{"name": f"btn{i}", "locator": f"getByRole('button', {{ name: 'Button number {i} {'x' * 60}' }})"}
-                for i in range(25)]
+        locs = [
+            {"name": f"btn{i}", "locator": f"getByRole('button', {{ name: 'Button number {i} {'x' * 60}' }})"}
+            for i in range(25)
+        ]
         memory.ingest(self.con, run("1.0", locators=locs))
         c = memory.card(self.con, "/form")
         self.assertRegex(c, r"\(\+\d+ more verified")
 
     def fixed_bug(self, draft="/proj/qa-out/run/bugs/BUG-1.md"):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999 saved",
-                                           "draft_path": draft}]), "2026-01-01T00:00:00Z")
+        memory.ingest(
+            self.con,
+            run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999 saved", "draft_path": draft}]),
+            "2026-01-01T00:00:00Z",
+        )
         h = core.bug_hash("/form", "speed 999 saved")
         cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
         return h
@@ -808,27 +1083,38 @@ class Card(MemBase):
 
     def test_fixed_bug_rechecked_on_this_build_is_marked(self):
         h = self.fixed_bug(draft=None)
-        memory.ingest(self.con, run(coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
-                      "2026-01-02T00:00:00Z")
+        memory.ingest(
+            self.con, run(coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), "2026-01-02T00:00:00Z"
+        )
         c = memory.card(self.con, "/form")
         self.assertTrue(self.fixed_line(c, h).endswith(" | re-checked on build 1.0"), c)
         self.assertIn(f"other:regression({h}:pass)", c)
-        self.assertEqual(c.split("UNTRIED: ")[1].splitlines()[0], ", ".join(core.HEURISTICS))  # regression is no heuristic
+        self.assertEqual(
+            c.split("UNTRIED: ")[1].splitlines()[0], ", ".join(core.HEURISTICS)
+        )  # regression is no heuristic
         memory.ingest(self.con, run("2.0"), "2026-01-03T00:00:00Z")  # a new build: check it again
         self.assertNotIn("re-checked", self.fixed_line(memory.card(self.con, "/form"), h))
 
     def test_a_newly_fixed_older_bug_is_on_the_card_gaps_counts(self):
         """bug-status and bug-sync don't touch last_seen: an older bug fixed today must still be listed to re-check."""
-        memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": "old", "symptom": "old bug"}]),
-                      "2026-01-01T00:00:00Z")
+        memory.ingest(
+            self.con,
+            run("2.0", bugs=[{"route": "/form", "title": "old", "symptom": "old bug"}]),
+            "2026-01-01T00:00:00Z",
+        )
         h_old = core.bug_hash("/form", "old bug")
         for i in range(6):
             s = f"newer {i}"
-            memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": s, "symptom": s}]), f"2026-01-0{i + 2}T00:00:00Z")
+            memory.ingest(
+                self.con, run("2.0", bugs=[{"route": "/form", "title": s, "symptom": s}]), f"2026-01-0{i + 2}T00:00:00Z"
+            )
             h = core.bug_hash("/form", s)
             cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
-            memory.ingest(self.con, run("2.0", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
-                          f"2026-01-0{i + 2}T01:00:00Z")
+            memory.ingest(
+                self.con,
+                run("2.0", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
+                f"2026-01-0{i + 2}T01:00:00Z",
+            )
         cli.run_cmd(self.con, "bug-status", [h_old, "FIXED"])
         self.assertIn("1 fixed bug to re-check", memory.gaps(self.con))
         c = memory.card(self.con, "/form")
@@ -840,26 +1126,49 @@ class Card(MemBase):
         memory.ingest(self.con, run("unknown", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), core.now())
         h = core.bug_hash("/form", "s")
         cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
-        memory.ingest(self.con, run("unknown", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), core.now())
+        memory.ingest(
+            self.con, run("unknown", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), core.now()
+        )
         self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 0)
         self.assertTrue(self.fixed_line(memory.card(self.con, "/form"), h).endswith("| re-checked"))
         self.con.execute("UPDATE coverage SET ts='2020-01-01T00:00:00Z'")
         self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 1)
 
     def test_card_size_is_bounded(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": f"fact {i} " + "y" * 280} for i in range(30)],
-                                locators=[{"name": f"loc{i} " + "n" * 250, "locator": "x" * 290} for i in range(30)],
-                                coverage=[{"heuristic": h, "target": f"t{i} " + "z" * 280} for h in core.HEURISTICS for i in range(6)],
-                                bugs=[{"route": "/form", "title": "b" * 300, "symptom": f"s{i} " + "q" * 280,
-                                       "draft_path": "/d/" + "p" * 2000} for i in range(12)]))
+        memory.ingest(
+            self.con,
+            run(
+                facts=[{"kind": "rule", "text": f"fact {i} " + "y" * 280} for i in range(30)],
+                locators=[{"name": f"loc{i} " + "n" * 250, "locator": "x" * 290} for i in range(30)],
+                coverage=[{"heuristic": h, "target": f"t{i} " + "z" * 280} for h in core.HEURISTICS for i in range(6)],
+                bugs=[
+                    {
+                        "route": "/form",
+                        "title": "b" * 300,
+                        "symptom": f"s{i} " + "q" * 280,
+                        "draft_path": "/d/" + "p" * 2000,
+                    }
+                    for i in range(12)
+                ],
+            ),
+        )
         with self.con:
             self.con.execute("UPDATE bugs SET status='FIXED' WHERE rowid IN (SELECT rowid FROM bugs LIMIT 6)")
         self.rules("/form", *(f"rule {i:02} " + "r" * 110 for i in range(12)))
         for page in ("/form", "/other"):  # another page on the same endpoint, with bugs of its own
-            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                             (page, "api", "save", "POST /api/x", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
-        memory.ingest(self.con, {"run_id": "other", "build": "1.0", "pages": [{"route": "/other"}], "bugs": [
-            {"route": "/other", "title": "o" * 300, "symptom": f"o{i} " + "q" * 280} for i in range(8)]})
+            self.con.execute(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                (page, "api", "save", "POST /api/x", "a.js:1", "/repo", "frontend", core.now(), "a.js"),
+            )
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "other",
+                "build": "1.0",
+                "pages": [{"route": "/other"}],
+                "bugs": [{"route": "/other", "title": "o" * 300, "symptom": f"o{i} " + "q" * 280} for i in range(8)],
+            },
+        )
         c = memory.card(self.con, "/form")
         self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT", c)
         self.assertLess(len(c), 15000)  # ~3.5k tokens at worst
@@ -872,8 +1181,10 @@ class Gaps(MemBase):
         with self.con:
             if page != "*":
                 self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
-            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                             (page, kind, label, value, f"{src}:1", repo, area, core.now(), src))
+            self.con.execute(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                (page, kind, label, value, f"{src}:1", repo, area, core.now(), src),
+            )
 
     def visit(self, route, build, ts):
         memory.ingest(self.con, {"run_id": f"r-{route}-{ts}", "build": build, "pages": [{"route": route}]}, ts)
@@ -935,16 +1246,23 @@ class Gaps(MemBase):
         os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-07T00:00:00Z"
         git(app, "commit", "-qam", "bump kit")  # the parent's log lists only 'lib/kit'
         out = memory.gaps(self.con)
-        self.assertIn("source changed (lib/kit/Button.jsx)", next(x for x in out.splitlines() if x.startswith("- /form ")))
-        self.assertNotIn("source changed", next(x for x in out.splitlines() if x.startswith("- /other ")))  # 'lib/kitchen.js'
+        self.assertIn(
+            "source changed (lib/kit/Button.jsx)", next(x for x in out.splitlines() if x.startswith("- /form "))
+        )
+        self.assertNotIn(
+            "source changed", next(x for x in out.splitlines() if x.startswith("- /other "))
+        )  # 'lib/kitchen.js'
 
     def test_source_changes_on_a_page_whose_build_was_never_read(self):
         """No last_verified (build unreadable): the last run on the page is the visit to compare commits against."""
         os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
         repo = git_repo(self.t / "app", {"src/Form.jsx": "a"})
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", os.path.realpath(repo))
-        memory.ingest(self.con, {"run_id": "r1", "target": "http://qa/form", "build": "unknown",
-                                 "pages": [{"route": "/form"}]}, "2026-01-05T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {"run_id": "r1", "target": "http://qa/form", "build": "unknown", "pages": [{"route": "/form"}]},
+            "2026-01-05T00:00:00Z",
+        )
         self.assertNotIn("source changed", memory.gaps(self.con))
         self.commit(repo, "src/Form.jsx", "2026-01-06T00:00:00Z")
         self.assertIn("source changed (src/Form.jsx)", memory.gaps(self.con))
@@ -976,11 +1294,28 @@ class Gaps(MemBase):
         self.visit("/old", "1.0", "2026-01-01T00:00:00Z")
         for route in ("/quiet", "/fragile", "/regressed"):
             self.visit(route, "2.0", "2026-01-02T00:00:00Z")
-        memory.ingest(self.con, {"run_id": "b", "build": "2.0", "pages": [{"route": "/fragile"}],
-                                 "bugs": [{"route": "/fragile", "title": f"t{i}", "symptom": f"s{i}", "severity": "HIGH"}
-                                          for i in range(2)]}, "2026-01-02T00:00:00Z")
-        memory.ingest(self.con, {"run_id": "c", "build": "2.0", "pages": [{"route": "/regressed"}],
-                                 "bugs": [{"route": "/regressed", "title": "r", "symptom": "r"}]}, "2026-01-02T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "b",
+                "build": "2.0",
+                "pages": [{"route": "/fragile"}],
+                "bugs": [
+                    {"route": "/fragile", "title": f"t{i}", "symptom": f"s{i}", "severity": "HIGH"} for i in range(2)
+                ],
+            },
+            "2026-01-02T00:00:00Z",
+        )
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "c",
+                "build": "2.0",
+                "pages": [{"route": "/regressed"}],
+                "bugs": [{"route": "/regressed", "title": "r", "symptom": "r"}],
+            },
+            "2026-01-02T00:00:00Z",
+        )
         self.con.execute("UPDATE bugs SET status='REGRESSED' WHERE page='/regressed'")
         self.con.execute("UPDATE bugs SET status='FILED' WHERE page='/fragile'")
         routes = [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
@@ -1019,8 +1354,16 @@ class Gaps(MemBase):
         # Modify A and C; mark a FIXED bug on B (un-rechecked)
         self.commit(repo, "src/A.jsx", "2026-01-06T00:00:00Z")
         self.commit(repo, "src/C.jsx", "2026-01-07T00:00:00Z")
-        memory.ingest(self.con, {"run_id": "fb", "build": "1.0", "pages": [{"route": "/b"}],
-                                 "bugs": [{"route": "/b", "title": "old", "symptom": "old"}]}, "2026-01-05T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "fb",
+                "build": "1.0",
+                "pages": [{"route": "/b"}],
+                "bugs": [{"route": "/b", "title": "old", "symptom": "old"}],
+            },
+            "2026-01-05T00:00:00Z",
+        )
         h = core.bug_hash("/b", "old")
         self.con.execute("UPDATE bugs SET status='FIXED' WHERE hash=?", (h,))
         self.con.commit()
@@ -1058,15 +1401,27 @@ class Search(MemBase):
         self.assertIn("no facts match", memory.search(self.con, "*"))
 
     def test_operators_in_the_query_are_words(self):
-        memory.ingest(self.con, run("1.43.0", facts=[{"kind": "rule", "text": "speed max 130"},
-                                                  {"kind": "rule", "text": "closure AND detour shown"}]))
+        memory.ingest(
+            self.con,
+            run(
+                "1.43.0",
+                facts=[{"kind": "rule", "text": "speed max 130"}, {"kind": "rule", "text": "closure AND detour shown"}],
+            ),
+        )
         self.assertNotIn("max 130", memory.search(self.con, "speed -130"))
         self.assertIn("detour", memory.search(self.con, "closure NEAR detour"))
         self.assertIn("max 130", memory.search(self.con, 'speed "130'))
 
     def test_symbols_in_the_query(self):
-        memory.ingest(self.con, run(facts=[{"kind": "api", "text": "GET /api/zones returns 500 on empty filter"},
-                                       {"kind": "note", "text": "speed chart loads slowly"}]))
+        memory.ingest(
+            self.con,
+            run(
+                facts=[
+                    {"kind": "api", "text": "GET /api/zones returns 500 on empty filter"},
+                    {"kind": "note", "text": "speed chart loads slowly"},
+                ]
+            ),
+        )
         self.assertIn("returns 500", memory.search(self.con, "/api/zones"))
         self.assertIn("no facts match", memory.search(self.con, "speed-limit"))
         self.assertIn("speed chart", memory.search(self.con, "speed -/api/zones"))
@@ -1076,8 +1431,13 @@ class Retrieval(MemBase):
     """Stemmed search over facts and bugs, a relaxed match when nothing matches all words, and card ranking/focus."""
 
     def test_word_forms_match_and_bugs_are_searched(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}],
-                                    bugs=[{"route": "/form", "title": "Zone validation skipped", "symptom": "zones saved unvalidated"}]))
+        memory.ingest(
+            self.con,
+            run(
+                facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}],
+                bugs=[{"route": "/form", "title": "Zone validation skipped", "symptom": "zones saved unvalidated"}],
+            ),
+        )
         self.assertIn("Corridor dates", memory.search(self.con, "date"))  # 'date' finds 'dates'
         out = memory.search(self.con, "zone validate")
         self.assertIn("[bug:OPEN]", out)
@@ -1087,7 +1447,9 @@ class Retrieval(MemBase):
         self.assertIn("[bug:FILED PROJ-9]", memory.search(self.con, "proj-9"))  # the update reached the index
 
     def test_no_match_of_all_words_relaxes_to_two_of_them_and_says_so(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC instead of local time"}]))
+        memory.ingest(
+            self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC instead of local time"}])
+        )
         out = memory.search(self.con, "date filter timezone UTC")
         self.assertIn("Corridor dates", out)
         self.assertIn("relaxed", out)
@@ -1096,9 +1458,11 @@ class Retrieval(MemBase):
 
     def test_an_old_database_index_is_upgraded_in_place(self):
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]))
-        self.con.executescript("DROP TRIGGER facts_ai; DROP TRIGGER facts_ad; DROP TABLE facts_fts; "
-                               "CREATE VIRTUAL TABLE facts_fts USING fts5(text, content='facts', content_rowid='id'); "
-                               "INSERT INTO facts_fts(facts_fts) VALUES('rebuild'); DELETE FROM meta WHERE key='fts';")
+        self.con.executescript(
+            "DROP TRIGGER facts_ai; DROP TRIGGER facts_ad; DROP TABLE facts_fts; "
+            "CREATE VIRTUAL TABLE facts_fts USING fts5(text, content='facts', content_rowid='id'); "
+            "INSERT INTO facts_fts(facts_fts) VALUES('rebuild'); DELETE FROM meta WHERE key='fts';"
+        )
         self.con.close()
         self.con = core.connect()
         self.assertIn("porter", self.con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()[0])
@@ -1106,12 +1470,20 @@ class Retrieval(MemBase):
 
     def test_rules_outrank_newer_notes_and_a_focus_comes_first(self):
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "date filter uses UTC"}]), "2026-01-01T00:00:00Z")
-        memory.ingest(self.con, run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
-                      "2026-01-02T00:00:00Z")
+        memory.ingest(
+            self.con,
+            run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
+            "2026-01-02T00:00:00Z",
+        )
         facts = lambda c: c.split("FACTS", 1)[1].split("\n")[1:]
-        self.assertTrue(any("date filter uses UTC" in x for x in facts(memory.card(self.con, "/form"))))  # not evicted by notes
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": f"rule {i} {'y' * i}"} for i in range(20)]),
-                      "2026-01-03T00:00:00Z")
+        self.assertTrue(
+            any("date filter uses UTC" in x for x in facts(memory.card(self.con, "/form")))
+        )  # not evicted by notes
+        memory.ingest(
+            self.con,
+            run(facts=[{"kind": "rule", "text": f"rule {i} {'y' * i}"} for i in range(20)]),
+            "2026-01-03T00:00:00Z",
+        )
         self.assertIn("date filter uses UTC", facts(memory.card(self.con, "/form", focus="date filters"))[0])
         code, out, _ = qa_mem("card", "/form", "--focus", "date filters")
         self.assertEqual(code, 0)
@@ -1127,8 +1499,11 @@ class Curation(MemBase):
         c = memory.card(self.con, "/form")
         self.assertIn("OPEN QUESTIONS", c)
         self.assertIn(q, c.split("OPEN QUESTIONS")[1])
-        memory.ingest(self.con, {**run(), "questions": [{"text": q, "status": "resolved", "answer": "Yes, 0..130"}]},
-                      "2026-01-02T00:00:00Z")
+        memory.ingest(
+            self.con,
+            {**run(), "questions": [{"text": q, "status": "resolved", "answer": "Yes, 0..130"}]},
+            "2026-01-02T00:00:00Z",
+        )
         memory.ingest(self.con, {**run(), "questions": [q]}, "2026-01-03T00:00:00Z")  # asked again: stays answered
         c = memory.card(self.con, "/form")
         self.assertIn(f"- {q} → Yes, 0..130", c.split("DECISIONS")[1])
@@ -1143,17 +1518,32 @@ class Curation(MemBase):
     def test_plan_questions_are_remembered_too(self):
         d = Path(self.tmp.name) / "qa-out/r/.data"
         d.mkdir(parents=True)
-        (d / "plan.json").write_text(json.dumps({"kind": "ticket", "tickets": [{"key": "P-1"}], "cases": [],
-                                                 "questions": [{"text": "Q1 [BLOCKING] Is 0 valid?", "status": "resolved",
-                                                                "answer": "No", "ticket": "PROJ-1"}]}))
+        (d / "plan.json").write_text(
+            json.dumps(
+                {
+                    "kind": "ticket",
+                    "tickets": [{"key": "P-1"}],
+                    "cases": [],
+                    "questions": [
+                        {"text": "Q1 [BLOCKING] Is 0 valid?", "status": "resolved", "answer": "No", "ticket": "PROJ-1"}
+                    ],
+                }
+            )
+        )
         memory.ingest_pending(d.parent.parent)
-        self.assertEqual(tuple(self.con.execute("SELECT page, ticket, status, answer FROM questions").fetchone()),
-                         ("*", "PROJ-1", "resolved", "No"))
-        self.assertIn("Is 0 valid? → No (PROJ-1)", memory.ticket_context(self.con, "Speed rules for PROJ-1")["decisions"][0])
+        self.assertEqual(
+            tuple(self.con.execute("SELECT page, ticket, status, answer FROM questions").fetchone()),
+            ("*", "PROJ-1", "resolved", "No"),
+        )
+        self.assertIn(
+            "Is 0 valid? → No (PROJ-1)", memory.ticket_context(self.con, "Speed rules for PROJ-1")["decisions"][0]
+        )
 
     def test_remembered_facts_are_pinned_and_forget_cleans_up(self):
         memory.ingest(self.con, run("1.0"))  # the page is on build 1.0
-        code, out, _ = qa_mem("remember", "/form", "flow", "Create a corridor first. Authorization: Bearer abcdefghijklmnopqrst")
+        code, out, _ = qa_mem(
+            "remember", "/form", "flow", "Create a corridor first. Authorization: Bearer abcdefghijklmnopqrst"
+        )
         self.assertEqual(code, 0)
         qa_mem("remember", "/form", "note", "Header is blue", "--build-scoped")
         self.assertEqual(qa_mem("remember", "/form", "wish", "x")[0], 2)
@@ -1177,14 +1567,16 @@ class Curation(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM facts WHERE page='/form'").fetchone()[0], 0)
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)  # bug history stays
 
-
     def test_forget_page_also_drops_its_states_transitions_signals_and_questions(self):
         ts = core.now()
         memory.ingest(self.con, run())
         memory.ingest(self.con, {"run_id": "o", "build": "1", "pages": [{"route": "/other"}]})
         with self.con:
             for page in ("/form", "/other"):
-                self.con.execute("INSERT INTO page_states VALUES(?,?,?,?,?,?,?)", (page, "tab: A", "tab", "click A", "unvisited", "1", ts))
+                self.con.execute(
+                    "INSERT INTO page_states VALUES(?,?,?,?,?,?,?)",
+                    (page, "tab: A", "tab", "click A", "unvisited", "1", ts),
+                )
                 self.con.execute("INSERT INTO signals(page,kind,sig_key) VALUES(?,?,?)", (page, "request", "GET /x"))
                 self.con.execute("INSERT INTO questions(page,text) VALUES(?,?)", (page, "Is 0 valid?"))
             self.con.execute("INSERT INTO transitions VALUES('/form','/other','link','/other','link','1',?)", (ts,))
@@ -1193,28 +1585,44 @@ class Curation(MemBase):
         self.assertEqual(memory.forget_page(self.con, "/form")[0], True)
         for table, col in (("page_states", "page"), ("signals", "page"), ("questions", "page")):
             self.assertEqual([r[0] for r in self.con.execute(f"SELECT {col} FROM {table}")], ["/other"], table)
-        self.assertEqual([tuple(r) for r in self.con.execute("SELECT from_route, to_route FROM transitions")], [("/other", "/third")])
+        self.assertEqual(
+            [tuple(r) for r in self.con.execute("SELECT from_route, to_route FROM transitions")], [("/other", "/third")]
+        )
 
 
 class Patterns(MemBase):
     """`qa-mem patterns`: how this app breaks again and again, from the heuristic and pattern each bug was recorded with."""
 
     def bug(self, page, symptom, **extra):
-        memory.ingest(self.con, {"run_id": f"r-{page}-{symptom}", "target": page, "build": "1", "pages": [{"route": page}],
-                                 "bugs": [{"route": page, "title": symptom, "symptom": symptom, **extra}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": f"r-{page}-{symptom}",
+                "target": page,
+                "build": "1",
+                "pages": [{"route": page}],
+                "bugs": [{"route": page, "title": symptom, "symptom": symptom, **extra}],
+            },
+        )
 
     def test_patterns_across_pages_rank_and_show_on_cards_and_in_prep(self):
         for page in ("/incidents", "/zones", "/closures"):
-            self.bug(page, f"{page} shows 0 items on a 500", heuristic="error-handling", pattern="Silent error as EMPTY!")
+            self.bug(
+                page, f"{page} shows 0 items on a 500", heuristic="error-handling", pattern="Silent error as EMPTY!"
+            )
         self.bug("/zones", "speed 131 saved", heuristic="boundary")
         self.bug("/form", "label typo", heuristic="boundary")
         self.con.execute("UPDATE bugs SET status='INVALID' WHERE symptom='label typo'")  # never a pattern
         out = memory.patterns(self.con)
-        self.assertTrue(out.splitlines()[1].startswith("- silent-error-as-empty (error-handling): 3 bugs on 3 pages"), out)
+        self.assertTrue(
+            out.splitlines()[1].startswith("- silent-error-as-empty (error-handling): 3 bugs on 3 pages"), out
+        )
         self.assertNotIn("boundary", out)  # one page only once the INVALID one is out
         self.assertEqual(json.loads(qa_mem("patterns", "--json")[1])[0]["pages"], 3)
         self.assertIn("RECURRING APP PATTERNS", memory.card(self.con, "/schedules") + memory.card(self.con, "/zones"))
-        self.assertIn("silent-error-as-empty", memory.ticket_context(self.con, "Schedules list error states")["patterns"][0])
+        self.assertIn(
+            "silent-error-as-empty", memory.ticket_context(self.con, "Schedules list error states")["patterns"][0]
+        )
         row = self.con.execute("SELECT heuristic, pattern FROM bugs WHERE page='/incidents'").fetchone()
         self.assertEqual(tuple(row), ("error-handling", "silent-error-as-empty"))
 
@@ -1226,12 +1634,21 @@ class BugMatch(MemBase):
         super().setUp()
         with self.con:
             for page in ("/zones/new", "/zones/:id"):
-                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                                 (page, "api", "save", "POST /api/zones", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
+                self.con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (page, "api", "save", "POST /api/zones", "a.js:1", "/repo", "frontend", core.now(), "a.js"),
+                )
 
     def bug(self, page, title, symptom, status="OPEN", **extra):
-        memory.ingest(self.con, {"run_id": f"r-{symptom}", "build": "1", "pages": [{"route": page}],
-                                 "bugs": [{"route": page, "title": title, "symptom": symptom, "severity": "HIGH", **extra}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": f"r-{symptom}",
+                "build": "1",
+                "pages": [{"route": page}],
+                "bugs": [{"route": page, "title": title, "symptom": symptom, "severity": "HIGH", **extra}],
+            },
+        )
         h = core.bug_hash(page, symptom)
         self.con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, h))
         return h
@@ -1243,7 +1660,9 @@ class BugMatch(MemBase):
         self.assertIn(h, out)
         self.assertIn("report a sighting with its hash", out)
         self.assertNotIn("Header misaligned", out)
-        code, cli_out, _ = qa_mem("bug-match", "/zones/:id", "form saves speed limit above 130 (131)", "--endpoint", "POST /api/zones")
+        code, cli_out, _ = qa_mem(
+            "bug-match", "/zones/:id", "form saves speed limit above 130 (131)", "--endpoint", "POST /api/zones"
+        )
         self.assertEqual(code, 0)
         self.assertIn(h, cli_out)
 
@@ -1265,32 +1684,62 @@ class History(MemBase):
     """Bug build lifecycle, run counters, `qa-mem history` (build over build, a page's timeline) and `qa-mem hotspots`."""
 
     def go(self, build, ts, cases=(), bugs=(), route="/form", status="COMPLETED"):
-        memory.ingest(self.con, {"run_id": f"r-{route}-{ts}", "mode": "ticket", "target": route, "build": build,
-                                 "status": status, "summary": "s", "pages": [{"route": route}], "cases": list(cases),
-                                 "bugs": list(bugs)}, ts)
+        memory.ingest(
+            self.con,
+            {
+                "run_id": f"r-{route}-{ts}",
+                "mode": "ticket",
+                "target": route,
+                "build": build,
+                "status": status,
+                "summary": "s",
+                "pages": [{"route": route}],
+                "cases": list(cases),
+                "bugs": list(bugs),
+            },
+            ts,
+        )
 
     def test_a_bug_knows_its_builds_and_regressions_and_runs_their_counts(self):
         bug = {"route": "/form", "title": "t", "symptom": "s", "severity": "HIGH"}
-        self.go("1.0", "2026-01-01T00:00:00Z", [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"},
-                                                {"id": "TC-3", "status": "BLOCKED"}], [bug])
+        self.go(
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"}, {"id": "TC-3", "status": "BLOCKED"}],
+            [bug],
+        )
         h = core.bug_hash("/form", "s")
         with mock.patch.object(core, "now", return_value="2026-01-02T00:00:00Z"):
             cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
         self.go("1.1", "2026-01-03T00:00:00Z", bugs=[{**bug, "hash": h}])
-        row = self.con.execute("SELECT first_build, last_build, fixed_build, regressed_count, status FROM bugs").fetchone()
+        row = self.con.execute(
+            "SELECT first_build, last_build, fixed_build, regressed_count, status FROM bugs"
+        ).fetchone()
         self.assertEqual(tuple(row), ("1.0", "1.1", "1.0", 1, "REGRESSED"))
-        counts = self.con.execute("SELECT cases_pass, cases_fail, cases_blocked, bugs_found FROM runs WHERE build='1.0'").fetchone()
+        counts = self.con.execute(
+            "SELECT cases_pass, cases_fail, cases_blocked, bugs_found FROM runs WHERE build='1.0'"
+        ).fetchone()
         self.assertEqual(tuple(counts), (1, 1, 1, 1))
 
     def test_history_by_build_and_by_page_and_hotspots(self):
-        self.go("1.0", "2026-01-01T00:00:00Z", [{"id": "TC-1", "status": "PASS"}],
-                [{"route": "/form", "title": "a", "symptom": "a", "severity": "HIGH"}])
-        self.go("1.1", "2026-01-05T00:00:00Z", [{"id": "TC-1", "status": "FAIL"}],
-                [{"route": "/form", "title": "b", "symptom": "b", "severity": "LOW"}])
+        self.go(
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            [{"id": "TC-1", "status": "PASS"}],
+            [{"route": "/form", "title": "a", "symptom": "a", "severity": "HIGH"}],
+        )
+        self.go(
+            "1.1",
+            "2026-01-05T00:00:00Z",
+            [{"id": "TC-1", "status": "FAIL"}],
+            [{"route": "/form", "title": "b", "symptom": "b", "severity": "LOW"}],
+        )
         self.go("1.1", "2026-01-05T01:00:00Z", route="/list")
         out = memory.history(self.con)
         lines = [x for x in out.splitlines() if x.startswith("- build")]
-        self.assertTrue(lines[0].startswith("- build 1.1: 2 runs on 2 pages; cases 0 pass / 1 fail / 0 blocked; 1 new bug"), out)
+        self.assertTrue(
+            lines[0].startswith("- build 1.1: 2 runs on 2 pages; cases 0 pass / 1 fail / 0 blocked; 1 new bug"), out
+        )
         self.assertTrue(lines[1].startswith("- build 1.0: 1 run on 1 page"), out)
         page = memory.history(self.con, "/form")
         self.assertLess(page.index("build 1.1"), page.index("build 1.0"))  # newest first
@@ -1319,6 +1768,7 @@ class SignalBaseline(MemBase):
         self.config(allowedHosts=["localhost"])
         first = self.explore("r1", "r1", time.time() - 3600)
         from qa_sdet import report
+
         self.assertIn("[NEW] POST /api/zones/7 → 500", report.render_report(first))
         second = self.explore("r2", "r2", time.time())
         r = report.render_report(second)
@@ -1340,19 +1790,46 @@ class States(MemBase):
     """In-page states (tabs, dialogs, query views) and page-to-page transitions, recorded by explorers as they go."""
 
     def visit(self, build, ts, states=(), transitions=()):
-        memory.ingest(self.con, {"run_id": f"r-{ts}", "target": "/incidents", "build": build,
-                                 "pages": [{"route": "/incidents", "states": list(states), "transitions": list(transitions)}]}, ts)
+        memory.ingest(
+            self.con,
+            {
+                "run_id": f"r-{ts}",
+                "target": "/incidents",
+                "build": build,
+                "pages": [{"route": "/incidents", "states": list(states), "transitions": list(transitions)}],
+            },
+            ts,
+        )
 
     def test_unvisited_states_leads_and_the_entry_of_a_detail_page(self):
-        tab = lambda name, status: {"key": f"tab: {name}", "kind": "tab", "trigger": f"getByRole('tab', {{ name: '{name}' }})",
-                                    "status": status}
-        self.visit("1.0", "2026-01-01T00:00:00Z", [tab("Active", "visited"), tab("Scheduled", "unvisited"),
-                                                   {"key": "dialog: Filter", "kind": "dialog", "trigger": "getByRole('button', { name: 'Filter' })"}],
-                   [{"to": "/incidents/4521", "trigger": "row click", "sample_path": "/incidents/4521?token=abc123secretvalue",
-                     "kind": "detail-row"}])
+        tab = lambda name, status: {
+            "key": f"tab: {name}",
+            "kind": "tab",
+            "trigger": f"getByRole('tab', {{ name: '{name}' }})",
+            "status": status,
+        }
+        self.visit(
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            [
+                tab("Active", "visited"),
+                tab("Scheduled", "unvisited"),
+                {"key": "dialog: Filter", "kind": "dialog", "trigger": "getByRole('button', { name: 'Filter' })"},
+            ],
+            [
+                {
+                    "to": "/incidents/4521",
+                    "trigger": "row click",
+                    "sample_path": "/incidents/4521?token=abc123secretvalue",
+                    "kind": "detail-row",
+                }
+            ],
+        )
         card = memory.card(self.con, "/incidents")
         line = next(x for x in card.splitlines() if x.startswith("UNVISITED STATES"))
-        self.assertIn("tab: Scheduled (getByRole('tab', { name: 'Scheduled' }))", line)  # with the trigger that opens it
+        self.assertIn(
+            "tab: Scheduled (getByRole('tab', { name: 'Scheduled' }))", line
+        )  # with the trigger that opens it
         self.assertIn("dialog: Filter (getByRole('button', { name: 'Filter' }))", line)
         self.assertNotIn("tab: Active", line)
         self.assertIn("/incidents/:id (row click)", next(x for x in card.splitlines() if x.startswith("LEADS TO")))
@@ -1387,8 +1864,10 @@ class ObservedEndpoints(MemBase):
         with self.con:
             self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
             for i, v in enumerate(values):
-                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                                 (page, "api", v, v, f"a{page}.js:1", "/repo", "frontend", core.now(), f"a{page}.js"))
+                self.con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (page, "api", v, v, f"a{page}.js:1", "/repo", "frontend", core.now(), f"a{page}.js"),
+                )
 
     def explore(self, lines, target="/map", build="1.0", ts=None, **extra):
         """A run of `target` whose browser made these requests ("GET /api/x => [200]" lines), ingested as the hook does."""
@@ -1396,26 +1875,54 @@ class ObservedEndpoints(MemBase):
         d = Path(self.tmp.name) / "proj/qa-out" / f"r{self.n}" / ".data"
         d.mkdir(parents=True)
         (d / "plan.json").write_text(json.dumps({"kind": "explore", "title": target, "tickets": [], "cases": []}))
-        (d / "requests-x.log").write_text("".join(f"{i}. [{l.split()[0]}] http://localhost:8765{l.split()[1]} => {l.split('=> ')[1]} OK\n"
-                                                  for i, l in enumerate(lines, 1)))
+        (d / "requests-x.log").write_text(
+            "".join(
+                f"{i}. [{l.split()[0]}] http://localhost:8765{l.split()[1]} => {l.split('=> ')[1]} OK\n"
+                for i, l in enumerate(lines, 1)
+            )
+        )
         f = d / "run-x.json"
-        f.write_text(json.dumps({**run(build=build), "run_id": f"r{self.n}", "target": target, "pages": [{"route": target}], **extra}))
+        f.write_text(
+            json.dumps(
+                {**run(build=build), "run_id": f"r{self.n}", "target": target, "pages": [{"route": target}], **extra}
+            )
+        )
         t = ts or time.time() - 1000 + self.n
         os.utime(f, (t, t))
         memory.ingest_pending(d.parent.parent)
         return d.parent
 
     def seen(self, route="/map"):
-        return [tuple(x) for x in self.con.execute("SELECT method, path, status_class, build FROM observed_endpoints WHERE route=? "
-                                                   "ORDER BY method, path, status_class", (route,))]
+        return [
+            tuple(x)
+            for x in self.con.execute(
+                "SELECT method, path, status_class, build FROM observed_endpoints WHERE route=? "
+                "ORDER BY method, path, status_class",
+                (route,),
+            )
+        ]
 
     def test_a_run_keeps_the_shape_and_status_class_of_each_call_never_the_query(self):
-        self.explore(["GET /api/incidents.json?token=abc123secretvalue&page=2 => [200]", "GET /api/zones/4521 => [404]",
-                      "POST /api/zones => [500]", "GET /api/units => [FAILED]", "GET /api/zones/4522 => [404]",
-                      "GET /api/other => [302]"])
-        self.assertEqual(self.seen(), [("GET", "/api/incidents.json", "2xx", "1.0"), ("GET", "/api/other", "3xx", "1.0"),
-                                       ("GET", "/api/units", "failed", "1.0"), ("GET", "/api/zones/:id", "4xx", "1.0"),
-                                       ("POST", "/api/zones", "5xx", "1.0")])
+        self.explore(
+            [
+                "GET /api/incidents.json?token=abc123secretvalue&page=2 => [200]",
+                "GET /api/zones/4521 => [404]",
+                "POST /api/zones => [500]",
+                "GET /api/units => [FAILED]",
+                "GET /api/zones/4522 => [404]",
+                "GET /api/other => [302]",
+            ]
+        )
+        self.assertEqual(
+            self.seen(),
+            [
+                ("GET", "/api/incidents.json", "2xx", "1.0"),
+                ("GET", "/api/other", "3xx", "1.0"),
+                ("GET", "/api/units", "failed", "1.0"),
+                ("GET", "/api/zones/:id", "4xx", "1.0"),
+                ("POST", "/api/zones", "5xx", "1.0"),
+            ],
+        )
         dump = json.dumps([tuple(x) for x in self.con.execute("SELECT * FROM observed_endpoints")])
         self.assertNotIn("abc123secretvalue", dump)
         self.assertNotIn("page=2", dump)
@@ -1424,17 +1931,22 @@ class ObservedEndpoints(MemBase):
         d = self.explore(["GET /api/x => [200]"])
         (d / ".data/requests-x.log").write_text(
             "1. [GET] http://localhost:8765/api/mine => [200] OK\n2. [GET] https://cdn.example.net/api/theirs => [200] OK\n"
-            "3. [GET] http://localhost:8765/static/app.js => [200] OK\n4. [GET] http://localhost:8765/logo.png => [200] OK\n")
+            "3. [GET] http://localhost:8765/static/app.js => [200] OK\n4. [GET] http://localhost:8765/logo.png => [200] OK\n"
+        )
         os.utime(d / ".data/run-x.json", (time.time(), time.time() + 1))
         (d / ".data/run-x.json.ingested").unlink()
         memory.ingest_pending(d.parent)
-        self.assertEqual({x[1] for x in self.seen()}, {"/api/x", "/api/mine"})  # /api/x: the first ingest of this folder
+        self.assertEqual(
+            {x[1] for x in self.seen()}, {"/api/x", "/api/mine"}
+        )  # /api/x: the first ingest of this folder
 
     def test_a_run_without_a_request_log_or_a_crawl_adds_nothing_and_never_fails(self):
         d = self.explore(["GET /api/x => [200]"], target="/a")
         (d / ".data/requests-x.log").unlink()
         self.assertEqual(self.seen("/a"), [("GET", "/api/x", "2xx", "1.0")])  # the first run's rows stay
-        self.explore(["GET /api/crawl => [200]"], target="/c", mode="map")  # the read-only crawl: one log for many pages
+        self.explore(
+            ["GET /api/crawl => [200]"], target="/c", mode="map"
+        )  # the read-only crawl: one log for many pages
         self.assertEqual(self.seen("/c"), [])
 
     def test_a_rewritten_run_does_not_duplicate_and_each_build_has_its_own_rows(self):
@@ -1448,8 +1960,16 @@ class ObservedEndpoints(MemBase):
         self.assertEqual(len(self.seen()), 100)
 
     def test_gaps_and_the_card_name_mapped_endpoints_the_run_never_made(self):
-        self.calls("/map", "GET /api/incidents.json", "GET /api/closures.json", "DELETE /api/zones/{id}", "POST /api/zones",
-                   "GET /api/a", "GET /api/b", "GET /api/c")
+        self.calls(
+            "/map",
+            "GET /api/incidents.json",
+            "GET /api/closures.json",
+            "DELETE /api/zones/{id}",
+            "POST /api/zones",
+            "GET /api/a",
+            "GET /api/b",
+            "GET /api/c",
+        )
         self.explore(["GET /api/incidents.json => [200]", "POST /api/zones => [200]"])
         card = memory.card(self.con, "/map")
         line = next(x for x in card.splitlines() if x.startswith("UNEXERCISED ENDPOINTS"))
@@ -1466,7 +1986,9 @@ class ObservedEndpoints(MemBase):
 
     def test_nothing_is_flagged_for_a_page_with_no_observations_on_this_build_or_after_the_call_is_made(self):
         self.calls("/map", "GET /api/closures.json")
-        self.assertNotIn("UNEXERCISED", memory.card(self.con, "/map"))  # never explored with a request log: unknown, not a gap
+        self.assertNotIn(
+            "UNEXERCISED", memory.card(self.con, "/map")
+        )  # never explored with a request log: unknown, not a gap
         self.explore(["GET /api/other => [200]"])
         self.assertIn("UNEXERCISED ENDPOINTS", memory.card(self.con, "/map"))
         self.explore(["GET /api/closures.json => [200]"])
@@ -1489,8 +2011,10 @@ class ObservedEndpoints(MemBase):
         order = lambda: [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
         self.assertEqual(order(), ["/b", "/a"])  # the same tier: more unexercised calls first
         with self.con:
-            self.con.execute("INSERT INTO bugs(hash,page,title,status,severity,first_seen,last_seen,symptom) "
-                             "VALUES('h','/a','t','REGRESSED','HIGH','x','x','s')")
+            self.con.execute(
+                "INSERT INTO bugs(hash,page,title,status,severity,first_seen,last_seen,symptom) "
+                "VALUES('h','/a','t','REGRESSED','HIGH','x','x','s')"
+            )
         self.assertEqual(order(), ["/a", "/b"])  # a regressed bug is a higher tier, whatever /b leaves untried
 
     def test_an_old_database_gains_the_table_and_forgetting_a_page_clears_it(self):
@@ -1511,13 +2035,20 @@ class BlindSpots(ObservedEndpoints):
         return self.explore(["GET /api/x => [200]"], target=target, not_tested=list(items), status=status, **extra)
 
     def rows(self, page="/map"):
-        return [tuple(x) for x in self.con.execute(
-            "SELECT category, text, seen_runs, resolved FROM blind_spots WHERE page=? ORDER BY category, text", (page,))]
+        return [
+            tuple(x)
+            for x in self.con.execute(
+                "SELECT category, text, seen_runs, resolved FROM blind_spots WHERE page=? ORDER BY category, text",
+                (page,),
+            )
+        ]
 
     def test_a_deferral_repeated_by_later_runs_is_counted_once_per_run(self):
         item = {"category": "needs_setup", "text": "error-handling needs --faults"}
         d = self.defer(item, "no second account")
-        self.assertEqual(self.rows(), [("needs_setup", "error-handling needs --faults", 1, 0), ("other", "no second account", 1, 0)])
+        self.assertEqual(
+            self.rows(), [("needs_setup", "error-handling needs --faults", 1, 0), ("other", "no second account", 1, 0)]
+        )
         f = d / ".data/run-x.json"
         (d / ".data/run-x.json.ingested").unlink()
         memory.ingest_pending(d.parent)  # the same run again: not a second sighting
@@ -1528,7 +2059,9 @@ class BlindSpots(ObservedEndpoints):
     def test_a_deferral_a_completed_later_run_no_longer_makes_is_resolved_and_comes_back_unresolved(self):
         self.defer({"category": "not_reached", "text": "the export dialog"})
         self.defer({"category": "needs_setup", "text": "admin role"})
-        self.assertEqual(self.rows(), [("needs_setup", "admin role", 1, 0), ("not_reached", "the export dialog", 1, 1)])  # gone
+        self.assertEqual(
+            self.rows(), [("needs_setup", "admin role", 1, 0), ("not_reached", "the export dialog", 1, 1)]
+        )  # gone
         self.defer({"category": "not_reached", "text": "the export dialog"})
         self.assertEqual(self.rows(), [("needs_setup", "admin role", 1, 1), ("not_reached", "the export dialog", 2, 0)])
         self.defer(status="INCOMPLETE")  # an unfinished run proves nothing
@@ -1544,15 +2077,26 @@ class BlindSpots(ObservedEndpoints):
     def test_blindspots_lists_the_four_kinds_for_a_page_and_as_json(self):
         self.calls("/map", "GET /api/closures.json", "POST /api/zones")
         with self.con:
-            self.con.execute("INSERT INTO page_states(page,state_key,kind,trigger,status,build,ts) VALUES('/map','tab: Layers','tab','t','unvisited','1.0','x')")
+            self.con.execute(
+                "INSERT INTO page_states(page,state_key,kind,trigger,status,build,ts) VALUES('/map','tab: Layers','tab','t','unvisited','1.0','x')"
+            )
         faults = {"category": "needs_setup", "text": "error-handling needs --faults"}
-        self.explore(["POST /api/zones => [200]", "POST /api/zones => [200]", "PUT /api/units => [200]", "PUT /api/units => [422]"],
-                     not_tested=[faults, {"category": "safety", "text": "bulk delete"}])
+        self.explore(
+            [
+                "POST /api/zones => [200]",
+                "POST /api/zones => [200]",
+                "PUT /api/units => [200]",
+                "PUT /api/units => [422]",
+            ],
+            not_tested=[faults, {"category": "safety", "text": "bulk delete"}],
+        )
         self.defer(faults)
         out = memory.blindspots(self.con, "/map")
         self.assertIn("/map", out)
         self.assertIn("GET /api/closures", out)  # mapped, never observed
-        self.assertIn("POST /api/zones", out.split("write")[1])  # only ever 2xx: its server-side validation was never provoked
+        self.assertIn(
+            "POST /api/zones", out.split("write")[1]
+        )  # only ever 2xx: its server-side validation was never provoked
         self.assertNotIn("PUT /api/units", out.split("write")[1])  # saw a 422
         self.assertIn("tab: Layers", out)
         self.assertIn("error-handling needs --faults (2 runs)", out)
@@ -1562,8 +2106,10 @@ class BlindSpots(ObservedEndpoints):
         self.assertEqual(page["unexercised_apis"], ["GET /api/closures"])
         self.assertEqual(page["untested_write_errors"], ["POST /api/zones"])
         self.assertEqual(page["unvisited_states"], ["tab: Layers"])
-        self.assertEqual([(x["category"], x["text"], x["runs"]) for x in page["not_tested"]],
-                         [("needs_setup", "error-handling needs --faults", 2)])
+        self.assertEqual(
+            [(x["category"], x["text"], x["runs"]) for x in page["not_tested"]],
+            [("needs_setup", "error-handling needs --faults", 2)],
+        )
 
     def test_blindspots_across_the_app_name_the_blockers_that_hit_several_pages(self):
         faults = {"category": "needs_setup", "text": "error-handling needs --faults"}
@@ -1571,7 +2117,9 @@ class BlindSpots(ObservedEndpoints):
             self.defer(faults, target=page)
         self.defer(faults, {"category": "needs_setup", "text": "another"}, target="/a")
         data = json.loads(memory.blindspots(self.con, as_json=True))
-        self.assertEqual(data["systemic"], [{"category": "needs_setup", "text": "error-handling needs --faults", "pages": 3}])
+        self.assertEqual(
+            data["systemic"], [{"category": "needs_setup", "text": "error-handling needs --faults", "pages": 3}]
+        )
         self.assertIn("error-handling needs --faults (3 pages)", memory.blindspots(self.con))
         self.assertEqual(memory.blindspots(self.con, "/nope"), "no blind spots recorded for /nope")
 
@@ -1593,8 +2141,10 @@ class Database(MemBase):
     """core.connect."""
 
     def test_a_database_from_before_0_4_is_refused_untouched(self):
-        for ddl, missing in (("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, seen_count INTEGER)", "bugs lacks"),
-                             ("CREATE TABLE codemap(page TEXT, kind TEXT, label TEXT, repo TEXT, area TEXT)", "codemap lacks src")):
+        for ddl, missing in (
+            ("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, seen_count INTEGER)", "bugs lacks"),
+            ("CREATE TABLE codemap(page TEXT, kind TEXT, label TEXT, repo TEXT, area TEXT)", "codemap lacks src"),
+        ):
             old = Path(self.tmp.name) / f"{missing.split()[0]}.db"
             c = sqlite3.connect(old)
             c.execute(ddl)
@@ -1604,7 +2154,9 @@ class Database(MemBase):
             with self.assertRaisesRegex(core.BadInput, f"from before qa-sdet 0.4 \\({missing}"):
                 core.connect()
             c = sqlite3.connect(old)
-            self.assertEqual(len(c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()), 1)  # nothing added
+            self.assertEqual(
+                len(c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()), 1
+            )  # nothing added
             c.close()
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
@@ -1628,11 +2180,25 @@ class AuditFollowUps(MemBase):
         self.assertEqual(tuple(self.con.execute("SELECT status, regressed_count FROM bugs").fetchone()), ("FIXED", 0))
 
     def test_a_page_only_the_crawler_mapped_is_still_never_explored(self):  # --discover / qa-init --crawl test nothing
-        self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                         ("/zones", "rule", "speed max 130", "", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
-        memory.ingest(self.con, {"run_id": "map-1", "mode": "map", "target": "http://qa", "build": "1.0", "status": "COMPLETED",
-                                 "pages": [{"route": "/zones"}]}, "2026-01-01T00:00:00Z")
-        page = lambda: next(p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/zones")
+        self.con.execute(
+            "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("/zones", "rule", "speed max 130", "", "a.js:1", "/repo", "frontend", core.now(), "a.js"),
+        )
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "map-1",
+                "mode": "map",
+                "target": "http://qa",
+                "build": "1.0",
+                "status": "COMPLETED",
+                "pages": [{"route": "/zones"}],
+            },
+            "2026-01-01T00:00:00Z",
+        )
+        page = lambda: next(
+            p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/zones"
+        )
         self.assertEqual((page()["never_explored"], page()["tier"]), (True, "new, with forms"))
         memory.ingest(self.con, {**run(), "target": "/zones", "pages": [{"route": "/zones"}]}, "2026-01-02T00:00:00Z")
         self.assertFalse(page()["never_explored"])
@@ -1643,12 +2209,15 @@ class AuditFollowUps(MemBase):
         self.con.commit()
         self.con.close()
         self.con = core.connect()
-        memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-05T00:00:00Z")
+        memory.ingest(
+            self.con, run("2.0", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-05T00:00:00Z"
+        )
         b2 = next(x for x in json.loads(memory.history(self.con, as_json=True))["builds"] if x["build"] == "2.0")
         self.assertEqual(b2["new_bugs"], 0)  # it was found before 2.0
 
     def test_a_locked_database_while_keeping_signals_retries_the_whole_file(self):
         import sqlite3
+
         out = Path(self.tmp.name) / "qa-out"
         f = runfile(out / "a")
         f.write_text(json.dumps(run()))
@@ -1680,13 +2249,21 @@ class IngestPending(MemBase):
 
     def test_odd_text_and_paths_are_ingested_not_parked(self):  # a sliced emoji, a BOM, `~user/` in draft_path
         out = Path(self.tmp.name) / "qa-out"
-        for name, data in [("s", json.dumps(run(facts=[{"kind": "note", "text": "emoji cut \ud83d here"}]))),
-                           ("b", "\ufeff" + json.dumps(run(facts=[{"kind": "note", "text": "Authorization: Bearer abcdefghijklmnop1234"}]))),
-                           ("t", json.dumps(run(bugs=[{"route": "/form", "title": "t", "draft_path": "~nosuchuser9/BUG-1.md"}])))]:
+        for name, data in [
+            ("s", json.dumps(run(facts=[{"kind": "note", "text": "emoji cut \ud83d here"}]))),
+            (
+                "b",
+                "\ufeff"
+                + json.dumps(run(facts=[{"kind": "note", "text": "Authorization: Bearer abcdefghijklmnop1234"}])),
+            ),
+            ("t", json.dumps(run(bugs=[{"route": "/form", "title": "t", "draft_path": "~nosuchuser9/BUG-1.md"}]))),
+        ]:
             (out / name).mkdir(parents=True)
             runfile(out / name).write_text(data, encoding="utf-8")
         self.assertEqual(memory.ingest_pending(out), 3, list(out.rglob("*.error")))
-        self.assertNotIn("abcdefghijklmnop1234", runfile(out / "b").read_text(encoding="utf-8"))  # the file is scrubbed too
+        self.assertNotIn(
+            "abcdefghijklmnop1234", runfile(out / "b").read_text(encoding="utf-8")
+        )  # the file is scrubbed too
         self.assertIn("emoji cut", memory.search(self.con, "emoji"))
 
     def test_transient_error_retries(self):
@@ -1704,9 +2281,14 @@ class IngestPending(MemBase):
 
     def test_wrongly_typed_fields_are_parked_not_retried(self):
         out = Path(self.tmp.name) / "qa-out"
-        for i, bad in enumerate([{"pages": [{"route": ["/a"]}]}, {"mode": {"x": 1}},
-                                 {"bugs": [{"route": "/a", "title": "t", "severity": ["HIGH"]}]},
-                                 {"status": 10 ** 30, "pages": [{"route": "/a", "facts": [{"text": {"a": 1}}]}]}]):
+        for i, bad in enumerate(
+            [
+                {"pages": [{"route": ["/a"]}]},
+                {"mode": {"x": 1}},
+                {"bugs": [{"route": "/a", "title": "t", "severity": ["HIGH"]}]},
+                {"status": 10**30, "pages": [{"route": "/a", "facts": [{"text": {"a": 1}}]}]},
+            ]
+        ):
             d = out / str(i)
             d.mkdir(parents=True)
             runfile(d).write_text(json.dumps({"run_id": f"r{i}", "build": "1", **bad}))
@@ -1730,9 +2312,16 @@ class IngestPending(MemBase):
         out = proj / "qa-out" / "form"
         (out / "bugs").mkdir(parents=True)
         (out / "bugs/BUG-1.md").write_text("x")
-        runfile(out).write_text(json.dumps(run(bugs=[
-            {"route": "/form", "title": "a", "draft_path": "qa-out/form/bugs/BUG-1.md"},
-            {"route": "/form", "title": "b", "draft_path": "bugs/BUG-1.md"}])))
+        runfile(out).write_text(
+            json.dumps(
+                run(
+                    bugs=[
+                        {"route": "/form", "title": "a", "draft_path": "qa-out/form/bugs/BUG-1.md"},
+                        {"route": "/form", "title": "b", "draft_path": "bugs/BUG-1.md"},
+                    ]
+                )
+            )
+        )
         memory.ingest_pending(proj / "qa-out")
         paths = {r[0] for r in self.con.execute("SELECT draft_path FROM bugs")}
         self.assertEqual(paths, {str((out / "bugs/BUG-1.md").resolve())})
@@ -1741,7 +2330,11 @@ class IngestPending(MemBase):
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
         f = runfile(out)
-        f.write_text(json.dumps(run(facts=[{"kind": "note", "text": "login sets eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk"}])))
+        f.write_text(
+            json.dumps(
+                run(facts=[{"kind": "note", "text": "login sets eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk"}])
+            )
+        )
         os.utime(f, (1, 1))
         (out.parent / ".scrubbed").write_text(str(time.time()))  # scrub skips the old file
         self.con.close()
@@ -1754,20 +2347,32 @@ class IngestPending(MemBase):
         (d / "bugs/BUG-1.md").write_text("draft")
         self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 2)
         self.assertTrue((d / ".data/run-form.json.ingested").exists())
-        self.assertTrue((d / ".data/plan.json.ingested").exists())  # only its questions are kept (facts and bugs come from runs)
+        self.assertTrue(
+            (d / ".data/plan.json.ingested").exists()
+        )  # only its questions are kept (facts and bugs come from runs)
         con = core.connect()
         try:
-            self.assertEqual(con.execute("SELECT draft_path FROM bugs").fetchone()[0], str((d / "bugs/BUG-1.md").resolve()))
+            self.assertEqual(
+                con.execute("SELECT draft_path FROM bugs").fetchone()[0], str((d / "bugs/BUG-1.md").resolve())
+            )
         finally:
             con.close()
         self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 0)
 
     def test_bad_report_fields_are_parked(self):
-        for bad in ({"cases": [{"id": "TC-1", "status": "MAYBE"}]}, {"cases": [{"status": "PASS"}]},
-                    {"cases": "TC-1 PASS"}, {"questions": "why?"}, {"not_tested": [1]}, {"notes": ["x"]},
-                    {"questions": [{"status": "open"}]}, {"not_tested": [{"category": "safety", "text": 3}]},
-                    {"env": "chrome"}, {"env": {"url": ["x"]}},
-                    {"bugs": [{"route": "/x", "title": "t", "annotated": "yes"}]}):
+        for bad in (
+            {"cases": [{"id": "TC-1", "status": "MAYBE"}]},
+            {"cases": [{"status": "PASS"}]},
+            {"cases": "TC-1 PASS"},
+            {"questions": "why?"},
+            {"not_tested": [1]},
+            {"notes": ["x"]},
+            {"questions": [{"status": "open"}]},
+            {"not_tested": [{"category": "safety", "text": 3}]},
+            {"env": "chrome"},
+            {"env": {"url": ["x"]}},
+            {"bugs": [{"route": "/x", "title": "t", "annotated": "yes"}]},
+        ):
             d = self.rundir("bad")
             f = d / ".data/run-x.json"
             f.write_text(json.dumps({**RUN_LIST, "bugs": [], **bad}))
@@ -1776,10 +2381,14 @@ class IngestPending(MemBase):
                 memory.ingest_pending(self.proj / "qa-out")
             self.assertTrue(f.with_name("run-x.json.error").exists(), bad)
             f.with_name("run-x.json.error").unlink()
-        good = {**RUN_LIST, "cases": [{"id": "TC-1", "status": "not run"}], "env": {"url": "u", "browser": "firefox"},
-                # question and not-tested objects are valid too
-                "questions": ["a?", {"text": "b?", "status": "resolved", "answer": "yes"}],
-                "not_tested": ["c", {"category": "safety", "text": "d"}]}
+        good = {
+            **RUN_LIST,
+            "cases": [{"id": "TC-1", "status": "not run"}],
+            "env": {"url": "u", "browser": "firefox"},
+            # question and not-tested objects are valid too
+            "questions": ["a?", {"text": "b?", "status": "resolved", "answer": "yes"}],
+            "not_tested": ["c", {"category": "safety", "text": "d"}],
+        }
         f.write_text(json.dumps(good))
         self.assertEqual(memory.ingest_pending(d), 1)  # a run folder finds its qa-out
 
@@ -1796,6 +2405,7 @@ class IngestPending(MemBase):
 
     def test_concurrent_ingest_pending_rereads_under_lock(self):
         import fcntl, hashlib, threading
+
         out = Path(self.tmp.name) / "qa-out"
         d = out / "2026-11-24-race"
         d.mkdir(parents=True)
@@ -1808,10 +2418,12 @@ class IngestPending(MemBase):
         # Hold the lock so worker B snapshots _pending before lock, while worker A ingests an updated file first.
         lock_fd = open(db.with_suffix(".lock"), "a")
         real_flock(lock_fd, fcntl.LOCK_EX)
+
         def waiting_flock(fh, op):
             if fh is not lock_fd:
                 entered_lock.set()
             return real_flock(fh, op)
+
         results = []
         with mock.patch.object(fcntl, "flock", side_effect=waiting_flock):
             t = threading.Thread(target=lambda: results.append(memory.ingest_pending(out)))
@@ -1830,7 +2442,9 @@ class IngestPending(MemBase):
         self.con.close()
         self.con = core.connect()
         self.assertEqual([r[0] for r in self.con.execute("SELECT text FROM facts")], ["NEW_FIXED_FACT"])
-        self.assertEqual((d / ".data/run-x.json.ingested").read_text().splitlines()[0], hashlib.sha1(rf.read_bytes()).hexdigest())
+        self.assertEqual(
+            (d / ".data/run-x.json.ingested").read_text().splitlines()[0], hashlib.sha1(rf.read_bytes()).hexdigest()
+        )
 
 
 class InitStatus(MemBase):
@@ -1838,16 +2452,23 @@ class InitStatus(MemBase):
 
     def test_settled_parked_missing_and_stale_maps(self):
         import hashlib
+
         d = Path(self.tmp.name) / "qa-out/init"
         d.mkdir(parents=True)
+
         def scan(name, sid, files):
-            (d / f"scan-{name}.json").write_text(json.dumps({"scan_id": sid, "area": name.split("-")[0],
-                                                              "repos": [{"repo": "/r", "files": files}]}))
+            (d / f"scan-{name}.json").write_text(
+                json.dumps({"scan_id": sid, "area": name.split("-")[0], "repos": [{"repo": "/r", "files": files}]})
+            )
+
         def cmap(name, sid, sentinel=None, note=""):
             f = d / f"code-map-{name}.json"
             f.write_text(json.dumps({"scan_id": sid, "area": name.split("-")[0], "rows": []}))
             if sentinel:
-                (d / f"{f.name}.{sentinel}").write_text(f"{hashlib.sha1(f.read_bytes()).hexdigest()}\n2026-11-25T10:00:00Z {note}\n")
+                (d / f"{f.name}.{sentinel}").write_text(
+                    f"{hashlib.sha1(f.read_bytes()).hexdigest()}\n2026-11-25T10:00:00Z {note}\n"
+                )
+
         new = "20261125-100000"
         scan("frontend-1", f"frontend-1-{new}", ["a.jsx"])
         scan("frontend-2", f"frontend-2-{new}", ["b.jsx"])
@@ -1857,7 +2478,8 @@ class InitStatus(MemBase):
         scan("old", "old-20261120-090000", ["x.js"])  # a scan file left from an earlier scan
         cmap("frontend-1", f"frontend-1-{new}", "ingested")
         (d / "code-map-frontend-1.json.ingested").write_text(
-            (d / "code-map-frontend-1.json.ingested").read_text().split("\n")[0] + "\nT\ndropped rows: {'kind': 2}\n")
+            (d / "code-map-frontend-1.json.ingested").read_text().split("\n")[0] + "\nT\ndropped rows: {'kind': 2}\n"
+        )
         cmap("frontend-2", f"frontend-2-{new}", "error", "ValueError: row 3 has no label")
         cmap("backend", "backend-20261120-090000", "ingested")  # the mapper didn't write this scan's map
         code, out, _ = qa_mem("init-status", str(d))
@@ -1869,8 +2491,10 @@ class InitStatus(MemBase):
         self.assertIn("row 3 has no label", retry["code-map-frontend-2.json"]["reason"])
         self.assertIn("no code map", retry["code-map-frontend-3.json"]["reason"])
         self.assertIn("older scan", retry["code-map-backend.json"]["reason"])
-        self.assertEqual((retry["code-map-backend.json"]["area"], retry["code-map-backend.json"]["scan"]),
-                         ("backend", str(d / "scan-backend.json")))
+        self.assertEqual(
+            (retry["code-map-backend.json"]["area"], retry["code-map-backend.json"]["scan"]),
+            ("backend", str(d / "scan-backend.json")),
+        )
 
 
 if __name__ == "__main__":

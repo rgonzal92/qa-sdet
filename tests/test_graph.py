@@ -1,5 +1,6 @@
 """The cross-app graph: shell menu bindings, resource roots and shared components, built from the code map's rows and
 the stored transitions; and what cards, gaps, `prep` and `qa-mem impact` show from it. Hints, never oracles."""
+
 import json, unittest
 
 from support import MemBase, cli, core, memory
@@ -11,8 +12,10 @@ class GraphCase(MemBase):
         with self.con:
             if page != "*":
                 self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
-            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                             (page, kind, label, value, f"{src}:1", repo, area, core.now(), src))
+            self.con.execute(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                (page, kind, label, value, f"{src}:1", repo, area, core.now(), src),
+            )
 
     def calls(self, page, *values, src=None):
         for i, v in enumerate(values):
@@ -22,9 +25,24 @@ class GraphCase(MemBase):
         self.row(shell, "route", "Daily", f"module {mid} at {module}", "public/config.json")
 
     def bug(self, page, symptom, endpoint=None, status="OPEN"):
-        memory.ingest(self.con, {"run_id": f"r-{page}-{symptom}", "build": "1", "pages": [{"route": page}],
-                                 "bugs": [{"route": page, "title": symptom, "symptom": symptom, "severity": "HIGH",
-                                           "classification": "CONFIRMED", **({"endpoint": endpoint} if endpoint else {})}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": f"r-{page}-{symptom}",
+                "build": "1",
+                "pages": [{"route": page}],
+                "bugs": [
+                    {
+                        "route": page,
+                        "title": symptom,
+                        "symptom": symptom,
+                        "severity": "HIGH",
+                        "classification": "CONFIRMED",
+                        **({"endpoint": endpoint} if endpoint else {}),
+                    }
+                ],
+            },
+        )
         h = core.bug_hash(page, symptom)
         with self.con:
             self.con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, h))
@@ -61,9 +79,16 @@ class ShellModules(GraphCase):
 
     def test_the_shell_route_has_its_modules_rows_and_the_backend_rules(self):
         rows = codemap._codemap_rows(self.con, "/reports/daily")
-        self.assertEqual({(x["page"], x["kind"]) for x in rows},
-                         {("/reports/daily", "route"), ("/m/daily", "locator"), ("/m/daily", "rule"), ("/m/daily", "api"),
-                          ("*", "rule")})
+        self.assertEqual(
+            {(x["page"], x["kind"]) for x in rows},
+            {
+                ("/reports/daily", "route"),
+                ("/m/daily", "locator"),
+                ("/m/daily", "rule"),
+                ("/m/daily", "api"),
+                ("*", "rule"),
+            },
+        )
         self.assertIn("/m/daily", codemap.code(self.con, "/reports/daily"))
 
     def test_the_card_of_the_shell_route_is_not_empty(self):
@@ -77,9 +102,24 @@ class ShellModules(GraphCase):
 
     def test_a_bug_on_an_endpoint_the_module_calls_shows_on_the_shell_card(self):
         self.calls("/zones/new", "POST /api/zones")
-        memory.ingest(self.con, {"run_id": "r1", "build": "1", "pages": [{"route": "/zones/new"}], "bugs": [
-            {"route": "/zones/new", "title": "speed 131 saved", "symptom": "speed 131 saved", "severity": "HIGH",
-             "classification": "CONFIRMED", "endpoint": "POST /api/zones"}]})
+        memory.ingest(
+            self.con,
+            {
+                "run_id": "r1",
+                "build": "1",
+                "pages": [{"route": "/zones/new"}],
+                "bugs": [
+                    {
+                        "route": "/zones/new",
+                        "title": "speed 131 saved",
+                        "symptom": "speed 131 saved",
+                        "severity": "HIGH",
+                        "classification": "CONFIRMED",
+                        "endpoint": "POST /api/zones",
+                    }
+                ],
+            },
+        )
         self.assertIn(core.bug_hash("/zones/new", "speed 131 saved"), memory.card(self.con, "/reports/daily"))
 
     def test_the_module_page_is_hidden_from_gaps_and_the_shell_route_stands_for_both(self):
@@ -89,7 +129,9 @@ class ShellModules(GraphCase):
         self.assertIn("untested field", next(x for x in out.splitlines() if "/reports/daily" in x))
         pages = json.loads(memory.gaps(self.con, as_json=True))["pages"]
         self.assertEqual([p["route"] for p in pages], ["/reports/daily"])
-        self.assertEqual(pages[0]["tier"], "new, with forms")  # the module's rule and write call count for the shell route
+        self.assertEqual(
+            pages[0]["tier"], "new, with forms"
+        )  # the module's rule and write call count for the shell route
 
     def test_a_module_nobody_mounts_still_shows_in_gaps(self):
         self.row("/other", "rule", "name", "required", "src/Other.jsx")
@@ -127,13 +169,22 @@ class Resources(GraphCase):
         self.assertEqual(root("api/v1/zones/:id"), "api/v1/zones")
         self.assertEqual(root("zones"), "zones")
         self.assertEqual(root("api/admin/zones"), "api/admin/zones")  # another resource than api/zones
-        for none in ("", "api", ":id/x", "api/graphql", "api/v1/me", "api/config/theme"):  # no root, or a utility endpoint
+        for none in (
+            "",
+            "api",
+            ":id/x",
+            "api/graphql",
+            "api/v1/me",
+            "api/config/theme",
+        ):  # no root, or a utility endpoint
             self.assertEqual(root(none), "", none)
 
     def test_a_writer_sees_the_readers_of_its_resource_and_the_other_writers(self):
         n = codemap.resource_neighbors(self.con, "/zones/new")
         self.assertEqual(self.routes(n["siblings"]), ["/zones/:id"])
-        self.assertEqual(self.routes(n["consumers"]), ["/map", "/zones"])  # a page listed once: as a sibling if it writes
+        self.assertEqual(
+            self.routes(n["consumers"]), ["/map", "/zones"]
+        )  # a page listed once: as a sibling if it writes
         self.assertEqual(n["producers"], [])
         self.assertEqual(n["consumers"][0]["why"], "GET api/zones")
         self.assertEqual(n["siblings"][0]["why"], "PUT api/zones/:id")
@@ -142,8 +193,9 @@ class Resources(GraphCase):
         n = codemap.resource_neighbors(self.con, "/zones")
         self.assertEqual(self.routes(n["producers"]), ["/zones/:id", "/zones/new"])
         self.assertEqual((n["consumers"], n["siblings"]), ([], []))
-        self.assertEqual(codemap.resource_neighbors(self.con, "/closures"),
-                         {"producers": [], "consumers": [], "siblings": []})
+        self.assertEqual(
+            codemap.resource_neighbors(self.con, "/closures"), {"producers": [], "consumers": [], "siblings": []}
+        )
 
     def test_a_base_prefix_or_a_method_less_call_still_links(self):
         self.calls("/zones/old", "fetch(`${BASE}/zones`)")
@@ -152,7 +204,9 @@ class Resources(GraphCase):
     def test_utility_endpoints_and_widely_called_resources_link_nothing(self):
         for i in range(13):
             self.calls(f"/p{i}", "POST /api/audit", "GET /api/me")
-        self.assertEqual(codemap.resource_neighbors(self.con, "/p0"), {"producers": [], "consumers": [], "siblings": []})
+        self.assertEqual(
+            codemap.resource_neighbors(self.con, "/p0"), {"producers": [], "consumers": [], "siblings": []}
+        )
 
     def test_a_module_page_shows_as_its_shell_route(self):
         self.mount("/reports/zones", "/m/zones")
@@ -218,8 +272,9 @@ class CrossPageRules(GraphCase):
     def test_the_same_field_with_another_limit_on_the_edit_page_is_a_hint(self):
         hints = memory._cross_page_rules_differ(self.con, "/zones/new")
         self.assertEqual(hints, ["Speed limit: here max 130 vs /zones/:id max 150"])
-        self.assertEqual(memory._cross_page_rules_differ(self.con, "/zones/:id"),
-                         ["speedLimit: here max 150 vs /zones/new max 130"])
+        self.assertEqual(
+            memory._cross_page_rules_differ(self.con, "/zones/:id"), ["speedLimit: here max 150 vs /zones/new max 130"]
+        )
 
     def test_a_flag_one_page_lacks_is_named(self):
         self.row("/zones/new", "rule", "name", "required, max 40", "src/New.jsx")
@@ -229,7 +284,9 @@ class CrossPageRules(GraphCase):
     def test_agreeing_rules_fields_on_one_page_only_and_other_resources_say_nothing(self):
         self.row("/zones/new", "rule", "color", "required", "src/New.jsx")  # no counterpart on the edit page
         self.row("/zones/:id", "rule", "Speed limit", "min 0, max 130", "src/Edit.jsx")  # the same rule, a second label
-        self.assertEqual(memory._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"])
+        self.assertEqual(
+            memory._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"]
+        )
         self.calls("/closures/new", "POST /api/closures")
         self.row("/closures/new", "rule", "speed limit", "max 5", "src/Closure.jsx")
         self.assertEqual(len(memory._cross_page_rules_differ(self.con, "/zones/new")), 1)
@@ -271,13 +328,19 @@ class Related(GraphCase):
 
     def test_the_card_lists_the_related_pages_with_why(self):
         line = self.line("/zones/new")
-        for want in ("/zones/:id (also writes PUT api/areas/:id)", "/map (reads GET api/areas)",
-                     "/zones (reads GET api/areas)"):
+        for want in (
+            "/zones/:id (also writes PUT api/areas/:id)",
+            "/map (reads GET api/areas)",
+            "/zones (reads GET api/areas)",
+        ):
             self.assertIn(want, line)
         self.assertIn("a change here may show there", line)
-        self.assertEqual(self.line("/schedules"), "RELATED PAGES (a change here may show there; from the code map): "
-                         "/incidents (shares src/components/DateRangePicker.tsx); /zones (shares "
-                         "src/components/DateRangePicker.tsx)")
+        self.assertEqual(
+            self.line("/schedules"),
+            "RELATED PAGES (a change here may show there; from the code map): "
+            "/incidents (shares src/components/DateRangePicker.tsx); /zones (shares "
+            "src/components/DateRangePicker.tsx)",
+        )
         self.assertEqual(self.line("/closures"), "")
 
     def test_the_card_caps_the_list_at_four(self):
@@ -356,16 +419,24 @@ class EntryChain(GraphCase):
         with self.con:
             for r in (a, b):
                 self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (r,))
-            self.con.execute("INSERT INTO transitions VALUES(?,?,?,?,?,?,?)", (a, b, trigger, None, None, "1", core.now()))
+            self.con.execute(
+                "INSERT INTO transitions VALUES(?,?,?,?,?,?,?)", (a, b, trigger, None, None, "1", core.now())
+            )
 
     def test_a_two_hop_detail_route_has_its_list_page_as_entry(self):
         self.go("/incidents", "/incidents/:id", "row click")
         self.go("/incidents/:id", "/incidents/:id/history", "History tab")
-        self.assertEqual(memory.entry_chain(self.con, "/incidents/:id/history"), [
-            {"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"},
-            {"from": "/incidents/:id", "to": "/incidents/:id/history", "trigger": "History tab"}])
-        self.assertEqual(memory.entry_chain(self.con, "/incidents/:id"),
-                         [{"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"}])
+        self.assertEqual(
+            memory.entry_chain(self.con, "/incidents/:id/history"),
+            [
+                {"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"},
+                {"from": "/incidents/:id", "to": "/incidents/:id/history", "trigger": "History tab"},
+            ],
+        )
+        self.assertEqual(
+            memory.entry_chain(self.con, "/incidents/:id"),
+            [{"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"}],
+        )
 
     def test_a_route_with_no_id_needs_no_chain_and_an_unreached_one_has_none(self):
         self.go("/incidents", "/incidents/:id")
@@ -380,13 +451,20 @@ class EntryChain(GraphCase):
         self.assertEqual([h["from"] for h in memory.entry_chain(self.con, "/b/:id")], ["/home", "/a/:id"])
 
     def test_the_chain_is_four_hops_at_most_and_the_shortest_way_wins(self):
-        for a, b in (("/l", "/x1/:id"), ("/x1/:id", "/x2/:id"), ("/x2/:id", "/x3/:id"), ("/x3/:id", "/x4/:id"),
-                     ("/x4/:id", "/x5/:id")):
+        for a, b in (
+            ("/l", "/x1/:id"),
+            ("/x1/:id", "/x2/:id"),
+            ("/x2/:id", "/x3/:id"),
+            ("/x3/:id", "/x4/:id"),
+            ("/x4/:id", "/x5/:id"),
+        ):
             self.go(a, b)
         self.assertEqual(len(memory.entry_chain(self.con, "/x4/:id")), 4)
         self.assertEqual(memory.entry_chain(self.con, "/x5/:id"), [])  # five hops
         self.go("/shortcut", "/x4/:id")
-        self.assertEqual(memory.entry_chain(self.con, "/x4/:id"), [{"from": "/shortcut", "to": "/x4/:id", "trigger": ""}])
+        self.assertEqual(
+            memory.entry_chain(self.con, "/x4/:id"), [{"from": "/shortcut", "to": "/x4/:id", "trigger": ""}]
+        )
 
     def test_an_entry_on_another_host_is_never_used(self):
         self.go("https://evil.example/list", "/x/:id")

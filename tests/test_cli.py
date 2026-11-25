@@ -1,4 +1,5 @@
 """The qa-mem command line: usage, error messages, and the bin/qa-mem launcher."""
+
 import json, os, sqlite3, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from unittest import mock
@@ -48,25 +49,30 @@ class Cli(Base):
 
     def test_round2_cli_option_validation_and_stale_norm(self):
         # H5: codemap-scan rejects empty --out, dangling --out, --full=false
-        for bad in (("codemap-scan", "--out", "", str(self.proj)),
-                    ("codemap-scan", "--out=", str(self.proj)),
-                    ("codemap-scan", str(self.proj), "--out"),
-                    ("codemap-scan", "--full=false", str(self.proj))):
+        for bad in (
+            ("codemap-scan", "--out", "", str(self.proj)),
+            ("codemap-scan", "--out=", str(self.proj)),
+            ("codemap-scan", str(self.proj), "--out"),
+            ("codemap-scan", "--full=false", str(self.proj)),
+        ):
             self.assertEqual(cli(*bad)[0], 2, bad)
         # M4: stale uses norm_build and rejects n/a, none, unknown (...)
         for unk in ("n/a", "none", "undefined", "unknown (missing)"):
             self.assertEqual(cli("stale", unk)[0], 2, unk)
         # L6: marker stop rejects flags, code rejects --repos=1 / --repos + route, bugs/ingest reject extra args
-        for bad in (("marker", "stop", str(self.proj), "--budget", "10"),
-                    ("marker", "stop", str(self.proj), "--faults"),
-                    ("marker", "stop", str(self.proj), "--api-writes"),
-                    ("code", "--repos=1"),
-                    ("code", "--repos", "/form"),
-                    ("bugs", "OPEN", "extra"),
-                    ("ingest", "a.json", "b.json")):
+        for bad in (
+            ("marker", "stop", str(self.proj), "--budget", "10"),
+            ("marker", "stop", str(self.proj), "--faults"),
+            ("marker", "stop", str(self.proj), "--api-writes"),
+            ("code", "--repos=1"),
+            ("code", "--repos", "/form"),
+            ("bugs", "OPEN", "extra"),
+            ("ingest", "a.json", "b.json"),
+        ):
             self.assertEqual(cli(*bad)[0], 2, bad)
         # L5: hook_input catches RecursionError on deeply nested stdin
         import io
+
         deep = io.StringIO("[" * 3000 + "]" * 3000)
         deep.isatty = lambda: False
         with mock.patch.object(sys, "stdin", deep), mock.patch("select.select", return_value=([deep], [], [])):
@@ -94,7 +100,9 @@ class BrokenDb(Base):
 
     def test_ingest_and_settings_take_odd_input(self):
         f = self.t / "run.json"
-        f.write_text("\ufeff" + json.dumps({"run_id": "r1", "build": "1", "pages": [{"route": "/a"}]}), encoding="utf-8")
+        f.write_text(
+            "\ufeff" + json.dumps({"run_id": "r1", "build": "1", "pages": [{"route": "/a"}]}), encoding="utf-8"
+        )
         self.assertEqual(cli("ingest", str(f))[0], 0)  # a BOM, as Windows editors write it
         code, _, err = cli("setup-permissions", "--settings", "~nosuchuser9/settings.json", "--apply")
         self.assertEqual(code, 2, err)
@@ -106,14 +114,22 @@ class Launcher(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.env = {**os.environ, "QA_SDET_DATA": str(Path(self.tmp.name) / "data"),
-                    "QA_SDET_CONFIG": str(Path(self.tmp.name) / "cfg/config.json")}
+        self.env = {
+            **os.environ,
+            "QA_SDET_DATA": str(Path(self.tmp.name) / "data"),
+            "QA_SDET_CONFIG": str(Path(self.tmp.name) / "cfg/config.json"),
+        }
         for leaked in ("PYTHONPATH", "QA_MEM_DB"):  # a developer's shell may set them
             self.env.pop(leaked, None)
 
     def where(self, launcher, cwd, env=None, flags=()):
-        r = subprocess.run([sys.executable, *flags, str(launcher), "where"], cwd=cwd, env=env or self.env,
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, *flags, str(launcher), "where"],
+            cwd=cwd,
+            env=env or self.env,
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         self.assertEqual(Path(r.stdout.strip()).parent, Path(self.tmp.name) / "data")
 
@@ -129,16 +145,25 @@ class Launcher(unittest.TestCase):
 
     def test_launcher_runs_from_another_folder(self):
         self.where(ROOT / "bin/qa-mem", "/")
-        r = subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "--help"], cwd=self.tmp.name, env=self.env,
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "--help"],
+            cwd=self.tmp.name,
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 2)
         self.assertIn("usage: qa-mem <command>", r.stdout)
 
     def test_a_read_command_does_not_load_report_or_doctor(self):
-        code = ("import sys; sys.path.insert(0, sys.argv[1]); from qa_sdet import cli; "
-                "assert cli.main(['card', '/x']) == 0; "
-                "print(sorted(m for m in sys.modules if m.startswith('qa_sdet.')))")
-        r = subprocess.run([sys.executable, "-c", code, str(ROOT / "lib")], env=self.env, capture_output=True, text=True)
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); from qa_sdet import cli; "
+            "assert cli.main(['card', '/x']) == 0; "
+            "print(sorted(m for m in sys.modules if m.startswith('qa_sdet.')))"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, str(ROOT / "lib")], env=self.env, capture_output=True, text=True
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         for loaded in ("report", "doctor", "ops", "scan"):
             self.assertNotIn(f"qa_sdet.{loaded}'", r.stdout)

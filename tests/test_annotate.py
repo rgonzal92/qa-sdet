@@ -1,4 +1,5 @@
 """`qa-mem annotate`: red boxes and a label drawn on a bug's evidence image."""
+
 import builtins, importlib.util, os, stat, struct, unittest, zlib
 from unittest import mock
 
@@ -10,8 +11,12 @@ def white_png(w, h):
     """A plain white RGB PNG, built without Pillow (it is optional at runtime)."""
     chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
     raw = b"".join(b"\0" + b"\xff" * 3 * w for _ in range(h))
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + \
-        chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
 
 
 HAVE_PIL = importlib.util.find_spec("PIL") is not None
@@ -28,6 +33,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_a_label_alone_is_a_caption_in_a_corner(self):  # an iframe shot the browser boxed: the label still fits
         from PIL import Image
+
         p = self.png()
         code, out, _ = cli("annotate", str(p), "--label", "POST /api/zones 500 shown as Saved")
         self.assertEqual(code, 0)
@@ -38,8 +44,11 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_box_and_label(self):
         from PIL import Image
+
         p = self.png()
-        code, out, _ = cli("annotate", str(p), "--box", "60,60,50,30", "--box", "5.4,5,10,10", "--label", "Speed accepts 999")
+        code, out, _ = cli(
+            "annotate", str(p), "--box", "60,60,50,30", "--box", "5.4,5,10,10", "--label", "Speed accepts 999"
+        )
         self.assertEqual(code, 0)
         img = Image.open(p).convert("RGB")
         self.assertEqual(img.getpixel((57, 75)), ops.RED)  # outline just outside the first box's left edge
@@ -55,6 +64,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_label_below_when_no_room_and_clamped(self):
         from PIL import Image
+
         p = self.png()
         ops.annotate(p, [(150, 0, 100, 20)], "x" * 200)  # top edge, sticks out on the right
         img = Image.open(p).convert("RGB")
@@ -68,6 +78,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_label_never_covers_another_box(self):
         from PIL import Image
+
         p = self.png(300, 160)  # the 46-char label wraps to two lines at 300px
         # live case: the 2nd box sits right above the 1st, where the label would go
         ops.annotate(p, [(10, 60, 280, 16), (40, 30, 60, 20)], "0 closures shown although the API returned 404")
@@ -80,6 +91,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_outline_outside_text_label_off_page_content_and_hidpi(self):  # outline hid the first glyph,
         from PIL import Image, ImageDraw  # label covered the Layer dropdown, 18px label unreadable at 2x
+
         for s in (1, 2):
             p = self.png(1280 * s, 720 * s)
             img = Image.open(p).convert("RGB")
@@ -93,8 +105,12 @@ class Annotate(Base):
             self.assertEqual(img.getpixel((8 * s - 1, 149 * s)), ops.RED, s)  # the outline hugs it from outside
             drop = [img.getpixel((x, y)) for x in range(49 * s, 125 * s) for y in range(106 * s, 126 * s)]
             self.assertEqual(drop.count(ops.RED), 0, s)  # dropdown left visible
-            rows = [y for y in range(img.height) if ops.WHITE in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]
-                    and ops.RED in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]]
+            rows = [
+                y
+                for y in range(img.height)
+                if ops.WHITE in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]
+                and ops.RED in [img.getpixel((x, y)) for x in range(125 * s, 700 * s)]
+            ]
             tag = max(rows) - min(rows) + 1
             self.assertGreaterEqual(tag, 20 * s, s)  # tag grows with the image
             lw = sum(img.getpixel((x, 149 * s)) == ops.RED for x in range(0, 8 * s))
@@ -103,6 +119,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_long_label_wraps_on_a_narrow_image_and_box_off_image_is_refused(self):
         from PIL import Image
+
         p = self.png(390, 844)
         label = "Saved at 131 km/h; max is 130 and the error message never appears on mobile view"
         ops.annotate(p, [(8, 400, 250, 20)], label)
@@ -125,6 +142,7 @@ class Annotate(Base):
             if name == "PIL" or name.startswith("PIL."):
                 raise ImportError(name)
             return real(name, *a, **k)
+
         with mock.patch.object(builtins, "__import__", fake):
             code, out, _ = cli("annotate", str(p), "--box", "1,1,5,5", "--label", "x")
         self.assertEqual((code, out.strip()), (0, ops.NO_PILLOW))
@@ -137,11 +155,18 @@ class Annotate(Base):
         (p.parent.parent / "bugs" / "a.png").write_bytes(p.read_bytes())
         (p.parent / "notes.txt").write_text("x")
         (p.parent / "link.png").symlink_to(other)
-        for target in (other, p.parent.parent / "bugs" / "a.png", p.parent / "notes.txt", p.parent / "link.png",
-                       p.parent / "missing.png"):
+        for target in (
+            other,
+            p.parent.parent / "bugs" / "a.png",
+            p.parent / "notes.txt",
+            p.parent / "link.png",
+            p.parent / "missing.png",
+        ):
             self.assertEqual(cli("annotate", str(target), "--box", "1,1,5,5", "--label", "x")[0], 2, target)
         for argv in (("--box", "1,1,5"), ("--box", "1,1,0,5")):  # a label alone is a caption (its own test)
-            self.assertEqual(cli("annotate", str(p), *argv, *(() if "--label" in argv else ("--label", "x")))[0], 2, argv)
+            self.assertEqual(
+                cli("annotate", str(p), *argv, *(() if "--label" in argv else ("--label", "x")))[0], 2, argv
+            )
         self.assertEqual(cli("annotate", str(p), "--box", "1,1,5,5")[0], 2)  # no label
 
     def test_refuses_another_projects_evidence(self):  # a link to another project's evidence png was drawn on
@@ -169,13 +194,23 @@ class Annotate(Base):
         (ev / "linkdir").symlink_to(other)
         for f in (other / "x.png", ev / "BUG-1.jpg", ev / "BUG-1.png.sh", ev / "sub" / "x.png", loose / "x.png"):
             f.write_bytes(p.read_bytes())
-        for target in (ev / "BUG-1.jpg", ev / "BUG-1.png.sh", ev / "sub" / "x.png", ev / "linkdir" / "x.png", ev,
-                       loose / "x.png", f"{ev}/../../../x.png", ev / "*.png", "-x.png"):
+        for target in (
+            ev / "BUG-1.jpg",
+            ev / "BUG-1.png.sh",
+            ev / "sub" / "x.png",
+            ev / "linkdir" / "x.png",
+            ev,
+            loose / "x.png",
+            f"{ev}/../../../x.png",
+            ev / "*.png",
+            "-x.png",
+        ):
             self.assertEqual(cli("annotate", str(target), "--box", "1,1,5,5", "--label", "x")[0], 2, target)
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_bad_input_is_exit_2_and_image_kept(self):  # inf box, non-PNG, truncated, huge -> tracebacks
         from PIL import Image
+
         p = self.png()
         for box in ("inf,1,5,5", "1e400,1,5,5", "nan,1,5,5"):
             self.assertEqual(cli("annotate", str(p), "--box", box, "--label", "x")[0], 2, box)
@@ -206,6 +241,7 @@ class Annotate(Base):
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_palette_and_16_bit_pngs(self):  # transparent palette went black, 16-bit grey went all white
         from PIL import Image
+
         p = self.png()
         im = Image.new("P", (40, 40), 0)
         im.save(p, transparency=0)

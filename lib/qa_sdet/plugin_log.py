@@ -5,6 +5,7 @@ Automatic hooks and qa-mem append scrubbed JSONL events (denials, hook errors, n
 bounces, CLI errors, and 1-line run summaries). Users add manual notes via `qa-mem plugin-log note` or
 `/qa-sdet:qa-feedback`. Setting `"pluginLog": false` in ~/.config/qa-sdet/config.json disables all writes.
 """
+
 import hashlib
 import json
 import os
@@ -34,8 +35,10 @@ _VERSION_CACHE = None
 # denials; credential-shaped values only, so notes stay readable (tests/test_guard.py LibMirrorsGuard pins the two).
 _CLI_MASKS = (
     (re.compile(r"(?i)\b(basic)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}=*"), r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)(token|password|passwd|pwd|secret|api[_-]?key)(\\?['\"]?\s*[=:]\s*\\?['\"]?)[^\s'\"&\\]+"),
-     r"\1\2[REDACTED]"),
+    (
+        re.compile(r"(?i)(token|password|passwd|pwd|secret|api[_-]?key)(\\?['\"]?\s*[=:]\s*\\?['\"]?)[^\s'\"&\\]+"),
+        r"\1\2[REDACTED]",
+    ),
     (re.compile(r"(?i)(\s--?[\w-]*(?:token|password|passwd|secret|api[_-]?key)\s+['\"]?)[^\s'\"]+"), r"\1[REDACTED]"),
     (re.compile(r"(\s(?:-u|--user)\s*['\"]?[^\s:'\"]+:)[^\s'\"]+"), r"\1[REDACTED]"),
 )
@@ -175,8 +178,11 @@ def latest_run_context(qa_out):
     except (OSError, ValueError, TypeError):
         pass
     try:
-        runs = [d for d in qa_out.iterdir()
-                if d.is_dir() and not d.is_symlink() and d.name != "init" and (d / ".data").is_dir()]
+        runs = [
+            d
+            for d in qa_out.iterdir()
+            if d.is_dir() and not d.is_symlink() and d.name != "init" and (d / ".data").is_dir()
+        ]
         runs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
         if runs:
             ctx["run"] = runs[0].name
@@ -224,7 +230,9 @@ def add_note(project, text, kind="nuisance", severity=None):
     if severity is not None:
         severity = str(severity).strip().lower()
         if severity not in SEVERITIES:
-            raise core.BadInput(f"plugin-log note: --severity must be one of {', '.join(SEVERITIES)} (got {severity!r})")
+            raise core.BadInput(
+                f"plugin-log note: --severity must be one of {', '.join(SEVERITIES)} (got {severity!r})"
+            )
     body = scrub_text(text, cap_len=1500)
     if not body:
         raise core.BadInput("plugin-log note: give a note describing the bug, nuisance, or idea")
@@ -234,6 +242,7 @@ def add_note(project, text, kind="nuisance", severity=None):
     qa_out = proj / "qa-out"
     qa_out.mkdir(exist_ok=True)
     from . import ops
+
     ops.git_exclude(proj)
     fields = {"agent": "user", "kind": kind, "text": body}
     if severity:
@@ -247,9 +256,41 @@ def add_note(project, text, kind="nuisance", severity=None):
 
 # ---------- Standard work-safe anonymizer (applied on export) ----------
 _TECH_PREFIXES = {
-    "TC", "AC", "BUG", "HTTP", "HTTPS", "UTF", "ASCII", "SHA", "MD", "TLS", "SSL", "ISO",
-    "PEP", "RFC", "CVE", "ECMA", "ES", "ERR", "EXIT", "UUID", "TICKET", "HOST", "SRC",
-    "CSS", "DOM", "API", "SQL", "HTML", "JSON", "YAML", "XML", "JWT", "SSO", "MFA", "URL",
+    "TC",
+    "AC",
+    "BUG",
+    "HTTP",
+    "HTTPS",
+    "UTF",
+    "ASCII",
+    "SHA",
+    "MD",
+    "TLS",
+    "SSL",
+    "ISO",
+    "PEP",
+    "RFC",
+    "CVE",
+    "ECMA",
+    "ES",
+    "ERR",
+    "EXIT",
+    "UUID",
+    "TICKET",
+    "HOST",
+    "SRC",
+    "CSS",
+    "DOM",
+    "API",
+    "SQL",
+    "HTML",
+    "JSON",
+    "YAML",
+    "XML",
+    "JWT",
+    "SSO",
+    "MFA",
+    "URL",
 }
 _URL_RE = re.compile(r"(https?://)([^/\s'\"`)\]>]+)(/[^\s'\"`)\]>]*)?", re.I)
 _JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,14})-(\d+)\b")
@@ -294,7 +335,7 @@ class Anonymizer:
         base_host = self._bare_host(cfg.get("qaBaseUrl"))
         if base_host:
             self._alias_host(base_host)
-        for h in (cfg.get("allowedHosts") if isinstance(cfg.get("allowedHosts"), list) else ()):
+        for h in cfg.get("allowedHosts") if isinstance(cfg.get("allowedHosts"), list) else ():
             bh = self._bare_host(h)
             if bh:
                 self._alias_host(bh)
@@ -369,7 +410,7 @@ class Anonymizer:
         norm_p = core._ids(path_part) or "/"
         if frag_part.startswith(("/", "!/")):
             bang = "!" if frag_part.startswith("!/") else ""
-            norm_p += f"#{bang}{core._ids(frag_part[len(bang):].split('?')[0])}"
+            norm_p += f"#{bang}{core._ids(frag_part[len(bang) :].split('?')[0])}"
         return f"{scheme}{net}{norm_p}" + ("?<query>" if q_sep else "")
 
     def route(self, r):
@@ -395,7 +436,9 @@ class Anonymizer:
         if self._app:
             out = re.sub(rf"(?i)\b{re.escape(self._app)}\b", "<app>", out)
         # Normalize numeric/UUID segments in route-like paths that weren't full URLs
-        out = _ROUTE_SEG_RE.sub(lambda m: core._ids(m.group(1)) if not m.group(1).startswith("/usr/") else m.group(1), out)
+        out = _ROUTE_SEG_RE.sub(
+            lambda m: core._ids(m.group(1)) if not m.group(1).startswith("/usr/") else m.group(1), out
+        )
         return out
 
     def command(self, cmd):
@@ -450,7 +493,9 @@ def _parse_since(val):
         return s + "T00:00:00Z"
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z?", s):
         return s if s.endswith("Z") else s + ("Z" if s.count(":") == 2 else ":00Z")
-    raise core.BadInput(f"plugin-log export: invalid --since {val!r} (use YYYY-MM-DD, ISO timestamp, or 7d / 24h / 30m)")
+    raise core.BadInput(
+        f"plugin-log export: invalid --since {val!r} (use YYYY-MM-DD, ISO timestamp, or 7d / 24h / 30m)"
+    )
 
 
 def _read_cursor(qa_out):
@@ -478,7 +523,7 @@ def _filter_window(items, qa_out, all_events=False, since=None):
     if ch:
         for i in range(len(items) - 1, -1, -1):
             if items[i][0] == ch:
-                return items[i + 1:]
+                return items[i + 1 :]
     return [(h, d) for h, d in items if str(d.get("ts") or "") > cts]
 
 
@@ -530,7 +575,14 @@ def render_digest(events, anon, bad_lines=0):
     if not notes:
         lines.append("- None.")
     else:
-        ordered = sorted(notes, key=lambda n: (kind_rank.get(n.get("kind"), 9), sev_rank.get(n.get("severity") or "", 9), n.get("ts") or ""))
+        ordered = sorted(
+            notes,
+            key=lambda n: (
+                kind_rank.get(n.get("kind"), 9),
+                sev_rank.get(n.get("severity") or "", 9),
+                n.get("ts") or "",
+            ),
+        )
         for n in ordered:
             tag = f"{n.get('kind', 'nuisance')}" + (f" / {n['severity']}" if n.get("severity") else "")
             ctx_parts = [anon.text(n["run"]) if n.get("run") else "", anon.route(n["route"]) if n.get("route") else ""]
@@ -566,7 +618,9 @@ def render_digest(events, anon, bad_lines=0):
     if by_type["stop_bounce"]:
         ranked, samples = _group_counts(
             by_type["stop_bounce"],
-            lambda e: f"[{e.get('agent', '?')}] {e.get('kind', 'bounce')}: {anon.text('; '.join(e.get('items') or [])[:140])}",
+            lambda e: (
+                f"[{e.get('agent', '?')}] {e.get('kind', 'bounce')}: {anon.text('; '.join(e.get('items') or [])[:140])}"
+            ),
             lambda e: anon.text(e.get("run", "")),
         )
         sec = [f"### Stop-Hook Bounces & Parked Files ({len(by_type['stop_bounce'])})"]
@@ -588,7 +642,9 @@ def render_digest(events, anon, bad_lines=0):
     if by_type["nudge"]:
         ranked, samples = _group_counts(
             by_type["nudge"],
-            lambda e: f"[{e.get('agent', '?')}] `{e.get('kind', '?')}`" + (f" ({e['trigger']})" if e.get("trigger") else ""),
+            lambda e: (
+                f"[{e.get('agent', '?')}] `{e.get('kind', '?')}`" + (f" ({e['trigger']})" if e.get("trigger") else "")
+            ),
             lambda e: anon.text(e.get("detail", ""))[:160],
         )
         sec = [f"### Agent Nudges ({len(by_type['nudge'])})"]
@@ -623,19 +679,33 @@ def render_digest(events, anon, bad_lines=0):
         turns_vals = [int(r["turns"]) for r in runs if isinstance(r.get("turns"), int)]
         dur_vals = [int(r["duration_s"]) for r in runs if isinstance(r.get("duration_s"), int)]
         total_bugs = sum(int(r.get("bugs_found") or 0) for r in runs)
-        lines.append("- **Outcomes:** " + ", ".join(f"{k}: {v}" for k, v in statuses.most_common())
-                     + (f" (`block_scope`: {', '.join(f'{k}={v}' for k, v in bscopes.most_common())})" if bscopes else ""))
+        lines.append(
+            "- **Outcomes:** "
+            + ", ".join(f"{k}: {v}" for k, v in statuses.most_common())
+            + (f" (`block_scope`: {', '.join(f'{k}={v}' for k, v in bscopes.most_common())})" if bscopes else "")
+        )
         lines.append("- **Stop reasons:** " + ", ".join(f"`{k}`: {v}" for k, v in stops.most_common()))
         lines.append(f"- **Build detection:** {known_builds}/{len(runs)} known ({len(runs) - known_builds} `unknown`)")
         avg_t = f"{sum(turns_vals) / len(turns_vals):.1f}" if turns_vals else "n/a"
         avg_d = f"{sum(dur_vals) / len(dur_vals):.0f}s" if dur_vals else "n/a"
-        lines.append(f"- **Stats:** avg turns {avg_t}, avg duration {avg_d}, bugs found {total_bugs}, "
-                     f"runs with `audit-bugs` issues {audit_runs}, missing run files {missing_files}")
-        notable = [r for r in runs if r.get("status") != "COMPLETED" or r.get("missing_run_file")
-                   or int(r.get("turns") or 0) >= 35 or int(r.get("audit_issues") or 0) > 0]
+        lines.append(
+            f"- **Stats:** avg turns {avg_t}, avg duration {avg_d}, bugs found {total_bugs}, "
+            f"runs with `audit-bugs` issues {audit_runs}, missing run files {missing_files}"
+        )
+        notable = [
+            r
+            for r in runs
+            if r.get("status") != "COMPLETED"
+            or r.get("missing_run_file")
+            or int(r.get("turns") or 0) >= 35
+            or int(r.get("audit_issues") or 0) > 0
+        ]
         if notable:
-            lines += ["", "| Run | Route | Status | Stop | Turns | Dur | Bugs | Audit |",
-                      "|---|---|---|---|---:|---:|---:|---:|"]
+            lines += [
+                "",
+                "| Run | Route | Status | Stop | Turns | Dur | Bugs | Audit |",
+                "|---|---|---|---|---:|---:|---:|---:|",
+            ]
             for r in notable[:15]:
                 lines.append(
                     f"| `{anon.text(r.get('run') or '?')}` | `{anon.route(r.get('route') or '') or '?'}` "
@@ -656,8 +726,17 @@ def export_digest(project, *, all_events=False, since=None, preview=False, stdou
     selected = _filter_window(items, qa_out, all_events=all_events, since=since)
     if not selected:
         cur = _read_cursor(qa_out)
-        why = f"since {since}" if since else (f"since last export ({cur['ts']})" if cur.get("ts") and not all_events else "")
-        return {"events": 0, "path": None, "markdown": "", "summary": f"no new plugin-log events{(' ' + why) if why else ''}"}
+        why = (
+            f"since {since}"
+            if since
+            else (f"since last export ({cur['ts']})" if cur.get("ts") and not all_events else "")
+        )
+        return {
+            "events": 0,
+            "path": None,
+            "markdown": "",
+            "summary": f"no new plugin-log events{(' ' + why) if why else ''}",
+        }
     events = [d for _, d in selected]
     anon = Anonymizer(proj, core.config())
     md = render_digest(events, anon, bad_lines=bad)
@@ -687,13 +766,24 @@ def show_log(project, *, limit=30, event_type=None):
     if not events:
         return "no plugin-log events"
     lines = []
-    for e in events[-max(1, int(limit or 30)):]:
+    for e in events[-max(1, int(limit or 30)) :]:
         et = e.get("type", "?")
         agent = e.get("agent") or "-"
-        detail = (e.get("text") or e.get("reason") or e.get("detail") or e.get("error")
-                  or ("; ".join(e.get("items") or []))
-                  or (f"{e.get('status')} stop={e.get('stop_reason') or '-'} turns={e.get('turns', '-')}" if et == "run_summary" else "")
-                  or e.get("cmd") or e.get("call") or "")
+        detail = (
+            e.get("text")
+            or e.get("reason")
+            or e.get("detail")
+            or e.get("error")
+            or ("; ".join(e.get("items") or []))
+            or (
+                f"{e.get('status')} stop={e.get('stop_reason') or '-'} turns={e.get('turns', '-')}"
+                if et == "run_summary"
+                else ""
+            )
+            or e.get("cmd")
+            or e.get("call")
+            or ""
+        )
         tag = f"{et}/{e['kind']}" if e.get("kind") else et
         lines.append(f"{e.get('ts', '?')}  {tag:20}  {agent:11}  {core.short(detail, 120)}")
     return "\n".join(lines)
