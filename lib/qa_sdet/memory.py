@@ -1427,6 +1427,42 @@ def _view_resolution(key):
         return None
 
 
+def set_bug_status(con, prefix, status, jira_key=None):
+    """(done, message): the one bug whose hash starts with `prefix` gets `status` (and `jira_key`). FIXED stamps the fix
+    time and build, so a run that finished before it, ingested later, is no regression (bug_sync stamps the same)."""
+    hits = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE substr(hash, 1, ?)=?", (len(prefix), prefix))]
+    if len(hits) != 1:  # an ambiguous prefix must not change several bugs at once
+        return False, f"{len(hits)} bugs match '{prefix}'" + (": " + ", ".join(hits[:10]) if hits else "") + "; give one hash"
+    h = hits[0]
+    with con:
+        if jira_key is not None:
+            con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, h))
+        else:
+            con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, h))
+        if status == "FIXED":
+            con.execute("UPDATE bugs SET fixed_ts=?, fixed_build=? WHERE hash=?", (core.now(), core.meta(con, "build"), h))
+        # reopened, but its run files no longer list it (they were rewritten without it): it is no bug to track
+        gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
+                           "(SELECT 1 FROM sightings WHERE hash=?)", (h, h)).rowcount
+    if gone:
+        return True, f"removed {h}: no run lists this bug any more"
+    return True, f"updated {h} -> {status}" + (f" ({jira_key})" if jira_key else "")
+
+
+def set_build(con, build):
+    """`build` is the deployed build: what pages of other builds verified is stale (the user's pinned facts stay), and
+    what this build verified is current again (a corrected build: stale 1.44 then stale 1.43). _store does the same per
+    page when a run reports a new build."""
+    with con:
+        core.set_meta(con, "build", build)
+        core.set_meta(con, "build_ts", core.now())
+        for table in ("facts", "locators"):
+            con.execute(f"UPDATE {table} SET stale=1 WHERE page IN (SELECT route FROM pages WHERE build!=?)"
+                        + (" AND pinned=0" if table == "facts" else ""), (build,))
+            con.execute(f"UPDATE {table} SET stale=0 WHERE build=? AND page IN "
+                        f"(SELECT route FROM pages WHERE build=?)", (build, build))
+
+
 def bug_sync(con, data):
     """Sync FILED bugs with read-only Jira search JSON: Done/Resolved (non-rejected) -> FIXED; rejected -> triage hint."""
     if isinstance(data, dict):

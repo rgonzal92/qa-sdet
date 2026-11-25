@@ -691,23 +691,9 @@ def run_cmd(con, cmd, args):
         if not re.fullmatch(r"[0-9a-f]{4,12}", prefix) or status not in core.STATUSES:
             print(f"need a hex hash prefix (4-12 chars) and a status in {sorted(core.STATUSES)}")
             return 2
-        hits = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE substr(hash, 1, ?)=?", (len(prefix), prefix))]
-        if len(hits) != 1:  # an ambiguous prefix must not change several bugs at once
-            print(f"{len(hits)} bugs match '{prefix}'" + (": " + ", ".join(hits[:10]) if hits else "") + "; give one hash")
-            return 1
-        with con:
-            if jira_key is not None:
-                con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, hits[0]))
-            else:
-                con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
-            if status == "FIXED":  # a run that finished before this, ingested later, is no regression
-                con.execute("UPDATE bugs SET fixed_ts=?, fixed_build=? WHERE hash=?",
-                            (core.now(), core.meta(con, "build"), hits[0]))
-            # reopened, but its run files no longer list it (they were rewritten without it): it is no bug to track
-            gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
-                               "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount
-        extra = f" ({jira_key})" if jira_key else ""
-        print(f"removed {hits[0]}: no run lists this bug any more" if gone else f"updated {hits[0]} -> {status}{extra}")
+        done, why = memory.set_bug_status(con, prefix, status, jira_key)
+        print(why)
+        return 0 if done else 1
     elif cmd == "bug-sync":
         o = _opts(args, flags=("--jql",))
         if o["_"]:
@@ -742,15 +728,7 @@ def run_cmd(con, cmd, args):
         if build == core.UNKNOWN:
             print("give the deployed build, e.g. qa-mem stale 1.43.0")
             return 2
-        with con:
-            core.set_meta(con, "build", build)
-            core.set_meta(con, "build_ts", core.now())
-            for table in ("facts", "locators"):
-                con.execute(f"UPDATE {table} SET stale=1 WHERE page IN (SELECT route FROM pages WHERE build!=?)"
-                            + (" AND pinned=0" if table == "facts" else ""), (build,))  # the user's own facts stay
-                # a corrected build (stale 1.44 then stale 1.43): what was verified on it is current again
-                con.execute(f"UPDATE {table} SET stale=0 WHERE build=? AND page IN "
-                            f"(SELECT route FROM pages WHERE build=?)", (build, build))
+        memory.set_build(con, build)
         print(f"current build set to {build}; older knowledge marked stale")
     else:
         return usage_error(cmd)
