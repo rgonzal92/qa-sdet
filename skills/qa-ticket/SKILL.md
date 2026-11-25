@@ -28,7 +28,7 @@ Run `qa-mem report '<run>'`.
 With `--review`, stop: reply with the case count per ticket, the REPORT.md path and one next step: reply `go` to run the cases (they may edit `<run>/.data/plan.json` first). On `go`, run pre-flight `qa-mem session-check`, Read `plan.json` again (keep every id the user left; a case they added with a missing or repeated id gets the next free TC number, saved to the file), run `qa-mem report '<run>'`, and test the cases it now holds.
 
 ## 3. Test
-Group the cases to run by route (`incomplete_routes` only on `--resume`). For each route, one at a time, as run-setup says: setup call (no `rundir`), delegate with mode `ticket`, `slug=<route slug>`, target `qaBaseUrl + route`, this route's cases, all AC of their tickets and the known Jira bugs (tell it to run the cases first, then explore around them), teardown.
+Group the cases to run by route (`incomplete_routes` only on `--resume`). For each route, one at a time, as run-setup says: `qa-mem dispatch '<run>' --route '<route>' --known-bugs '<the Known bugs search's keys and summaries>'` (run-setup's Setup; it puts this route's cases, all AC of their tickets and the known bugs in the brief, cases first), delegate with its brief, teardown.
 If an explorer returns BLOCKED, skip the remaining routes (their cases stay NOT_RUN) and keep its summary (the user can continue later with `/qa-sdet:qa-ticket --resume`).
 
 ## 4. Reply

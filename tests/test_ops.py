@@ -451,5 +451,53 @@ class Evidence(Base):
         self.assertEqual(cli("evidence", str(outside), "--selector", "#a", "--label", "x")[0], 2)
 
 
+class Dispatch(Base):
+    """`qa-mem dispatch <run> --route <route>`: one explorer's setup and brief, so the coordinator never copies it by hand."""
+
+    def setUp(self):
+        super().setUp()
+        self.config(app="x", browser="chrome", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
+                    ssoHost="sso.example.com", mapRoute="/map", buildSource={"type": "selector", "value": "#build"})
+        from support import PLAN
+        cases = [{**PLAN["cases"][0], "route": "/list?a=1", "steps": ["Open", "Authorization: Bearer abcdefghijklmnopqrst"]},
+                 {**PLAN["cases"][2], "route": "/list?a=2"}]
+        self.run_dir = self.rundir("2026-11-25-PROJ-1+PROJ-2", plan={**PLAN, "cases": cases})
+        (self.proj / "qa-rules.md").write_text("never click Confirm\n")
+
+    def dispatch(self, route, *extra):
+        code, out, err = cli("dispatch", str(self.run_dir), "--route", route, *extra)
+        return code, (json.loads(out) if code == 0 else None), err
+
+    def test_brief_holds_this_routes_cases_its_tickets_acs_rules_and_card(self):
+        code, out, _ = self.dispatch("/list?a=1", "--budget", "20", "--known-bugs", "PROJ-77 Sort breaks on ties")
+        self.assertEqual(code, 0)
+        self.assertEqual({k: out[k] for k in ("slug", "target", "mode", "case_count")},
+                         {"slug": "list", "target": "https://qa.example.com/list?a=1", "mode": "ticket", "case_count": 1})
+        brief = Path(out["brief"]).read_text()
+        self.assertEqual(Path(out["brief"]), self.run_dir / ".data/brief-list.md")
+        for want in ("out: " + str(self.run_dir), "slug: list", "budget: 20", "minutes: unlimited", "faults: no",
+                     "TC-1", "Saves 0-130", "Rejects 131", "RULES:\nnever click Confirm", "PROJ-77 Sort breaks on ties",
+                     "mapRoute: /map", "NO CARD for '/list?a=1'", str(ROOT / "references")):
+            self.assertIn(want, brief)
+        for gone in ("TC-3", "Sorted by date", "abcdefghijklmnopqrst"):  # another route's case and ticket; a secret
+            self.assertNotIn(gone, brief)
+        m = json.loads((self.proj / "qa-out/.active").read_text())
+        self.assertEqual((m["budget"], m["run_dir"], m["slug"]), (20, str(self.run_dir), "list"))
+
+    def test_routes_with_one_slug_get_their_own_and_a_route_keeps_its_slug(self):
+        self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")
+        self.assertEqual(self.dispatch("/list?a=2", "--focus", "ties")[1]["slug"], "list-2")
+        self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")  # --resume of that route: same run file
+        self.assertIn("FOCUS: ties", (self.run_dir / ".data/brief-list-2.md").read_text())
+
+    def test_refusals(self):
+        self.assertEqual(cli("dispatch", str(self.proj), "--route", "/x")[0], 2)  # not a run folder
+        code, _, err = self.dispatch("https://evil.example.com/x")
+        self.assertEqual(code, 2)
+        self.assertIn("allowedHosts", err)
+        (self.run_dir / ".data/plan.json").unlink()
+        self.assertEqual(self.dispatch("/list?a=1")[0], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

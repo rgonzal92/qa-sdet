@@ -155,7 +155,9 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
-    "page-start": "<url>", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
+    "page-start": "<url>",
+    "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
+                "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
@@ -217,8 +219,8 @@ def _main(argv):
         return usage_error(cmd, f"{cmd} takes no arguments")
     # an option the usage line doesn't list is a typo (`stale --bogus` must not set the build to "--bogus");
     # option values (after --label, --box, …) and `hash` symptom text may start with "--" or be "-h"
-    known = set(re.findall(r"--[a-z]+", COMMANDS[cmd]))
-    valued = set(re.findall(r"(--[a-z]+)\s+[^|\[\]]", COMMANDS[cmd]))
+    known = set(re.findall(r"--[a-z][a-z-]*[a-z]", COMMANDS[cmd]))  # --known-bugs is one option
+    valued = set(re.findall(r"(--[a-z][a-z-]*[a-z])\s+[^|\[\]]", COMMANDS[cmd]))
     skip = False
     for k, a in enumerate(args):
         if skip:
@@ -337,6 +339,15 @@ def run_cmd(con, cmd, args):
             if top < 1:
                 raise core.BadInput("--top must be a whole number >= 1")
         print(memory.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
+    elif cmd == "dispatch":
+        o = _opts(args, flags=("--faults", "--open-record"),
+                  valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs"))
+        if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
+            return usage_error(cmd)
+        from . import ops
+        print(json.dumps(ops.dispatch(con, o["_"][0], o["--route"], o.get("--mode"), o.get("--focus"), _count(o, "--budget"),
+                                      _count(o, "--minutes", ops.MARKER_HOURS * 60), o.get("--faults", False),
+                                      o.get("--known-bugs") or "", o.get("--open-record", False))))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
