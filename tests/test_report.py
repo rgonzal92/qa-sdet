@@ -171,6 +171,11 @@ class MergedCases(Base):
         self.assertEqual([(c["id"], c["status"], c["actual"]) for c in cases],
                          [("TC-1", "FAIL", "131 saved"), ("TC-2", "PASS", ""), ("TC-3", "PASS", "")])
         self.assertEqual(report.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
+        # a PASS from another run never hides a FAIL or a QUESTION, whichever run is newer
+        for worse in ("FAIL", "QUESTION"):
+            for first, second in ((worse, "PASS"), ("PASS", worse)):
+                two = [("a", {"cases": [{"id": "TC-1", "status": first}]}), ("b", {"cases": [{"id": "TC-1", "status": second}]})]
+                self.assertEqual(report.merged_cases(plan, two)[0]["status"], worse, (first, second))
         # same rank: the newest run wins
         tie = report.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
                                      ("b", {"cases": [{"id": "TC-1", "status": "pass", "actual": "new"}]})])
