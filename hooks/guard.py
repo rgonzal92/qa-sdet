@@ -66,6 +66,12 @@ PW_DENY_EXPLORER = {"webmcp-call": "webmcp-call runs a tool the page registered;
                     "cookie-clear": "cookie-clear would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
                     "cookie-delete": "cookie-delete would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
                     "state-load": "state-load replaces the QA session's cookies and storage with a file's"}
+API_WRITE_METHODS, API_FORBIDDEN_HEADERS = {"POST", "PUT", "PATCH", "DELETE"}, {"authorization", "cookie", "proxy-authorization"}
+EVAL_FETCH_RE = re.compile(r"\bfetch\s*\(")
+EVAL_METHOD_RE = re.compile(r"(?i)\bmethod\W*[:=]\s*['\"`]\s*(post|put|patch|delete)\b")  # {method: 'POST'}, "method" : `put`, o.method = 'Patch'
+EVAL_WRITE_RE = re.compile(r"\bXMLHttpRequest\b|\bsendBeacon\b")  # pattern-based: a method built at run time (['PO','ST'].join('')) is not seen
+EVAL_WRITE_REASON = ("playwright-cli eval sending a write (fetch with POST/PUT/PATCH/DELETE, XMLHttpRequest, sendBeacon) blocked: "
+                     "qa-mem api-probe is the way to send one (with --api-writes, on qa-sdet- records); GET fetches and UI form submits are fine")
 SECRET_JS = re.compile(
     r"[dD]ocument\s*(\.\s*cookie|\[\s*['\"`]cookie)|cookieStore|"  # also el.ownerDocument.cookie
     r"\.\s*cookie\b(?![-\w'\"`])|['\"`]cookie['\"`]|[{,]\s*cookie\s*[,}:]|"  # d=document; d.cookie / Reflect.get(document,'cookie') / ({cookie}) =>
@@ -222,6 +228,7 @@ def read_marker(cwd):
             marker = json.loads(path.read_text())
             nums = {k: float(marker[k]) for k in ("expires", "deadline", "budget", "used") if marker.get(k) is not None}
             ok = ("expires" in nums and marker.get("faults") in (None, True, False)  # NaN/inf would lift a limit
+                  and (marker.get("api_writes") is None or isinstance(marker["api_writes"], bool))  # 1 or "yes" would turn writes on
                   and all(math.isfinite(v) and v >= 0 for v in nums.values())  # epoch seconds: ms would never expire
                   and all(nums.get(k, 0) <= time.time() + 2 * 86400 for k in ("expires", "deadline")))
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
@@ -608,6 +615,8 @@ def check_pw(rest, ctx, cwds, outs):
         return "playwright-cli show --host would expose the logged-in QA browser to the network; keep it on localhost"
     if verb == "eval" and secret_js(" ".join(rest)):
         return "playwright-cli eval reading cookie or web storage values blocked; read key names: Object.keys(localStorage)"
+    if verb == "eval" and (js := " ".join(rest)) and (EVAL_WRITE_RE.search(js) or EVAL_FETCH_RE.search(js) and EVAL_METHOD_RE.search(js)):
+        return EVAL_WRITE_REASON
     if any(verb != "open" or not v or dynamic(v) or any(real(v, c) not in main_profile() for c in cwds) for v in pw_profile_values(rest)):
         return "playwright-cli --profile/--user-data-dir: only `open` with the qa-sdet main profile, spelled out (qa-mem browser-open)"
     sent = args[1:] + opt_values(rest, "--path") if verb in ("upload", "drop") else []
@@ -722,12 +731,38 @@ def check_qamem(args, ctx, cwds=()):
         n = 4 if any(a == "--ref" or a.startswith("--ref=") for a in args) else 2
         ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + n, True, ctx.loop or ctx.loop_depth > 0
         return None
+    if args[:1] == ["api-probe"]:
+        return check_api_probe(args[1:], ctx)
     if args[:1] not in (["browser-open"], ["page-start"]):
         return None
     hosts, pos = allowed_hosts(), [a for k, a in enumerate(args[1:]) if not a.startswith("--") and args[k] != "--session"]
     if bad := next((u for u in pos if not host_ok(u, hosts)), None):
         return f"qa-mem {args[0]} to non-allowlisted host: {bad} (allowed: {sorted(hosts)})"
     ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 1, True, ctx.loop or ctx.loop_depth > 0  # one budgeted command
+def check_api_probe(args, ctx):
+    """qa-mem api-probe <METHOD> <url> [--json b] [--content-type t] [--header 'N: v']: one browser command (a PUT, PATCH or
+    DELETE reads the record first: two), allowedHosts only, no credential headers, writes only in a run with api_writes."""
+    pos, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a.split("=", 1)[0] in ("--json", "--content-type", "--header"):
+            skip = "=" not in a
+        elif not a.startswith("--"):
+            pos.append(a)
+    if len(pos) != 2 or any(dynamic(w) for w in pos):
+        return "qa-mem api-probe <METHOD> <url>: spell out the method and the URL (they can't be checked otherwise)"
+    method, url, hosts = pos[0].upper(), pos[1], allowed_hosts()
+    if not host_ok(url, hosts):
+        return f"qa-mem api-probe to non-allowlisted host: {url} (allowed: {sorted(hosts)})"
+    if bad := next((h for h in opt_values(args, "--header") if h.split(":", 1)[0].strip().lower() in API_FORBIDDEN_HEADERS), None):
+        return (f"qa-mem api-probe header {bad.split(':', 1)[0].strip()} refused: the browser's own session authenticates the "
+                "request; credentials are never sent by hand")
+    if method in API_WRITE_METHODS and not (ctx.marker and ctx.marker.get("api_writes") is True):
+        return (f"qa-mem api-probe {method} writes data: only a run started with --api-writes may (and only on qa-sdet- records); "
+                "GET, HEAD and OPTIONS are always allowed")
+    ctx.spend, ctx.runs_pw = ctx.spend + (2 if method in API_WRITE_METHODS - {"POST"} else 1), True  # PUT, PATCH, DELETE: a GET first
+    ctx.loop = ctx.loop or ctx.loop_depth > 0
 _HTTP_SHORT_VAL = {o[1] for o in HTTP_VALUE_OPTS if len(o) == 2 and o[0] == "-"}
 def explorer_net(name, rest, raw):
     """Deny reason for a network tool the explorer runs, or None: an HTTP client may fetch from the allowed hosts

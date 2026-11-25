@@ -775,13 +775,97 @@ class R6Marker(Case):
         with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=str(cwd)):  # the marker found via the project folder
             self.assertIsNone(bash("playwright-cli -s=qa route '**/api/**'", project()))
 
+    def test_api_probe_is_hosts_checked_header_checked_and_counted(self):
+        cwd = project(budget=30)
+        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+        url = "https://qa.traffic.example/api/zones"
+        for explorer in (False, True):
+            self.assertIn("non-allowlisted host", bash("qa-mem api-probe GET https://evil.com/api/zones", cwd, explorer))
+            self.assertIn("non-allowlisted host", bash("qa-mem api-probe GET https://qa.traffic.example@evil.com/api", cwd, explorer))
+            for h in ("Authorization: Bearer x", "cookie: sid=1", "  Proxy-Authorization : x", "AUTHORIZATION:x"):
+                for form in (f"--header '{h}'", f"--header='{h}'"):
+                    self.assertIn("refused", bash(f"qa-mem api-probe GET {url} {form}", cwd, explorer) or "", h)
+            self.assertIsNotNone(bash("qa-mem api-probe GET", cwd, explorer))  # no URL to check
+            self.assertIsNotNone(bash("qa-mem api-probe GET $URL", cwd, explorer))
+        self.assertEqual(used(), 0)  # a denial spends nothing
+        for cmd, n in ((f"qa-mem api-probe GET {url}", 1), (f"qa-mem api-probe head {url}/1", 1), (f"qa-mem api-probe OPTIONS {url}", 1),
+                       (f"qa-mem api-probe GET {url} --header 'Accept: application/json' --header 'X-Trace: 1'", 1),
+                       (f"python3 {Q} api-probe GET {url}", 1)):
+            before = used()
+            self.assertIsNone(bash(cmd, cwd, True), cmd)
+            self.assertEqual(used() - before, n, cmd)
+        for ok in ("--json '{\"name\": \"qa-sdet-a\"}'", "--json '{\"url\": \"https://evil.com/x\"}'",  # a body is data, not a URL
+                   "--content-type text/plain"):
+            self.assertIsNone(bash(f"qa-mem api-probe GET {url} {ok}", cwd, True), ok)
+
+    def test_api_probe_writes_need_the_run_flag_and_cost_what_they_run(self):
+        url, body = "https://qa.traffic.example/api/zones", "--json '{\"name\": \"qa-sdet-z\"}'"
+        writes = [("POST", 1), ("put", 2), ("PATCH", 2), ("DELETE", 2)]
+        for why, m in (("no marker", None), ("flag off", {"api_writes": False}), ("flag absent", {"budget": 40}),
+                       ("expired", {"api_writes": True, "expires": time.time() - 5})):
+            cwd = project()
+            if m is not None:
+                marker(cwd, **m)
+            for explorer in (False, True):
+                for method, _ in writes:
+                    self.assertIn("--api-writes", bash(f"qa-mem api-probe {method} {url}/1 {body}", cwd, explorer) or "", (why, method))
+            for method in ("GET", "HEAD", "OPTIONS"):
+                self.assertIsNone(bash(f"qa-mem api-probe {method} {url}", cwd, True), (why, method))
+        cwd = project(budget=40, api_writes=True)
+        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+        for method, n in writes:  # PUT, PATCH and DELETE read the record first: two browser commands
+            before = used()
+            self.assertIsNone(bash(f"qa-mem api-probe {method} {url}/1 {body}", cwd, True), method)
+            self.assertEqual(used() - before, n, method)
+        self.assertIsNotNone(bash(f"qa-mem api-probe DELETE https://evil.com/api/zones/1 {body}", cwd, True))  # the host check holds
+        self.assertIsNotNone(bash(f"qa-mem api-probe POST {url} --header 'Cookie: a=b' {body}", cwd, True))
+        used_up = project(budget=2, used=1, api_writes=True)
+        self.assertIn("browser commands", bash(f"qa-mem api-probe DELETE {url}/1 {body}", used_up, True) or "")  # 2 > 1 left
+
+    def test_the_explorer_cannot_turn_on_api_writes(self):  # only the coordinator's marker may say it
+        for cmd in (f"qa-mem dispatch '{RUN}/qa-out/r' --route /x --api-writes", f"qa-mem marker start '{RUN}' --api-writes",
+                    f"python3 {Q} marker start . --api-writes", "echo '{\"expires\": 9, \"api_writes\": true}' > qa-out/.active",
+                    "sed -i 's/\"api_writes\": false/\"api_writes\": true/' qa-out/.active",
+                    "tee qa-out/.active < /tmp/m"):
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+        cwd = project(budget=9, api_writes=False)  # a marker the explorer can't change keeps writes off
+        self.assertIn("--api-writes", bash("qa-mem api-probe DELETE https://qa.traffic.example/api/zones/1", cwd, True) or "")
+        self.assertIsNone(bash(f"qa-mem marker start '{RUN}' --api-writes", RUN))  # the main session may
+
+    EVAL_WRITES = ["fetch('/api/zones', {method: 'POST', body: '{}'})", "fetch(u,{method:\"put\"})", "fetch(u, { 'method' : `PATCH` })",
+                   "fetch(u, {\"method\":\"DELETE\", credentials: 'include'})", "fetch (u, {headers: h, method: 'Post'})",
+                   "fetch(new Request(u, {method: 'DELETE'}))", "(async()=>{ const o = {}; o.method = 'POST'; await fetch(u, o) })()",
+                   "fetch(u, {method\n:\n'post'})", "var x = new XMLHttpRequest(); x.open('GET', u); x.send()",
+                   "navigator.sendBeacon('/api/log', 'x')", "navigator . sendBeacon(u)", "new window.XMLHttpRequest()"]
+    EVAL_OK = ["fetch(u).then(r => r.headers.get('content-type'))", "fetch(u, {method: 'GET'}).then(r => r.status)",
+               "fetch(u, {method: 'head'}).then(r => r.headers.get('etag'))", "fetch(u, {method: 'OPTIONS'}).then(r => r.headers.get('allow'))",
+               "document.querySelector('form').requestSubmit()", "document.querySelector('form').noValidate = true",
+               "document.querySelector('[name=speed]').removeAttribute('max')",
+               "document.body.innerText.includes('POST')", "[...document.forms].map(f => f.method)"]
+
+    def test_raw_eval_writes_are_denied_for_every_role_even_with_api_writes(self):
+        cwd = project(budget=50, api_writes=True)
+        for js in self.EVAL_WRITES:
+            for verb in ("eval", "--raw eval"):
+                cmd = f"playwright-cli -s=qa {verb} {shlex.quote(js)}"
+                for explorer in (False, True):
+                    self.assertIn("qa-mem api-probe", bash(cmd, cwd, explorer) or "", cmd)
+        self.assertIn("qa-mem api-probe", bash(f"playwright-cli -s=qa --raw eval {shlex.quote(self.EVAL_WRITES[0])}", PROJ) or "")
+        self.table([f"playwright-cli -s=qa --raw eval {shlex.quote(js)}" for js in self.EVAL_OK], False, cwd=cwd)
+
+    def test_raw_eval_denials_spend_nothing(self):
+        cwd = project(budget=10)
+        self.assertIsNotNone(bash(f"playwright-cli -s=qa --raw eval {shlex.quote(self.EVAL_WRITES[0])}", cwd, True))
+        self.assertEqual(json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0), 0)
+
     def test_malformed_markers_are_no_run(self):
         cwd = project(budget=1)
         ms = int(time.time() * 1000)
         for text in (json.dumps({"expires": ms + 7200000, "deadline": ms, "budget": 5}), "{oops", json.dumps({"budget": 5}),
                      json.dumps({"expires": time.time() + 600, "budget": "150 (default)"}), "[1]",
                      '{"expires": %d, "budget": Infinity}' % (time.time() + 600), '{"expires": %d, "deadline": NaN}' % (time.time() + 600),
-                     '{"expires": %d, "used": -1000, "budget": 10}' % (time.time() + 600)):
+                     '{"expires": %d, "used": -1000, "budget": 10}' % (time.time() + 600),
+                     json.dumps({"expires": time.time() + 600, "api_writes": "yes"}), json.dumps({"expires": time.time() + 600, "api_writes": 1})):
             Path(cwd, "qa-out/.active").write_text(text)
             self.assertEqual(g.read_marker(str(cwd)), (None, None), text)
             self.assertIsNone(bash("playwright-cli -s=qa click e1", cwd), text)
@@ -1172,6 +1256,9 @@ class KnownLimits(Case):
                     f"cat {D}/{{profiles,x}}/main/Default/Cookies", f"find {D} | cpio -o > /tmp/x.cpio",
                     "cat ~/.config/qa-sdet/qa-state.json"], False, agents=(False,))
         self.assertIsNone(tool("mcp__playwright__browser_navigate", url="https://evil.com"))
+        self.table(["playwright-cli -s=qa --raw eval \"fetch(u, {method: ['PO', 'ST'].join('')})\"",  # the raw-eval write deny is
+                    "playwright-cli -s=qa --raw eval \"const m = 'POST'; fetch(u, {method: m})\""],  # pattern-based
+                   False, agents=(False,))
         cwd = project()
         (cwd / ".env").write_text("K=v")
         self.assertIsNone(tool("Grep", MAPPER, cwd, pattern="K", path=str(cwd), output_mode="content"))
