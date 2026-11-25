@@ -40,6 +40,17 @@ playwright-cli -s=qa requests --filter '<path regexp>' > '<out>/evidence/BUG-<n>
 ```
 `<#>` is the call's number in `requests`. The file is scrubbed before the report links it and the filing command attaches it.
 
+## Map the page's states and links (one call, read-only)
+Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES; never follow logout or delete links.
+```
+playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, seen = new Set();
+  for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim();
+    if (u.host === location.host && !/logout|sign-?out|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname + u.search)) { seen.add(u.pathname + u.search); out.links.push([u.pathname + u.search, t.slice(0, 40)]); } } catch (e) {} }
+  for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
+    out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
+  return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"
+```
+
 ## Look for broken output (one call, read-only)
 After the page loads, and after each submit or big state change, one `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text, broken images, a page wider than the window, a region still busy, controls with no accessible name. Each hit is a lead: check it like any other result.
 ```

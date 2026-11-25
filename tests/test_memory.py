@@ -1219,6 +1219,41 @@ class SignalBaseline(MemBase):
         self.assertIn("POST /api/zones/7", report.render_report(second))
 
 
+class States(MemBase):
+    """In-page states (tabs, dialogs, query views) and page-to-page transitions, recorded by explorers as they go."""
+
+    def visit(self, build, ts, states=(), transitions=()):
+        memory.ingest(self.con, {"run_id": f"r-{ts}", "target": "/incidents", "build": build,
+                                 "pages": [{"route": "/incidents", "states": list(states), "transitions": list(transitions)}]}, ts)
+
+    def test_unvisited_states_leads_and_the_entry_of_a_detail_page(self):
+        tab = lambda name, status: {"key": f"tab: {name}", "kind": "tab", "trigger": f"getByRole('tab', {{ name: '{name}' }})",
+                                    "status": status}
+        self.visit("1.0", "2026-01-01T00:00:00Z", [tab("Active", "visited"), tab("Scheduled", "unvisited"),
+                                                   {"key": "dialog: Filter", "kind": "dialog", "trigger": "getByRole('button', { name: 'Filter' })"}],
+                   [{"to": "/incidents/4521", "trigger": "row click", "sample_path": "/incidents/4521?token=abc123secretvalue",
+                     "kind": "detail-row"}])
+        card = memory.card(self.con, "/incidents")
+        line = next(x for x in card.splitlines() if x.startswith("UNVISITED STATES"))
+        self.assertIn("tab: Scheduled", line)
+        self.assertIn("dialog: Filter", line)
+        self.assertNotIn("tab: Active", line)
+        self.assertIn("/incidents/:id (row click)", next(x for x in card.splitlines() if x.startswith("LEADS TO")))
+        detail = memory.card(self.con, "/incidents/:id")
+        self.assertIn("ENTRY: from /incidents (row click; e.g. /incidents/4521)", detail)
+        self.assertNotIn("abc123secretvalue", detail)
+        data = json.loads(memory.gaps(self.con, as_json=True))
+        page = next(p for p in data["pages"] if p["route"] == "/incidents/:id")
+        self.assertEqual((page["entry_route"], page["entry_trigger"]), ("/incidents", "row click"))
+        self.assertNotIn("/incidents/:id", data["needs_id"])  # it can be opened from its list page now
+
+    def test_a_new_build_makes_visited_states_due_again(self):
+        self.visit("1.0", "2026-01-01T00:00:00Z", [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
+        self.assertNotIn("UNVISITED STATES", memory.card(self.con, "/incidents"))
+        self.visit("2.0", "2026-01-02T00:00:00Z")
+        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+
+
 class Database(MemBase):
     """core.connect."""
 

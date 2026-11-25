@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from . import core, scrub, codemap
 
 
@@ -64,7 +65,8 @@ def check_run(run):
             raise ValueError("page entry missing 'route'")
         core.txt(pg.get("name"), "name")
         for key, fields in (("facts", ("kind", "text", "source")), ("locators", ("name", "locator")),
-                            ("coverage", ("target", "heuristic", "result"))):
+                            ("coverage", ("target", "heuristic", "result")), ("states", ("key", "kind", "trigger", "status")),
+                            ("transitions", ("to", "trigger", "sample_path", "kind"))):
             for item in core.dicts(pg, key):
                 for f in fields:
                     core.txt(item.get(f), f"{key}.{f}")
@@ -137,6 +139,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                     keep_old = late or (not known and bool(old and old["build"] not in (core.UNKNOWN, None)))
                     con.execute(f"INSERT OR {'IGNORE' if keep_old else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
                                 (route, loc_name, loc_val, build, ts))
+            _store_states(con, route, pg, build, ts)
             for c in pg.get("coverage") or []:
                 if core.norm(c.get("heuristic")):
                     # the newest run's result stands: a run.json ingested late must not put its older one back
@@ -235,6 +238,42 @@ def _pattern(raw):
     """A defect class as a short kebab-case tag ('Silent error as EMPTY!' -> silent-error-as-empty), or None."""
     tag = re.sub(r"[^a-z0-9]+", "-", str(raw or "").lower()).strip("-")[:60].strip("-")
     return tag or None
+
+
+STATES_PER_PAGE = 60
+
+
+def _store_states(con, route, pg, build, ts):
+    """A page's in-page states (tab, dialog, drawer, wizard step, query view) and the pages it leads to, as reported. A
+    state visited on a build stays visited for that build; a new build makes it due again."""
+    for st in core.dicts(pg, "states"):
+        key = core.cap(st.get("key"))[:120]
+        if not key:
+            continue
+        said = core.norm(st.get("status"))
+        status = "visited" if said in ("visited", "done", "opened", "checked") else "blocked" if said == "blocked" else "unvisited"
+        con.execute("INSERT INTO page_states VALUES(?,?,?,?,?,?,?) ON CONFLICT(page, state_key) DO UPDATE SET "
+                    "kind=coalesce(excluded.kind, kind), trigger=coalesce(excluded.trigger, trigger), "
+                    "status=CASE WHEN status='visited' AND build IS excluded.build AND excluded.status!='visited' THEN status "
+                    "ELSE excluded.status END, build=excluded.build, ts=excluded.ts",
+                    (route, key, core.cap(st.get("kind"))[:30] or None, core.cap(st.get("trigger"))[:200] or None,
+                     status, build, ts))
+    con.execute("DELETE FROM page_states WHERE page=? AND state_key NOT IN (SELECT state_key FROM page_states WHERE page=? "
+                "ORDER BY ts DESC LIMIT ?)", (route, route, STATES_PER_PAGE))
+    for t in core.dicts(pg, "transitions"):
+        to = core.norm_route(core.cap(t.get("to")))
+        if not to or to == route:
+            continue
+        sample = core.cap(scrub.redact(t.get("sample_path") or ""))
+        try:
+            sample = urlsplit(sample if "://" in sample else "http://x" + sample).path if sample.startswith(("/", "http")) else ""
+        except ValueError:
+            sample = ""
+        con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (to,))  # known from a link: its card can say how to reach it
+        con.execute("INSERT INTO transitions VALUES(?,?,?,?,?,?,?) ON CONFLICT(from_route, to_route, trigger) DO UPDATE SET "
+                    "sample_path=coalesce(excluded.sample_path, sample_path), kind=coalesce(excluded.kind, kind), "
+                    "build=excluded.build, ts=excluded.ts",
+                    (route, to, core.cap(t.get("trigger"))[:120], sample or None, core.cap(t.get("kind"))[:30] or None, build, ts))
 
 
 def _store_questions(con, items, page, ts, ticket=None):
@@ -516,7 +555,7 @@ def card(con, q, focus=None, ids=False):
     out = [f"PAGE {r} \"{pg['name'] or ''}\" build={pg['build']} verified={pg['last_verified'] or 'never'}"
            + ("" if core.norm_route(q) == r else f"  (matched from '{q}')")]
     if code_only:
-        out.append("NOTE: known from source code only; no run has visited it yet.")
+        out.append("NOTE: known from source code (or a link) only; no run has visited it yet.")
     elif not current:
         out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
     elif unknown_page and b != core.UNKNOWN:
@@ -608,6 +647,19 @@ def card(con, q, focus=None, ids=False):
     if noisy:
         out += ["RECURRING UNEXPLAINED SIGNALS (no bug explains them; investigate or draft; the user can ignore noise):"] + [
             f"- {x['sig_key']} (seen in {x['seen_runs']} runs since build {x['first_build']})" for x in noisy]
+    states = con.execute("SELECT state_key, status, build FROM page_states WHERE page=? ORDER BY ts DESC", (r,)).fetchall()
+    due = [x["state_key"] for x in states if x["status"] != "visited" or x["build"] != b]
+    if due:
+        out.append(f"UNVISITED STATES (on this page, not opened on {'build ' + b if b and b != core.UNKNOWN else 'this build'}: "
+                   "open each, check it, report it as visited): " + "; ".join(due[:8]) + (f" (+{len(due) - 8})" if len(due) > 8 else ""))
+    leads = con.execute("SELECT to_route, trigger FROM transitions WHERE from_route=? ORDER BY ts DESC LIMIT 5", (r,)).fetchall()
+    if leads:
+        out.append("LEADS TO: " + "; ".join(f"{x['to_route']}" + (f" ({x['trigger']})" if x["trigger"] else "") for x in leads))
+    entry = con.execute("SELECT from_route, trigger, sample_path FROM transitions WHERE to_route=? ORDER BY ts DESC LIMIT 1",
+                        (r,)).fetchone()
+    if entry:
+        out.append(f"ENTRY: from {entry['from_route']} (" + "; ".join(x for x in (entry["trigger"], f"e.g. {entry['sample_path']}"
+                   if entry["sample_path"] else "") if x) + ")")
     recurring = _patterns(con)[:3]
     if recurring:
         out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [_pattern_line(g) for g in recurring]
@@ -1175,8 +1227,10 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append("a bug regressed")
         if hot.get(r, 0) >= 3:
             parts.append(f"hotspot {hot[r]} (bug history)")
-        if "/:id" in r:  # a detail page: the explorer can't open it without a real record
-            parts.append("(needs a record id)")
+        entry = con.execute("SELECT from_route, trigger FROM transitions WHERE to_route=? ORDER BY ts DESC LIMIT 1",
+                            (r,)).fetchone() if "/:id" in r else None
+        if "/:id" in r:  # a detail page: opened from the page that leads to it, else it needs a real record
+            parts.append(f"(open from {entry['from_route']}: {entry['trigger'] or 'a link'})" if entry else "(needs a record id)")
         # tiers: what changed or broke again first, then unexplored pages with something to submit, then pages on an
         # older build, then the rest; bug history (hotspot) and untried checks order each tier
         tier = 0 if src or r in regressed or fixed_recheck else 1 if never and r in forms else 2 if old else 3
@@ -1184,14 +1238,17 @@ def gaps(con, changed_only=False, top=None, as_json=False):
                 "never_explored": never, "old_build": old, "changed": bool(src), "changed_files": src,
                 "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested, "open_bugs": open_bugs,
                 "risk_reasons": parts}
+        if entry:
+            info |= {"entry_route": entry["from_route"], "entry_trigger": entry["trigger"]}
         ranked.append(((tier, -hot.get(r, 0), -(untried + untested), -open_bugs, r),
                        f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
     ranked.sort(key=lambda x: x[0])
     shown = ranked[:top] if top is not None else ranked
     if as_json:  # for batch runs: only pages an explorer can open; detail pages are named apart
-        openable = [x[2] for x in ranked if "/:id" not in x[2]["route"]]
+        can_open = lambda i: "/:id" not in i["route"] or "entry_route" in i
+        openable = [x[2] for x in ranked if can_open(x[2])]
         return json.dumps({"build": current or core.UNKNOWN, "pages": openable[:top] if top is not None else openable,
-                           "needs_id": [x[2]["route"] for x in ranked if "/:id" in x[2]["route"]],
+                           "needs_id": [x[2]["route"] for x in ranked if not can_open(x[2])],
                            "unchecked_repos": unchecked}, indent=1)
     if not shown:
         return "no pages with source changes since their last visit"

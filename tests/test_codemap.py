@@ -277,7 +277,7 @@ class Card(CodeMapCase):
         self.write_map("frontend", rows)
         self.ingest_all()
         c = memory.card(self.con, "speed zone")
-        self.assertIn("NOTE: known from source code only", c)
+        self.assertIn("NOTE: known from source code (or a link) only", c)
         self.assertNotIn("re-verify", c)
         self.assertIn("FROM CODE (hints from source, not requirements; unverified;", c)
         self.assertIn("speed: min 0, max 130", c)
