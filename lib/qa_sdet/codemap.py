@@ -443,21 +443,19 @@ def component_neighbors(con, route):
     return [{"route": r, "why": w} for r, w in sorted(found.items())]
 
 
-def codemap_block(con, route, shown=None, first=()):
-    """Card lines for the code map: compact (about 12 lines); `qa-mem code <route>` has everything. Rules whose label is
-    in `first` (untested, or in a file changed since the last visit) come before the others within the cap."""
+def codemap_block(con, route, shown, first=()):
+    """Card lines for the code map: compact (about 12 lines); `qa-mem code <route>` has everything. `shown`: the verified
+    locators the card already printed (any it had no room for still show here as hints). Rules whose label is in `first`
+    (untested, or in a file changed since the last visit) come before the others within the cap."""
     all_rows = _codemap_rows(con, route)
     rows = [x for x in all_rows if x["kind"] != "route"]
     if not rows:
         return []
-    # Verified locators the card already printed; any it had no room for still show here as hints
-    seen = shown if shown is not None else \
-        {x["locator"] for x in con.execute("SELECT locator FROM locators WHERE page=? AND stale=0", (route,))}
     by = {k: [x for x in rows if x["kind"] == k] for k in ("locator", "rule", "api")}
     by["rule"].sort(key=lambda x: x["label"] not in first)  # stable: alphabetical within each group
     uniq = {}
     for x in by["locator"]:  # confirmed by a run: shown above already; the same locator from two files: once
-        if x["value"] not in seen:
+        if x["value"] not in shown:
             uniq.setdefault(x["value"], x)
     by["locator"] = list(uniq.values())
     limits, out = {"locator": 15, "rule": 6, "api": 4}, []
