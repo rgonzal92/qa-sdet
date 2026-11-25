@@ -92,6 +92,12 @@ def check_run(run):
     return rid, build, known, pages, bug_list
 
 
+# In _store's bug upsert: this sighting makes a FIXED bug REGRESSED. ? is 1 for a run that hadn't listed the bug yet; a
+# run older than the last sighting or than the fix (ingested late) predates them: no regression.
+REGRESSES = ("status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
+             "AND excluded.last_seen >= coalesce(fixed_ts, '')")
+
+
 def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
     with con:
         statuses = [core.case_status(c.get("status")) for c in core.dicts(run, "cases")]
@@ -199,16 +205,12 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                         "first_build=coalesce(first_build, excluded.first_build), "
                         "last_build=CASE WHEN excluded.last_build IS NOT NULL AND excluded.last_seen >= coalesce(last_seen, '') "
                         "THEN excluded.last_build ELSE last_build END, "
-                        "regressed_count=coalesce(regressed_count, 0) + CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= "
-                        "coalesce(last_seen, '') AND excluded.last_seen >= coalesce(fixed_ts, '') THEN 1 ELSE 0 END, "
+                        f"regressed_count=coalesce(regressed_count, 0) + CASE WHEN {REGRESSES} THEN 1 ELSE 0 END, "
                         "heuristic=coalesce(excluded.heuristic, heuristic), endpoint=coalesce(excluded.endpoint, endpoint), "
                         "pattern=coalesce(excluded.pattern, pattern), ticket=coalesce(excluded.ticket, ticket), "
                         "seen_count=seen_count + ?, "
-                        # a run older than the last sighting or than the fix (ingested late) predates it: no regression
-                        "status=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
-                        "AND excluded.last_seen >= coalesce(fixed_ts, '') THEN 'REGRESSED' ELSE status END, "
-                        "regressed_by=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
-                        "AND excluded.last_seen >= coalesce(fixed_ts, '') THEN excluded.last_run ELSE regressed_by END, "
+                        f"status=CASE WHEN {REGRESSES} THEN 'REGRESSED' ELSE status END, "
+                        f"regressed_by=CASE WHEN {REGRESSES} THEN excluded.last_run ELSE regressed_by END, "
                         "last_run=CASE WHEN excluded.last_seen >= coalesce(last_seen, '') THEN excluded.last_run ELSE last_run END, "
                         "last_seen=max(coalesce(last_seen, ''), excluded.last_seen), "
                         "first_seen=min(coalesce(first_seen, excluded.first_seen), excluded.first_seen), "
