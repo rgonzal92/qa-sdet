@@ -1021,6 +1021,29 @@ class FilingBundle(Rendering):
         # Draft file itself stays clean (no filing command injected into --description-file)
         self.assertNotIn("acli jira", (d / "bugs/BUG-1.md").read_text())
 
+    def test_a_resighted_bugs_follow_up_names_the_hash_memory_stores(self):  # a reworded regression named no bug
+        con = core.connect()
+        try:
+            memory.ingest(con, {"run_id": "r-old", "target": "/form", "build": "1.40", "bugs": [
+                {"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved"}]}, "2026-11-01T00:00:00Z")
+            h = core.bug_hash("/form", "131 saved")
+            con.execute("UPDATE bugs SET status='FIXED' WHERE hash=?", (h,))
+            con.commit()
+        finally:
+            con.close()
+        back = {"route": "/form", "title": "Speed accepts 131 again", "symptom": "131 is saved once more", "hash": h,
+                "severity": "HIGH", "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md"}
+        jira = {**back, "title": "Known Jira bug", "symptom": "x", "hash": "CAFE-12", "draft_path": "bugs/BUG-2.md"}
+        d = self.rundir("2026-11-24-PROJ-1", plan=PLAN1, runs=[("form", {**RUN1, "run_id": "r-new", "bugs": [back, jira]})])
+        for n in (1, 2):
+            (d / f"bugs/BUG-{n}.md").write_text(f"# Draft {n}\n")
+        report.write_report(d)
+        follow = re.findall(r"qa-mem bug-status (\S+) FILED", (d / "REPORT.md").read_text())
+        self.assertEqual(follow, [h, core.bug_hash("/form", "x")])  # a Jira key is no hash: not 'cafe'
+        self.assertEqual(cli("ingest", str(d / ".data/run-form.json"))[:2], (0, "ingested\n"))  # what the hook stores
+        code, out, _ = cli("bug-status", follow[0], "FILED", "PROJ-9")
+        self.assertEqual((code, out.strip()), (0, f"updated {h} -> FILED (PROJ-9)"))
+
 
 if __name__ == "__main__":
     unittest.main()

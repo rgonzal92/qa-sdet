@@ -517,7 +517,9 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
         title = _draft_title(draft, b.get("title") or bid)
         cmd = (f"acli jira workitem create --project {shlex.quote(proj)} --type Bug "
                f"--summary {shlex.quote(title)} --description-file {shlex.quote(str(draft))}")
-        h = core.bug_hash(core.norm_route(b.get("route")), core.cap(scrub.redact(b.get("symptom") or b.get("title"))))
+        # a re-sighting (a regression's draft) is stored under the hash it names, not one of its new wording
+        h = core.given_hash(b.get("hash")) or \
+            core.bug_hash(core.norm_route(b.get("route")), core.cap(scrub.redact(b.get("symptom") or b.get("title"))))
         attachments = [p for p in (run_dir / "evidence" / f"{bid}.png", run_dir / "evidence" / f"{bid}.webm",
                                    run_dir / "repro" / f"{bid}.spec.ts") if p.is_file()]
         block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", "", "```sh", cmd,

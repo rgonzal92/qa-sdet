@@ -180,6 +180,16 @@ def bug_hash(route, symptom):
     return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode()).hexdigest()[:12]
 
 
+def given_hash(raw):
+    """The hash (or 4-12 char prefix) a run's bug names, as ingest looks it up: '<hash>', '#<hash>', '<hash> (known)';
+    '' for none, 'n/a' or a Jira key ('CAFE-12' is no prefix 'cafe')."""
+    raw = _s(raw).strip()
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw):
+        return ""
+    m = re.match(r"#?\s*([0-9a-fA-F]{4,12})\b", raw)
+    return m.group(1).lower() if m else ""
+
+
 def meta(con, key):
     row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return row[0] if row else None

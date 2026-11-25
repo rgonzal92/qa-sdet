@@ -147,8 +147,7 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
             raw = str(b.get("hash") or "").strip()
             if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw) and not re.fullmatch(r"(?i)BUG-\d+", raw):
                 continue  # a Jira key: a bug tracked in Jira, not a local one to create (BUG-n is a draft's id: created)
-            m = re.match(r"#?\s*([0-9a-fA-F]{4,12})\b", raw)  # '<hash> ', '#<hash>', '<hash> (known)'
-            given = m.group(1).lower() if m else ""  # 'n/a', 'TBD', 'new': no hash, so the bug is created
+            given = core.given_hash(raw)  # 'n/a', 'TBD', 'new': no hash, so the bug is created
             h = None
             if given:  # re-sighting of a known bug (prefix ok if unique)
                 hits = con.execute("SELECT hash FROM bugs WHERE substr(hash,1,?)=?", (len(given), given)).fetchall()
