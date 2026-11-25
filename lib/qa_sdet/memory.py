@@ -707,8 +707,9 @@ def card(con, q, focus=None, ids=False):
     shown = set()
     if current:
         locs, size = [], 0
-        rows = con.execute("SELECT name,locator FROM locators WHERE page=? AND stale=0 ORDER BY last_verified DESC",
-                           (r,)).fetchall()
+        # a run that couldn't read the build confirmed them for a week, as its coverage (ON_BUILD): a deploy since may drop them
+        rows = con.execute("SELECT name,locator FROM locators WHERE page=? AND stale=0 AND (build IS NOT 'unknown' OR "
+                           "last_verified >= ?) ORDER BY last_verified DESC", (r, _week_ago())).fetchall()
         for x in rows:
             entry = f"{core.short(x['name'], 40)}={x['locator']}"  # locators stay whole: a cut one is useless
             if len(locs) >= 20 or size + len(entry) > 2000:

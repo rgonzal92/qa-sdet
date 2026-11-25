@@ -399,6 +399,14 @@ class Builds(MemBase):
         memory.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "boundary"}]), "2020-01-01T00:00:00Z")
         self.assertNotIn("boundary(", memory.card(self.con, "/form"))
 
+    def test_locators_of_an_unreadable_build_expire_after_a_week(self):  # as its coverage: a later deploy may drop them
+        memory.ingest(self.con, run("unknown", locators=[{"name": "Old", "locator": "#old"}]), "2020-01-01T00:00:00Z")
+        memory.ingest(self.con, run("unknown", locators=[{"name": "New", "locator": "#new"}]))
+        self.assertIn("LOCATORS (fresh): New=#new\n", memory.card(self.con, "/form") + "\n")
+        memory.ingest(self.con, {"run_id": "k", "build": "1.0", "pages": [{"route": "/map", "locators": [
+            {"name": "Layer", "locator": "#layer"}]}]}, "2020-01-01T00:00:00Z")
+        self.assertIn("LOCATORS (fresh): Layer=#layer", memory.card(self.con, "/map"))  # a read build: no age limit
+
     def test_plan_does_not_mark_verified(self):
         memory.ingest(self.con, {"run_id": "p", "build": "unknown", "pages": [{"route": "/new"}]})
         self.assertIn("verified=never", memory.card(self.con, "/new"))
