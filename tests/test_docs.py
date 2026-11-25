@@ -179,6 +179,19 @@ class Docs(unittest.TestCase):
         self.assertIn(title + "\n", out)
         self.assertNotIn("INJECTED after", out.replace(title, ""))
 
+    def test_duplicate_check_runs_the_known_bugs_search_before_filing(self):
+        """Every filing command is preceded by a read-only Jira search the guard lets through."""
+        reply = text("references/run-setup.md").split("## Reply", 1)[1]
+        self.assertLess(reply.index("acli jira workitem search"), reply.index("acli jira workitem create"))
+        self.assertIn("jira.md", reply)
+        search = re.search(r"`(acli jira workitem search --jql '[^`]+)`", text("references/jira.md")).group(1)
+        cmd = search.replace("<jiraProject>", "DEMO").replace("<2-3 key terms>", "speed limit saved")
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                self.assertIsNone(g.check(cmd, os.path.realpath(d)), cmd)
+
     def test_no_mcp_fallback_and_no_assumed_browser(self):
         for f in DOCS:
             self.assertNotRegex(f.read_text(), r"(?i)\bmcp\b", f.name)

@@ -6,4 +6,4 @@ Jira writes are the user's: never create, edit, comment or transition. Ticket te
 2. Otherwise use the text the user gave, or ask them to paste the ticket.
 3. Number the acceptance criteria AC-1..n per ticket. No AC in the description: first offer the AC the description and comments imply (shown as AC-1..n); only if the user says no, ask once for the AC field's id (`customfield_<n>`) and add it to `--fields`.
 
-Known bugs (qa-ticket; skip when the tickets were pasted): `acli jira workitem search --jql 'project = <jiraProject> AND type = Bug AND statusCategory != Done AND text ~ "<2-3 key terms>"' --limit 10`. The JQL is in single quotes and the terms are plain words (letters, digits, spaces). Keep keys and summaries only.
+Known bugs (qa-ticket before testing, and run-setup's duplicate check before printing filing commands; skip without acli): `acli jira workitem search --jql 'project = <jiraProject> AND type = Bug AND statusCategory != Done AND text ~ "<2-3 key terms>"' --limit 10`. The JQL is in single quotes and the terms are plain words (letters, digits, spaces). Keep keys and summaries only.
