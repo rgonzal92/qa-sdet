@@ -511,6 +511,38 @@ class Dispatch(Base):
 
     def test_refusals(self):
         self.assertEqual(cli("dispatch", str(self.proj), "--route", "/x")[0], 2)  # not a run folder
+    def seed_list_and_detail(self):
+        from qa_sdet import memory
+        con = core.connect()
+        try:
+            memory.ingest(con, {"run_id": "r", "build": "1", "target": "/incidents", "pages": [
+                {"route": "/incidents", "transitions": [{"to": "/incidents/4521", "trigger": "row click"}]},
+                {"route": "/incidents/4521", "facts": [{"kind": "rule", "text": "Detail page shows the severity badge"}]}]})
+        finally:
+            con.close()
+
+    def test_open_record_gets_its_own_slug_and_the_detail_pages_card(self):
+        self.seed_list_and_detail()
+        lst = self.dispatch("/incidents")[1]
+        rec = self.dispatch("/incidents", "--open-record")[1]
+        self.assertEqual((lst["slug"], rec["slug"]), ("incidents", "incidents-id"))  # the list page's brief stays
+        self.assertEqual(rec["target"], "https://qa.example.com/incidents")  # it starts on the list page
+        brief = Path(rec["brief"]).read_text()
+        self.assertIn("route: /incidents/:id", brief)
+        self.assertIn("open a record", brief)
+        self.assertIn("Detail page shows the severity badge", brief)  # the detail page's card
+        self.assertIn("route: /incidents\n", Path(lst["brief"]).read_text())
+        self.assertEqual(self.dispatch("/incidents", "--open-record")[1]["slug"], "incidents-id")  # --resume: same file
+        m = json.loads((self.proj / "qa-out/.active").read_text())
+        self.assertEqual(m["slug"], "incidents-id")
+
+    def test_open_record_without_a_known_detail_page_still_has_a_slug_of_its_own(self):
+        self.assertEqual(self.dispatch("/incidents")[1]["slug"], "incidents")
+        rec = self.dispatch("/incidents", "--open-record")[1]
+        self.assertEqual(rec["slug"], "incidents-record")
+        self.assertEqual(self.dispatch("/incidents", "--open-record")[1]["slug"], "incidents-record")
+        self.assertEqual(self.dispatch("/incidents")[1]["slug"], "incidents")
+
         code, _, err = self.dispatch("https://evil.example.com/x")
         self.assertEqual(code, 2)
         self.assertIn("allowedHosts", err)
