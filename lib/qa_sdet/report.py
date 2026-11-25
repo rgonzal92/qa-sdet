@@ -1415,6 +1415,49 @@ def plan_find(project, keys=None, run_dir=None):
     return {"reusable_plan": reusable, "latest_run": latest}
 
 
+def block_scope(run):
+    """What a BLOCKED run blocks: its block_scope, else read from its summary (the explorer's start reports the sign-in
+    and browser failures in fixed words); anything else blocks just its page."""
+    from . import memory
+    said = str(run.get("block_scope") or "").strip().lower()
+    if said in memory.BLOCK_SCOPES:
+        return said
+    text = str(run.get("summary") or "").lower()
+    if re.search(r"session expired|qa-login|\bsso\b|sign-?in", text):
+        return "session"
+    if re.search(r"browser profile in use|can't start|browser tool failed|kill-all", text):
+        return "browser"
+    return "page"
+
+
+def next_action(run_dir, slug):
+    """{action: continue | recover_sso | abort, block_scope, reason} for the coordinator after the explorer of
+    run-<slug>.json: a page blocker doesn't stop the other routes (two in a row do: the app may be down), a sign-in
+    blocker is recovered with qa-login (the skill does it once per run), a browser one or a missing run file stops."""
+    data = Path(run_dir) / ".data"
+    run = _load_json(data / f"run-{slug}.json", [])
+    if not isinstance(run, dict):
+        return {"action": "abort", "block_scope": "browser", "reason": "explorer ended without a run file"}
+    if _first_word(run.get("status")) != "blocked":
+        return {"action": "continue", "block_scope": None, "reason": f"run-{slug}.json is {run.get('status') or '?'}"}
+    scope, why = block_scope(run), _clip(run.get("summary"), 120)
+    if scope == "session":
+        return {"action": "recover_sso", "block_scope": scope, "reason": why}
+    if scope == "browser":
+        return {"action": "abort", "block_scope": scope, "reason": why}
+    runs = sorted(data.glob("run-*.json"), key=lambda f: (_mtime(f), f.name))
+    streak = 0
+    for f in reversed(runs):  # the newest run files, while they are page blockers
+        r = _load_json(f, [])
+        if not (isinstance(r, dict) and _first_word(r.get("status")) == "blocked" and block_scope(r) == "page"):
+            break
+        streak += 1
+    if streak >= 2:
+        return {"action": "abort", "block_scope": scope,
+                "reason": f"{streak} pages in a row blocked (the QA app may be down): {why}"}
+    return {"action": "continue", "block_scope": scope, "reason": why}
+
+
 def _slice(st, want):
     """A run state cut to the tickets in `want`: its cases, routes and counts; `subset_of` names the run's tickets."""
     mine = lambda c: str(c.get("ticket") or "").strip().upper() in want

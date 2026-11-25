@@ -29,7 +29,7 @@ With `--review`, stop: reply with the case count per ticket, the REPORT.md path 
 
 ## 3. Test
 Group the cases to run by route (`incomplete_routes` only on `--resume`). For each route, one at a time, as run-setup says: `qa-mem dispatch '<run>' --route '<route>' --known-bugs '<the Known bugs search's keys and summaries>'` (run-setup's Setup; it puts this route's cases, all AC of their tickets and the known bugs in the brief, cases first), delegate with its brief, teardown.
-If an explorer returns BLOCKED, skip the remaining routes (their cases stay NOT_RUN) and keep its summary (the user can continue later with `/qa-sdet:qa-ticket --resume`).
+After each route's teardown, `qa-mem next-action '<run>' <slug>` says what comes next (run-setup's After each explorer): `continue` (a page-local blocker stays that route's BLOCKED; the other routes go on), `recover_sso` (sign in again, once per run, then that route again) or `abort` (skip the remaining routes, their cases stay NOT_RUN; keep its reason; the user can continue later with `/qa-sdet:qa-ticket --resume`).
 
 With `--verify`: after the last teardown, run-setup's Second opinion (a `qa-sdet:qa-reviewer` read-only check of the serious drafts; its reply saved as `<run>/.data/review.json`).
 

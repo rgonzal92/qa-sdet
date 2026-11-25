@@ -1236,6 +1236,48 @@ class Traceability(Rendering):
         self.assertEqual([x.split(" | ")[0] for x in rows], ["| PROJ-2"])  # only the 3.6 ticket
 
 
+class NextAction(Rendering):
+    """`qa-mem next-action <run> <slug>`: after each explorer, continue, recover the sign-in once, or stop."""
+
+    def folder(self, *runs):
+        import time
+        self.n = getattr(self, "n", 0) + 1  # a folder of its own each time: an earlier run file would make a streak
+        d = self.rundir(f"2026-11-25-multi-{self.n}", plan={"kind": "ticket", "tickets": [], "cases": []})
+        for i, (slug, run) in enumerate(runs):
+            f = d / f".data/run-{slug}.json"
+            f.write_text(json.dumps(run))
+            os.utime(f, (time.time() - 100 + i, time.time() - 100 + i))
+        return d
+
+    def test_a_page_blocker_continues_a_session_one_recovers_a_browser_one_stops(self):
+        blocked = lambda scope=None, summary="403 for this account": {"status": "BLOCKED", "summary": summary,
+                                                                       **({"block_scope": scope} if scope else {})}
+        d = self.folder(("ok", {"status": "COMPLETED"}), ("admin", blocked("page")))
+        self.assertEqual(report.next_action(d, "admin")["action"], "continue")
+        self.assertEqual(report.next_action(d, "ok")["action"], "continue")
+        for scope, summary, action in ((None, "session expired, run /qa-sdet:qa-login", "recover_sso"),
+                                       (None, "browser profile in use: another qa-sdet browser", "abort"),
+                                       ("browser", "x", "abort"), (None, "the page returned 500", "continue")):
+            d = self.folder(("p", blocked(scope, summary)))
+            self.assertEqual(report.next_action(d, "p")["action"], action, summary)
+        self.assertEqual(report.next_action(d, "missing")["action"], "abort")  # no run file: the explorer died
+        code, out, _ = cli("next-action", str(d), "p")
+        self.assertEqual((code, json.loads(out)["block_scope"]), (0, "page"))
+
+    def test_two_page_blockers_in_a_row_stop_the_batch(self):  # the QA app may be down
+        d = self.folder(("a", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}),
+                        ("b", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
+        nxt = report.next_action(d, "b")
+        self.assertEqual(nxt["action"], "abort")
+        self.assertIn("2 pages in a row", nxt["reason"])
+
+    def test_block_scope_is_checked_at_ingest(self):
+        from qa_sdet import memory
+        with self.assertRaises(ValueError):
+            memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "planet"})
+        memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
+
+
 class FilingBundle(Rendering):
     """Persistent shell-safe filing commands & attachments folded inside REPORT.md."""
 

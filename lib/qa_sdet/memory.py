@@ -35,6 +35,9 @@ def resolve_draft(path, run_dir):
     return str(next((t for t in tries if t.exists()), tries[0]))
 
 
+BLOCK_SCOPES = ("page", "session", "browser")  # what a BLOCKED run blocks: this page, the sign-in, the browser
+
+
 def ingest(con, run, ts=None, run_dir=None, src=""):
     """Upsert one run.json dict. ts = when the run finished (file mtime); run_dir = folder of the run.json;
     src = the file it came from (a rewrite of that file replaces its bugs).
@@ -56,8 +59,10 @@ def check_run(run):
     # An empty or missing build (empty version element) is unknown, not a broken run.
     build = core.norm_build(core.txt(run.get("build"), "build"))
     known = build.lower() != core.UNKNOWN
-    for f in ("mode", "target", "status", "summary"):
+    for f in ("mode", "target", "status", "summary", "block_scope"):
         core.txt(run.get(f), f)
+    if run.get("block_scope") not in (None, "", *BLOCK_SCOPES):
+        raise ValueError(f"'block_scope' must be one of {', '.join(BLOCK_SCOPES)}")
     pages, bug_list = core.dicts(run, "pages"), core.dicts(run, "bugs")
     for pg in pages:
         pg["route"] = core.norm_route(core.txt(pg.get("route"), "route"))
