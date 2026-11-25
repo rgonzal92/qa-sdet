@@ -70,6 +70,49 @@ playwright-cli -s=qa --raw eval "(() => { const out = [], seen = el => el && el.
   return out.slice(0, 20).join(' | ') || 'none'; })()"
 ```
 
+## Server-boundary probes (no secrets read)
+A limit the page enforces is not proof the server does: `max`, `required`, a `<select>` list and a disabled button stop a value before it is sent. Test the server in this order; `curl` carries no sign-in and the guard denies a write sent with `eval`.
+
+**1. Bypass the page's own checks, then submit through the UI** (every run, no flag). The app's own signed-in client sends the request, whatever its auth scheme. One eval relaxes the form, sets one value (a number past `max`, a decimal, `   `, text past `maxlength`, a value outside a `<select>`'s list) and submits it; use `qa-sdet-` text for a text field. The record it creates, if the server accepts it, is deleted in step 9:
+```
+playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('form'), el = f.querySelector('[name=speed]'), v = '131';
+  f.noValidate = true;
+  for (const e of f.elements) for (const a of ['max', 'min', 'maxlength', 'minlength', 'required', 'pattern', 'step', 'readonly']) e.removeAttribute(a);
+  if (el.tagName === 'SELECT' && ![...el.options].some(o => o.value === v)) el.add(new Option(v, v));  // an option the list doesn't offer
+  const proto = {INPUT: HTMLInputElement, TEXTAREA: HTMLTextAreaElement, SELECT: HTMLSelectElement}[el.tagName].prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);  // the native setter: React inputs too
+  el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true}));
+  f.requestSubmit();
+  return 'sent ' + el.name + '=' + v; })()"
+playwright-cli -s=qa requests --filter '/api/'
+playwright-cli -s=qa response-body <#>
+```
+- The value the UI refuses must be refused by the server too: a 4xx with an error and no record. A 2xx, a saved record (reload and read it), or a 500 is a bug (boundary / invalid-format / empty-null). Say in the draft that the page's check was bypassed, with the request body and status (`BUG-<n>-network.txt`).
+- If the page puts the attribute back on re-render, this one call is still enough: it sets and submits in the same call. A form with no `<form>` element (a button that calls the API): relax the inputs, then `click` the real button.
+
+**2. Read with `qa-mem api-probe`** (every run). One request from the signed-in browser: it prints `{status, ok, headers, body}`, with contract headers only and a scrubbed body cut at 4000 characters, and counts as one browser command:
+```
+qa-mem api-probe GET '<qaBaseUrl>/api/zones/<id>'
+qa-mem api-probe OPTIONS '<qaBaseUrl>/api/zones'
+qa-mem api-probe GET '<qaBaseUrl>/api/admin/stats'
+```
+- Check what the UI hides: the status, `content-type` (JSON, not an HTML error page), `cache-control` and `etag` on data, `location` after a create, and `allow`. An endpoint the card lists for another page or for no page (`page *`) that answers 200 with data to this role while the AC says it is restricted is a `permissions` bug; with no AC it is a QUESTION.
+- It refuses login, session and token paths and credential headers, and a URL outside `allowedHosts`. A 401 or 403 on an app that attaches its token in JavaScript only means the probe has no token: add a `not_tested` line, category `needs_setup`, and use the UI route (1) instead. Never a bug.
+
+**3. Writes with `qa-mem api-probe`, only when the brief says `api_writes: yes`** (otherwise the guard refuses them). One mass-assignment probe per write endpoint, on a record you created this run: add one field the form never sends (the read-only fields a GET of the record shows: `approved`, `status`, `role`, `createdBy`, `id`), then read the record back. The tool allows a POST only with a `qa-sdet-` value in the body, and a PUT, PATCH or DELETE only on a record that shows `qa-sdet-` (it reads the record first, so each costs 2 browser commands). A bulk or list URL is refused:
+```
+qa-mem api-probe POST '<qaBaseUrl>/api/zones' --json '{"name": "qa-sdet-zone-1", "speedLimit": 50, "approved": true}'
+qa-mem api-probe GET '<qaBaseUrl>/api/zones/<id>'
+qa-mem api-probe DELETE '<qaBaseUrl>/api/zones/<id>'
+```
+- A stored extra field (`approved` true although the form can't set it) is a bug (permissions); a malformed body or a wrong `--content-type text/plain` that gives 500 instead of 400 or 415 is another. Delete what you created in step 9 the same way (`DELETE`), or list it as `Left in the app:`.
+
+**HTML-encoding canary** (harmless markup, entered through the UI like any value): type `qa-sdet-canary <b>b</b> & &amp; "q"` in a text field, save, then read it back where it is shown (the list, the detail page, a toast):
+```
+playwright-cli -s=qa --raw eval "JSON.stringify([...document.querySelectorAll('body *')].filter(e => e.textContent.includes('qa-sdet-canary') && ![...e.children].some(c => c.textContent.includes('qa-sdet-canary'))).slice(0, 5).map(e => ({tag: e.tagName, text: e.textContent.slice(0, 80), injected: e.querySelectorAll('b').length})))"
+```
+It must show the text as typed (`<b>b</b> & &amp; "q"`) and `injected` 0. A `<b>` element built from it (`injected` above 0, bold text) is unescaped output; `&amp;amp;` or `&lt;b&gt;` shown as text is double-encoding. Never a `<script>` tag or an event handler.
+
 ## Evidence image (bug or case)
 A bug: after `recording-stop` (its toolbar shows in screenshots). A case: before you cancel any dialog. One call, nothing else before it:
 ```

@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -264,6 +265,39 @@ class Docs(unittest.TestCase):
         for rel in ("skills/qa-explore/SKILL.md", "skills/qa-ticket/SKILL.md"):
             self.assertIn("--api-writes", text(rel).split("---\n")[1], rel)  # the argument-hint
         self.assertIn("api_writes", text("agents/qa-explorer.md"))  # the brief line it reads
+
+    def test_server_boundary_recipes_pass_the_guard_and_replace_curl(self):
+        """Every command of the tips file's "Server-boundary probes" is approved for the explorer in a run with api_writes
+        (and its writes are refused without it); the explorer no longer sends curl for a server rule."""
+        explorer = text("agents/qa-explorer.md")
+        self.assertNotIn("curl to an allowed host", explorer)
+        for token in ("Server-boundary probes", "qa-mem api-probe", "api_writes: yes", "Left in the app"):
+            self.assertIn(token, explorer)
+        self.assertIn("Server-boundary probes", text("references/heuristics.md"))
+        section = text("references/playwright-cli-tips.md").split("## Server-boundary probes")[1].split("\n## ")[0]
+        blocks = re.findall(r"```\n(.*?)```", section, re.S)
+        self.assertEqual(len(blocks), 4)  # the UI bypass, the reads, the writes, the encoding canary
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            proj = Path(os.path.realpath(d)) / "proj"
+            (proj / "qa-out").mkdir(parents=True)
+            marker = lambda **m: (proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600, "budget": 100, **m}))
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                ev = lambda cmd: g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
+                                             "agent_type": "qa-sdet:qa-explorer"})
+                cmds = [re.sub("<qaBaseUrl>", "https://qa.example.com", c.replace("<#>", "3").replace("<id>", "7"))
+                        for b in blocks for c in re.split(r"\n(?=playwright-cli |qa-mem )", b.strip())]
+                writes = [c for c in cmds if re.match(r"qa-mem api-probe (POST|PUT|PATCH|DELETE) ", c)]
+                self.assertEqual(len(writes), 2)
+                for api_writes in (True, False):
+                    marker(api_writes=api_writes)
+                    for cmd in cmds:
+                        got = ev(cmd)
+                        if cmd in writes and not api_writes:
+                            self.assertIn("--api-writes", got[0] or "", cmd)
+                        else:
+                            self.assertEqual(got, (None, True), cmd)
 
     def test_frontmatter(self):
         fm = lambda p: dict(re.findall(r"^([\w-]+): (.*)$", p.read_text().split("---\n")[1], re.M))
