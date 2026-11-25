@@ -179,6 +179,16 @@ class Docs(unittest.TestCase):
         self.assertIn(title + "\n", out)
         self.assertNotIn("INJECTED after", out.replace(title, ""))
 
+    def test_caller_labels_reach_the_explorer(self):
+        """Labels the skills pass (`RULES:`, qa-explore's --focus as `FOCUS:`) are ones the explorer's Input names."""
+        delegate = text("references/run-setup.md").split("## Delegate", 1)[1].split("\n## ", 1)[0]
+        labels = set(re.findall(r"`([A-Z]+):", delegate))
+        self.assertTrue({"RULES", "FOCUS"} <= labels, labels)
+        explorer_input = text("agents/qa-explorer.md").split("## Input", 1)[1].split("\n## ", 1)[0]
+        for label in labels:
+            self.assertIn(f"`{label}:", explorer_input, label)
+        self.assertIn("FOCUS:", text("skills/qa-explore/SKILL.md"))
+
     def test_duplicate_check_runs_the_known_bugs_search_before_filing(self):
         """Every filing command is preceded by a read-only Jira search the guard lets through."""
         reply = text("references/run-setup.md").split("## Reply", 1)[1]

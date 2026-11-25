@@ -46,7 +46,7 @@ Then restart Claude Code.
 | `/qa-sdet:qa-inbox` | Open tickets assigned to you, NEW since last look first; saved to `qa-out/INBOX.md` |
 | `/qa-sdet:qa-ticket 1234 1250 [--faults] [--budget N] [--minutes M] [--review]` | Tests tickets end to end and gives each a verdict |
 | `/qa-sdet:qa-plan 1234` or `"text"` | Test plan + test cases only, no browser; `qa-ticket` reuses them |
-| `/qa-sdet:qa-explore <url \| route \| page name> [--faults] [--budget N] [--minutes M]` | Exploratory bug hunt on one page, no ticket; with no page, offers the most urgent ones from `qa-mem gaps` |
+| `/qa-sdet:qa-explore <url \| route \| page name> [--faults] [--budget N] [--minutes M] [--focus '<charter>']` | Exploratory bug hunt on one page, no ticket; with no page, offers the most urgent ones from `qa-mem gaps`; `--focus` narrows the session to a charter (the rest is listed as not tested) |
 | `/qa-sdet:qa-init [folders] [--full] [--crawl [--budget N] [--minutes M]]` | Maps routes, locators, validation rules and endpoints from source into memory; `--crawl` verifies locators live |
 | `/qa-sdet:qa-memory <subcommand>` | Queries or updates memory (`card`, `gaps`, `search`, `bugs`, `bug-status`, `stale`, `hash`, `doctor`, `browsers`, `where`) |
 
