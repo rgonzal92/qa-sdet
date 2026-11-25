@@ -31,12 +31,14 @@ qa-mem annotate '<out>/evidence/<BUG-n or TC-n>.png' --box <x,y,w,h> --label '<a
 ```
 - `screenshot` saves the viewport in CSS pixels, the unit of `getBoundingClientRect()`: no `devicePixelRatio` factor, never `--hires` or `--full-page`. Always pass `--filename`.
 - The box is the element that shows the problem (the wrong value, the error text, the bad row). A second `--box` is allowed. The label sits by the first box, so that is the element it describes. Bug label: actual vs expected (`Saved at 131 km/h; max is 130`). Case label: `TC-<n> <STATUS>: <value you read>`.
-- `annotate` says Pillow is missing: keep the image, describe the spot in the draft, `annotated: false`.
-- **In-frame variant** (the app shell loads pages in an iframe, which the eval above can't see). Find the frame once: `playwright-cli -s=qa --raw eval "[...document.querySelectorAll('iframe')].map(f => f.id ? '#' + f.id : '[name=' + f.name + ']').join(' ')"`. Then the eval adds the frame's offset:
+- `annotate` says Pillow is missing: take the image again now with the highlight steps below (same file), and use them for the rest of the run.
+
+**Highlight variant:** for an element in a frame (the app shell loads pages in an iframe; the eval above and card locators can't reach inside), or when Pillow is missing. playwright-cli draws the box itself, also in frames from another origin. `find '<text on the element>'` shows its ref (`status [ref=f1e15]: Saved …`); then, with nothing else between the highlight and the screenshot:
 ```
-playwright-cli -s=qa --raw eval "(() => { const f = document.querySelector('iframe<selector>');
-  const el = f.contentDocument.querySelector('<css>'); el.scrollIntoView({block: 'center'});
-  const o = f.getBoundingClientRect(), r = el.getBoundingClientRect();
-  return [o.x + f.clientLeft + r.x, o.y + f.clientTop + r.y, r.width, r.height].map(Math.round).join(','); })()"
+playwright-cli -s=qa eval "el => el.scrollIntoView({block: 'center'})" <ref>
+playwright-cli -s=qa highlight <ref> --style 'outline: 3px solid red'
+playwright-cli -s=qa screenshot --filename='<out>/evidence/<BUG-n or TC-n>.png'
+playwright-cli -s=qa highlight --hide
 ```
-  A frame on another origin has no `contentDocument`: keep the plain screenshot. Not checked on the live app yet: keep the plain screenshot if the box looks wrong.
+- The box has no label, only a small tag naming the ref: put the label text (actual vs expected) in the draft's Actual or the case's `actual`. `annotated: true`.
+- `--hide` before the next screenshot, or the old box shows up in it.

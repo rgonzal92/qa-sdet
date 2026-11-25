@@ -5,7 +5,7 @@ A Claude Code plugin for SDET work: it reads your Jira tickets, writes a test pl
 ## Install (per machine)
 
 **Needs:** Linux, Claude Code, Python 3.9+ as `python3` (hooks run it), and `playwright-cli` (`npm i -g @playwright/cli`).
-**Optional:** `acli` signed in (`acli jira auth login`) for Jira reads, `git` for repo-aware code scans and `.git/info/exclude`, and Pillow for red highlight boxes on bug screenshots (`qa-mem doctor` and `/qa-sdet:qa-setup` print the install command that works on your system: `pip install --user`, or `apt-get` where system Python blocks `pip`).
+**Optional:** `acli` signed in (`acli jira auth login`) for Jira reads, `git` for repo-aware code scans and `.git/info/exclude`, and Pillow for a text label beside the red box on evidence screenshots (without it, and inside iframes, `playwright-cli highlight` draws the box with no label; `qa-mem doctor` and `/qa-sdet:qa-setup` print the install command that works on your system: `pip install --user`, or `apt-get` where system Python blocks `pip`).
 
 From GitHub (nothing to clone):
 ```sh
@@ -74,7 +74,7 @@ qa-out/
   2026-11-23-PROJ-1234+PROJ-1250/
     REPORT.md                     open this: verdict, what needs action, test cases with images, not tested
     bugs/BUG-1.md                 Jira-ready bug drafts (the run reply prints the acli command to file each)
-    evidence/BUG-1.png            bug screenshots, problem boxed in red with a label
+    evidence/BUG-1.png            bug screenshots, problem boxed in red (labelled when Pillow is installed)
     evidence/TC-1.png             one screenshot per checked case
     jira-comment-PROJ-1234.md     pass comment draft (PASS / PASS WITH NOTES): paste into Jira yourself
     repro/BUG-1.spec.ts           Playwright spec that fails while the bug exists
