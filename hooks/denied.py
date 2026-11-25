@@ -5,15 +5,20 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # as pretooluse.py: also with PYTHONSAFEPATH set
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # as pretooluse.py: also with PYTHONSAFEPATH set
 import guard  # noqa: E402
 
 try:
     data = json.load(sys.stdin)
-except ValueError:
+except (ValueError, RecursionError):
     data = None
 if isinstance(data, dict):
-    project = os.environ.get("CLAUDE_PROJECT_DIR") or str(data.get("cwd") or os.getcwd())
-    if (guard.agent_role(data).startswith("qa-") or guard.mentions_guarded(json.dumps(data.get("tool_input") or {}), True)
-            or os.path.isdir(os.path.join(project, "qa-out"))):
+    try:
+        cwd = guard.clean(data.get("cwd") or os.getcwd())
+    except OSError:
+        cwd = ""
+    project = guard.clean(os.environ.get("CLAUDE_PROJECT_DIR") or "") or cwd
+    if (guard.agent_role(data).startswith("qa-")
+            or guard.mentions_guarded(json.dumps(data.get("tool_input") or {}, ensure_ascii=False, default=str), True)
+            or (project and os.path.isdir(os.path.join(project, "qa-out")))):
         guard.log_denial(data, data.get("reason") or "denied by Claude Code", layer="claude-code")

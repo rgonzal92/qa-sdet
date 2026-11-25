@@ -130,6 +130,11 @@ class Marker(Base):
         self.assertIn("at most 480", err)
         self.assertEqual(guard.spend_budget(path, 3), None)  # the earlier marker is untouched and still spendable
 
+    def test_stop_on_a_missing_project_is_an_error(self):  # `marker stop /typo` said "marker removed"
+        code, out, err = cli("marker", "stop", str(self.t / "nope"))
+        self.assertEqual(code, 2)
+        self.assertNotIn("marker removed", out)
+
     def test_missing_project_is_not_created(self):  # marker start /typo made /typo/qa-out
         self.assertEqual(cli("marker", "start", str(self.t / "nope" / "proj"))[0], 2)
         self.assertFalse((self.t / "nope").exists())
@@ -270,6 +275,37 @@ class Prune(Base):
             return real_lstat(p, *a, **k)
         with mock.patch.object(os, "lstat", side_effect=disappearing):
             self.assertEqual(ops.prune(self.proj, run=d), 0)
+
+    def test_round2_ops_browser_open_prune_and_annotate(self):
+        # M3: page title containing 'already in use' on exit 0 must not trigger profile-in-use error
+        self.config(browser="chrome")
+        ok_out = "### Page\n- Page Title: Port already in use\n"
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=ok_out)]):
+            code, out, err = cli("browser-open", "https://qa.example/")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Port already in use", out)
+        # L3: empty crashed run folder still prunes snapshots created since folder creation
+        cli_dir = self.proj / ".playwright-cli"
+        cli_dir.mkdir(exist_ok=True)
+        old_snap = cli_dir / "before.yml"
+        old_snap.write_text("old")
+        t0 = time.time() - 3600
+        os.utime(old_snap, (t0, t0))
+        empty_run = self.proj / "qa-out/2026-11-24-crashed"
+        empty_run.mkdir(parents=True)
+        os.utime(empty_run, (time.time() - 60, time.time() - 60))
+        (cli_dir / "after.yml").write_text("new")
+        self.assertEqual(ops.prune(self.proj, run=empty_run), 1)
+        self.assertTrue(old_snap.exists())
+        self.assertFalse((cli_dir / "after.yml").exists())
+        # L6: Pillow ValueError (e.g. huge zTXt chunk) becomes BadInput, not uncaught traceback
+        from PIL import Image
+        png = empty_run / "evidence/BUG-1.png"
+        png.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (20, 20)).save(png)
+        with mock.patch.object(Image, "open", side_effect=ValueError("Decompressed data too large")):
+            with self.assertRaises(core.BadInput):
+                ops.annotate(png, [(0, 0, 10, 10)], "x")
 
 
 if __name__ == "__main__":

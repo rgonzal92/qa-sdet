@@ -147,6 +147,13 @@ class Bugs(MemBase):
         self.assertIn("FILED", memory.card(self.con, "/form"))
 
 
+class BugLines(MemBase):
+    def test_a_bug_without_severity_or_classification_prints_no_none(self):
+        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Bare bug"}]))
+        self.assertNotIn("None", memory.bugs(self.con))
+        self.assertNotIn("None", memory.card(self.con, "/form"))
+
+
 class BugStatus(MemBase):
     """`qa-mem bug-status` and `qa-mem hash`."""
 
@@ -349,9 +356,72 @@ class Facts(MemBase):
 
     def test_bad_shapes_rejected(self):
         for bad in ([], {"run_id": "x", "build": "1", "pages": {"route": "/a"}},
-                    {"run_id": "x", "build": "1", "bugs": ["oops"]}, {"build": "1"}):  # the last has no run_id
-            with self.assertRaises(ValueError):
+                    {"run_id": "x", "build": "1", "bugs": ["oops"]}, {"build": "1"},
+                    {"run_id": "   ", "build": "1"},
+                    {"run_id": "x", "pages": {}}, {"run_id": "x", "bugs": ""},
+                    {"run_id": "x", "cases": False}, {"run_id": "x", "env": []},
+                    {"run_id": "x", "questions": {}}, {"run_id": "x", "not_tested": ""},
+                    {"run_id": "x", "bugs": [{"route": "http://[x", "title": "bad"}]},
+                    {"run_id": "x", "bugs": [{"route": "/a", "title": "   "}]},
+                    {"run_id": "x", "cases": [{"id": "TC-1", "status": "PASS", "annotated": "false"}]}):
+            with self.assertRaises(ValueError, msg=str(bad)):
                 memory.ingest(self.con, bad)
+
+    def test_round1_memory_and_core_fixes(self):
+        # 1. cap/norm/short preserve numeric 0; norm preserves non-ASCII
+        self.assertEqual((core.cap(0), core.norm(0), core.short(0, 10)), ("0", "0", "0"))
+        self.assertNotEqual(core.bug_hash("/a", "日本語エラー"), core.bug_hash("/a", "한국어오류"))
+        self.assertEqual(core.norm("Erreur: échec"), "erreur échec")
+        # 2. whitespace symptom falls back to title (distinct bugs don't collide)
+        memory.ingest(self.con, {"run_id": "b1", "build": "1.0", "bugs": [
+            {"route": "/a", "title": "Bug A", "symptom": "   "},
+            {"route": "/a", "title": "Bug B", "symptom": "   "},
+        ]})
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
+        # 3. unknown-build plan does not overwrite/un-stale verified locators or store blank locators/heuristics
+        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [
+            {"route": "/loc", "locators": [{"name": "Save", "locator": "#old"}]}]}, "2026-01-01T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/loc"}]}, "2026-01-02T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "p1", "build": "unknown", "pages": [
+            {"route": "/loc", "locators": [{"name": "Save", "locator": "#guess"}, {"name": "  ", "locator": "  "}],
+             "coverage": [{"target": "t", "heuristic": "   ", "result": "pass"}]}]}, "2026-01-03T00:00:00Z")
+        rows = [dict(r) for r in self.con.execute("SELECT name, locator, build, stale FROM locators WHERE page='/loc'")]
+        self.assertEqual(rows, [{"name": "Save", "locator": "#old", "build": "1.0", "stale": 1}])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM coverage WHERE page='/loc'").fetchone()[0], 0)
+        # 4. fact dedup keeps numbers with attached units distinct
+        memory.ingest(self.con, {"run_id": "u1", "build": "2.0", "pages": [{"route": "/units", "facts": [
+            {"kind": "rule", "text": "Speed limit must be between 0 and 130km/h"},
+            {"kind": "rule", "text": "Speed limit must be between 0 and 120km/h"},
+        ]}]})
+        cu = memory.card(self.con, "/units")
+        self.assertIn("130km/h", cu)
+        self.assertIn("120km/h", cu)
+        # 5. search multi-word negation excludes only the phrase, not individual words
+        memory.ingest(self.con, {"run_id": "s1", "build": "2.0", "pages": [{"route": "/s", "facts": [
+            {"kind": "note", "text": "speed chart loads slowly"},
+            {"kind": "rule", "text": "speed-limit max 130"},
+            {"kind": "api", "text": "GET /api/incidents returns 500"},
+            {"kind": "api", "text": "GET /api/zones returns 500"},
+        ]}]})
+        self.assertIn("speed chart", memory.search(self.con, "speed -speed-limit"))
+        self.assertNotIn("speed-limit", memory.search(self.con, "speed -speed-limit"))
+        self.assertIn("/api/incidents", memory.search(self.con, "500 -/api/zones"))
+        self.assertNotIn("/api/zones", memory.search(self.con, "500 -/api/zones"))
+        # 6. MAX_RUNS pruning leaves no orphan sightings
+        orig_max = core.MAX_RUNS
+        core.MAX_RUNS = 2
+        try:
+            memory.ingest(self.con, {"run_id": "m2", "build": "2.0", "bugs": []}, "2026-12-02T00:00:00Z")
+            memory.ingest(self.con, {"run_id": "m3", "build": "2.0", "bugs": []}, "2026-12-03T00:00:00Z")
+            memory.ingest(self.con, {"run_id": "m1", "build": "2.0", "bugs": [{"route": "/m", "title": "old"}]},
+                          "2026-01-01T00:00:00Z", src="f1")
+            orphans = self.con.execute("SELECT count(*) FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)").fetchone()[0]
+            self.assertEqual(orphans, 0)
+        finally:
+            core.MAX_RUNS = orig_max
+        # 7. QA_MEM_DB expands ~ and empty QA_SDET_DATA / QA_SDET_CONFIG do not resolve to '.'
+        with mock.patch.dict(os.environ, QA_MEM_DB="~/custom.db"):
+            self.assertFalse(str(core.db_path()).startswith("~"))
 
 
 class Card(MemBase):
@@ -501,6 +571,17 @@ class IngestPending(MemBase):
         self.assertTrue((out / "a/.data/run-x.json.ingested").exists())
         self.assertTrue((out / "b/.data/run-x.json.error").exists())
         self.assertEqual(memory.ingest_pending(out), 0)
+
+    def test_odd_text_and_paths_are_ingested_not_parked(self):  # a sliced emoji, a BOM, `~user/` in draft_path
+        out = Path(self.tmp.name) / "qa-out"
+        for name, data in [("s", json.dumps(run(facts=[{"kind": "note", "text": "emoji cut \ud83d here"}]))),
+                           ("b", "\ufeff" + json.dumps(run(facts=[{"kind": "note", "text": "Authorization: Bearer abcdefghijklmnop1234"}]))),
+                           ("t", json.dumps(run(bugs=[{"route": "/form", "title": "t", "draft_path": "~nosuchuser9/BUG-1.md"}])))]:
+            (out / name).mkdir(parents=True)
+            runfile(out / name).write_text(data, encoding="utf-8")
+        self.assertEqual(memory.ingest_pending(out), 3, list(out.rglob("*.error")))
+        self.assertNotIn("abcdefghijklmnop1234", runfile(out / "b").read_text(encoding="utf-8"))  # the file is scrubbed too
+        self.assertIn("emoji cut", memory.search(self.con, "emoji"))
 
     def test_transient_error_retries(self):
         out = Path(self.tmp.name) / "qa-out" / "a"

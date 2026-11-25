@@ -502,6 +502,37 @@ class Code(CodeMapCase):
         self.assertEqual(r("api.get<Zone[]>('/zones')"), ("GET", "zones"))
         self.assertEqual(r("http.post<Zone>('/api/zones', z)"), ("POST", "api/zones"))
 
+    def test_round1_codemap_stale_card_star_and_hash_routes(self):
+        repo = git_repo(self.dir / "ui", {"src/A.jsx": "<button data-testid='save'/>"})
+        self.scan(repo)
+        self.write_map("frontend", [
+            {"page": "/a", "kind": "route", "label": "A", "value": "A", "file": "src/A.jsx:1"},
+            {"page": "/a", "kind": "locator", "label": "Save", "value": "getByTestId('save')", "file": "src/A.jsx:1"},
+            {"page": "/*", "kind": "route", "label": "Catchall", "value": "C", "file": "src/A.jsx:1"},
+            {"page": "/#/zones/:id", "kind": "route", "label": "Zone", "value": "Z", "file": "src/A.jsx:1"},
+        ])
+        api = git_repo(self.dir / "api", {"r.js": "router.get('/api/x', h)"})
+        self.scan(repo, api, stamp="s2")
+        self.write_map("frontend", [
+            {"repo": str(repo), "page": "/a", "kind": "route", "label": "A", "value": "A", "file": "src/A.jsx:1"},
+            {"repo": str(repo), "page": "/a", "kind": "locator", "label": "Save", "value": "getByTestId('save')", "file": "src/A.jsx:1"},
+            {"repo": str(repo), "page": "/*", "kind": "route", "label": "Catchall", "value": "C", "file": "src/A.jsx:1"},
+            {"repo": str(repo), "page": "/#/zones/:id", "kind": "route", "label": "Zone", "value": "Z", "file": "src/A.jsx:1"},
+        ])
+        self.write_map("backend", [
+            {"repo": str(api), "page": "*", "kind": "api", "label": "GET /api/x", "value": "x", "file": "r.js:1"},
+        ])
+        self.ingest_all()
+        # 1. Stale build card still prints FROM CODE locators when LOCATORS (fresh) was skipped
+        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [
+            {"route": "/a", "locators": [{"name": "Save", "locator": "getByTestId('save')"}]}]}, "2026-01-01T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/other"}]}, "2026-01-02T00:00:00Z")
+        self.assertIn("getByTestId('save')", memory.card(self.con, "/a"))
+        # 2. code('*') returns backend rows even when a '/*' frontend route exists
+        self.assertTrue(codemap.code(self.con, "*").startswith("CODE MAP * "))
+        # 3. find_page resolves SPA hash routes without a leading slash
+        self.assertEqual(codemap.find_page(self.con, "#/zones/42")["route"], "/#/zones/:id")
+
 
 class ShellMenu(CodeMapCase):
     """The app shell's menu config gives route rows written by code, not by a mapper."""

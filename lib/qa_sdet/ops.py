@@ -129,8 +129,9 @@ def marker_start(project, budget=0, minutes=0, faults=False, t=None):
 
 
 def marker_stop(project):
+    root = _project(project) / "qa-out"
     for name in (".active", ".active.lock"):
-        (Path(project) / "qa-out" / name).unlink(missing_ok=True)
+        (root / name).unlink(missing_ok=True)
 
 
 def profile_dir():
@@ -200,7 +201,7 @@ def browser_open(args):
     code_ = r.returncode if r.returncode >= 0 else 128 - r.returncode  # killed by signal N: exit 128+N like a shell
     text = f"{r.stderr or ''}\n{r.stdout or ''}"
     # the category is the first stderr line, as the explorer and the skills report it
-    if "already in use" in text:
+    if "browser is already in use" in text.lower():
         # playwright-cli's hint (--isolated) would drop the sign-in; say what actually holds the profile
         print("browser profile in use: another qa-sdet browser holds the main profile (a /qa-sdet:qa-login window not "
               "finished, or a run in another project folder). Close the other qa-sdet browser (or run `playwright-cli "
@@ -229,7 +230,13 @@ def prune(project, days=7, t=None, run=None):
                     stamps.append(os.lstat(os.path.join(d, fn)).st_mtime)
                 except OSError:
                     continue
-        since = min(stamps) if stamps else None
+        if stamps:
+            since = min(stamps)
+        else:
+            try:
+                since = os.lstat(run).st_mtime
+            except OSError:
+                since = None
         data = Path(run) / ".data"
         for f in [*data.glob("snapshot*.md"), *data.glob("map-*.png")] if data.is_dir() and not data.is_symlink() else []:
             try:
@@ -322,7 +329,7 @@ def annotate(path, boxes, label):
     try:
         img = Image.open(path)
         img.load()
-    except (OSError, Image.DecompressionBombError) as e:  # not a PNG, truncated, or too many pixels: left as is
+    except (OSError, ValueError, Image.DecompressionBombError) as e:  # not a PNG, truncated, huge text chunk, or bomb: left as is
         raise core.BadInput(f"annotate: can't read {path.name} as an image ({e}); image left as is")
     W, H = img.size
     for x, y, w, h in boxes:

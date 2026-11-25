@@ -21,12 +21,19 @@ COVERAGE_ICON = {"pass": "✅", "fail": "❌", "blocked": "⛔"}
 
 def _load_json(path, warnings):
     try:
-        return scrub.redact_json(json.loads(Path(path).read_text()))
+        return scrub.redact_json(json.loads(Path(path).read_text(encoding="utf-8-sig")))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         warnings.append(f"{Path(path).name} unreadable ({type(e).__name__})")
         return None
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def load_run(run_dir):
@@ -37,7 +44,10 @@ def load_run(run_dir):
         warnings.append("plan.json is not an object")
         plan = None
     runs = []
-    for f in sorted(data.glob("run-*.json"), key=lambda x: (x.stat().st_mtime, x.name)):
+    for f in sorted(data.glob("run-*.json"), key=lambda x: (_mtime(x), x.name)):
+        if f.is_symlink() and not f.exists():
+            warnings.append(f"{f.name} unreadable (FileNotFoundError)")
+            continue
         r = _load_json(f, warnings)
         if isinstance(r, dict):
             runs.append((f.name, r))
@@ -98,18 +108,19 @@ def merged_cases(plan, runs, warnings=None):
     "not run" never hides its FAIL. A plan case with no id or a repeated one can't get a result: it is left out and
     named in `warnings`."""
     warnings = [] if warnings is None else warnings
+    valid_id = lambda v: isinstance(v, (str, int, float)) and not isinstance(v, bool) and v != ""  # as core.txt
     results = {}
     rank = lambda c: MERGE_RANK.index(core.case_status(c.get("status")) or "NOT_RUN")
     for _, r in runs:
         for c in _list(r, "cases"):
-            if isinstance(c.get("id"), (str, int)) and c["id"] != "":
+            if valid_id(c.get("id")):
                 cid = str(c["id"])
                 if cid not in results or rank(c) >= rank(results[cid]):
                     results[cid] = c
     out, seen = [], set()
-    for c in _list(plan, "cases") + [c for c in results.values() if str(c["id"]) not in
-                                       {str(p.get("id")) for p in _list(plan, "cases")}]:
-        cid = str(c["id"]) if c.get("id") not in (None, "") else ""  # a numeric id 0 is still an id
+    plan_ids = {str(p["id"]) for p in _list(plan, "cases") if valid_id(p.get("id"))}
+    for c in _list(plan, "cases") + [c for c in results.values() if str(c["id"]) not in plan_ids]:
+        cid = str(c["id"]) if valid_id(c.get("id")) else ""  # a numeric id 0 is still an id; bool/list is not
         if not cid or cid in seen:
             what = one_line(core.short(c.get("title") or c.get("expected") or "untitled", 60))
             warnings.append(f"plan.json: case '{what}' " + (f"repeats id {cid}" if cid else "has no id")
@@ -118,10 +129,10 @@ def merged_cases(plan, runs, warnings=None):
         seen.add(cid)
         res = results.get(cid, {})
         ac = c.get("ac")  # a case may cover several AC: "AC-1, AC-2" or a list
-        ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int))) if isinstance(ac, list) else ac
+        ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int)) and not isinstance(a, bool)) if isinstance(ac, list) else ac
         merged = {**c, "id": cid, "ac": ac, "status": core.case_status(res.get("status")) or "NOT_RUN",
-                  "actual": str(res.get("actual") or ""), "notes": str(res.get("notes") or ""),
-                  "bug": str(res.get("bug") or "")}
+                  "actual": core._s(res.get("actual")), "notes": core._s(res.get("notes")),
+                  "bug": core._s(res.get("bug"))}
         if "annotated" in res:
             merged["annotated"] = res["annotated"]
         out.append(merged)
@@ -432,7 +443,7 @@ def _notes_section(runs):
         cov = {}
         for p in _list(r, "pages"):
             for c in _list(p, "coverage"):
-                if c.get("heuristic"):
+                if core.norm(c.get("heuristic")):
                     h, res = core.heuristic_id(c["heuristic"]), core.coverage_result(c.get("result"))
                     order = ("fail", "blocked", "pass")
                     if h not in cov or (res in order and (cov[h] not in order or order.index(res) < order.index(cov[h]))):
@@ -672,7 +683,7 @@ def run_summary(run_dir):
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
     cases, bugs = merged_cases(plan, runs), run_bugs(runs)
-    tickets = [t for t in _list(plan, "tickets") if t.get("key")]
+    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
     if kind == "plan":
         verdicts = f"plan only ({len(cases)} cases)"
     elif tickets:
@@ -688,16 +699,17 @@ def render_index(qa_out):
     qa_out = Path(qa_out)
     runs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink()
             and ((p / "REPORT.md").exists() or (p / ".data" / "plan.json").exists())]
-    when = lambda p: max(x.stat().st_mtime for x in (p, p / "REPORT.md", p / ".data" / "plan.json") if x.exists())
+    when = lambda p: max((_mtime(x) for x in (p, p / "REPORT.md", p / ".data" / "plan.json") if x.exists()), default=0.0)
     rows = []
     for p in runs:
         try:
             date, kind, verdicts, n = run_summary(p)
+            ts = when(p)
         except Exception as e:  # one odd folder must not break the index
             m = re.match(r"\d{4}-\d{2}-\d{2}", p.name)
-            date, kind, verdicts, n = (m.group(0) if m else ""), "?", f"unreadable ({type(e).__name__})", "?"
+            date, kind, verdicts, n, ts = (m.group(0) if m else ""), "?", f"unreadable ({type(e).__name__})", "?", 0.0
         name = one_line(p.name).replace("[", "\\[").replace("]", "\\]")
-        rows.append(((date, when(p)), row(date, Raw(f"[{name}]({quote(p.name, safe='+')}/REPORT.md)"), kind, verdicts, n)))
+        rows.append(((date, ts), row(date, Raw(f"[{name}]({quote(p.name, safe='+')}/REPORT.md)"), kind, verdicts, n)))
     rows.sort(key=lambda x: x[0], reverse=True)
     return "\n".join(["# QA runs", "Newest first. Open a run's REPORT.md for test cases, bugs and questions.", "",
                       row("Date", "Run", "Kind", "Verdict", "Bugs"), "|---|---|---|---|---|"] + [r for _, r in rows]) + "\n"
@@ -717,7 +729,7 @@ def write_report(run_dir):
         for name, body in drafts.items():
             core._write(run_dir / name, body)
         for old in run_dir.glob("jira-comment-*.md"):
-            if old.name not in drafts:
+            if old.name not in drafts and (old.is_symlink() or old.is_file()):
                 old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one
     # rendered before the other run's REPORT.md existed, and that run would vanish from the index.
@@ -777,7 +789,8 @@ def inbox(con, project, data, prefix=None, today=None):
     else:
         lines.append("No open tickets assigned to you.")
     pick = [x["key"] for x in (new or items[:3])]
-    p = str(prefix or "").strip().upper().rstrip("-")
+    p = str(prefix or "").strip().rstrip("-")
+    p = p.upper() if p.isascii() else ""
     nums = [k[len(p) + 1:] if p and k.startswith(p + "-") else k for k in pick]
     lines += ["", f"Next: /qa-sdet:qa-ticket {' '.join(nums)}" if nums else "Next: nothing to test"]
     text = "\n".join(lines) + "\n"

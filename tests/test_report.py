@@ -3,7 +3,7 @@ import fcntl, json, os, threading, unittest
 from unittest import mock
 
 from support import Base, cli, PLAN, RUN_FORM, RUN_LIST
-from qa_sdet import report
+from qa_sdet import core, report
 
 PLAN1 = {"kind": "ticket", "title": "PROJ-1", "created": "2026-11-23T18:00:00Z",
          "env": {"url": "https://qa.example", "browser": "chrome"},
@@ -131,6 +131,10 @@ class MergedCases(Base):
         tie = report.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
                                      ("b", {"cases": [{"id": "TC-1", "status": "pass", "actual": "new"}]})])
         self.assertEqual(tie[0]["actual"], "new")
+
+    def test_a_float_case_id_ingest_accepts_is_reported(self):  # core.txt takes 1.0; the report dropped it silently
+        cases = report.merged_cases({}, [("a", {"cases": [{"id": 1.0, "status": "FAIL", "actual": "x"}]})])
+        self.assertEqual([(c["id"], c["status"]) for c in cases], [("1.0", "FAIL")])
 
     def test_case_without_or_with_a_repeated_id_is_named_not_dropped_silently(self):
         plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}]}], "cases": [
@@ -639,6 +643,37 @@ class JiraDraft(Rendering):
         self.assertEqual(report._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
         self.assertEqual(report._release_names(["A-{version}"], None)[1], "the ticket has no single fix version (plan.json fix_version)")
         self.assertEqual(report._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
+
+    def test_round2_report_resilience_types_and_prefixes(self):
+        # M2: broken symlink and deeply nested run JSON do not crash report or index
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
+        (d / ".data/run-broken.json").symlink_to(self.t / "missing-target.json")
+        (d / ".data/run-deep.json").write_text("[" * 3000 + "]" * 3000)
+        r = report.render_report(d)
+        self.assertIn("**Verdict: ✅ PASS**", r)
+        self.assertIn("run-broken.json unreadable", r)
+        self.assertIn("run-deep.json unreadable", r)
+        # M5: bool/list case IDs warned & dropped, numeric 0 actual kept, non-string ticket keys ignored in run_summary
+        plan_odd = {**PLAN1, "tickets": [{"key": ["bad"]}, {"key": 12}, *PLAN1["tickets"]],
+                    "cases": [{"id": True, "title": "bool id"}, {"id": ["x"], "title": "list id"}, *PLAN1["cases"]]}
+        run_zero = {**RUN1, "cases": [{"id": "TC-1", "status": "PASS", "actual": 0}, {"id": "TC-2", "status": "PASS", "actual": "ok"}],
+                    "pages": [{"route": "/form", "coverage": [{"heuristic": "   ", "result": "pass"}]}]}
+        d2 = self.rundir("2026-11-23-ODD", plan=plan_odd, runs=[("form", run_zero)])
+        r2 = report.render_report(d2)
+        self.assertIn("| TC-1 |", r2)
+        self.assertIn("| ✅ PASS | 0 |", r2)
+        self.assertNotIn("| True |", r2)
+        self.assertNotIn("| ['x'] |", r2)
+        self.assertNotIn("other:", r2)
+        summary = report.run_summary(d2)
+        self.assertNotIn("['bad']", summary[2])
+        # L4: non-ASCII jiraKeyPrefix 'ß' does not strip 'SS-' in inbox
+        con = core.connect()
+        try:
+            out = report.inbox(con, self.proj, [{"key": "SS-12", "fields": {"summary": "x", "status": {"name": "Open"}}}], prefix="ß")
+            self.assertIn("Next: /qa-sdet:qa-ticket SS-12", out)
+        finally:
+            con.close()
 
 
 if __name__ == "__main__":

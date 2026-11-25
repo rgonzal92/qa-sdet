@@ -78,6 +78,8 @@ def wrapper_cmd(cmd, args):
         if args[0] == "start":
             print(json.dumps(ops.marker_start(o["_"][0], _count(o, "--budget"), _count(o, "--minutes", ops.MARKER_HOURS * 60), o.get("--faults", False))))
         else:
+            if len(o) > 1:
+                raise core.BadOption("marker stop takes no options")
             ops.marker_stop(o["_"][0])
             print("marker removed")
     elif cmd == "browser-open":
@@ -152,7 +154,7 @@ def hook_input():
             return {}
         data = json.loads(sys.stdin.read() or "{}")
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RecursionError):
         return {}
 
 
@@ -162,9 +164,10 @@ def main(argv):
     except core.BadInput as e:  # also the refusal of a pre-0.4 DB, from core.connect()
         print(f"qa-mem: {e}", file=sys.stderr)
         return 2
-    except sqlite3.OperationalError as e:
+    except sqlite3.DatabaseError as e:
         if "locked" not in str(e) and "busy" not in str(e):
-            raise
+            print(f"qa-mem: the memory DB {core.db_path()} failed: {e}", file=sys.stderr)
+            return 1
         print(f"qa-mem: the memory DB {core.db_path()} stayed busy (another qa-mem or a run's hook is writing to it); "
               "the command did not finish: run it again in a minute", file=sys.stderr)
         return 1
@@ -204,6 +207,7 @@ def _main(argv):
             return usage_error(cmd, f"unknown option {a}")
         skip = a in valued
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
+        memory.PARKED.clear()
         for root in dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a):  # cwd + project dir
             try:
                 memory.ingest_pending(root)
@@ -261,6 +265,8 @@ def _main(argv):
     con = core.connect()
     try:
         return run_cmd(con, cmd, args)
+    except core.BadOption as e:
+        return usage_error(cmd, str(e))
     finally:
         con.close()
 
@@ -269,7 +275,10 @@ def run_cmd(con, cmd, args):
     if cmd == "card" and args:
         print(memory.card(con, " ".join(args)))
     elif cmd == "code":
-        print(codemap.code(con, " ".join(args)))
+        o = _opts(args, flags=("--repos",))
+        if o.get("--repos") and o["_"]:
+            raise core.BadOption("--repos takes no route")
+        print(codemap.code(con, "--repos" if o.get("--repos") else " ".join(o["_"])))
     elif cmd == "codemap-forget" and args:
         n = codemap.codemap_forget(con, " ".join(args))
         if n is None:
@@ -278,24 +287,18 @@ def run_cmd(con, cmd, args):
             return 2
         print(f"removed {n} code-map rows for {' '.join(args)}")
     elif cmd == "codemap-scan":
-        full, out, paths, it = False, "qa-out/init", [], iter(args)
-        for a in it:
-            if a == "--full":
-                full = True
-            elif a == "--out":
-                out = next(it, out)
-            elif a.startswith("--out="):
-                out = a.split("=", 1)[1] or out
-            else:
-                paths.append(a)
+        o = _opts(args, flags=("--full",), valued=("--out",))
+        if "--out" in o and not o["--out"].strip():
+            raise core.BadOption("--out needs a folder path")
+        paths = o["_"]
         if not paths:
             print("give the source folder(s) to scan, e.g. qa-mem codemap-scan ~/work/traffic-ui ~/work/traffic-api")
             return 2
         from . import scan
-        print(json.dumps(scan.codemap_scan(con, paths, out, full), indent=1))
+        print(json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
-    elif cmd == "bugs":
+    elif cmd == "bugs" and len(args) <= 1:
         status = args[0].upper() if args else "OPEN"
         if status not in core.STATUSES:
             print(f"unknown status '{args[0]}'; use one of {sorted(core.STATUSES)}")
@@ -316,18 +319,18 @@ def run_cmd(con, cmd, args):
             gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
                                "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount
         print(f"removed {hits[0]}: no run lists this bug any more" if gone else f"updated {hits[0]} -> {status}")
-    elif cmd == "ingest" and args:
+    elif cmd == "ingest" and len(args) == 1:
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:
-            memory.ingest(con, scrub.redact_json(json.loads(Path(args[0]).read_text())), run_dir=Path(args[0]).resolve().parent,
-                   src=Path(args[0]).resolve())
+            memory.ingest(con, scrub.redact_json(json.loads(Path(args[0]).read_text(encoding="utf-8-sig"))),
+                          run_dir=Path(args[0]).resolve().parent, src=Path(args[0]).resolve())
         except (OSError, ValueError, RecursionError) as e:  # ValueError: not JSON, or a field ingest rejects
             print(f"qa-mem: ingest: can't save {args[0]} ({type(e).__name__}: {core.short(e, 200)})", file=sys.stderr)
             return 2
         print("ingested")
     elif cmd == "stale" and args:
-        build = core.cap(" ".join(args))  # normalised like ingest, so it matches stored builds
-        if not build or build.lower() == core.UNKNOWN:
+        build = core.norm_build(" ".join(args))  # normalised like ingest, so it matches stored builds
+        if build == core.UNKNOWN:
             print("give the deployed build, e.g. qa-mem stale 1.43.0")
             return 2
         with con:

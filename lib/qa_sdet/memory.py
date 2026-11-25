@@ -2,6 +2,7 @@
 import fcntl
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -18,7 +19,7 @@ def resolve_draft(path, run_dir):
         return None  # "" from a re-sighting must not wipe the draft path the DB already has
     if run_dir is None:
         return str(path)
-    p = Path(str(path)).expanduser()
+    p = Path(os.path.expanduser(str(path)))
     if p.is_absolute():
         return str(p)
     run_dir = Path(run_dir).resolve()
@@ -38,11 +39,12 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
     Raises ValueError on bad shape."""
     if not isinstance(run, dict):
         raise ValueError("run.json must be an object")
-    if not run.get("run_id"):
+    rid = core.txt(run.get("run_id"), "run_id")
+    if not rid or not rid.strip():
         raise ValueError("run.json missing 'run_id'")
     # Same build text however the page laid it out ("Build:\n 1.42" == "Build: 1.42"); capped like all text.
     # An empty or missing build (empty version element) is unknown, not a broken run.
-    build, rid, ts = core.norm_build(core.txt(run.get("build"), "build")), core.txt(run["run_id"], "run_id"), ts or core.now()
+    build, ts = core.norm_build(core.txt(run.get("build"), "build")), ts or core.now()
     known = build.lower() != core.UNKNOWN
     for f in ("mode", "target", "status", "summary"):
         core.txt(run.get(f), f)
@@ -63,9 +65,9 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
             core.txt(b.get(f), f"bugs.{f}")
         if b.get("annotated") is not None and not isinstance(b["annotated"], bool):
             raise ValueError("'bugs.annotated' must be true or false")
-        if not b.get("title") or not b.get("route"):
+        b["route"] = core.norm_route(b.get("route"))
+        if not core.cap(b.get("title")) or not b["route"]:
             raise ValueError("bug entry needs 'title' and 'route'")
-        b["route"] = core.norm_route(b["route"])
     with con:
         con.execute("INSERT OR REPLACE INTO runs VALUES(?,?,?,?,?,?,?)",
                     (rid, core.cap(run.get("mode")) or None, core.cap(run.get("target")), build, core.cap(run.get("status")) or None,
@@ -112,12 +114,14 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
                                  *(int(known and not late),) * 2))
             for loc in pg.get("locators") or []:
                 # A truncated locator would be broken, so skip oversized ones instead of capping.
-                if (not late or same_build) and loc.get("name") and loc.get("locator") \
-                        and len(str(loc["locator"])) <= core.MAX_TEXT:  # late + same build: add, never replace newer
-                    con.execute(f"INSERT OR {'IGNORE' if late else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
-                                (route, core.cap(loc["name"]), str(loc["locator"]).strip(), build, ts))
+                loc_name, loc_val = core.cap(loc.get("name")), (core.txt(loc.get("locator"), "locators.locator") or "").strip()
+                if (not late or same_build) and loc_name and loc_val and len(loc_val) <= core.MAX_TEXT:
+                    # late + same build, or unknown-build plan on a verified page: add, never overwrite/un-stale verified
+                    keep_old = late or (not known and bool(old and old["build"] not in (core.UNKNOWN, None)))
+                    con.execute(f"INSERT OR {'IGNORE' if keep_old else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
+                                (route, loc_name, loc_val, build, ts))
             for c in pg.get("coverage") or []:
-                if c.get("heuristic"):
+                if core.norm(c.get("heuristic")):
                     # the newest run's result stands: a run.json ingested late must not put its older one back
                     con.execute("INSERT INTO coverage VALUES(?,?,?,?,?,?,?) ON CONFLICT(page,target,heuristic,build) "
                                 "DO UPDATE SET result=excluded.result, run_id=excluded.run_id, ts=excluded.ts "
@@ -131,8 +135,6 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
                         "ORDER BY ts DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_COVERAGE))
             con.execute("DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
                         "ORDER BY stale, last_verified DESC LIMIT 60)", (pg["route"], pg["route"]))
-        con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
-        con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
         # sightings = which bugs this run file reported. A rewritten run.json (or a sibling's hook ingesting it
         # mid-run) replaces its earlier version: a bug it no longer lists is un-sighted (dropped when only it ever
         # saw it), and seen_count counts distinct run ids even when runs are re-ingested interleaved.
@@ -141,7 +143,7 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
         ran = lambda h: con.execute("SELECT 1 FROM sightings WHERE run_id=? AND hash=?", (rid, h)).fetchone()
         now_seen = set()
         for b in bug_list:
-            symptom = core.cap(b.get("symptom") or b["title"])
+            symptom = core.cap(b.get("symptom")) or core.cap(b["title"])
             raw = str(b.get("hash") or "").strip()
             if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw) and not re.fullmatch(r"(?i)BUG-\d+", raw):
                 continue  # a Jira key: a bug tracked in Jira, not a local one to create (BUG-n is a draft's id: created)
@@ -183,6 +185,8 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
             # only this run ever saw it and the user hasn't triaged it: it was never a bug
             con.execute("DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
                         "(SELECT 1 FROM sightings WHERE hash=?)", (h, h))
+        con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
+        con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
 
 
 def check_report_fields(run):
@@ -192,18 +196,23 @@ def check_report_fields(run):
             raise ValueError("every case needs an 'id' (TC-n from the plan)")
         for f in ("status", "actual", "notes", "bug"):
             core.txt(c.get(f), f"cases.{f}")
+        if c.get("annotated") is not None and not isinstance(c["annotated"], bool):
+            raise ValueError("'cases.annotated' must be true or false")
         if not core.case_status(c.get("status")):
             raise ValueError(f"case {c['id']}: 'status' must be one of {', '.join(core.CASE_STATUSES)}")
-    items = run.get("questions") or []
+    items = run.get("questions")
+    items = [] if items is None else items
     if not isinstance(items, list) or not all(
             isinstance(i, str) or (isinstance(i, dict) and isinstance(i.get("text"), str)) for i in items):
         raise ValueError("'questions' must be a list of strings, or of {\"text\", \"status\", \"answer\"} objects")
-    items = run.get("not_tested") or []
+    items = run.get("not_tested")
+    items = [] if items is None else items
     if not isinstance(items, list) or not all(
             isinstance(i, str) or (isinstance(i, dict) and isinstance(i.get("text"), str)) for i in items):
         raise ValueError("'not_tested' must be a list of strings, or of {\"category\", \"text\"} objects")
     core.txt(run.get("notes"), "notes")
-    env = run.get("env") or {}
+    env = run.get("env")
+    env = {} if env is None else env
     if not isinstance(env, dict):
         raise ValueError("'env' must be an object")
     for f in ("url", "browser"):
@@ -276,13 +285,13 @@ def _ingest_files(con, pending):
                 note = f"dropped rows: {dropped}\n" if dropped else ""
             else:
                 ingest(con, scrub.redact_json(json.loads(data)), ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped
-            done.write_text(f"{digest}\n{core.now()}\n{note}")
+            core._write(done, f"{digest}\n{core.now()}\n{note}")
             err.unlink(missing_ok=True)
             n += 1
         except sqlite3.OperationalError as e:  # transient (e.g. DB locked): retry on the next hook run
             print(f"qa-mem: will retry {f}: {e}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 - bad file: park it until it is rewritten
-            err.write_text(f"{digest}\n{core.now()} {type(e).__name__}: {e}\n")
+            core._write(err, f"{digest}\n{core.now()} {type(e).__name__}: {e}\n")
             print(f"qa-mem: skipped {f}: {e}", file=sys.stderr)
             PARKED.append(f"{f}: {type(e).__name__}: {e}")
     return n
@@ -314,7 +323,7 @@ def card(con, q):
         words = set(core.norm(f["text"]).split())
         # Runs restate facts in new words; show only the freshest of near-duplicates.
         if any(k == f["kind"] and len(words & w) >= 0.8 * max(len(words | w), 1)
-               and not any(x.isdigit() for x in words ^ w) for k, w in seen):  # '130' vs '120' is news, not a repeat
+               and not any(c.isdigit() for x in words ^ w for c in x) for k, w in seen):  # '130km/h' vs '120km/h' is news
             continue
         seen.append((f["kind"], words))
         facts.append(f)
@@ -340,7 +349,7 @@ def card(con, q):
         if locs:
             more = f" (+{len(rows) - len(locs)} more verified; find them with a snapshot)" if len(rows) > len(locs) else ""
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
-    out += codemap.codemap_block(con, r, shown if current else None)
+    out += codemap.codemap_block(con, r, shown)
     cov = {}
     # Coverage from runs that couldn't read the build counts for a week, then the heuristic is retried.
     week_ago = datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -368,7 +377,7 @@ def bug_lines(con, route):
     fixed = con.execute("SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status='FIXED'"
                         + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
                         [route] if route is not None else []).fetchall()
-    line = lambda x: (f"- {x['hash']} {x['status']} [{x['severity']}] "
+    line = lambda x: (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] "
                       + (f"{x['page']} " if route is None else "")  # app-wide list: say which page
                       + f"{core.short(x['title'], 100)} | symptom: {core.short(x['symptom'] or x['title'], 120)} (seen {x['seen_count']})")
     out = []
@@ -389,9 +398,10 @@ def search(con, q):
     (NEAR, AND, a leading -) can't change what is matched."""
     terms = [t for t in str(q).split() if t not in ("AND", "OR", "NOT", "NEAR") and re.search(r"\w", t)]
     pos, neg = [t for t in terms if not t.startswith("-")], [t[1:] for t in terms if t.startswith("-")]
-    # '/api/zones', 'speed-limit', 'form.html': every word in a term counts (FTS indexes words)
-    words, nots = [w for t in pos for w in re.findall(r"\w+", t)], [w for t in neg for w in re.findall(r"\w+", t)]
-    rows = _search(con, " ".join(f'"{w}"' for w in words) + "".join(f' NOT "{w}"' for w in nots)) if words else []
+    # '/api/zones', 'speed-limit', 'form.html': every word in a term counts; multi-word exclusions match as one phrase
+    words = [w for t in pos for w in re.findall(r"\w+", t)]
+    nots = [" ".join(ws) for t in neg if (ws := re.findall(r"\w+", t))]
+    rows = _search(con, " ".join(f'"{w}"' for w in words) + "".join(f' NOT "{p}"' for p in nots)) if words else []
     lines = [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in rows]
     if words:  # the code map too (incl. backend endpoints no page calls, page '*')
         cond = " AND ".join(["(label || ' ' || coalesce(value, '')) LIKE ? ESCAPE '\\'"] * len(pos)
@@ -412,7 +422,7 @@ def _search(con, q):
 def bugs(con, status="OPEN"):
     total = con.execute("SELECT count(*) FROM bugs WHERE status=?", (status,)).fetchone()[0]
     rows = con.execute("SELECT * FROM bugs WHERE status=? ORDER BY last_seen DESC LIMIT 30", (status,)).fetchall()
-    lines = [f"{x['hash']} [{x['severity']}] {x['classification']} {x['page']} {core.short(x['title'], 100)} "
+    lines = [f"{x['hash']} [{x['severity'] or '?'}] {x['classification'] or '?'} {x['page']} {core.short(x['title'], 100)} "
              f"(seen {x['seen_count']}) {x['draft_path'] or ''}" for x in rows]
     if total > len(rows):
         lines.append(f"... {total - len(rows)} older {status} bugs not shown (search facts or ask for a page's card)")

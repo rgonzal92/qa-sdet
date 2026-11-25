@@ -13,8 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
-DATA_DIR = Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser()
+CONFIG = Path(os.environ.get("QA_SDET_CONFIG") or "~/.config/qa-sdet/config.json").expanduser()
+DATA_DIR = Path(os.environ.get("QA_SDET_DATA") or "~/.local/share/qa-sdet").expanduser()
 MAX_TEXT = 300
 MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
 UNKNOWN = "unknown"
@@ -73,7 +73,7 @@ def config(strict=False):
     """The config file as a dict. strict=False: {} when it is missing or broken. strict=True: raises OSError (missing,
     unreadable) or ValueError (not JSON, or not one JSON object) so the caller can say what is wrong."""
     try:
-        cfg = json.loads(CONFIG.read_text())
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
         if not isinstance(cfg, dict):
             raise ValueError('the file must be one JSON object: {"app": ..., "qaBaseUrl": ...}')
     except (OSError, ValueError):
@@ -85,7 +85,7 @@ def config(strict=False):
 
 def db_path():
     if os.environ.get("QA_MEM_DB"):
-        return Path(os.environ["QA_MEM_DB"])
+        return Path(os.environ["QA_MEM_DB"]).expanduser()
     app = "default"
     try:
         app = str(config(strict=True).get("app") or app)
@@ -98,7 +98,10 @@ def db_path():
 
 def connect():
     p = db_path()
-    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # app facts and bugs: owner only
+    try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # app facts and bugs: owner only
+    except OSError as e:
+        raise BadInput(f"can't create the memory DB folder {p.parent}: {e.strerror}") from e
     con = sqlite3.connect(p, timeout=10)
     con.row_factory = sqlite3.Row
     for table, cols in (("bugs", {"last_run", "symptom"}), ("codemap", {"src"})):  # no migrations: refuse a pre-0.4 DB
@@ -149,8 +152,12 @@ def _ids(path):
     return ("/" + "/".join(segs)) if segs else ""
 
 
+def _s(v):
+    return "" if v is None or isinstance(v, bool) else str(v)
+
+
 def cap(s):
-    return " ".join(str(s or "").split())[:MAX_TEXT]
+    return " ".join(_s(s).split())[:MAX_TEXT]
 
 
 def norm_build(v):
@@ -163,7 +170,7 @@ def norm_build(v):
 
 
 def norm(s):
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).split())
+    return " ".join(re.sub(r"[\W_]+", " ", _s(s).lower()).split())
 
 
 def bug_hash(route, symptom):
@@ -180,7 +187,9 @@ def set_meta(con, key, value):
 
 
 def dicts(obj, key):
-    items = obj.get(key) or []
+    items = obj.get(key)
+    if items is None:
+        return []
     if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
         raise ValueError(f"'{key}' must be a list of objects")
     return items
@@ -231,7 +240,7 @@ def _git(repo, *args, timeout=30):
 
 
 def short(s, n):
-    s = str(s or "")
+    s = _s(s)
     return s if len(s) <= n else s[:n - 1] + "…"
 
 

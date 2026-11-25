@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -d qa-out ] || [ -d \"$CLAUDE_PROJECT_DIR/qa-out\" ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/bin/qa-mem\" ingest-pending qa-out \"$CLAUDE_PROJECT_DIR/qa-out\"; fi",
+            "command": "if [ -d qa-out ] || { [ -n \"$CLAUDE_PROJECT_DIR\" ] && [ -d \"$CLAUDE_PROJECT_DIR/qa-out\" ]; }; then python3 \"${CLAUDE_PLUGIN_ROOT}/bin/qa-mem\" ingest-pending qa-out ${CLAUDE_PROJECT_DIR:+\"$CLAUDE_PROJECT_DIR/qa-out\"}; fi",
             "timeout": 30
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -d qa-out ] || [ -d \"$CLAUDE_PROJECT_DIR/qa-out\" ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/bin/qa-mem\" ingest-pending qa-out \"$CLAUDE_PROJECT_DIR/qa-out\"; fi",
+            "command": "if [ -d qa-out ] || { [ -n \"$CLAUDE_PROJECT_DIR\" ] && [ -d \"$CLAUDE_PROJECT_DIR/qa-out\" ]; }; then python3 \"${CLAUDE_PLUGIN_ROOT}/bin/qa-mem\" ingest-pending qa-out ${CLAUDE_PROJECT_DIR:+\"$CLAUDE_PROJECT_DIR/qa-out\"}; fi",
             "timeout": 30
           }
         ]

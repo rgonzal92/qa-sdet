@@ -73,6 +73,18 @@ class Hooks(Base):
                            capture_output=True)
         self.assertEqual(r.returncode, 0)
 
+    def test_stop_hook_ignores_unset_project_dir(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        cmd = hooks["Stop"][0]["hooks"][0]["command"]
+        other = Path(self.tmp.name) / "empty-cwd"
+        other.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        env["CLAUDE_PLUGIN_ROOT"] = str(ROOT)
+        # Check with trace that unset CLAUDE_PROJECT_DIR never tests /qa-out
+        r = subprocess.run(["bash", "-x", "-c", cmd], cwd=other, env=env, input="{}", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("/qa-out", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

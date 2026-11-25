@@ -30,7 +30,7 @@ def installed_browsers(names=core.BROWSERS):
             why = f"can't check: `playwright-cli install-browser --dry-run {name}` gave no install location"
             try:
                 dry = subprocess.run([pw, "install-browser", "--dry-run", name], capture_output=True, text=True,
-                                     timeout=30).stdout
+                                     errors="replace", timeout=30).stdout
                 m = re.search(r"Install location:\s*(.+)", dry)
                 loc = m.group(1).strip() if m else None
             except (subprocess.TimeoutExpired, OSError):
@@ -114,7 +114,7 @@ def doctor():
         line(isinstance(hosts, list) and all(isinstance(h, str) for h in hosts), "allowedHosts is a list of hosts",
              'e.g. "allowedHosts": ["qa.example.com"]')
         norm_hosts = [h.lower().strip().rstrip(".").removeprefix("*.") for h in hosts
-                      if isinstance(h, str)] if isinstance(hosts, list) else []  # same rules as the guard
+                      if isinstance(h, str) and h.strip()] if isinstance(hosts, list) else []  # same rules as the guard
         odd = [h for h in norm_hosts if h and not re.fullmatch(r"[a-z0-9._-]+|::1", h)]  # the guard matches host names only
         if {"localhost", "127.0.0.1", "::1"} & set(norm_hosts):  # loopback aliases, as in the guard
             norm_hosts += ["localhost", "127.0.0.1", "::1"]
@@ -139,8 +139,8 @@ def doctor():
                  "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED")
         prefix = cfg.get("jiraKeyPrefix")
         if prefix not in (None, ""):  # optional: lets the user type ticket numbers without the project key
-            line(isinstance(prefix, str) and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"),
-                                                               re.ASCII)),
+            line(isinstance(prefix, str) and prefix.isascii() and bool(re.fullmatch(
+                 r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"), re.ASCII)),
                  "jiraKeyPrefix is a Jira project key", 'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"')
         temps = cfg.get("releaseTemplates")
         if temps not in (None, []):  # optional: the Jira pass-comment draft fills {version} into these
@@ -206,7 +206,9 @@ def merge_permissions(path, stamp=None):
     """Append the missing PERMISSION_RULES to permissions.allow of a Claude Code settings file; every other key stays.
     Backs the file up first and writes atomically. A file that isn't usable JSON is refused untouched.
     Returns the rules added."""
-    path = Path(os.path.realpath(Path(path).expanduser()))  # a symlinked settings.json (dotfiles) stays a link
+    if (expanded := os.path.expanduser(str(path))).startswith("~"):
+        raise core.BadInput(f"can't find the home folder in {path}; give the full path")
+    path = Path(os.path.realpath(expanded))  # a symlinked settings.json (dotfiles) stays a link
     try:
         old = path.read_text(encoding="utf-8") if path.exists() else None
         settings = json.loads(old) if old is not None else {}
@@ -226,9 +228,11 @@ def merge_permissions(path, stamp=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         if old is not None:
             bak = path.with_name(f"{path.name}.bak-{stamp or datetime.now().strftime('%Y%m%d%H%M%S')}")
-            while bak.exists():  # two applies in one second: keep the first backup
+            while os.path.lexists(bak):  # two applies in one second, or a planted dangling symlink: never write through
                 bak = bak.with_name(bak.name + "x")
-            shutil.copy2(path, bak)
+            bak_fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, path.stat().st_mode & 0o7777)
+            with os.fdopen(bak_fd, "wb") as bf:
+                bf.write(old.encode("utf-8"))
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
         with os.fdopen(fd, "wb") as f:
             f.write(data)

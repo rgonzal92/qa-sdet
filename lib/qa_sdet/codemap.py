@@ -60,10 +60,10 @@ def load_scan(cm, f):
     m = re.fullmatch(r"code-map-(\w+(?:-\d+)?)\.json", Path(f).name)
     scan_path = Path(f).with_name(f"scan-{m.group(1) if m else area}.json")
     try:
-        scan = json.loads(scan_path.read_text())
+        scan = json.loads(scan_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise ValueError(f"{scan_path.name} is missing or unreadable ({e}); run qa-mem codemap-scan first")
-    if not isinstance(scan, dict) or not isinstance(scan.get("repos") or [], list):
+    if not isinstance(scan, dict) or (scan.get("repos") is not None and not isinstance(scan.get("repos"), list)):
         raise ValueError(f"{scan_path.name} is not a scan file; run qa-mem codemap-scan again")
     if cm.get("scan_id") != scan.get("scan_id"):
         raise ValueError(f"scan_id {cm.get('scan_id')!r} doesn't match {scan_path.name} ({scan.get('scan_id')!r}): "
@@ -327,8 +327,11 @@ def code(con, q=""):
                                          or "(none: no frontend routes mapped yet)")
                 + f"\nTOTAL: {len(rows)} routes, {n.get('locator', 0)} locators, {n.get('rule', 0)} rules, "
                   f"{n.get('api', 0)} endpoints ({n_star} backend: qa-mem code '*')")
-    pg = find_page(con, q)
-    route = pg["route"] if pg else ("*" if q.strip() == "*" else core.norm_route(q))
+    if q.strip() == "*":
+        route = "*"
+    else:
+        pg = find_page(con, q)
+        route = pg["route"] if pg else core.norm_route(q)
     rows = _codemap_rows(con, route)
     if not rows:
         return f"no code-map rows for '{q}'"
@@ -341,7 +344,7 @@ def find_page(con, q):
     q = q.strip()
     if not q:
         return None
-    if q.startswith("/") or "://" in q:
+    if q.startswith(("/", "#/", "#!/")) or "://" in q:
         return con.execute("SELECT * FROM pages WHERE route=?", (core.norm_route(q),)).fetchone()
     esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like, seg = f"%{esc}%", f"%/{esc}%"

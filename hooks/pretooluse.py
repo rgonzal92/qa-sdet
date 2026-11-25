@@ -4,7 +4,7 @@ Python leaves it off, the import fails, and a failed hook lets every command thr
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import guard  # noqa: E402
 
 guard.main()

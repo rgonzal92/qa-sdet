@@ -195,6 +195,36 @@ class ScrubFiles(MemBase):
         self.assertEqual(f.read_text(), "NEW draft\n")
         self.assertEqual([p.name for p in self.t.iterdir() if p.name.startswith(".BUG")], [])
 
+    def test_round2_scrub_surrogates_url_query_case_and_symlink(self):
+        # H4: lone surrogate in JSON must not crash scrub_file or abort scrub_tree
+        d = self.rundir("sur")
+        jf = d / ".data/run-sur.json"
+        jf.write_text('{"note": "\\ud800", "token": "secret123456"}', encoding="utf-8")
+        scrub.scrub_tree(self.proj / "qa-out")
+        self.assertNotIn("secret123456", jf.read_text(encoding="utf-8"))
+        # M1: URL with port + @ in query/fragment stays intact
+        self.assertEqual(scrub.redact("http://localhost:8765?email=qa@example.com"), "http://localhost:8765?email=qa@example.com")
+        self.assertEqual(scrub.redact("https://qa.example.com:8443#user@host"), "https://qa.example.com:8443#user@host")
+        # M6: planted symlink at qa-out/.scrubbed is not written through
+        victim = self.t / "scrub-victim"
+        victim.write_text("keep")
+        stamp = self.proj / "qa-out/.scrubbed"
+        stamp.unlink(missing_ok=True)
+        stamp.symlink_to(victim)
+        scrub.scrub_tree(self.proj / "qa-out")
+        self.assertEqual(victim.read_text(), "keep")
+        # L6 + case-insensitive suffixes: prefixed session_id, numeric 0/1 secrets, uppercase .MD/.JSON
+        got = scrub.redact_json({"user_session_id": "abc12345", "authSessionId": "xyz98765", "secret": 0, "token": 1, "api_key": False})
+        self.assertEqual(got, {"user_session_id": "[REDACTED]", "authSessionId": "[REDACTED]", "secret": "[REDACTED]", "token": "[REDACTED]", "api_key": False})
+        up = d / "bugs/BUG-9.MD"
+        up.write_text("Authorization: Bearer abcdefghijklmnop1234\n", encoding="utf-8")
+        upj = d / "evidence.JSON"
+        upj.write_text('{"password": "hunter2secret"}', encoding="utf-8")
+        stamp.unlink(missing_ok=True)
+        scrub.scrub_tree(self.proj / "qa-out")
+        self.assertNotIn("abcdefghijklmnop1234", up.read_text(encoding="utf-8"))
+        self.assertNotIn("hunter2secret", upj.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

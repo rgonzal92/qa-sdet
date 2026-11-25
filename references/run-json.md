@@ -12,7 +12,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
   "summary": "one line",
   "env": {"url": "<target URL>", "browser": "<config browser>"},
   "cases": [{"id": "TC-1", "status": "PASS | FAIL | BLOCKED | NOT_RUN | QUESTION",
-             "actual": "what you saw", "notes": "", "bug": "BUG-2 or empty"}],
+             "actual": "what you saw", "notes": "", "bug": "BUG-2 or empty", "annotated": true}],
   "questions": [{"text": "for the product owner or a dev", "status": "open | resolved", "answer": "when resolved"}],
   "not_tested": [{"category": "safety | out_of_scope | not_reached | needs_setup | heuristic | other", "text": "what and why"}],
   "notes": "what you explored, in plain words (at most 1500 chars)",

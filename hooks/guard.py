@@ -16,8 +16,8 @@ from fnmatch import fnmatch
 from itertools import islice, takewhile
 from pathlib import Path
 # ---------- 1. constants ----------
-CONFIG = Path(os.environ.get("QA_SDET_CONFIG", "~/.config/qa-sdet/config.json")).expanduser()
-DATA_DIR = os.path.realpath(Path(os.environ.get("QA_SDET_DATA", "~/.local/share/qa-sdet")).expanduser())
+CONFIG = Path(os.environ.get("QA_SDET_CONFIG") or "~/.config/qa-sdet/config.json").expanduser()
+DATA_DIR = os.path.realpath(Path(os.environ.get("QA_SDET_DATA") or "~/.local/share/qa-sdet").expanduser())
 PLUGIN_QA_MEM = os.path.realpath(Path(__file__).resolve().parent.parent / "bin" / "qa-mem")
 _PLUGIN_QAMEM_VAR_RE = re.compile(r"^\$\{?(?:CLAUDE_PLUGIN_ROOT|CLAUDE_SKILL_DIR)\}?(?:/\.\.)*/bin/qa-mem$")
 _PY_SAFE_FLAG_RE = re.compile(r"-[ISsEOuBPqvbdix]+")
@@ -66,7 +66,8 @@ REMOVERS = {"rm", "rmdir", "unlink", "mv", "shred", "truncate", "dd", "trash", "
 WRITERS, INPLACE = {"cp", "tee", "install", "ln", "rsync"}, {"sed", "perl", "ruby", "gawk"}
 NET_CLIS = set("curl wget http https xh httpie nc ncat netcat telnet socat aria2c ssh scp sftp ftp lynx w3m links elinks".split())
 HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh", "httpie", "aria2c"}  # the explorer may fetch from allowedHosts
-HTTP_REROUTE_OPTS = set("-x --proxy --preproxy --resolve --connect-to --doh-url -K --config --unix-socket "  # elsewhere,
+HTTP_REROUTE_OPTS = set("-x --proxy --proxy1.0 --preproxy --socks4 --socks4a --socks5 --socks5-hostname "
+                        "--resolve --connect-to --doh-url -K --config --unix-socket "  # elsewhere,
                         "--abstract-unix-socket".split())  # or URLs / options from a file the guard doesn't see
 WGET_FILE_OPTS = {"-i", "--input-file", "-e", "--execute"}  # wget only (curl -i/-e: headers, referer)
 HTTP_VALUE_OPTS = set("-o -O -d -H -X -u -A -e -b -c -F -T -w -m -r -C -D -E -P -U -t -a --output --data --data-raw "
@@ -85,8 +86,8 @@ SCHEMELESS_URL_RE = re.compile(r"[\"'`(]\s*//([a-z0-9][a-z0-9.-]*)", re.I)  # '/
 HEREDOC_RE = re.compile(r"""(?<![<$(\d])<<(?!<)(-?)[ \t]*((?:[^\s<>;&|()'"\\]|\\.|'[^']*'|"[^"]*")+)""")  # <<'E"OF' ends at EOF
 REDIR_OP_RE = re.compile(r"<<<?|<>|>>?|<")  # unquoted redirection operators (quoted ones are QUOTED_GT/LT)
 PW_ENV_RE = re.compile(r"(PLAYWRIGHT_MCP_|PWTEST_)\w*=|\b(export|declare|typeset|readonly|local)\b[^;&|\n]*?\b(PLAYWRIGHT_MCP_|PWTEST_)")
-PROXY_ENV_RE = re.compile(r"(?i)\b(https?|all|ftp)_proxy\s*=")
-HOSTISH_RE = re.compile(r"(?i)(localhost|[\w-]+(\.[\w-]+)*\.[a-z]{2,})(:\d+)?(/\S*)?")
+PROXY_ENV_RE = re.compile(r"(?i)\b((https?|all|ftp)_proxy|CURL_HOME|(SYSTEM_)?WGETRC|XDG_CONFIG_HOME)\s*=")  # or an rc file
+HOSTISH_RE = re.compile(r"(?i)(localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|[\w-]+(\.[\w-]+)*\.[a-z]{2,})(:\d+)?(/\S*)?")
 NOT_A_PATH_RE, GLOB_RE = re.compile(r"[\s()'\"`;|<>]"), re.compile(r"[*?\[]")  # code or text in an argument; a glob
 MSG_OPT_RE = re.compile(r"(-m|--message|--body|--title)(=|$)")  # its value is text (a commit message), not a path
 POS_PARAM_RE = re.compile(r"^\$(\{?[@*]\}?|\{?[1-9]\}?)$")  # "$@", $1: a function passing its arguments through
@@ -201,7 +202,7 @@ def read_marker(cwd):
             ok = ("expires" in nums and marker.get("faults") in (None, True, False)  # NaN/inf would lift a limit
                   and all(math.isfinite(v) and v >= 0 for v in nums.values())  # epoch seconds: ms would never expire
                   and all(nums.get(k, 0) <= time.time() + 2 * 86400 for k in ("expires", "deadline")))
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             continue
         if ok and nums["expires"] > time.time():
             return path, marker
@@ -209,28 +210,45 @@ def read_marker(cwd):
 def spend_budget(path, n, explorer=False):
     """Count n browser commands against the run (locked); deny reason when used up. `used` is kept only with a budget."""
     path = Path(path)  # no truncation, no symlink following (a planted `.active.lock -> ~/.bashrc`), no blocking (FIFO)
-    fd = os.open(path.with_name(".active.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    with os.fdopen(fd, "r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        marker = json.loads(path.read_text())
-        deadline, budget = float(marker.get("deadline") or 0), int(float(marker.get("budget") or 0))
-        used, done = int(float(marker.get("used") or 0)), "write your bug drafts and <out>/.data/run-<slug>.json now"
-        if deadline and time.time() > deadline + 600 and not explorer:  # a crashed run left it behind (user hint)
-            return f"a qa-sdet run marker expired over 10 minutes ago; if no run is active, delete {path}"
-        if deadline and time.time() > deadline:
-            return f"the run's time budget is used up: close the browser, {done}"
-        if budget and used < budget < used + n:  # a batch bigger than what's left: the run goes on, fewer per call
-            return (f"this call has {n} browser commands but only {budget - used} of the run's {budget} are left "
-                    f"({used} used); send fewer per call, or close the browser and write <out>/.data/run-<slug>.json if done")
-        if budget and used + n > budget:
-            return f"the run's budget of {budget} browser commands is used up ({used} used): close the browser, {done}"
-        if budget:
-            marker["used"] = used + n
-            import tempfile  # here, not at the top: it costs ~4 ms of start-up on every call, and only a budget needs it
-            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".active.")
-            with os.fdopen(fd, "w") as f:
-                json.dump(marker, f)
-            os.replace(tmp, path)
+    lock_path = path.with_name(".active.lock")
+    for _ in range(3):
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                if os.fstat(lock.fileno()).st_ino != os.lstat(lock_path).st_ino:
+                    continue  # lock file was unlinked and recreated while we waited for flock
+            except FileNotFoundError:
+                if not path.exists():
+                    return None  # marker stop removed both .active.lock and .active
+                continue
+            try:
+                marker = json.loads(path.read_text())
+            except FileNotFoundError:
+                return None  # marker stop removed .active between read_marker and flock
+            deadline, budget = float(marker.get("deadline") or 0), int(float(marker.get("budget") or 0))
+            used, done = int(float(marker.get("used") or 0)), "write your bug drafts and <out>/.data/run-<slug>.json now"
+            if deadline and time.time() > deadline + 600 and not explorer:  # a crashed run left it behind (user hint)
+                return f"a qa-sdet run marker expired over 10 minutes ago; if no run is active, delete {path}"
+            if deadline and time.time() > deadline:
+                return f"the run's time budget is used up: close the browser, {done}"
+            if budget and used < budget < used + n:  # a batch bigger than what's left: the run goes on, fewer per call
+                return (f"this call has {n} browser commands but only {budget - used} of the run's {budget} are left "
+                        f"({used} used); send fewer per call, or close the browser and write <out>/.data/run-<slug>.json if done")
+            if budget and used + n > budget:
+                return f"the run's budget of {budget} browser commands is used up ({used} used): close the browser, {done}"
+            if budget:
+                marker["used"] = used + n
+                import tempfile  # here, not at the top: it costs ~4 ms of start-up on every call, and only a budget needs it
+                fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".active.")
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(marker, f)
+                    os.replace(tmp, path)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+            return None
 # ---------- 4. text pre-processing ----------
 def normalize(cmd):
     """Drop '#' comments, unquoted newline -> ';', mark quoted '<' '>' as data, `2>&1` -> `2>` FD_DUP `1`, `&>f`/`>|f` -> `>f`."""
@@ -447,12 +465,19 @@ def how_run(name, rest):
     """("c", text) for `sh -c`; ("code", None) inline, a module or awk's program; ("file", path); ("stdin", None)."""
     if name in ("source", "."):
         return ("file", rest[0]) if rest else (None, None)  # `.)` in a case pattern runs nothing
-    shell, awk = name in SHELLS, "awk" in name
+    shell, awk, c_text = name in SHELLS, "awk" in name, False
     for k, a in enumerate(rest):
         if k and rest[k - 1] in (("-o", "+o", "-O", "+O") if shell else ("-v", "-F", "-W", "-X")):
             continue  # an option's value
-        if shell and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a) and k + 1 < len(rest):
-            return "c", rest[k + 1]
+        if shell and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a):
+            c_text = True  # the text is the first word after the options: `bash -c -x -- 'cmd'`
+            continue
+        if c_text:
+            if a in ("--", "-"):
+                return ("c", rest[k + 1]) if k + 1 < len(rest) else (None, None)
+            if not a.startswith(("-", "+")):
+                return "c", a
+            continue
         if awk and a == "-f":
             return "file", (rest[k + 1:] or [""])[0]
         if a in ("-", "/dev/stdin") or shell and a == "-s":
@@ -533,7 +558,8 @@ def compared_only(js, pos, url):
     return url.startswith(XML_NAMESPACES) or re.search(r"(\.(startsWith|endsWith|includes|indexOf|lastIndexOf)\s*\(|[!=]==?)\s*"
                                                        r"['\"`]$|\[\s*[\w:-]+\s*[~|^$*]?=\s*['\"`]?$", js[max(0, pos - 40):pos]) is not None
 _KEY_READ_RE = re.compile(r"(Object\.keys\(\s*(window\.)?|\bin\s+(window\.)?|typeof\s+(window\.)?)$")
-_QUOTE_END_RE, _BRACKET_QUOTE_END_RE = re.compile(r"['\"`]$"), re.compile(r"\[\s*['\"`]$")
+_QUOTE_END_RE = re.compile(r"['\"`]$")
+_TEXT_SEARCH_END_RE = re.compile(r"(\.(includes|indexOf|lastIndexOf|startsWith|endsWith|match|search|split)\s*\(|[!=]==?)\s*$")
 def storage_value_read(js):
     """Any use of localStorage/sessionStorage except key names, .length and writes: returning the Storage
     object prints every value, and `localStorage.token` reads one."""
@@ -546,11 +572,10 @@ def storage_value_read(js):
         if re.match(r"\s*\.\s*(length|key|clear|setItem|removeItem)\b", after):
             continue
         if _QUOTE_END_RE.search(js, lo, m.start()) and re.match(r"['\"`]", after) and \
-                not _BRACKET_QUOTE_END_RE.search(js, lo, m.start()):
-            continue  # the word inside a string literal, e.g. innerText.includes('localStorage'); not window['localStorage']
+                _TEXT_SEARCH_END_RE.search(js, max(0, m.start() - 41), m.start() - 1):
+            continue  # the word searched for in text, e.g. innerText.includes('localStorage'); not Reflect.get / window['localStorage']
         return True
     return False
-_TEXT_SEARCH_END_RE = re.compile(r"(\.(includes|indexOf|lastIndexOf|startsWith|endsWith|match|search|split)\s*\(|[!=]==?)\s*$")
 def secret_js(js):
     """Page JS that reads cookie or web-storage values. A length (`document.cookie.length`) or the word searched for
     in page text (`body.innerText.includes('cookie')`, `x === 'cookie'`) reads no value."""
@@ -572,7 +597,7 @@ def acli_words(positional):
         nxt = positional[k + 1] if k + 1 < len(positional) else ""
         if a == "link" and (is_acli_read(nxt) or nxt in ACLI_WRITE or nxt == "type"):
             continue
-        out.append("list" if a == "type" and positional[k - 1:k] == ["link"] else a)
+        out.append("list" if a == "type" and not nxt and positional[k - 1:k] == ["link"] else a)
     return out
 def acli_head(rest):
     """acli words up to and including the action (view, create, ...): the part that decides read vs write."""
@@ -614,6 +639,7 @@ def check_qamem(args, ctx):
     if bad := next((u for u in pos if not host_ok(u, hosts)), None):
         return f"qa-mem browser-open to non-allowlisted host: {bad} (allowed: {sorted(hosts)})"
     ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 1, True, ctx.loop or ctx.loop_depth > 0  # one budgeted command
+_HTTP_SHORT_VAL = {o[1] for o in HTTP_VALUE_OPTS if len(o) == 2 and o[0] == "-"}
 def explorer_net(name, rest, raw):
     """Deny reason for a network tool the explorer runs, or None: an HTTP client may fetch from the allowed hosts
     (an API check), nothing else reaches out. shortcut: a proxy set in ~/.curlrc or ~/.wgetrc by an earlier command
@@ -622,14 +648,30 @@ def explorer_net(name, rest, raw):
         return (f"{name} reaches other machines outside the browser; the explorer fetches only from the QA app "
                 "(the browser, or curl/wget to an allowed host)")
     opts = HTTP_REROUTE_OPTS | (WGET_FILE_OPTS if name in ("wget", "aria2c") else set())
-    short_opts = tuple(o for o in opts if len(o) == 2 and o[0] == "-")  # glued short flags: -xproxy, -Kfile, -ifile
-    if any(a.split("=", 1)[0] in opts or a.startswith(short_opts) for a in rest) or PROXY_ENV_RE.search(raw):
+    bad_short = {o[1] for o in opts if len(o) == 2 and o[0] == "-"}  # glued/bundled short flags: -x, -sx, -sK, -qi
+    reroute = PROXY_ENV_RE.search(raw) is not None
+    for a in takewhile(lambda x: x != "--", rest):
+        if a.startswith("--"):
+            opt = a.split("=", 1)[0]
+            if opt in opts or name != "curl" and len(opt) > 3 and any(o.startswith(opt) for o in opts):
+                reroute = True
+        elif a.startswith("-") and len(a) > 1:
+            for c in a[1:]:
+                if c in bad_short:
+                    reroute = True
+                    break
+                if c in _HTTP_SHORT_VAL:
+                    break  # rest of cluster is a value (e.g. -dx is --data x, not -x proxy)
+    if reroute:
         return f"{name} with a proxy, a resolve override or an option file can send the request elsewhere; call the URL directly"
-    hosts, urls = allowed_hosts(), URL_RE.findall(" ".join(rest))
-    for k, a in enumerate(rest):  # bare hosts too (`curl -s qa.example/api`, `curl --url evil.example`, `--url=evil.example`)
-        if a.startswith("--url=") and not URL_RE.search(a):
+    hosts, urls, end = allowed_hosts(), URL_RE.findall(" ".join(rest)), False
+    for k, a in enumerate(rest):  # bare hosts/IPs too (`curl -s qa.example/api`, `curl --url=evil.example`, `169.254.169.254`)
+        if not end and a == "--":
+            end = True
+            continue
+        if not end and a.startswith("--url=") and not URL_RE.search(a):
             urls.append(a.split("=", 1)[1])
-        elif not a.startswith("-") and not (k and rest[k - 1] in HTTP_VALUE_OPTS) \
+        elif (end or not a.startswith("-")) and not (not end and k and rest[k - 1] in HTTP_VALUE_OPTS) \
                 and not URL_RE.search(a) and HOSTISH_RE.fullmatch(a):
             urls.append(a)
     if not urls:
@@ -639,30 +681,175 @@ def explorer_net(name, rest, raw):
             return f"{name} to non-allowlisted host: {u} (allowed: {sorted(hosts)}); the explorer fetches only from the QA app"
     return None
 # ---------- 7. paths: the profile (R3), the data folder (R5), the config (R4) ----------
-def unpack_dir(name, rest):
-    """The folder an archiver unpacks into (tar x -C, unzip -d, 7z x -o), or None when it doesn't unpack."""
+_GREP_SHORT_VAL = set("efmABCdD")
+_GREP_SAFE_LONG = set("--extended-regexp --fixed-strings --basic-regexp --perl-regexp --ignore-case --no-ignore-case "
+                      "--word-regexp --line-regexp --count --files-without-match --files-with-matches --only-matching "
+                      "--quiet --silent --no-messages --invert-match --line-number --with-filename --no-filename "
+                      "--text --initial-tab --null --null-data --byte-offset --line-buffered --version --help".split())
+_RECURSIVE_LONG = {"cp": (("--recursive", 5), ("--archive", 5)), "ls": (("--recursive", 5),), "du": (("--all", 5),),
+                   "grep": (("--recursive", 5), ("--dereference-recursive", 5)),
+                   "egrep": (("--recursive", 5), ("--dereference-recursive", 5)),
+                   "fgrep": (("--recursive", 5), ("--dereference-recursive", 5)),
+                   "zip": (("--recurse-paths", 5),)}
+def _long_is(opt, full, min_len=5):
+    """Match a GNU getopt_long unambiguous option prefix (`--reg` -> `--regexp`)."""
+    return len(opt) >= min_len and full.startswith(opt)
+def _grep_parse(rest):
+    """(has_pat, pos, pat_files, recursive, unknown_long) for grep/rg/ag options, handling GNU prefixes, bundles and `--`."""
+    has_pat, pos, pat_files, rec, unknown_long, end, pending = False, [], [], False, False, False, None
+    for a in rest:
+        if end:
+            pos.append(a)
+        elif pending is not None:
+            if pending == "f":
+                pat_files.append(a)
+            elif pending == "d" and a.startswith("rec"):
+                rec = True
+            pending = None
+        elif a == "--":
+            end = True
+        elif a.startswith("--"):
+            opt, eq, val = a.partition("=")
+            if _long_is(opt, "--regexp", 5) or _long_is(opt, "--file", 4):
+                has_pat = True
+                if _long_is(opt, "--file", 4):
+                    if eq:
+                        pat_files.append(val)
+                    else:
+                        pending = "f"
+                elif not eq:
+                    pending = "v"
+            elif _long_is(opt, "--recursive", 5) or _long_is(opt, "--dereference-recursive", 5):
+                rec = True
+            elif _long_is(opt, "--directories", 5):
+                if eq:
+                    rec = rec or val.startswith("rec")
+                else:
+                    pending = "d"
+            elif opt in _GREP_VAL_OPTS:
+                if not eq:
+                    pending = "v"
+            elif opt not in _GREP_SAFE_LONG:
+                unknown_long = True
+        elif a.startswith("-") and len(a) > 1:
+            for idx, c in enumerate(a[1:]):
+                if c in _GREP_SHORT_VAL:
+                    val = a[idx + 2:]
+                    if c == "e":
+                        has_pat = True
+                        if not val:
+                            pending = "v"
+                    elif c == "f":
+                        has_pat = True
+                        if val:
+                            pat_files.append(val)
+                        else:
+                            pending = "f"
+                    elif c == "d":
+                        if val:
+                            rec = rec or val.startswith("rec")
+                        else:
+                            pending = "d"
+                    elif not val:
+                        pending = "v"
+                    break
+                if c in "rR":
+                    rec = True
+        else:
+            pos.append(a)
+    return has_pat, pos, pat_files, rec, unknown_long
+def _target_dirs(rest):
+    """Every -t / --target-directory value (incl. glued -t/dir, bundled -ft/dir, and GNU --target prefixes)."""
+    dirs, skip, end = [], False, False
+    for a in rest:
+        if end:
+            break
+        if skip:
+            dirs.append(a)
+            skip = False
+        elif a == "--":
+            end = True
+        elif a.startswith("--"):
+            opt, eq, val = a.partition("=")
+            if _long_is(opt, "--target-directory", 5):
+                if eq:
+                    dirs.append(val)
+                else:
+                    skip = True
+        elif a.startswith("-") and len(a) > 1:
+            for idx, c in enumerate(a[1:]):
+                if c == "t":
+                    if val := a[idx + 2:]:
+                        dirs.append(val)
+                    else:
+                        skip = True
+                    break
+                if c in "SmogZ":
+                    break  # another value-taking short option consumes the rest of the cluster
+    return dirs
+def tar_dirs(rest):
+    """tar's -C / --directory folders (glued -Cdir, bundled -xzC dir, --dir= prefixes)."""
+    dirs, skip = [], False
+    for a in rest:
+        if skip:
+            dirs.append(a)
+            skip = False
+        elif a == "--":
+            break
+        elif a.startswith("--"):
+            opt, eq, val = a.partition("=")
+            if _long_is(opt, "--directory", 5):
+                if eq:
+                    dirs.append(val)
+                else:
+                    skip = True
+        elif m := re.match(r"^-[A-Za-z]*C(.*)$", a):
+            if m.group(1):
+                dirs.append(m.group(1))
+            else:
+                skip = True
+    return dirs
+def unpack_dirs(name, rest):
+    """Folders an archiver unpacks into (tar x -C, unzip -d, 7z x -o), or None when it doesn't unpack."""
     first, pos0 = next((a for a in rest if a != "--"), ""), next((a for a in rest if not a.startswith("-")), "")
-    if not (name == "unzip" or name in ("tar", "bsdtar") and (any(re.match(r"-[A-Za-z]*x|--(extract|get)$", a) for a in rest)
-            or "x" in first and not first.startswith("-")) or name in ("7z", "7za") and pos0 in ("x", "e")):
+    old_tar = name in ("tar", "bsdtar") and bool(first) and not first.startswith("-") and "x" in first
+    if not (name == "unzip" or old_tar or name in ("tar", "bsdtar") and any(
+            re.match(r"-[A-Za-z]*x", a) or _long_is(a, "--extract", 5) or a == "--get" for a in rest)
+            or name in ("7z", "7za") and pos0 in ("x", "e")):
         return None
-    d = opt_values(rest, "-C", "--directory") if name != "unzip" else opt_values(rest, "-d")
-    return (d or [a[2:] for a in rest if name.startswith("7z") and a.startswith("-o") and len(a) > 2] or ["."])[0]
+    if name == "unzip":
+        dirs = opt_values(rest, "-d") + [a[2:] for a in rest if a.startswith("-d") and len(a) > 2]
+    elif name.startswith("7z"):
+        dirs = opt_values(rest, "-o") + [a[2:] for a in rest if a.startswith("-o") and len(a) > 2]
+    else:
+        dirs = tar_dirs(rest)
+        if old_tar and "C" in first:
+            dirs += [a for a in rest[rest.index(first) + 1:] if not a.startswith("-")]
+    return dirs or ["."]
 def check_profile(name, rest, outs, ins, cwds, skip=()):
     """R3: only echo/printf/test name a path in a profile folder or run there; no folder walker (tar, cp -r, grep -r,
     git, ...) starts in or above the data folder in HOME. skip: the --profile values check_pw allowed."""
     if name in PRINTERS:
-        return None
+        return PROFILE_REASON if any(map(in_profile, cwds)) or any(map(in_profile, paths(outs + ins, cwds))) else None
     args = [a for a in rest if a not in skip and a.split("=", 1)[-1] not in skip]
-    pos = [a for a in args if not a.startswith("-")]
-    if name in GREP_TOOLS and pos and not {"-e", "-f", "--regexp", "--file"} & set(rest):
-        args.remove(pos.pop(0))  # `grep -n "<profile path>" README.md`: a pattern, not a file
+    grep_rec = False
+    if name in GREP_TOOLS:
+        has_pat, pos, pat_files, grep_rec, _ = _grep_parse(args)
+        if pos and not has_pat:
+            args.remove(pos.pop(0))  # `grep -n "<profile path>" README.md`: a pattern, not a file
+        args = args + pat_files
+    else:
+        pos = [a for a in args if not a.startswith("-")]
+    udirs = unpack_dirs(name, rest)
     flags = RECURSIVE.get(name)
-    walks = name in TREE_READERS and unpack_dir(name, rest) is None or flags and any(
-        re.match(rf"-[a-zA-Z]*[{flags}]", a) or a == "--recursive" for a in rest)
-    dest = name in ("cp", "scp", "rsync", "ln") and not opt_values(rest, "-t", "--target-directory")
+    walks = name in TREE_READERS and udirs is None or grep_rec or name == "find" and bool(FIND_ACTIONS & set(rest)) or flags and any(
+        re.match(rf"-[a-zA-Z]*[{flags}]", a) or any(_long_is(a, full, n) for full, n in _RECURSIVE_LONG.get(name, ()))
+        for a in rest)
+    dest = name in ("cp", "scp", "rsync", "ln") and not _target_dirs(rest)
     srcs = (args if name in ("git", "tar") else pos[1:] if name == "zip" else pos[:-1] if dest else pos) or ["."]
-    if any(map(in_profile, cwds)) or any(map(in_profile, paths(args + outs + ins, cwds))) or \
-            walks and any(map(in_area, paths(srcs, cwds))):  # `tar c ~/.local/share/qa-sdet`, `grep -r x ~/.local`
+    src_cwds = cwds | {real(d, c) for d in tar_dirs(rest) for c in cwds} if name in ("tar", "bsdtar") else cwds  # `-C ~ .local`
+    if any(map(in_profile, cwds)) or any(map(in_profile, paths(args + (udirs or []) + outs + ins, cwds))) or \
+            walks and any(map(in_area, paths(srcs, src_cwds))):  # `tar c ~/.local/share/qa-sdet`, `grep -r x ~/.local`
         return PROFILE_REASON
 _COPY_VAL_OPTS = set("-S --suffix -t --target-directory -m --mode -o --owner -g --group -Z --context "
                       "--backup-dir --compare-dest --copy-dest --link-dest -e --rsh --exclude --include --filter "
@@ -689,8 +876,10 @@ def changes(name, rest, outs, cwds, root):
     opts, pos = [a for a in rest if a.startswith("-")], [a for a in rest if not a.startswith("-")]
     if any(hit(o) for o in outs):
         return True
-    if (d := unpack_dir(name, rest)) is not None:  # into it, or over it
-        return hit(d) or hit(os.path.join(d, os.path.basename(root)))
+    if name in HTTP_CLIENTS and any(hit(w) for w in http_writes(rest, cwds)):
+        return True
+    if (dirs := unpack_dirs(name, rest)) is not None:  # into it, or over it
+        return any(hit(d) or hit(os.path.join(d, os.path.basename(root))) for d in dirs)
     if name == "find":  # `find ~ -name '*.pyc' -delete` is fine, `find ~ -name '*.db' -delete` isn't
         names = {os.path.basename(root)} | (set(os.listdir(root)) if os.path.isdir(root) else set())
         pats = [(a, rest[k + 1]) for k, a in enumerate(rest[:-1]) if a in ("-name", "-iname")]
@@ -699,31 +888,41 @@ def changes(name, rest, outs, cwds, root):
         while k < len(rest) and (rest[k] in ("-H", "-L", "-P", "-D", "--") or re.fullmatch(r"-O\d*", rest[k])):
             k += 2 if rest[k] == "-D" else 1
         return bool(FIND_ACTIONS & set(rest)) and any(hit(a, up) for a in list(takewhile(lambda a: a[:1] not in "-(!", rest[k:])) or ["."])
-    tdir = opt_values(rest, "-t", "--target-directory")
+    tdir = _target_dirs(rest)
     cpos = _pos_args(rest, _COPY_VAL_OPTS) if name in WRITERS | {"mv"} else pos
     srcs, dests = (cpos, tdir) if tdir else (cpos[:-1], cpos[-1:])
     dests += [os.path.join(t, os.path.basename(s.rstrip("/"))) for t in dests for s in srcs]  # `mv x <folder>/`
     moves = name == "mv" or name == "rsync" and any(a.startswith("--remove-source") for a in rest)
     mirror = name == "rsync" and any(a.startswith("--delete") for a in rest)  # deletes what the source lacks
-    rec = name != "rm" or any(re.match(r"-[a-zA-Z]*[rR]", o) or o == "--recursive" for o in opts)
+    rec = name != "rm" or any(re.match(r"-[a-zA-Z]*[rR]", o) or _long_is(o, "--recursive", 5) for o in opts)
     return (name in WRITERS | {"mv"} and (any(hit(t, mirror) for t in (pos if name == "tee" else dests))
                                           or moves and any(hit(s, True) for s in srcs))
             or name in REMOVERS - {"mv"} and any(hit(a, rec) for a in ([a[3:] for a in pos if a.startswith("of=")] if name == "dd" else pos))
             or name in INPLACE and any(re.match(r"-[a-zA-Z]*i", o) or o.startswith("--in-place") for o in opts)
             and any(hit(a) for a in pos)  # sed -i / perl -pi rewrite the file in place
-            or name == "sqlite3" and "-readonly" not in rest and any(hit(a) for a in pos))
+            or name == "sqlite3" and "-readonly" not in takewhile(lambda a: a != "--", rest) and any(hit(a) for a in pos))
+def http_writes(rest, cwds):
+    """Paths an HTTP client may write: any argument (also after `=`, or glued to a short option: -o<file>, -so <file>),
+    and each URL's file name in the cwd or a folder argument (curl -O, wget, aria2c save under the remote name)."""
+    words = [w for a in rest for w in {a, a.split("=", 1)[-1], *(a[k:] for k in range(2, len(a)) if re.match(r"-[^-]", a))} if w]
+    names = {os.path.basename(re.split(r"[?#]", w)[0]) for w in words if "/" in w} - {""}
+    dirs = set(cwds) | {p for w in words for c in cwds if os.path.isdir(p := real(w, c))}
+    return words + [os.path.join(d, n) for d in dirs for n in names]
 def config_files(cwds):
     """R4: the qa-sdet config (allowedHosts) and the playwright-cli config files that would pick its browser."""
     return {os.path.realpath(CONFIG), real("~/.playwright/cli.config.json", "/")} | {real(".playwright/cli.config.json", c) for c in cwds}
 # ---------- 8. odd forms ----------
-def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None):
+def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None, cwds=()):
     """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file."""
     kind, val = run
-    if ctx.explorer and (kind == "file" or kind == "stdin" and ins):
+    by_path = i is not None and "/" in words[i] and not (any(real(words[i], c) == PLUGIN_QA_MEM for c in cwds)
+                                                     or re.match(r"/(usr|bin|sbin|opt|snap)/", words[i]))
+    if ctx.explorer and (kind == "file" or kind == "stdin" and ins or by_path):  # ./x.sh: may not exist yet
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
     if not ctx.guarded:
         return None
     pos = pw_args(rest)
+    runs_pkg = name in ("bunx", "pnpx") or bool({"exec", "x", "dlx"} & set(rest))  # `npm i @playwright/cli` installs it
     hidden = lambda t: mentions_guarded(t, ctx.explorer) or ctx.area and dynamic(t)  # noqa: E731 - names it, or computed near it
     forms = [
         (i is not None and dynamic(words[i]), "a program name from $VAR or $(...)"),  # O1
@@ -734,15 +933,15 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None)
         (q and dynamic(q[0]), "a qa-mem subcommand from $VAR or $(...)"),
         (name == "alias" and GUARDED_TOOL_RE.search(" ".join(rest)), "an alias for a guarded tool"),
         (name == "eval" and any(map(dynamic, rest)), "eval of $VAR or $(...)"),  # O3
-        ("env" in wrappers and any(w.startswith(("-S", "--split-string")) for w in words[:i]) or "npx" in wrappers
-         and any(w in ("-c", "--call") for w in words[:i]), "a command string given to env -S or npx -c"),  # O4
+        ("env" in wrappers and any(re.match(r"-[A-Za-z0-9]*S|--split-string", w) for w in words[:i]) or "npx" in wrappers
+         and any(w.split("=", 1)[0] in ("-c", "--call") for w in words[:i]), "a command string given to env -S or npx -c"),  # O4
         (name in SHELLS and kind in ("file", "stdin"), f"{name} running a script file, a pipe, a heredoc or stdin"),
         (INTERP_RE.fullmatch(name) and q is None and kind == "file" and dynamic(val), f"{name} running a script from $VAR"),
         (INTERP_RE.fullmatch(name) and q is None and mentions_guarded(  # O5: inline code; stdin: the whole call
             ctx.raw if kind == "stdin" else " ".join(rest + feeds), ctx.explorer), f"{name} code that names a guarded tool or path"),
         ("xargs" in wrappers and (name in GUARDED or q is not None or ctx.area), f"{name} run by xargs"),  # O6
         (name and name not in TEXT_TOOLS | SHELLS | GUARDED | {"eval", "alias"} and not INTERP_RE.fullmatch(name) and any(  # O7
-            prog_name(a.split("=", 1)[-1]) in GUARDED and a[:1] != "@" and k + 1 < len(rest)
+            prog_name(a.split("=", 1)[-1]) in GUARDED and (a[:1] != "@" or runs_pkg) and k + 1 < len(rest)
             and (rest[k + 1].startswith("-") or "/" not in rest[k + 1])
             or re.search(r"\s", a) and hidden(a) or prog_name(a) in SHELLS - {".", "source"} for k, a in enumerate(rest)),
          f"a guarded tool or command string run by {name}"),
@@ -813,17 +1012,22 @@ _HEAD_VAL_OPTS = {"-n", "-c", "--lines", "--bytes", "--sleep-interval", "--pid"}
 _GREP_VAL_OPTS = set("-e --regexp -f --file -m --max-count -A -B -C --after-context --before-context --context "
                      "--include --exclude --exclude-dir --label --binary-files --devices --directories "
                      "--color --colour -d -D".split())
+_HEAD_SAFE_LONG = {"--quiet", "--silent", "--verbose", "--zero-terminated"}
 def _filter_ok(name, rest, cwd, bases):
     """head/tail/grep auto-approve only as stdin filters, or reading files under qa-out/ or .playwright-cli/."""
     roots = bases | {os.path.realpath(os.path.join(b, ".playwright-cli")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if name in ("head", "tail"):
+        if any(a.startswith("--") and a.split("=", 1)[0] not in _HEAD_VAL_OPTS | _HEAD_SAFE_LONG
+               for a in takewhile(lambda x: x != "--", rest)):
+            return False
         files = _pos_args(rest, _HEAD_VAL_OPTS)
     else:
-        has_pat = any(a.split("=", 1)[0] in ("-e", "--regexp", "-f", "--file") or a.startswith(("-e", "-f")) and len(a) > 2 for a in rest)
-        pos = _pos_args(rest, _GREP_VAL_OPTS)
-        files = (pos if has_pat else pos[1:]) + opt_values(rest, "-f", "--file") + [a[2:] for a in rest if a.startswith("-f") and len(a) > 2]
-        if not files and any(re.match(r"-[a-zA-Z]*[rR]", a) or a in ("--recursive", "--dereference-recursive") for a in rest):
-            return False  # `grep -r` with no path walks the whole cwd
+        has_pat, pos, pat_files, rec, unknown_long = _grep_parse(rest)
+        if unknown_long:
+            return False
+        files = (pos if has_pat else pos[1:]) + pat_files
+        if not files and rec:
+            return False  # `grep -r` / `-d recurse` with no path walks the whole cwd
     return all("$" not in f and not GLOB_RE.search(f) and any(real(f, cwd).startswith(b + os.sep) for b in roots) for f in files)
 def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-mem, head/tail/grep run directly, output to qa-out
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
@@ -848,7 +1052,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     local = {real(env_dir, c) for c in cwds} if env_dir else cwds
     q = qamem_args(name, rest, local)
     run = how_run(name, rest) if name in SHELLS or INTERP_RE.fullmatch(name) and q is None else (None, None)
-    if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q)) or lookup:
+    if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q, local)) or lookup:
         ctx.approve = False
         return r  # `command -v x` runs nothing
     if name in ("cd", "pushd", "popd"):  # where the later commands run
@@ -882,8 +1086,11 @@ def check_mapper(tool, tin, cwd):
     if tool == "Write" and any(os.path.dirname(t) not in dirs or not re.fullmatch(
             r"code-map-(frontend|backend|tests)(-\d+)?\.json", os.path.basename(t)) for t in (real(p, cwd) for p in tool_paths(tin))):
         return "the qa-mapper writes only <project>/qa-out/init/code-map-<area>[-<n>].json"
-    if tool in ("Read", "Grep", "Glob", "LS") and any(is_secret_path(real(p or ".", cwd)) for p in tool_paths(tin)):
-        return "the qa-mapper reads source only; secret files (.env, keys, credentials, qa-sdet data, config) stay closed: write [secret]"
+    if tool in ("Read", "Grep", "Glob", "LS"):
+        extra = clean(tin.get("pattern") or "") if tool == "Glob" else clean(tin.get("glob") or "") if tool == "Grep" else ""
+        if any(is_secret_path(real(p or ".", cwd)) or (extra and is_secret_path(real(os.path.join(p or ".", extra), cwd)))
+               for p in tool_paths(tin)):
+            return "the qa-mapper reads source only; secret files (.env, keys, credentials, qa-sdet data, config) stay closed: write [secret]"
 def check_files(tool, tin, cwd, explorer):
     """R3, R4, R5 for the file tools: the profile stays closed, the data folder unwritten, the config the explorer's."""
     for raw in tool_paths(tin):
@@ -905,10 +1112,17 @@ def tool_paths(tin):
 def agent_role(data):
     """qa-explorer / qa-mapper / "" from agent_type, tolerant of case and stray spaces ("QA-SDET:qa-explorer ")."""
     return str(data.get("agent_type") or "").strip().lower().split(":")[-1].strip()
+def _cwd(data):
+    if data.get("cwd"):
+        return clean(data["cwd"])
+    try:
+        return clean(os.getcwd())
+    except OSError:
+        return "/"
 def evaluate(data):
     """(deny reason or None, approve) for one tool call."""
     tool, tin, role = clean(data.get("tool_name") or ""), data.get("tool_input"), agent_role(data)
-    tin, cwd = {} if tin is None else tin, clean(data.get("cwd") or os.getcwd())
+    tin, cwd = {} if tin is None else tin, _cwd(data)
     if not isinstance(tin, dict):
         return "malformed tool input (not an object)", False
     if role == "qa-mapper" and (r := check_mapper(tool, tin, cwd)):
@@ -925,7 +1139,7 @@ def decide(data):
 _MASKS = [(re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+\s+)?[^\s'\"]+"), r"\1[masked]"),
           (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 [masked]"),
           (re.compile(r"(?i)\b(token|password|passwd|pwd|secret|api[_-]?key|access[_-]?token)(\s*[=:]\s*)[^\s'\"&]+"), r"\1\2[masked]"),
-          (re.compile(r"://[^\s/:@'\"]+:[^\s/@'\"]+@"), "://[masked]@")]
+          (re.compile(r"://[^\s/?#:@'\"]+:[^\s/?#@'\"]+@"), "://[masked]@")]
 DENIAL_LOG_LINES = 1000
 def mask(text):
     for rx, rep in _MASKS:
@@ -960,7 +1174,7 @@ def log_denial(data, reason, layer="guard"):
 def main():
     try:
         data = json.load(sys.stdin)
-    except ValueError:
+    except (ValueError, RecursionError):
         data = None
     if not isinstance(data, dict):
         return 0

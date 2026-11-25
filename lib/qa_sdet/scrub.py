@@ -14,7 +14,7 @@ SECRET_HEADERS = ("authorization|proxy-authorization|cookie|set-cookie|x-api-key
                   "x-xsrf-token|x-amz-security-token")
 # Any name ending in one of these (PRIVATE_TOKEN, secret_key, bearerToken); not 'sid': site/segment IDs.
 SECRET_KEYS = ("[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
-               "access[ _-]?key|account[ _-]?key|subscription[ _-]?key)|session[ _-]?id")  # also 'API key', 'Session ID'
+               "access[ _-]?key|account[ _-]?key|subscription[ _-]?key|session[ _-]?id)")  # also 'API key', 'Session ID'
 SECRET_NAME_RE = re.compile(rf"(?i)^({SECRET_HEADERS}|{SECRET_KEYS}|jsessionid|phpsessid|asp\.net_sessionid|jwt|"
                             rf"bearer)$")  # as a JSON key or header name only; in prose these are ordinary words
 # Literal tokens: safe to replace anywhere, including inside code and JSON strings.
@@ -33,7 +33,7 @@ LITERAL_REDACTIONS = [
     # a token, not a word: "Bearer acknowledgements" in prose stays
     (re.compile(r"(?i)\b(bearer)(\s+)(?!\[REDACTED)(?=[A-Za-z0-9\-._~+/]*[0-9._~+/-])[A-Za-z0-9\-._~+/]{16,}=*"),
      r"\1\2[REDACTED]"),
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s:@\"'`]*:[^/\s@\"'`]+@"), r"\1[REDACTED]@"),  # user:pass@host
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^/\s?#:@\"'`]*:[^/\s?#@\"'`]+@"), r"\1[REDACTED]@"),  # user:pass@host
     # not ?code=: usually an ordinary value (road/segment codes); an OAuth code is single-use and short-lived
     (re.compile(r"(?i)([?&](?:access_token|id_token|token|sig|signature|api_key|apikey|"
                 r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=|"
@@ -55,6 +55,10 @@ def redact(text):
     return HEADER_RE.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", redact_literals(text))
 
 
+def _redactable(v):
+    return not (v is None or isinstance(v, bool) or v == "")
+
+
 def redact_json(obj):
     """Structured: values of secret-named keys (and HAR-style {name, value} headers) become "[REDACTED]"."""
     if isinstance(obj, dict):
@@ -63,18 +67,18 @@ def redact_json(obj):
         out = {}
         for k, v in obj.items():
             if isinstance(k, str) and k.lower() == "cookies" and isinstance(v, (list, dict)):  # a cookie jar: every value
-                hide = lambda x: "[REDACTED]" if x not in (None, True, False, "") else x
+                hide = lambda x: "[REDACTED]" if _redactable(x) else x
                 out[k] = {n: hide(x) for n, x in v.items()} if isinstance(v, dict) else [
                     {**redact_json(c), "value": hide(c["value"])} if isinstance(c, dict) and "value" in c else redact_json(c) for c in v]
                 continue
             secret = (isinstance(k, str) and SECRET_NAME_RE.match(k)) or (named and k == "value")
-            out[k] = "[REDACTED]" if secret and v not in (None, True, False, "") else redact_json(v)
+            out[k] = "[REDACTED]" if secret and _redactable(v) else redact_json(v)
         return out
     if isinstance(obj, list):
         if len(obj) == 2 and isinstance(obj[0], str) and isinstance(obj[1], str) and obj[1] and SECRET_NAME_RE.match(obj[0]):
             return [obj[0], "[REDACTED]"]  # a header as a [name, value] pair
         return [redact_json(v) for v in obj]
-    return redact(obj) if isinstance(obj, str) else obj
+    return redact(obj.encode("utf-8", "surrogatepass").decode("utf-8", "replace")) if isinstance(obj, str) else obj
 
 
 PROSE_SUFFIXES = {".md", ".txt", ".log", ".html", ".htm", ".yml", ".yaml", ".csv"}
@@ -85,18 +89,19 @@ CODE_SUFFIXES = {".ts", ".js", ".mjs", ".cjs", ".py"}
 def scrub_file(f):
     try:
         before = f.stat()
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return
     same = lambda a: (a.st_ino, a.st_size, a.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)
-    if f.suffix in JSON_SUFFIXES:
+    suf = f.suffix.lower()
+    if suf in JSON_SUFFIXES:
         try:
             obj = json.loads(text)
         except (ValueError, RecursionError):
             return  # leave unparseable JSON as is rather than corrupt it (ingest parks it with a message)
         clean_obj = redact_json(obj)
         clean = text if clean_obj == obj else json.dumps(clean_obj, indent=2, ensure_ascii=False) + "\n"
-    elif f.suffix in CODE_SUFFIXES:
+    elif suf in CODE_SUFFIXES:
         clean = redact_literals(text)  # repro specs must stay runnable
     else:
         clean = redact(text)
@@ -106,10 +111,10 @@ def scrub_file(f):
         # planted .<name>.scrub link can't redirect the write outside qa-out
         fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=f".{f.name}.", suffix=".scrub")
         try:
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                 fh.write(clean)
             os.chmod(tmp, st.st_mode & 0o7777)
-            os.utime(tmp, (st.st_atime, st.st_mtime))  # keep the run's finish time for late-ingest ordering
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))  # keep the run's finish time for late-ingest ordering
             if not same(f.stat()):  # an explorer rewrote it meanwhile: keep its write, the next hook scrubs that
                 Path(tmp).unlink()
                 return
@@ -127,7 +132,7 @@ def scrub_tree(root, budget=4.0):
     qa-out has thousands of files with one mtime)."""
     stamp = root / ".scrubbed"
     try:
-        since, _, cursor = stamp.read_text().partition(" ")
+        since, _, cursor = stamp.read_text(encoding="utf-8").partition(" ")
         since = float(since)
     except (OSError, ValueError):
         since, cursor = 0.0, ""
@@ -136,7 +141,8 @@ def scrub_tree(root, budget=4.0):
     for folder, _, names in os.walk(root):  # no stat for folders, images or other files this never scrubs (sorted below)
         for name in names:
             # Path.suffix is '' or the text from the last dot: most names (images) fail the cheap test first
-            if name[name.rfind("."):] not in suffixes or Path(name).suffix not in suffixes:
+            dot = name.rfind(".")
+            if dot < 0 or name[dot:].lower() not in suffixes or Path(name).suffix.lower() not in suffixes:
                 continue
             f = os.path.join(folder, name)
             try:
@@ -155,12 +161,20 @@ def scrub_tree(root, budget=4.0):
             break
         try:
             scrub_file(Path(name))
-        except (OSError, RecursionError):  # one odd file (nested past the stack) must not stop every ingest
+        except (OSError, RecursionError, UnicodeError):  # one odd file must not stop every ingest
             pass
         done = (mtime, name)
     else:
         done = None  # the whole backlog: the next pass starts from this one's start time
     try:
-        stamp.write_text(f"{done[0]} {done[1]}" if done else str(started))
+        fd, tmp = tempfile.mkstemp(dir=root, prefix=".scrubbed.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(f"{done[0]} {done[1]}" if done else str(started))
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, stamp)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     except OSError:
         pass

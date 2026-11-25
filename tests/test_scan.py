@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from support import CodeMapCase, FIX, git, git_repo
-from qa_sdet import codemap, scan as scan_mod, cli
+from qa_sdet import codemap, core, scan as scan_mod, cli
 
 
 class Classify(unittest.TestCase):
@@ -142,6 +142,17 @@ class Classify(unittest.TestCase):
         self.assertEqual(scan_mod.classify_source("api/openapi-config.json", spec), "backend")
 
 
+class ClassifySpeed(unittest.TestCase):
+    def test_api_call_pattern_stays_linear(self):  # was ~20 s for 160 KB of `api.get<`
+        import time
+        for text in ("api.get<" * 20000, "api" * 50000 + ".get"):
+            t = time.monotonic()
+            scan_mod.classify_source("src/a.ts", text)
+            self.assertLess(time.monotonic() - t, 2, text[:20])
+        self.assertEqual(scan_mod.classify_source("src/a.ts", "const zones = await apiClient.post<Zone[]>('/zones', body)"),
+                         scan_mod.classify_source("src/a.ts", "const zones = await fetch('/zones')"))
+
+
 class Scan(CodeMapCase):
     def test_root_and_home_are_refused_not_walked(self):
         with mock.patch.dict(os.environ, HOME=str(self.dir)):  # a real folder, whatever HOME the run has
@@ -271,6 +282,16 @@ class Scan(CodeMapCase):
         self.scan(FIX / "frontend", stamp="s2")
         self.assertFalse((self.out / "code-map-frontend.json").exists())
         self.assertFalse((self.out / "code-map-frontend.json.error").exists())
+
+    def test_a_new_scan_keeps_files_it_did_not_write(self):  # --out <folder> held the user's own scan-*.json
+        mine = ["scan-results.json", "code-map-notes.json.bak", "scan-frontend-notes.json"]
+        self.out.mkdir(parents=True, exist_ok=True)
+        for name in mine + ["scan-tests-2.json", "code-map-backend-3.json.ingested"]:
+            (self.out / name).write_text("{}")
+        self.scan(FIX / "frontend", stamp="s3")
+        self.assertTrue(all((self.out / n).exists() for n in mine))
+        self.assertFalse((self.out / "scan-tests-2.json").exists())
+        self.assertFalse((self.out / "code-map-backend-3.json.ingested").exists())
 
     def test_backend_schema_files_go_to_the_backend(self):
         repo = git_repo(self.dir / "api", {"src/routes.ts": "router.post('/api/zones', validate(zoneSchema), h)",
@@ -534,6 +555,53 @@ class Remap(CodeMapCase):
         listed = json.loads(Path(s3["areas"]["frontend"]["mappers"][0]["scan_file"]).read_text())["repos"][0]["files"]
         self.assertTrue({"src/C0.jsx", "src/C1.jsx"} <= set(listed), listed)
         self.assertNotIn("src/routes.js", listed)  # the chunk that landed is settled
+
+    def test_round1_scan_fixes(self):
+        # 1. _apply_shell_menu does not prematurely advance codemap_commit before frontend mappers run
+        ui = git_repo(self.dir / "shell-ui", {
+            "public/config.json": json.dumps({"nav": [{"key": "z", "title": "Z", "module": {"id": "z", "url": "/z"}}]}),
+            "src/A.jsx": "export const A = () => <b/>;\n",
+        })
+        self.scan(ui)
+        self.assertIsNone(core.meta(self.con, f"codemap_commit:frontend:{ui.resolve()}"))
+        # 2. 0-route file edited into a multi-route router triggers full frontend remap
+        ui2 = git_repo(self.dir / "zero-route", {
+            "src/routes.js": "export const x = fetch('/api/x');\n",
+            "src/A.jsx": "export const A = () => <b/>;\n",
+        })
+        self.scan(ui2, stamp="z1")
+        self.write_map("frontend", [])
+        self.ingest_all()
+        (ui2 / "src/routes.js").write_text("export const r = [{ path: '/a' }, { path: '/b' }];\n")
+        self.scan(ui2, stamp="z2")
+        r = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]
+        self.assertTrue(r["full"])
+        self.assertIn("src/A.jsx", r["files"])
+        # 3. _chunk never emits an empty 0-file chunk before a large file
+        entries = [
+            {"path": "/r1", "commit": "", "full": False, "files": [], "deleted": [], "hashes": {}, "sizes": {}, "bytes": 0},
+            {"path": "/r2", "commit": "", "full": False, "files": ["big.js"], "deleted": [], "hashes": {"big.js": "h"},
+             "sizes": {"big.js": 300000}, "bytes": 300000},
+        ]
+        chunks = scan_mod._chunk(entries, 40, 60000)
+        self.assertTrue(all(sum(len(e["files"]) for e in ch) > 0 for ch in chunks), chunks)
+        # 4. non-UTF-8 submodule/nested repo dir is skipped without crashing
+        sub = git_repo(self.dir / "sub", {"src/S.jsx": "export const S = () => <b/>;\n"})
+        top = git_repo(self.dir / "nonutf-top", {"src/A.jsx": "export const A = () => <b/>;\n"})
+        bad_dir = top / b"sub\xffdir".decode("utf-8", "surrogateescape")
+        shutil.copytree(sub, bad_dir)
+        self.scan(top, stamp="nu1")
+        listed = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]["files"]
+        self.assertEqual(listed, ["src/A.jsx"])
+        # M1: URL with port + @ in query string does not falsely trigger SECRET_CONTENT_RE
+        self.assertEqual(scan_mod.classify_source("src/Mail.tsx", "export const u = 'http://localhost:8765?email=qa@example.com';"), "frontend")
+        # M6: planted symlink at scan-frontend.json is not written through
+        victim = self.dir / "scan-victim"
+        victim.write_text("keep")
+        (self.out / "scan-frontend.json").unlink(missing_ok=True)
+        (self.out / "scan-frontend.json").symlink_to(victim)
+        self.scan(top, stamp="sym1")
+        self.assertEqual(victim.read_text(), "keep")
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ FRONTEND_RE = re.compile(r"\bpath\s*:\s*['\"`]|<Route\b|createBrowserRouter|crea
                          r"Validators\.|\bv-model|\bng-model|\byup\.|\bz\.(object|string|number)|useForm\(|register\(|"
                          r"\b(required|maxLength|minLength|pattern)\b|\b(min|max)=|\bfetch\(|\baxios\b|HttpClient|\$http|"
                          r"\buseQuery\(|\bapiClient\b|['\"`]/api/|<template\b|@Component\(|export\s+default\s+defineComponent|"
-                         r"\b\w*(api|http|client|request)\w*\.(get|post|put|patch|delete)\s*(<[^()]*?>)?\s*\(")  # api.post<Z>('/zones')
+                         r"\b\w{0,40}(api|http|client|request)\w{0,40}\.(get|post|put|patch|delete)\s*(<[^()]{0,200}?>)?\s*\(")  # api.post<Z>('/zones')
 PAGE_DIR_RE = re.compile(r"(^|/)(app|pages|routes|views|screens)/")  # file-system routing (Next, Nuxt, SvelteKit, Remix)
 UI_SIGNAL_RE = re.compile(r"export\s+((async\s+)?function|const|let)\s+(load|loader|action|generateMetadata|"
                           r"getServerSideProps|getStaticProps)\b|['\"]use client['\"]|@Component\(|defineComponent|<template\b")
@@ -90,7 +90,7 @@ CONFIG_FILE_RE = re.compile(r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|pr
                             r"credentials?)\.(js|ts|mjs|cjs)$|(^|/)config/(default|production|development|staging|local|test|"
                             r"custom-environment-variables)[\w.-]*\.(js|ts|mjs|cjs)$")
 SECRET_CONTENT_RE = re.compile(r"(?m)^\s*(SECRET_KEY|INSTALLED_APPS|DATABASES)\s*=|class\s+\w+\(\s*BaseSettings\s*\)|"
-                               r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[a-z][\w+.-]*://[^\s:/'\"@]+:[^\s@'\"/]+@")
+                               r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[a-z][\w+.-]*://[^\s:/?#'\"@]+:[^\s@'\"/?#]+@")
 # Django settings, pydantic settings, keys, connection URIs with a password (mongodb://user:pass@host)
 CONFIG_SECRET_RE = re.compile(r"(?i)\b(secret\w*|pass(word|wd|phrase)?|pwd|private_?key\w*|api_?key\w*|\w*token)['\"]?\s*[:=]\s*"
                               r"['\"][^'\"\s]{6,}['\"]")  # in a config/ folder: a literal credential
@@ -114,12 +114,13 @@ def _rel_files(root):
     rels = [rel.rstrip("/") for rel in (listed or "").split("\0") if rel and os.path.normpath(rel) != "."]
     if rels:  # (nothing listed: not a repo, or a folder a parent repo ignores: walk it)
         for rel in rels:
+            if not (rel.isprintable() and rel.encode("utf-8", "ignore").decode() == rel):
+                continue  # a name the DB can't hold: skipped (including submodules under such a dir)
             if os.path.isdir(os.path.join(root, rel)) and not os.path.islink(os.path.join(root, rel)):
                 # (an empty, uninitialised submodule lists nothing of its own: git answers for the parent there)
                 if not any(part in SCAN_SKIP_DIRS for part in rel.split("/")) and os.path.exists(os.path.join(root, rel, ".git")):
                     yield from (f"{rel}/{sub}" for sub in _rel_files(os.path.join(root, rel)))  # a submodule: its own files
-            elif rel.isprintable() and rel.encode("utf-8", "ignore").decode() == rel \
-                    and not any(part in SCAN_SKIP_DIRS for part in rel.split("/")[:-1]):  # (a name the DB can't hold: skipped)
+            elif not any(part in SCAN_SKIP_DIRS for part in rel.split("/")[:-1]):
                 yield rel
         return
     for dirpath, dirs, files in os.walk(root):
@@ -202,8 +203,9 @@ def _apply_shell_menu(con, repos):
                  "value": f"module {mid} at {url}"[:300], "file": f"{rel}:{ln}"}
                 for page, label, mid, url, ln in found]})
             scan = {"area": "frontend", "repos": [
-                # its hash: without it the next scan sees a changed multi-route file and re-maps frontend in full
-                {"path": repo, "commit": head or "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]}
+                # its hash: without it the next scan sees a changed multi-route file and re-maps frontend in full;
+                # leave commit empty so unmapped frontend files don't look up-to-date before a mapper runs
+                {"path": repo, "commit": "", "full": False, "files": [rel], "deleted": [], "hashes": {rel: h}}]}
             try:
                 codemap.apply_codemap(con, cm, scan, core.now())
             except (ValueError, sqlite3.Error) as e:
@@ -287,8 +289,10 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    own = re.compile(rf"(scan-({'|'.join(codemap.CODEMAP_AREAS)})(-\d+)?\.json|code-map-({'|'.join(codemap.CODEMAP_AREAS)})(-\d+)?\.json(\..+)?)")
     for old in [*out_dir.glob("scan-*.json"), *out_dir.glob("code-map-*.json*")]:
-        old.unlink(missing_ok=True)  # a new scan: maps of older scans are stale (and the Write tool won't overwrite them)
+        if own.fullmatch(old.name):  # --out may be a folder holding the user's own files
+            old.unlink(missing_ok=True)  # a new scan: maps of older scans are stale (and the Write tool won't overwrite them)
     summary = {"incremental": False, "total_files": 0, "tokens": 0, "areas": {}, "skipped": []}
     repos = []
     for raw in paths:
@@ -346,7 +350,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                 routes_moved = True
         # a new router file, or a one-route file that now holds several: its new pages render components whose
         # files didn't change, so only a full pass puts their locators there
-        if stored and any(rel not in stored or (len(by_file.get(rel, ())) == 1 and stored[rel] != candidates[rel][2])
+        if stored and any(rel not in stored or (len(by_file.get(rel, ())) <= 1 and stored[rel] != candidates[rel][2])
                           for rel in routers):
             routes_moved = True
     areas = {a: [] for a in codemap.CODEMAP_AREAS}
@@ -395,7 +399,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             data = {"scan_id": f"{a}{suffix}-{stamp}", "area": a,
                     "repos": [{k: v for k, v in r.items() if k != "sizes"} for r in chunk]}
             scan_file = out_dir / f"scan-{a}{suffix}.json"
-            scan_file.write_text(json.dumps(data, indent=1))
+            core._write(scan_file, json.dumps(data, indent=1))
             files = sum(len(r["files"]) for r in chunk)
             if files:
                 info.append({"scan_file": str(scan_file), "scan_id": data["scan_id"],
@@ -431,7 +435,7 @@ def _chunk(entries, chunk_files, chunk_tokens):
             part_for(e, True)
             continue
         for rel in e["files"]:
-            if cur and (n_files + 1 > chunk_files or (n_bytes + e["sizes"].get(rel, 0)) // 4 > chunk_tokens):
+            if n_files and (n_files + 1 > chunk_files or (n_bytes + e["sizes"].get(rel, 0)) // 4 > chunk_tokens):
                 chunks.append(cur)
                 cur, n_files, n_bytes = [], 0, 0
             part = part_for(e, first)

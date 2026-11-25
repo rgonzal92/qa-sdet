@@ -364,6 +364,28 @@ class SetupPermissions(Base):
         self.assertEqual(cli("setup-permissions", "--apply", "--settings", "")[0], 2)
         self.assertFalse((self.t / "home" / ".claude").exists())
 
+    def test_round2_doctor_dangling_backup_prefix_and_decoding(self):
+        # M6: dangling backup symlink is never written through
+        s = self.t / "settings.json"
+        s.write_text("{}")
+        victim = self.t / "dangling-victim"
+        (self.t / "settings.json.bak-20261124000000").symlink_to(victim)
+        doctor.merge_permissions(s, stamp="20261124000000")
+        self.assertFalse(victim.exists())
+        # L4: non-ASCII jiraKeyPrefix 'ß' fails doctor check (matching ops.expand_keys)
+        good = dict(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
+                    ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
+        self.config(**good, jiraKeyPrefix="ß")
+        out = io.StringIO()
+        with mock.patch("shutil.which", lambda *a, **k: None), contextlib.redirect_stdout(out):
+            doctor.doctor()
+        self.assertIn("FIX  jiraKeyPrefix is a Jira project key", out.getvalue())
+        # L6: installed_browsers passes errors='replace' so non-UTF-8 output never crashes
+        with mock.patch("shutil.which", return_value="/x/playwright-cli"), \
+                mock.patch("subprocess.run", return_value=done(0, out="")) as mrun:
+            doctor.installed_browsers(("firefox",))
+        self.assertEqual(mrun.call_args.kwargs.get("errors"), "replace")
+
 
 if __name__ == "__main__":
     unittest.main()
