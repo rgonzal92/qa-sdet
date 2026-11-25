@@ -26,6 +26,16 @@ class Annotate(Base):
         return p
 
     @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
+    def test_a_label_alone_is_a_caption_in_a_corner(self):  # an iframe shot the browser boxed: the label still fits
+        from PIL import Image
+        p = self.png()
+        code, out, _ = cli("annotate", str(p), "--label", "POST /api/zones 500 shown as Saved")
+        self.assertEqual(code, 0)
+        img = Image.open(p).convert("RGB")
+        self.assertEqual(img.getpixel((2, 2)), ops.RED)  # the quiet top-left corner of a blank page
+        self.assertIn(ops.WHITE, [img.getpixel((x, y)) for x in range(0, 120) for y in range(0, 30)])
+
+    @unittest.skipUnless(HAVE_PIL, "Pillow not installed")
     def test_box_and_label(self):
         from PIL import Image
         p = self.png()
@@ -130,7 +140,7 @@ class Annotate(Base):
         for target in (other, p.parent.parent / "bugs" / "a.png", p.parent / "notes.txt", p.parent / "link.png",
                        p.parent / "missing.png"):
             self.assertEqual(cli("annotate", str(target), "--box", "1,1,5,5", "--label", "x")[0], 2, target)
-        for argv in (("--box", "1,1,5"), ("--box", "1,1,0,5"), ("--label", "x")):
+        for argv in (("--box", "1,1,5"), ("--box", "1,1,0,5")):  # a label alone is a caption (its own test)
             self.assertEqual(cli("annotate", str(p), *argv, *(() if "--label" in argv else ("--label", "x")))[0], 2, argv)
         self.assertEqual(cli("annotate", str(p), "--box", "1,1,5,5")[0], 2)  # no label
 

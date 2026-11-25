@@ -441,6 +441,11 @@ class Evidence(Base):
         self.assertIn("screenshot failed", err)
         self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])  # no red box left for the next image
 
+    def test_a_ref_image_gets_its_label_as_a_caption_when_pillow_is_there(self):
+        code, out, calls, ann, _ = self.run_evidence("--ref", "f1e15", "--label", "Saved at 131")
+        self.assertEqual((code, out["method"]), (0, "highlight"))
+        self.assertEqual(ann.call_args[0][1:], ([], "Saved at 131"))
+
     def test_refusals(self):
         code, _, calls, _, err = self.run_evidence("--selector", "#none", "--label", "x", outputs=[done(0, out='""')])
         self.assertEqual(code, 1)

@@ -31,7 +31,7 @@ Per CONFIRMED or SUSPECTED bug write `<out>/bugs/BUG-<n>.md`, `<out>/repro/BUG-<
 ## Evidence (attach these files to the Jira item: the local links below don't open from Jira)
 - Screenshot: BUG-<n>.png ![BUG-<n>](../evidence/BUG-<n>.png) (red box marks the problem)
 - Video: BUG-<n>.webm (../evidence/BUG-<n>.webm), the clean-state repro (SUSPECTED: the attempt that didn't show it)
-- Network: `<METHOD> <path>` → <status> (redacted)
+- Network: `<METHOD> <path>` → <status> (redacted); the request and response bodies: BUG-<n>-network.txt (../evidence/BUG-<n>-network.txt), when it was an API call (tips file, "Network evidence")
 - Console: <message>
 - Repro spec: BUG-<n>.spec.ts (../repro/BUG-<n>.spec.ts); run it with `BASE_URL=<qaBaseUrl> STORAGE_STATE=<a signed-in storage state file> npx playwright test BUG-<n>.spec.ts` (STORAGE_STATE only when the app needs a sign-in)
 - API repro (only for a bug in an API call: a 4xx/5xx, or the server accepting what it must refuse): `curl -s -X <METHOD> '<qaBaseUrl><path>' -H 'Content-Type: application/json' -H 'Authorization: <TOKEN>' -d '<the request body, secrets and personal data replaced>'`, with `<TOKEN>` as written, never a real value

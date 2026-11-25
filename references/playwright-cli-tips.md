@@ -24,12 +24,21 @@ playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelecto
 ## Bug video (the clean-state repro)
 ```
 playwright-cli -s=qa recording-start && playwright-cli -s=qa video-start '<out>/evidence/BUG-<n>.webm'
+playwright-cli -s=qa video-show-actions --cursor none --highlight-style 'outline: 3px solid red' --position top-right
 playwright-cli -s=qa reload
-playwright-cli -s=qa video-stop && playwright-cli -s=qa recording-stop
+playwright-cli -s=qa video-hide-actions; playwright-cli -s=qa video-stop && playwright-cli -s=qa recording-stop
 ```
+- `video-show-actions` names each action in the video and boxes its element, so the developer sees what was clicked and typed; if it fails (an older playwright-cli), go on without it.
 - Between `reload` (or a `goto` to the start page) and `video-stop`: the repro steps with real `fill` / `click`. n = the number this bug will get (the highest in `<out>/bugs/` + 1).
 - The bug didn't show again (SUSPECTED): keep the video and say in the draft that it shows the attempt that didn't hit.
-- No `--cursor` (it slows every action by 800 ms). No videos for cases.
+- Always `--cursor none` (the pointer slows every action by 800 ms). No videos for cases.
+
+## Network evidence (a bug in an API call)
+A call that failed, or that the server wrongly accepted: save what was sent and returned, while the browser is open, before step 9 (never for login, session, token or profile calls):
+```
+playwright-cli -s=qa requests --filter '<path regexp>' > '<out>/evidence/BUG-<n>-network.txt'; playwright-cli -s=qa request-body <#> >> '<out>/evidence/BUG-<n>-network.txt'; playwright-cli -s=qa response-body <#> >> '<out>/evidence/BUG-<n>-network.txt'
+```
+`<#>` is the call's number in `requests`. The file is scrubbed before the report links it and the filing command attaches it.
 
 ## Look for broken output (one call, read-only)
 After the page loads, and after each submit or big state change, one `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text, broken images, a page wider than the window, a region still busy, controls with no accessible name. Each hit is a lead: check it like any other result.

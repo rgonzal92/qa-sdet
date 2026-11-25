@@ -554,6 +554,7 @@ def evidence(path, label, selector=None, ref=None):
             return fail("screenshot failed", r)
     finally:
         pw("highlight", "--hide")
+    annotate(png, [], label)  # Pillow there: the label as a caption over the browser's box (an iframe element)
     print(json.dumps({"path": str(png), "annotated": True, "method": "highlight"}))
     return 0
 
@@ -646,8 +647,9 @@ def annotate(path, boxes, label):
             lines[-1] = lines[-1].rstrip() + "…"
         tw = min(max(round(draw.textlength(t, font=font)) for t in lines) + 2 * pad, W)
         th = min(lh * len(lines) + 2 * pad, H)
-        x0, y0, x1, y1 = drawn[0]
-        ux0, uy0, uy1 = min(c[0] for c in drawn), min(c[1] for c in drawn), max(c[3] for c in drawn)
+        corners = [(0, 0), (max(0, W - tw), 0), (0, max(0, H - th)), (max(0, W - tw), max(0, H - th))]
+        x0, y0, x1, y1 = drawn[0] if drawn else (0, 0, 0, 0)  # no box: a caption in the quietest corner
+        ux0, uy0, uy1 = (min(c[0] for c in drawn), min(c[1] for c in drawn), max(c[3] for c in drawn)) if drawn else (0, 0, 0)
         fit = lambda tx, ty: (max(0, min(tx, W - tw)), max(0, min(ty, H - th)))
         hits = lambda tx, ty: any(tx < c[2] + gap and c[0] - gap < tx + tw and ty < c[3] + gap and c[1] - gap < ty + th
                                   for c in drawn)
@@ -659,7 +661,7 @@ def annotate(path, boxes, label):
         # around the first box (above, below, right, left; then above/below its right end), then above/below all
         spots = [fit(x0, y0 - th - gap), fit(x0, y1 + gap + 1), fit(x1 + gap + 1, y0), fit(x0 - gap - tw, y0),
                  fit(x1 - tw, y0 - th - gap), fit(x1 - tw, y1 + gap + 1), fit(ux0, uy0 - th - gap), fit(ux0, uy1 + gap + 1),
-                 fit(0, 0), fit(W, 0), fit(0, H), fit(W, H)]  # corners: the last resort when nothing near is free
+                 fit(0, 0), fit(W, 0), fit(0, H), fit(W, H)] if drawn else corners  # corners: the last resort
         cover = lambda tx, ty: sum(max(0, min(tx + tw, c[2] + 1) - max(tx, c[0])) * max(0, min(ty + th, c[3] + 1) - max(ty, c[1]))
                                    for c in drawn)  # box area hidden (no free spot: hide the least)
         free = [xy for xy in spots if not hits(*xy)]

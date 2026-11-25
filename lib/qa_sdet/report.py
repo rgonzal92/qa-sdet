@@ -686,7 +686,8 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
                f"--summary {shlex.quote(title)} --description-file {shlex.quote(str(draft))}")
         h = _stored_hash(b)
         attachments = [p for p in (run_dir / "evidence" / f"{bid}.png", run_dir / "evidence" / f"{bid}.webm",
-                                   run_dir / "repro" / f"{bid}.spec.ts") if p.is_file()]
+                                   run_dir / "evidence" / f"{bid}-network.txt", run_dir / "repro" / f"{bid}.spec.ts")
+                       if p.is_file()]
         block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", "", "```sh", cmd,
                  f"qa-mem bug-status {h} FILED <JIRA-KEY>", "```"]
         if attachments:
@@ -697,6 +698,17 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
         return []
     return ["", f"<details><summary>Filing commands &amp; attachments ({len(entries)} confirmed)</summary>", "",
             *entries, "</details>"]
+
+
+def _evidence_gaps(cases, run_dir, kind):
+    """'TC-n: no evidence image (…)' for each case of a ticket run checked to PASS or FAIL without a non-empty image."""
+    out = []
+    for c in cases if kind == "ticket" else []:
+        p = Path(run_dir) / "evidence" / f"{c['id']}.png"
+        if c["status"] in ("PASS", "FAIL") and re.fullmatch(r"[A-Za-z]+-\d+", str(c["id"])) and \
+                (not p.is_file() or p.stat().st_size == 0):
+            out.append(f"{c['id']}: no evidence image (evidence/{p.name})")
+    return out
 
 
 def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None, audit=None, reviews=None):
@@ -712,8 +724,11 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
         image = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else ""
         webm = Path(run_dir) / "evidence" / f"{bid}.webm"  # the video of the clean-state repro
         video = f"[video](evidence/{quote(webm.name)})" if bid and webm.is_file() else ""
+        spec, net = Path(run_dir) / "repro" / f"{bid}.spec.ts", Path(run_dir) / "evidence" / f"{bid}-network.txt"
+        repro = f"[repro](repro/{quote(spec.name)})" if bid and spec.is_file() else ""
+        network = f"[network](evidence/{quote(net.name)})" if bid and net.is_file() else ""
         badge = cell(_repro_badge(bid, b, audit or {}, reviews))
-        evidence = " · ".join(x for x in (image, video, badge) if x) or "—"
+        evidence = " · ".join(x for x in (image, video, repro, network, badge) if x) or "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), core.short(b.get("title"), 120), b.get("route"),
                        ", ".join(owners), Raw(evidence)))
@@ -935,6 +950,7 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
         pids = ", ".join(str(c.get("id") or "?") for c in prior_passed)
         tag = f" of {' '.join(str(retest_of).split())}" if retest_of else ""
         lines.append(f"- Partial retest{tag}: {len(prior_passed)} case(s) ({pids}) passed on prior build {pb} and were not re-run here.")
+    lines += [f"- {g.split(':')[0]} has no evidence image: take it or say why" for g in _evidence_gaps(mine, run_dir, "ticket")]
     lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
     if not shots:
         lines.append("- No screenshot for this ticket yet. Add one before you post.")
@@ -1057,6 +1073,8 @@ def render_report_parts(run_dir, cfg=None):
         hosts = core.allowed_hosts(cfg)
         baseline = _signal_baseline()
         triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
+        if gaps := _evidence_gaps(cases, run_dir, kind):
+            action += [f"### Evidence gaps ({len(gaps)})"] + [f"- {cell(g)}" for g in gaps] + [""]
         signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
         third = sum(n for _, (_, n) in triaged)
         if signals:
@@ -1155,10 +1173,23 @@ def render_index(qa_out):
                       row("Date", "Run", "Kind", "Verdict", "Bugs"), "|---|---|---|---|---|"] + [r for _, r in rows]) + "\n"
 
 
+def _scrub_run(run_dir):
+    """Scrub the run's text files (drafts, specs, network evidence, signal logs) now: the filing commands link them, and
+    the hooks' scrub pass may not have reached them yet (it stops after a few seconds)."""
+    for pattern in ("bugs/*.md", "repro/*", "evidence/*.txt", "evidence/*.json", ".data/*.log"):
+        for f in Path(run_dir).glob(pattern):
+            if f.is_file() and not f.is_symlink():
+                try:
+                    scrub.scrub_file(f)
+                except (OSError, ValueError, RecursionError):
+                    pass  # a file it can't read or parse stays as it is; the hook's pass will try again
+
+
 def write_report(run_dir):
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
         raise core.BadInput(f"report: not a run folder (qa-out/<run>/): {run_dir}")
+    _scrub_run(run_dir)
     try:
         text, drafts = render_report_parts(run_dir)
     except Exception as e:  # never fail: say what went wrong in the report itself

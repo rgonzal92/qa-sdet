@@ -108,9 +108,9 @@ def wrapper_cmd(cmd, args):
         print(f"pruned {n} old snapshot files" if len(args) == 1 else f"pruned {n} snapshot and temp files of this run")
     elif cmd == "annotate":
         o = _opts(args, valued=("--label",), multi=("--box",))
-        if len(o["_"]) != 1 or not o.get("--box") or not o.get("--label"):
-            raise core.BadInput("usage: qa-mem annotate <png> --box x,y,w,h [--box ...] --label <text>")
-        boxes = [ops.parse_box(b) for b in o["--box"]]
+        if len(o["_"]) != 1 or not o.get("--label"):
+            raise core.BadInput("usage: qa-mem annotate <png> [--box x,y,w,h ...] --label <text>")
+        boxes = [ops.parse_box(b) for b in o.get("--box") or []]  # none: the label alone, as a caption
         png = ops.evidence_png(o["_"][0])
         if not ops.annotate(png, boxes, o["--label"]):
             print(ops.NO_PILLOW)
@@ -188,7 +188,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "signals-triage": "<run dir> --slug <slug>",
+    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }

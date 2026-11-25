@@ -26,7 +26,7 @@ localstorage-list localstorage-set mousedown mousemove mouseup mousewheel networ
 recording-start recording-stop reload request request-body request-headers requests resize response-body response-headers
 resume route route-list run-code screenshot select sessionstorage-clear sessionstorage-delete sessionstorage-get
 sessionstorage-list sessionstorage-set show snapshot state-load state-save step-over tab-close tab-list tab-new tab-select
-tracing-start tracing-stop type uncheck unroute upload video-start video-stop""".split())
+tracing-start tracing-stop type uncheck unroute upload video-hide-actions video-show-actions video-start video-stop""".split())
 
 
 def load_guard(tmp):

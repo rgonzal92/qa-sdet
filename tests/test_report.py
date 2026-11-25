@@ -691,6 +691,8 @@ class Signals(Rendering):
                 (d / f".data/{kind}-form.log").write_text(text)
         for i, text in enumerate(drafts, 1):
             (d / f"bugs/BUG-{i}.md").write_text(text)
+        for c in run.get("cases") or []:  # every checked case has its image: only signals are under test
+            (d / f"evidence/{c['id']}.png").write_bytes(b"png")
         report.write_report(d)
         return (d / "REPORT.md").read_text()
 
@@ -777,6 +779,7 @@ class Escaping(Rendering):
                "bugs": [{"hash": "ab|cd\nef", "title": "t", "route": "/f"}]}
         d = self.rundir(plan=plan, runs=[("f", run)])
         (d / "bugs/BUG-9.md").write_text("x")
+        (d / "evidence/TC-1.png").write_bytes(b"png")  # the case has its image: no evidence gap heading
         r = report.render_report(d)
         headings = [ln for ln in r.splitlines() if ln.startswith("#")]
         self.assertEqual(headings, ["# QA report: T ## injected", "## Needs your action", "### Bugs to file (1)",
@@ -1266,6 +1269,26 @@ class AuditBugs(Rendering):
         self.assertIn("reviewed ✓", report.render_report(d))
         (d / ".data/review.json").write_text("{oops")
         self.assertIn("review.json unreadable", report.render_report(d))
+
+    def test_network_and_repro_are_linked_and_files_are_scrubbed_before_the_report(self):
+        d = self.folder(good_draft(self.H) + "Authorization: Bearer abcdefghijklmnopqrst\n", GOOD_SPEC)
+        (d / "evidence/BUG-1-network.txt").write_text("POST /api/zones => 500\n{\"code\": \"ZONE_OVERLAP\"}\n")
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        row = next(x for x in r.splitlines() if x.startswith("| [BUG-1]"))
+        self.assertIn("[repro](repro/BUG-1.spec.ts)", row)
+        self.assertIn("[network](evidence/BUG-1-network.txt)", row)
+        self.assertIn("BUG-1-network.txt`", r.split("Filing commands")[1])  # attached to the Jira bug too
+        self.assertNotIn("abcdefghijklmnopqrst", (d / "bugs/BUG-1.md").read_text())  # scrubbed before it was linked
+
+    def test_a_checked_case_without_its_image_is_an_evidence_gap(self):
+        d = self.rundir("2026-11-25-gap", plan=PLAN1_ANSWERED, runs=[("form", RUN1)])
+        (d / "evidence/TC-1.png").write_bytes(b"png")
+        (d / "evidence/TC-2.png").write_bytes(b"")  # 0 bytes: no image
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("### Evidence gaps (1)\n- TC-2: no evidence image (evidence/TC-2.png)", r)
+        self.assertIn("TC-2 has no evidence image", (d / "jira-comment-PROJ-1.md").read_text())
 
     def test_contract_warnings(self):
         spec = GOOD_SPEC.replace("'/form'", "'/incidents/:id'").replace("...(process.env.STORAGE_STATE ? { storageState: "
