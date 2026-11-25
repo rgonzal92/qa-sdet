@@ -244,6 +244,32 @@ class Prep(Base):
         self.assertFalse(any("Speed accepts 131" in x for x in ctx["relevant_bugs"]))
         self.assertIn("bugs_open", json.loads(out))  # the full lists stay for callers that read them
 
+    def test_prep_fingerprints_tickets_and_a_changed_ticket_is_fully_retested(self):
+        """Its requirements changed in Jira since the run: its earlier passes were checked against the old ones."""
+        import subprocess
+        from support import done, PLAN
+        self.config(jiraKeyPrefix="PROJ")
+        plan = {**PLAN, "tickets": [{**PLAN["tickets"][0], "source_snapshot": {"fields_sha1": "old", "captured_at": "2026-11-20T00:00:00Z"}},
+                                     {**PLAN["tickets"][1]}]}
+        runs = [("form", {"target": "/form", "status": "COMPLETED", "build": "1", "cases": [{"id": "TC-1", "status": "PASS"},
+                                                                                             {"id": "TC-2", "status": "FAIL"}]})]
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=plan, runs=runs)
+        view = json.dumps({"key": "PROJ-1", "fields": {"summary": "Speed limit form", "description": "Max is now 120"}})
+        view2 = json.dumps({"key": "PROJ-2", "fields": {"summary": "Incident list"}})
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=view), done(0, out="[]"),
+                                                                  done(0, out=view2), done(0, out="[]")]):
+            code, out, err = cli("prep", str(self.proj), "1", "2")
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(out)
+        self.assertRegex(data["tickets"][0]["source_snapshot"]["fields_sha1"], r"^[0-9a-f]{40}$")
+        drift = data["plan_state"]["drift"]
+        self.assertEqual(list(drift), ["PROJ-1"])  # PROJ-2 had no snapshot: nothing to compare
+        self.assertEqual(drift["PROJ-1"]["prior_captured_at"], "2026-11-20T00:00:00Z")
+        lr = data["plan_state"]["latest_run"]
+        self.assertIn("TC-1", [c["id"] for c in lr["retest_cases"]])  # its pass is rerun
+        self.assertNotIn("TC-1", [c["id"] for c in lr["passed_cases"]])
+
 
 if __name__ == "__main__":
     unittest.main()

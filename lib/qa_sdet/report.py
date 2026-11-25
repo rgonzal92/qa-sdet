@@ -317,7 +317,9 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     plan_keys = {str(k).strip().upper() for k in known} | {me}
     owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
     qid = lambda q: re.match(r"\s*(Q\d+)\b", q["text"])
-    notes = [f"{qid(q).group(1)} open blocking question" if qid(q) else f"open blocking question: {_clip(q['text'], 40)}"
+    drift = ticket.get("drift") if isinstance(ticket, dict) and isinstance(ticket.get("drift"), str) else ""
+    notes = ([f"requirements changed: {_clip(drift, 80)}"] if drift.strip() else []) + \
+        [f"{qid(q).group(1)} open blocking question" if qid(q) else f"open blocking question: {_clip(q['text'], 40)}"
              for q in questions if not q["resolved"] and "[BLOCKING]" in q["text"].upper()
              and (owner(q) == me or owner(q) not in plan_keys)] + \
         [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"] + \
@@ -408,7 +410,9 @@ def _ac_lines(t, cases, with_status, prior_passed=()):
             state = f" — verified on prior build {one_line(pb)}"
         else:
             state = ""
-        out.append(f"- {one_line(aid)} {cell(ac.get('text'))}{state}{ids}".replace("  ", " "))
+        named = sorted(set().union(*map(_case_bugs, mine))) if mine else []
+        bugs = f" · bugs: {one_line(', '.join(named))}" if named and with_status else ""
+        out.append(f"- {one_line(aid)} {cell(ac.get('text'))}{state}{ids}{bugs}".replace("  ", " "))
     return out
 
 
@@ -763,8 +767,10 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
         badge = cell(_repro_badge(bid, b, audit or {}, reviews))
         evidence = " · ".join(x for x in (image, video, repro, network, badge) if x) or "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
+        found_by = [c for c in cases if _bug_refs(b) & _case_bugs(c)]  # the case that failed on it, and its AC
+        trace = "; ".join(" · ".join(str(x) for x in (c["id"], c.get("ac")) if x) for c in found_by)
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), core.short(b.get("title"), 120), b.get("route"),
-                       ", ".join(owners), Raw(evidence)))
+                       ", ".join(owners) + (f" ({trace})" if trace else ""), Raw(evidence)))
     return out + _filing_block(bugs, cases, tickets, run_dir, cfg or {})
 
 
@@ -1400,7 +1406,24 @@ def plan_find(project, keys=None, run_dir=None):
             latest = st
         if reusable and latest:
             break
+    if latest is None:  # one ticket of a multi-ticket run (PROJ-101 of PROJ-100+101): its slice, TC ids kept
+        for p in dirs:
+            st = _run_state(p)
+            if st and st["kind"] == "ticket" and st["has_runs"] and want < {k.strip().upper() for k in st["tickets"]}:
+                latest = _slice(st, want)
+                break
     return {"reusable_plan": reusable, "latest_run": latest}
+
+
+def _slice(st, want):
+    """A run state cut to the tickets in `want`: its cases, routes and counts; `subset_of` names the run's tickets."""
+    mine = lambda c: str(c.get("ticket") or "").strip().upper() in want
+    retest, passed = [c for c in st["retest_cases"] if mine(c)], [c for c in st["passed_cases"] if mine(c)]
+    routes = {c["route"] for c in retest + passed if c.get("route")}
+    return {**st, "subset_of": st["tickets"], "tickets": [k for k in st["tickets"] if k.strip().upper() in want],
+            "retest_cases": retest, "passed_cases": passed, "total_cases": len(retest) + len(passed),
+            "incomplete_routes": [r for r in st["incomplete_routes"] if r in {c["route"] for c in retest}],
+            "completed_routes": [r for r in st["completed_routes"] if r in routes]}
 
 
 # ---------- inbox: Jira tickets assigned to me, NEW ones flagged ----------
@@ -1587,6 +1610,68 @@ def _trim_comments(raw):
     return trimmed
 
 
+def _ticket_fingerprint(fields, ac_field=""):
+    """sha1 of what a ticket asks for: summary, description, the AC field and fix versions (rich text flattened)."""
+    import hashlib
+    text = lambda v: _adf_text(v) if isinstance(v, dict) else v if isinstance(v, str) else ""
+    fixes = sorted(str(x.get("name") if isinstance(x, dict) else x) for x in fields.get("fixVersions") or []
+                   if isinstance(fields.get("fixVersions"), list))
+    parts = [text(fields.get("summary")), text(fields.get("description")), text(fields.get(ac_field)) if ac_field else ""]
+    return hashlib.sha1("\n".join(core.norm(x) for x in parts + fixes).encode()).hexdigest()
+
+
+def _with_drift(state, tickets):
+    """plan_state plus `drift` {KEY: {fields_changed, prior_captured_at}} for tickets whose Jira text changed since the
+    plan's source_snapshot. A drifted ticket's carried passes move to retest_cases: they were checked against the old
+    requirements."""
+    plan = next((_load_json(Path(x["plan_file"]), []) for x in (state.get("latest_run"), state.get("reusable_plan"))
+                 if x and x.get("plan_file")), None)
+    before = {str(t.get("key")).upper(): t.get("source_snapshot") for t in _list(plan, "tickets")
+              if isinstance(t.get("source_snapshot"), dict)}
+    drift = {}
+    for t in tickets:
+        snap, old = t.get("source_snapshot"), before.get(str(t.get("key")).upper())
+        if snap and old and old.get("fields_sha1") and old.get("fields_sha1") != snap["fields_sha1"]:
+            drift[t["key"]] = {"fields_changed": True, "prior_captured_at": old.get("captured_at")}
+    lr = state.get("latest_run")
+    if drift and lr:
+        moved = [c for c in lr["passed_cases"] if str(c.get("ticket")).upper() in {k.upper() for k in drift}]
+        lr = {**lr, "passed_cases": [c for c in lr["passed_cases"] if c not in moved],
+              "retest_cases": lr["retest_cases"] + [{**c, "status": "PASS"} for c in moved]}
+    return {**state, "latest_run": lr, "drift": drift}
+
+
+def trace(project, keys=None, fix_version=None):
+    """Each ticket's latest run across qa-out (newest folder that ran it): verdict, date, builds, AC coverage, bugs,
+    and what it retested: a release or sprint sign-off view. Read-only."""
+    qa_out = ops._project(project) / "qa-out"
+    want = {k.strip().upper() for k in keys or []}
+    seen, rows = set(), []
+    for p in _plan_folders(qa_out) if qa_out.is_dir() else []:
+        d = load_run(p)
+        plan, runs = d["plan"], d["runs"]
+        if not runs or str(plan.get("kind")) == "plan":
+            continue
+        cases, bugs = merged_cases(plan, runs), run_bugs(runs)
+        vmap = _verdicts(plan, runs, cases, bugs)
+        builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
+        for t in _plan_tickets(plan):
+            k = t["key"].upper()
+            if k in seen or (want and k not in want) or (fix_version and str(t.get("fix_version") or "") != fix_version):
+                continue
+            seen.add(k)
+            acs = [_ac_key(_ac_id(a)) for a in _list(t, "acs") if _ac_id(a)]
+            covered = {a for c in cases if c.get("ticket") == t["key"] for a in _case_acs(c)}
+            v, why = vmap[t["key"]]
+            rows.append(row(t["key"], VERDICT_ICON[v], f"{sum(a in covered for a in acs)}/{len(acs)} AC", builds,
+                            len(ticket_bugs(t["key"], cases, bugs, list(vmap))), p.name,
+                            str(plan.get("retest_of") or ""), why))
+    if not rows:
+        return "no ticket runs match"
+    return "\n".join([row("Ticket", "Verdict", "ACs covered", "Build", "Bugs", "Latest run", "Retest of", "Why"),
+                      "|---|---|---|---|---|---|---|---|"] + rows)
+
+
 def prep(con, project, key_args):
     """Bundle keys, Jira ticket + comments (via read-only acli if signed in), reusable plan/run state, qa-rules.md,
     and memory routes/bugs in one scrubbed JSON dict."""
@@ -1622,6 +1707,9 @@ def prep(con, project, key_args):
                         item["fields"][f] = _adf_text(item["fields"][f])
             if ac_field and not used_ac and not err:
                 item["ac_field_skipped"] = ac_field
+            if isinstance(item["fields"], dict) and not err:  # what the plan was made against: drift shows on --retest
+                item["source_snapshot"] = {"fields_sha1": _ticket_fingerprint(item["fields"], ac_field),
+                                           "captured_at": core.now()}
             if err:
                 item["error"] = err
             if comm_err:
@@ -1650,7 +1738,7 @@ def prep(con, project, key_args):
         "config": {k: cfg.get(k) for k in ("jiraProject", "jiraKeyPrefix", "jiraAcField", "qaBaseUrl", "browser",
                                            "buildSource", "releaseTemplates", "inboxJql") if cfg.get(k) is not None},
         "tickets": tickets,
-        "plan_state": plan_find(proj, keys=keys),
+        "plan_state": _with_drift(plan_find(proj, keys=keys), tickets),
         "rules": rules,
         "routes": codemap.code(con),
         "bugs_open": "\n".join(open_bugs) or "no OPEN bugs",

@@ -13,14 +13,14 @@ Per CONFIRMED or SUSPECTED bug write `<out>/bugs/BUG-<n>.md`, `<out>/repro/BUG-<
 # <Short title: what breaks, where>
 
 **Classification:** CONFIRMED | SUSPECTED · **Severity:** HIGH · **Env:** <qaBaseUrl> · **Route:** /path · **Build:** <build> · **Browser:** <browser>
-**Ticket:** <KEY or none> · **Repro:** 2/2 · **Found:** <date> · **qa-mem hash:** <hash>
+**Ticket:** <KEY or none> · **Case:** <TC-n that failed on it, or none> · **Repro:** 2/2 · **Found:** <date> · **qa-mem hash:** <hash>
 
 ## Steps
 1. Open <qaBaseUrl>/<concrete path>
 2. …
 
 ## Expected
-<what should happen> — **Oracle:** <AC-x | rule | invariant>
+<what should happen> — **Oracle:** <AC-x: "<the AC's text, quoted>" | rule | invariant>
 
 ## Actual
 <what happened, exact text and values>

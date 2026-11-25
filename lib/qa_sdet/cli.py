@@ -61,7 +61,8 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
-                   "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "plan-find", "setup-permissions"):
+                   "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "plan-find",
+                   "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -138,6 +139,13 @@ def wrapper_cmd(cmd, args):
               if lines else "no unexplained app signals")
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
+    elif cmd == "trace":
+        o = _opts(args, valued=("--keys", "--fix-version"))
+        if len(o["_"]) != 1:
+            raise core.BadInput("usage: qa-mem trace <project> [--keys K1,K2] [--fix-version VER]")
+        from . import report
+        keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if o.get("--keys") else None
+        print(report.trace(o["_"][0], keys, o.get("--fix-version")))
     elif cmd == "dup-check":
         if len(args) != 2 or not (Path(args[0]) / ".data").is_dir() or not re.fullmatch(r"BUG-\d+", args[1]):
             raise core.BadInput("usage: <acli jira workitem search ... --json> | qa-mem dup-check <run dir> <BUG-n>")
@@ -209,7 +217,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "signals-triage": "<run dir> --slug <slug>",
+    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }

@@ -272,8 +272,8 @@ class Report(Base):
         self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)
         self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | ✅ PASS | Saved | — |", r)
         self.assertIn("| TC-2 |  | AC-2 | Reject 131 | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) | — |", r)
-        self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | PROJ-1 | "
-                      "[image](evidence/BUG-1.png) · ⚠", r)
+        self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | PROJ-1 (TC-2 · AC-2) | "
+                      "[image](evidence/BUG-1.png) · ⚠", r)  # the case that failed on it, and its AC
         self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | PROJ-2 | ⚠ no repro spec", r)
         self.assertIn("### Open questions (2)\n- Is 0 a valid speed? _(from /form)_\n"
                       "- TC-4: Order of ties unspecified _(from /list)_", r)
@@ -1189,6 +1189,51 @@ class JiraBundles(Rendering):
         self.assertEqual(cli("dup-check", str(d), "BUG-2", stdin=hits)[0], 0)
         self.assertEqual(json.loads((d / ".data/jira-dups.json").read_text()),
                          {"BUG-2": [{"key": "PROJ-77", "summary": "Name too long saved"}]})
+
+
+class Traceability(Rendering):
+    """AC <-> case <-> evidence <-> bug both ways, requirement drift, one ticket out of a multi-ticket run, and trace."""
+
+    def test_acs_name_their_bugs_and_bugs_their_cases(self):
+        run = {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL", "bug": "BUG-1"}],
+               "bugs": [{"route": "/form", "title": "Speed accepts 131", "severity": "HIGH", "classification": "CONFIRMED",
+                         "draft_path": "bugs/BUG-1.md"}]}
+        d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        self.assertIn("- AC-2 Rejects 131 — ❌ FAIL (TC-2) · bugs: BUG-1", r)
+        row = next(x for x in r.splitlines() if x.startswith("| BUG-1") or x.startswith("| [BUG-1]"))
+        self.assertIn("PROJ-1 (TC-2 · AC-2)", row)
+
+    def test_a_ticket_whose_requirements_changed_says_so(self):
+        plan = {**PLAN1_ANSWERED, "tickets": [{**PLAN1["tickets"][0], "drift": "description changed in Jira since 2026-11-20"}]}
+        _, r = self.render_run([("form", RUN1)], plan=plan)
+        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES** — requirements changed: description changed in Jira since 2026-11-20", r)
+
+    def test_one_ticket_is_found_inside_a_multi_ticket_run(self):
+        from support import PLAN
+        runs = [("form", {"target": "/form", "status": "COMPLETED", "build": "1",
+                          "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}]}),
+                ("list", {"target": "/list", "status": "COMPLETED", "build": "1",
+                          "cases": [{"id": "TC-3", "status": "FAIL"}, {"id": "TC-4", "status": "PASS"}]})]
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=PLAN, runs=runs)
+        lr = report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
+        self.assertEqual(lr["subset_of"], ["PROJ-1", "PROJ-2"])
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
+        self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-4"])  # TC ids kept
+
+    def test_trace_rolls_up_each_tickets_latest_verdict(self):
+        from support import PLAN
+        plan = {**PLAN, "tickets": [{**PLAN["tickets"][0], "fix_version": "3.5"}, {**PLAN["tickets"][1], "fix_version": "3.6"}]}
+        runs = [("form", {"target": "/form", "status": "COMPLETED", "build": "1",
+                          "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}]})]
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=plan, runs=runs)
+        code, out, _ = cli("trace", str(self.proj))
+        self.assertEqual(code, 0)
+        line = next(x for x in out.splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("✅ PASS", line)
+        self.assertIn("2/2 AC", line)
+        self.assertIn("2026-11-23-PROJ-1+PROJ-2", line)
+        rows = [x for x in cli("trace", str(self.proj), "--fix-version", "3.6")[1].splitlines() if x.startswith("| PROJ")]
+        self.assertEqual([x.split(" | ")[0] for x in rows], ["| PROJ-2"])  # only the 3.6 ticket
 
 
 class FilingBundle(Rendering):
