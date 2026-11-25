@@ -349,5 +349,67 @@ class Related(GraphCase):
         self.assertIn("/zones/new", [x["route"] for x in out["resource_siblings"]])
 
 
+class EntryChain(GraphCase):
+    """The way from a page with no record id to a detail page, over the stored transitions (BFS, 4 hops at most)."""
+
+    def go(self, a, b, trigger=""):
+        with self.con:
+            for r in (a, b):
+                self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (r,))
+            self.con.execute("INSERT INTO transitions VALUES(?,?,?,?,?,?,?)", (a, b, trigger, None, None, "1", core.now()))
+
+    def test_a_two_hop_detail_route_has_its_list_page_as_entry(self):
+        self.go("/incidents", "/incidents/:id", "row click")
+        self.go("/incidents/:id", "/incidents/:id/history", "History tab")
+        self.assertEqual(memory.entry_chain(self.con, "/incidents/:id/history"), [
+            {"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"},
+            {"from": "/incidents/:id", "to": "/incidents/:id/history", "trigger": "History tab"}])
+        self.assertEqual(memory.entry_chain(self.con, "/incidents/:id"),
+                         [{"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"}])
+
+    def test_a_route_with_no_id_needs_no_chain_and_an_unreached_one_has_none(self):
+        self.go("/incidents", "/incidents/:id")
+        self.assertEqual(memory.entry_chain(self.con, "/incidents"), [])
+        self.assertEqual(memory.entry_chain(self.con, "/zones/:id"), [])
+
+    def test_cycles_stop(self):
+        self.go("/a/:id", "/b/:id")
+        self.go("/b/:id", "/a/:id")
+        self.assertEqual(memory.entry_chain(self.con, "/a/:id"), [])
+        self.go("/home", "/a/:id")
+        self.assertEqual([h["from"] for h in memory.entry_chain(self.con, "/b/:id")], ["/home", "/a/:id"])
+
+    def test_the_chain_is_four_hops_at_most_and_the_shortest_way_wins(self):
+        for a, b in (("/l", "/x1/:id"), ("/x1/:id", "/x2/:id"), ("/x2/:id", "/x3/:id"), ("/x3/:id", "/x4/:id"),
+                     ("/x4/:id", "/x5/:id")):
+            self.go(a, b)
+        self.assertEqual(len(memory.entry_chain(self.con, "/x4/:id")), 4)
+        self.assertEqual(memory.entry_chain(self.con, "/x5/:id"), [])  # five hops
+        self.go("/shortcut", "/x4/:id")
+        self.assertEqual(memory.entry_chain(self.con, "/x4/:id"), [{"from": "/shortcut", "to": "/x4/:id", "trigger": ""}])
+
+    def test_an_entry_on_another_host_is_never_used(self):
+        self.go("https://evil.example/list", "/x/:id")
+        self.assertEqual(memory.entry_chain(self.con, "/x/:id"), [])
+
+    def test_gaps_gives_a_deep_route_its_static_entry_page(self):
+        self.go("/incidents", "/incidents/:id", "row click")
+        self.go("/incidents/:id", "/incidents/:id/history", "History tab")
+        self.row("/incidents/:id/history", "rule", "from", "required", "src/History.jsx")
+        data = json.loads(memory.gaps(self.con, as_json=True))
+        deep = next(p for p in data["pages"] if p["route"] == "/incidents/:id/history")
+        self.assertEqual((deep["entry_route"], deep["entry_trigger"]), ("/incidents", "row click"))
+        self.assertEqual([h["to"] for h in deep["entry_chain"]], ["/incidents/:id", "/incidents/:id/history"])
+        self.assertNotIn("/incidents/:id/history", data["needs_id"])
+        line = next(x for x in memory.gaps(self.con).splitlines() if "/incidents/:id/history" in x)
+        self.assertIn("(open from /incidents: row click, then History tab)", line)
+
+    def test_gaps_names_a_detail_route_nothing_leads_to_as_needing_an_id(self):
+        self.go("/a/:id", "/a/:id/x")  # reached only from a detail page nobody reached
+        self.row("/a/:id/x", "rule", "from", "required", "src/X.jsx")
+        data = json.loads(memory.gaps(self.con, as_json=True))
+        self.assertIn("/a/:id/x", data["needs_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

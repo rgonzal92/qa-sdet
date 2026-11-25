@@ -1383,6 +1383,33 @@ def _unrechecked_fixed(con, route, build):
     return sum(h.lower() not in checked for h in rows)
 
 
+ENTRY_DEPTH = 4
+
+
+def entry_chain(con, route, max_depth=ENTRY_DEPTH):
+    """The shortest way from a page with no record id to a detail route (`/incidents/:id/history`), over the stored
+    transitions: [{from, to, trigger}, ...] from the static page down to `route`; [] for a route with no `:id`, or when
+    no chain of at most `max_depth` transitions starts at one. Routes are paths on the QA app (a transition recorded
+    with another host is skipped; dispatch refuses hosts outside allowedHosts too). Cycles end the search."""
+    if "/:id" not in route:
+        return []
+    seen, level = {route}, [(route, [])]
+    for _ in range(max_depth):
+        found = []
+        for node, path in level:
+            for x in con.execute("SELECT from_route, trigger FROM transitions WHERE to_route=? ORDER BY ts DESC", (node,)):
+                src = x["from_route"]
+                if src in seen or "://" in src:
+                    continue
+                seen.add(src)
+                way = [{"from": src, "to": node, "trigger": x["trigger"] or ""}] + path
+                if "/:id" not in src:
+                    return way
+                found.append((src, way))
+        level = found
+    return []
+
+
 def gaps(con, changed_only=False, top=None, as_json=False):
     """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
     verified on an older build, un-rechecked FIXED bugs, then the most untried heuristics and untested fields, then open bugs."""
@@ -1442,10 +1469,10 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append("a bug regressed")
         if hot.get(r, 0) >= 3:
             parts.append(f"hotspot {hot[r]} (bug history)")
-        entry = con.execute("SELECT from_route, trigger FROM transitions WHERE to_route=? ORDER BY ts DESC LIMIT 1",
-                            (r,)).fetchone() if "/:id" in r else None
-        if "/:id" in r:  # a detail page: opened from the page that leads to it, else it needs a real record
-            parts.append(f"(open from {entry['from_route']}: {entry['trigger'] or 'a link'})" if entry else "(needs a record id)")
+        chain = entry_chain(con, r)
+        if "/:id" in r:  # a detail page: opened from the page that leads to it (maybe through others), else it needs a record
+            parts.append(f"(open from {chain[0]['from']}: " + ", then ".join(h["trigger"] or "a link" for h in chain) + ")"
+                         if chain else "(needs a record id)")
         # tiers: what changed or broke again first, then unexplored pages with something to submit, then pages on an
         # older build, then the rest; bug history (hotspot) and untried checks order each tier
         tier = 0 if src or r in regressed or fixed_recheck else 1 if never and r in forms else 2 if old else 3
@@ -1453,8 +1480,8 @@ def gaps(con, changed_only=False, top=None, as_json=False):
                 "never_explored": never, "old_build": old, "changed": bool(src), "changed_files": src,
                 "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested,
                 "unvisited_states": states, "open_bugs": open_bugs, "risk_reasons": parts}
-        if entry:
-            info |= {"entry_route": entry["from_route"], "entry_trigger": entry["trigger"]}
+        if chain:
+            info |= {"entry_route": chain[0]["from"], "entry_trigger": chain[0]["trigger"], "entry_chain": chain}
         ranked.append(((tier, -hot.get(r, 0), -(untried + untested), -open_bugs, r),
                        f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
     ranked.sort(key=lambda x: x[0])
