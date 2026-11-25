@@ -765,6 +765,103 @@ class Signals(Rendering):
         keys = [k for k, _, _ in report.triage_signals(d, "form", RUN1)["app"]]
         self.assertEqual(keys, ["GET /api/zones/:id ×6 (the same call 6 times: a request loop?)"])
 
+    def triage_dir(self, requests, console=None, run=RUN1, bodies=None, drafts=()):
+        self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", run)])
+        (d / ".data/requests-form.log").write_text(requests)
+        if console is not None:
+            (d / ".data/console-form.log").write_text(console)
+        for i, text in enumerate(drafts, 1):
+            (d / f"bugs/BUG-{i}.md").write_text(text)
+        return d
+
+    def test_body_verdict_reads_error_envelopes_html_and_leaks(self):
+        v = report.body_verdict
+        self.assertEqual(v('{"data": {"zones": []}}'), [])
+        self.assertEqual(v('{"errors": [{"message": "Forbidden"}], "data": null}'), ["error body: errors: Forbidden"])
+        self.assertEqual(v('{"success": false, "message": "Zone name taken"}'), ["error body: success false: Zone name taken"])
+        self.assertEqual(v('{"error": "invalid input"}'), ["error body: error: invalid input"])
+        self.assertEqual(v('{"ok": false}'), ["error body: ok false"])
+        self.assertEqual(v('{"status": "error", "detail": "x"}'), ["error body: status error: x"])
+        self.assertEqual(v('{"errors": [], "error": null, "success": true}'), [])  # empty or null means none
+        self.assertEqual(v("<!doctype html><html><title>Sign in</title>", "/api/zones"), ["HTML on an API endpoint"])
+        self.assertEqual(v("<!DOCTYPE html><html>", "/zones"), [])  # a page may be HTML
+        self.assertEqual(v("<html>", "/graphql"), ["HTML on an API endpoint"])
+        self.assertEqual(v('{"error": "x"}', status=422), [])  # a 4xx saying so is the right answer: leaks only
+        for text, label in (("Traceback (most recent call last):\n  File \"/srv/app.py\", line 4", "stack trace"),
+                            ("java.lang.NullPointerException\n\tat com.acme.Zone.save(Zone.java:42)", "stack trace"),
+                            ("at Object.<anonymous> (/srv/app/zones.js:42:11)", "stack trace"),
+                            ('{"error": "invalid input syntax for type integer: \\"x\\" SQLSTATE 22P02"}', "SQL error"),
+                            ("ORA-00942: table or view does not exist", "SQL error"),
+                            ("You have an error in your SQL syntax near", "SQL error"),
+                            ("Whitelabel Error Page", "framework debug page"),
+                            ("You're seeing this error because you have DEBUG = True", "framework debug page"),
+                            ("Server Error in '/' Application.", "framework debug page")):
+            self.assertIn(f"leak: {label}", v(text, status=500), text)
+        self.assertEqual(v("at https://app.example/main.js:10:5", status=500), [])  # browser frames are the app's own JS
+
+    def test_suspect_200s_are_graphql_rpc_and_writes_without_auth_paths(self):
+        d = self.triage_dir("1. [POST] http://localhost:8765/graphql => [200] OK\n"
+                            "2. [POST] http://localhost:8765/api/auth/token => [200] OK\n"
+                            "3. [GET] http://localhost:8765/api/zones => [200] OK\n"
+                            "4. [PUT] http://localhost:8765/api/zones/7 => [200] OK\n"
+                            "5. [PUT] http://localhost:8765/api/zones/8 => [200] OK\n"
+                            "6. [POST] http://localhost:8765/api/profile => [200] OK\n"
+                            "7. [DELETE] http://localhost:8765/api/zones/9 => [204] No Content\n"
+                            "8. [POST] http://localhost:8765/api/jobs => [200] OK\n"
+                            "9. [POST] https://cdn.example.com/rpc => [200] OK\n")
+        t = report.triage_signals(d, "form", RUN1)
+        self.assertEqual(t["app"], [])  # nothing is a signal until a body says so
+        self.assertEqual(t["suspect_200"], [("POST /graphql", "1"), ("PUT /api/zones/:id", "4"), ("DELETE /api/zones/:id", "7")])
+        run = {**RUN1, "notes": "PUT /api/zones/:id saves the zone, body checked."}
+        self.assertEqual([k for k, _ in report.triage_signals(d, "form", run)["suspect_200"]],
+                         ["POST /graphql", "DELETE /api/zones/:id", "POST /api/jobs"])  # a named call is cleared, the next one fills in
+
+    def test_a_checked_body_makes_its_call_a_severe_signal_and_a_clean_one_clears_it(self):
+        d = self.triage_dir("1. [POST] http://localhost:8765/graphql => [200] OK\n"
+                            "2. [POST] http://localhost:8765/api/zones => [200] OK\n"
+                            "3. [POST] http://localhost:8765/api/zones => [500] Internal Server Error\n")
+        code, out, _ = cli("body-check", str(d), "--slug", "form", "1", stdin='{"errors": [{"message": "Forbidden"}]}')
+        self.assertEqual(code, 0, out)
+        self.assertIn("error body: errors: Forbidden", out)
+        code, out, _ = cli("body-check", str(d), "--slug", "form", "2", stdin='{"id": 7, "name": "qa-sdet-z"}')
+        self.assertIn("nothing suspicious", out)
+        cli("body-check", str(d), "--slug", "form", "3", stdin="PG::SyntaxError: ERROR: syntax error at or near")
+        t = report.triage_signals(d, "form", RUN1)
+        self.assertEqual([k for k, _, _ in t["app"]],
+                         ["POST /graphql → 200 [error body: errors: Forbidden]",
+                          "POST /api/zones → 500 [leak: SQL error]"])
+        self.assertEqual(t["suspect_200"], [])
+        self.assertEqual([report.signal_severity(k) for k, _, _ in t["app"]], ["severe", "severe"])
+        code, out, _ = cli("signals-triage", str(d), "--slug", "form")
+        self.assertLess(out.index("SEVERE"), out.index("#1 POST /graphql → 200"))
+        self.assertNotIn("SUSPECT 200", out)
+
+    def test_body_check_text_is_scrubbed_and_a_missing_request_still_checks(self):
+        d = self.triage_dir("1. [POST] http://localhost:8765/graphql => [200] OK\n")
+        code, out, _ = cli("body-check", str(d), "--slug", "form", "1",
+                           stdin='{"errors": [{"message": "bad apiKey=sk-12345678901234567890 for x"}]}')
+        self.assertNotIn("12345678901234567890", out)
+        self.assertNotIn("12345678901234567890", (d / ".data/bodies-form.json").read_text())
+        code, out, _ = cli("body-check", str(d), "--slug", "form", "99", stdin="<!doctype html>")
+        self.assertEqual(code, 0)
+        self.assertIn("nothing suspicious", out)  # no such request in the log: no path to call it an API
+        code, _, err = cli("body-check", str(d), "--slug", "form", "x", stdin="{}")
+        self.assertEqual(code, 2)
+
+    def test_triage_groups_severe_signals_before_client_errors(self):
+        d = self.triage_dir("1. [GET] http://localhost:8765/api/closures.json => [404] Not Found\n"
+                            "2. [POST] http://localhost:8765/form => [500] Error\n"
+                            "3. [POST] http://localhost:8765/graphql => [200] OK\n",
+                            console="[ERROR] column \"x\" does not exist SQLSTATE 42703 @ :1\n[ERROR] plain failure @ :1\n")
+        code, out, _ = cli("signals-triage", str(d), "--slug", "form")
+        self.assertEqual(code, 0)
+        sev, client, other, suspect = (out.index(w) for w in ("SEVERE", "CLIENT 4xx", "OTHER", "SUSPECT 200"))
+        self.assertTrue(sev < out.index("#2 POST /form → 500") < client < out.index("#1 GET /api/closures.json → 404") < other
+                        < suspect < out.index("#3 POST /graphql"))
+        self.assertIn("console: column \"x\" does not exist SQLSTATE 42703 [leak: SQL error]", out.split("CLIENT 4xx")[0])
+        self.assertIn("qa-mem body-check", out)
+
     def test_third_party_failures_fold_into_one_line_and_request_loops_show(self):
         self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
         d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])

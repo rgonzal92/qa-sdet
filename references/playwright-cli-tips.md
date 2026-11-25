@@ -46,6 +46,17 @@ playwright-cli -s=qa requests --filter '<path regexp>' > '<out>/evidence/BUG-<n>
 ```
 `<#>` is the call's number in `requests`. The file is scrubbed before the report links it and the filing command attaches it.
 
+## Error bodies: disguised failures and leaks (step 9, or when a call looks wrong)
+The `requests` list shows only a status, so a 200 can hide a failure. `qa-mem signals-triage` names the calls to read (SUSPECT 200: GraphQL and RPC calls, then writes; and every failed call). One body per command, never for login, session, token or profile calls:
+```
+playwright-cli -s=qa response-body <#> | qa-mem body-check '<out>' --slug <slug> <#>
+```
+It reads the body from stdin and prints what is wrong with it; the verdict, clean or not, goes into the run folder, so triage shows a bad body as a signal until a bug draft or `notes` names the call (`POST /graphql`). A clean answer clears the call.
+- **A 2xx that is a failure:** a JSON body with `error` or `errors` (GraphQL: `{"errors": [{"message": …}]}`), `success` or `ok` false, or `status` `error`; or an HTML page (a login redirect, a proxy page) on an API call. Oracle: a call the page makes for its data or action either worked or did not; the page must not show "Saved" or "0 items" for it.
+- **A leak, in any status:** a stack trace (`Traceback`, `at … (/srv/app/zones.js:42:11)`, `NullPointerException`), a SQL error (`SQLSTATE`, `ORA-00942`, `syntax error at or near`), or a framework debug page (`Whitelabel Error Page`, Django `DEBUG = True`, `Server Error in '/' Application`). Never shown to a user: a bug (severity HIGH when it names internals such as tables or server paths).
+- **A 5xx on bad input:** a value the form or the server should refuse (past a limit, empty, the wrong type) must give a 4xx with a message. A 500 for it is a bug (boundary / invalid-format / empty-null), whatever the page shows.
+- A 4xx whose body says so (`{"error": "…"}`) is the right answer; only its leaks count.
+
 ## Map the page's states and links (one call, read-only)
 Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES; never follow logout or delete links. A link's query string is dropped: `/list?page=2` and `/list?sort=name` are the page `/list` (a query view that shows other content is an in-page state, not a page).
 ```

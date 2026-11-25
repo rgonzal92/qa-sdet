@@ -196,6 +196,20 @@ class Docs(unittest.TestCase):
                     self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
                                                  "agent_type": "qa-sdet:qa-explorer"}), (None, True), cmd)
 
+    def test_the_body_check_pipeline_is_approved_and_named_by_the_explorer_and_the_tips(self):
+        """Step 9 reads a body into `qa-mem body-check`: the verb exists, the guard lets the pipe through, both docs name it."""
+        self.assertIn("body-check", cli.COMMANDS)
+        for doc in ("agents/qa-explorer.md", "references/playwright-cli-tips.md"):
+            self.assertIn("| qa-mem body-check '<out>' --slug <slug> <#>", text(doc), doc)
+        cmd = "playwright-cli -s=qa response-body 7 | qa-mem body-check '/p/qa-out/run' --slug form 7"
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            proj = Path(os.path.realpath(d)) / "proj"
+            (proj / "qa-out/run/.data").mkdir(parents=True)
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                self.assertIsNone(g.check(cmd.replace("/p/", f"{proj}/"), str(proj), explorer=True), cmd)
+
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)

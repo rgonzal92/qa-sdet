@@ -856,17 +856,125 @@ def _names_request(named, method, path):
 
 
 STORM_CALLS = 5  # the same call this often in one page visit: a fetch loop, likely
+SUSPECT_200_SHOWN = 3  # calls triage names for a response-body check: each one costs a browser command
+RPC_PATH = re.compile(r"graphql|/gql\b|rpc", re.I)
+API_PATH = re.compile(r"/api(?:/|$)|graphql|/gql\b|rpc|\.json$|/v\d+/", re.I)  # where a 200 HTML page is wrong
+_NOT_A_URL = r"(?<![:/\w])"  # a browser stack frame is the app's own JS (http://host/main.js:10); a server frame has a file path
+LEAKS = (  # what a server must never show a client: (label, pattern)
+    ("stack trace", re.compile(
+        r"Traceback \(most recent call last\)|\bNullPointerException\b|\bNullReferenceException\b|\bException in thread\b"
+        r"|\bat\s+[^\n(]*\(?" + _NOT_A_URL + r"(?:/|[A-Za-z]:\\)[^\s:)]+\.(?:js|ts|java|cs|py|rb|php|go):\d+"
+        r"|\bat \S+ in \S+\.cs:line \d+")),
+    ("SQL error", re.compile(
+        r"\bSQLSTATE\b|\bORA-\d{4,5}\b|syntax error at or near|\bPG::\w+|SequelizeDatabaseError|error in your SQL syntax"
+        r"|\bsqlite3?\.OperationalError|\bpsycopg2\.\w+|(?:column|relation) \S+ does not exist", re.I)),
+    ("framework debug page", re.compile(
+        r"Whitelabel Error Page|you have DEBUG = True|Server Error in '[^']*' Application|Werkzeug Debugger"
+        r"|Whoops, looks like something went wrong|ActionController::RoutingError|Django Version:", re.I)),
+)
+
+
+PROFILE_SEGMENTS = {"me", "profile", "userinfo", "whoami", "currentuser"}  # the explorer never reads these bodies either
+
+
+def _credential_call(path):
+    """Whether a path is a login, session, token or user-profile call, whose body carries credentials."""
+    return bool(ops._auth_segment(path)) or any(re.sub(r"[-_]", "", x.lower()) in PROFILE_SEGMENTS for x in path.split("/"))
+
+
+def _err_text(e):
+    """The message inside an error value (`"x"`, `[{"message": "x"}]`, `{"detail": "x"}`), at most 80 characters."""
+    if isinstance(e, list):
+        e = e[0] if e else ""
+    if isinstance(e, dict):
+        e = next((e[k] for k in ("message", "detail", "title", "error", "code") if e.get(k)), json.dumps(e, ensure_ascii=False))
+    return "" if isinstance(e, bool) else core.short(scrub.redact(" ".join(str(e).split())), 80)
+
+
+def body_verdict(text, path="", status=200):
+    """What is wrong with one response body, as short labels ([] when nothing): a leak signature (stack trace, SQL error,
+    framework debug page) in any status; on a 2xx also a JSON error envelope (`error`, `errors`, GraphQL `errors`,
+    `success`/`ok` false, `status` "error") and, on an API-looking path, an HTML page (a login redirect, a proxy page).
+    A 4xx or 5xx that says so in JSON is the right answer, so only its leaks count."""
+    text = str(text or "")[:200_000]
+    out = []
+    if 200 <= status < 300:
+        try:
+            v = json.loads(text)
+        except (ValueError, RecursionError):
+            v = None
+        if isinstance(v, dict):
+            for k in ("errors", "error"):
+                if v.get(k):
+                    out.append(f"error body: {k}" + (f": {m}" if (m := _err_text(v[k])) else ""))
+                    break
+            else:
+                flag = next((k for k in ("success", "ok") if v.get(k) is False), None)
+                if flag or str(v.get("status")).lower() in ("error", "fail", "failed", "failure"):
+                    m = _err_text(next((v[k] for k in ("message", "detail", "error_description", "reason") if v.get(k)), ""))
+                    out.append(f"error body: {flag + ' false' if flag else 'status ' + str(v['status']).lower()}" + (f": {m}" if m else ""))
+        elif re.match(r"\s*<(?:!doctype html|html)\b", text, re.I) and API_PATH.search(path):
+            out.append("HTML on an API endpoint")
+    out += [f"leak: {label}" for label, rx in LEAKS if rx.search(text)]
+    return out
+
+
+def signal_severity(key):
+    """'severe' (a 5xx, a failed request, a 200 with an error body, a leak signature), 'client' (a 4xx) or 'other'
+    (a request loop, a console error) for a triage key, with or without the [NEW] / (seen in N runs) marks."""
+    if "[leak:" in key or re.search(r"→ (?:5\d\d|FAILED)\b|→ 2\d\d \[", key):
+        return "severe"
+    return "client" if re.search(r"→ 4\d\d\b", key) else "other"
+
+
+def _bodies(data, slug):
+    """{request number: [finding]} qa-mem body-check recorded in .data/bodies-<slug>.json ({} without one)."""
+    try:
+        v = json.loads((data / f"bodies-{slug}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(v, dict):
+        return {}
+    return {str(k): [scrub.redact(str(f)) for f in fs if isinstance(f, str)] for k, fs in v.items() if isinstance(fs, list)}
+
+
+def check_body(run_dir, slug, index, text):
+    """Judge the body of request `index` (the number `requests` printed) and record the verdict, clean or not, in
+    .data/bodies-<slug>.json for triage_signals. The method, path and status come from .data/requests-<slug>.log when it
+    has the request. Returns (what it was, findings)."""
+    data = Path(run_dir) / ".data"
+    line = next((m for m in map(REQUEST_LINE.fullmatch, _text(data / f"requests-{slug}.log").splitlines())
+                 if m and m.group(1) == index), None)
+    path, status = "", 200
+    if line:
+        try:
+            path = urlsplit(line.group(3)).path
+        except ValueError:
+            pass
+        status = int(line.group(4)) if line.group(4).isdigit() else 0
+    findings = [scrub.redact(f) for f in body_verdict(text, path, status)]
+    recorded = _bodies(data, slug)
+    recorded[index] = findings
+    tmp = data / f".bodies-{slug}.tmp"
+    tmp.write_text(json.dumps(recorded, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, data / f"bodies-{slug}.json")
+    return (f"{line.group(2)} {path} → {line.group(4)}" if line else ""), findings
 
 
 def triage_signals(run_dir, slug, run, hosts=None):
-    """{"app": [(signal, count, first request index or None)], "third_party": count} from .data/requests-<slug>.log and
-    console-<slug>.log: failed requests (4xx, 5xx, FAILED), a call made STORM_CALLS+ times (a request loop), and
-    console errors, each once, minus those the run JSON or a bug draft names (a request by its method and path, a
-    message by its first 60 characters). A failed request to a host outside allowedHosts (a CDN, map tiles) is only
-    counted. "Failed to load resource" lines repeat the requests log and are skipped. hosts: allowedHosts (None: the
-    config's; empty: every host is the app's)."""
+    """{"app": [(signal, count, first request index or None)], "third_party": count, "suspect_200": [(call, index)]} from
+    .data/requests-<slug>.log, console-<slug>.log and bodies-<slug>.json (what `qa-mem body-check` found in the bodies the
+    explorer read): failed requests (4xx, 5xx, FAILED), a 2xx whose body was an error envelope, an HTML page or a leak, a
+    call made STORM_CALLS+ times (a request loop), and console errors, each once, minus those the run JSON or a bug draft
+    names (a request by its method and path, a message by its first 60 characters). A leak signature (stack trace, SQL
+    error) in a body or a console message is added to the signal in brackets. A failed request to a host outside
+    allowedHosts (a CDN, map tiles) is only counted. "Failed to load resource" lines repeat the requests log and are
+    skipped. `suspect_200` is up to SUSPECT_200_SHOWN 2xx calls nobody has checked or named whose body the log can't show
+    (GraphQL and RPC calls, then writes, never login, session or token paths): the explorer reads their bodies while the
+    browser is open. hosts: allowedHosts (None: the config's; empty: every host is the app's)."""
     data, found, calls, third = Path(run_dir) / ".data", {}, {}, 0
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
+    checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
@@ -882,9 +990,16 @@ def triage_signals(run_dir, slug, run, hosts=None):
         shape = core._ids(path) or path
         if method == "GET":  # a POST many times is a user (or a test) saving records, not a fetch loop
             calls.setdefault((method, shape), [0, index])[0] += 1
+        notes = f" [{'; '.join(checked[index])}]" if checked.get(index) else ""  # what body-check saw in its body
+        if index in checked:
+            checked_shapes.add((method, shape))
         if code == "FAILED" or int(code) >= 400:
             status = code if code != "FAILED" else f"FAILED {text}".strip()
-            found.setdefault(f"{method} {path} → {status}", [(method, path), 0, index])[1] += 1
+            found.setdefault(f"{method} {path} → {status}{notes}", [(method, path), 0, index])[1] += 1
+        elif notes:
+            found.setdefault(f"{method} {path} → {code}{notes}", [(method, path), 0, index])[1] += 1
+        elif index not in checked:
+            seen_2xx.append((method, path, shape, index))
     for (method, shape), (n, index) in calls.items():
         if n >= STORM_CALLS:
             found[f"{method} {shape} ×{n} (the same call {n} times: a request loop?)"] = [(method, shape), 1, index]
@@ -894,7 +1009,8 @@ def triage_signals(run_dir, slug, run, hosts=None):
         level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
         msg = re.sub(r"\s+@\s+\S*$", "", line[level.end():] if level else line).strip()  # " @ <source>:1"
         if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
-            found.setdefault(f"console: {msg}", [msg[:60], 0, None])[1] += 1
+            leaks = "".join(f" [leak: {label}]" for label, rx in LEAKS if rx.search(msg))  # the server's own words in the page
+            found.setdefault(f"console: {msg}{leaks}", [msg[:60], 0, None])[1] += 1
     drafts = "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))
     named = (json.dumps(run, ensure_ascii=False) + drafts).lower()  # a console message: any mention in the run
     # a failed request: bugs, notes, non-PASS cases and drafts only; a passing fact or locator that mentions the path
@@ -902,7 +1018,14 @@ def triage_signals(run_dir, slug, run, hosts=None):
     cases = [c for c in _list(run, "cases") if core.case_status(c.get("status")) != "PASS"]
     explains = (json.dumps([_list(run, "bugs"), run.get("notes"), cases], ensure_ascii=False) + drafts).lower()
     explained = lambda w: _names_request(explains, *w) if isinstance(w, tuple) else w.lower() in named
-    return {"app": [(key, n, index) for key, (what, n, index) in found.items() if not explained(what)], "third_party": third}
+    rank = lambda c: 0 if RPC_PATH.search(c[1]) else 1
+    suspects = {}
+    for method, path, shape, index in sorted((c for c in seen_2xx if (RPC_PATH.search(c[1]) or c[0] in ops.API_WRITES)
+                                              and not _credential_call(c[1])), key=rank):
+        if (method, shape) not in checked_shapes and not explained((method, path)):
+            suspects.setdefault((method, shape), index)
+    return {"app": [(key, n, index) for key, (what, n, index) in found.items() if not explained(what)], "third_party": third,
+            "suspect_200": [(f"{method} {shape}", index) for (method, shape), index in suspects.items()][:SUSPECT_200_SHOWN]}
 
 
 def _signal_baseline():

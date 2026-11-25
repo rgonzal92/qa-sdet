@@ -61,7 +61,7 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
-                   "annotate", "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
+                   "annotate", "evidence", "report", "audit-bugs", "signals-triage", "body-check", "dup-check", "trace", "next-action", "explore-next", "plan-find",
                    "setup-permissions", "spend", "plugin-log", "discover"):
         return None
     from . import ops
@@ -149,12 +149,32 @@ def wrapper_cmd(cmd, args):
         except (OSError, ValueError):
             run = {}  # step 9 writes the run file last: nothing named yet
         t = report.triage_signals(o["_"][0], o["--slug"], run if isinstance(run, dict) else {})
+        groups = (("severe", "SEVERE (5xx, failed requests, a 200 with an error body, a leak)"), ("client", "CLIENT 4xx"),
+                  ("other", "OTHER (request loops, console errors)"))
         lines = [f"- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
+        sev = [report.signal_severity(key) for key, _, _ in t["app"]]
         print(("APP SIGNALS NO BUG EXPLAINS YET (while the browser is open: `playwright-cli -s=qa response-body <#>`; a "
-               "real failure is a bug, a known one goes in notes by method and path):\n" + "\n".join(lines))
+               "real failure is a bug, a known one goes in notes by method and path):\n"
+               + "\n".join(f"{title}:\n" + "\n".join(l for l, v in zip(lines, sev) if v == kind)
+                           for kind, title in groups if kind in sev))
               if lines else "no unexplained app signals")
+        if t["suspect_200"]:
+            slug, d = o["--slug"], o["_"][0]
+            print("SUSPECT 200 (a 200 can still be a failure the log can't show; read each body once, while the browser is "
+                  f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check '{d}' --slug {slug} <#>`):\n"
+                  + "\n".join(f"- #{i} {call}" for call, i in t["suspect_200"]))
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
+    elif cmd == "body-check":
+        o = _opts(args, valued=("--slug",))
+        if len(o["_"]) != 2 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir() or not o["_"][1].isdigit():
+            raise core.BadInput("usage: <playwright-cli response-body <#>> | qa-mem body-check <run dir> --slug <slug> <#>")
+        from . import report
+        what, findings = report.check_body(o["_"][0], o["--slug"], o["_"][1], sys.stdin.read(200_000))
+        print(f"body-check #{o['_'][1]}" + (f" {what}" if what else "") + ": "
+              + ("nothing suspicious (no error envelope, HTML page or leak signature)" if not findings
+                 else "\n" + "\n".join(f"- {f}" for f in findings)
+                 + "\nA real failure is a bug; a harmless one goes in notes by method and path."))
     elif cmd == "next-action":
         if len(args) != 2 or not (Path(args[0]) / ".data").is_dir():
             raise core.BadInput("usage: qa-mem next-action <run dir> <slug>")
@@ -298,6 +318,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "prune": "<project> [<run dir>]",
     "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]",
     "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]", "signals-triage": "<run dir> --slug <slug>",
+    "body-check": "<run dir> --slug <slug> <#>   (the response body of request <#> on stdin)",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
     "plugin-log": "note [--kind bug|nuisance|idea] [--severity low|med|high] [--project DIR] <text> | "
