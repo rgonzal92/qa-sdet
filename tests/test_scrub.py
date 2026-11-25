@@ -96,6 +96,25 @@ class ScrubFiles(MemBase):
         scrub.scrub_file(f)
         self.assertEqual(f.read_text(), "const password = 'hunter2secret';\nconst t = '[REDACTED-JWT]';\n")
 
+    def test_network_evidence_text_loses_json_secret_values(self):
+        out = Path(self.tmp.name) / "evidence"
+        out.mkdir()
+        f = out / "BUG-1-network.txt"
+        body = ('{"user":"ann","password":"hunter2pw","clientSecret": "c1ientS3cretv","apiKey":"k3yV4lue99",'
+                '"session_id":"sess1234abcd","retries":3,"password_hint":"first pet","nested":{"token":"t0kenV4lue"}}')
+        f.write_text(f"[1] POST /api/login => [500]\n{body}\nresponse: {body[:60]}")  # a truncated body too
+        scrub.scrub_file(f)
+        got = f.read_text()
+        for secret in ("hunter2pw", "c1ientS3cretv", "k3yV4lue99", "sess1234abcd", "t0kenV4lue"):
+            self.assertNotIn(secret, got)
+        for keep in ('"user":"ann"', '"retries":3', '"password_hint":"first pet"', "POST /api/login => [500]"):
+            self.assertIn(keep, got)
+        scrub.scrub_file(f)
+        self.assertEqual(f.read_text(), got)  # idempotent
+        (out / "a.log").write_text('{"password": "hunter2pw"}')
+        scrub.scrub_file(out / "a.log")
+        self.assertEqual((out / "a.log").read_text(), '{"password": "[REDACTED]"}')
+
     def test_ingest_redacts_drafts_and_run_json(self):
         out = Path(self.tmp.name) / "qa-out" / "a"
         (out / "bugs").mkdir(parents=True)

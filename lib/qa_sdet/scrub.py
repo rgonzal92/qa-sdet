@@ -55,6 +55,21 @@ def redact(text):
     return HEADER_RE.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", redact_literals(text))
 
 
+# `"key": "value"` (or a number) anywhere in text: a JSON body embedded in a request log, even a truncated one
+JSON_PAIR_RE = re.compile(r'("([^"\\\n]{1,60})"[ \t]*:[ \t]*)("(?:[^"\\\n]|\\.)*"?|-?\d[\w.+-]*)')
+
+
+def redact_json_text(text):
+    """Text that embeds JSON (`requests` output plus request/response bodies): values of secret-named keys, as
+    redact_json does for parsed JSON. An object or array under a secret key is left; its own keys are still checked."""
+    def mask(m):
+        v = m.group(3)
+        if not SECRET_NAME_RE.match(m.group(2)) or v in ('""', '"[REDACTED]"'):
+            return m.group(0)
+        return m.group(1) + '"[REDACTED]"'
+    return JSON_PAIR_RE.sub(mask, text)
+
+
 def _redactable(v):
     return not (v is None or isinstance(v, bool) or v == "")
 
@@ -105,6 +120,8 @@ def scrub_file(f):
         clean = redact_literals(text)  # repro specs must stay runnable
     else:
         clean = redact(text)
+        if suf in {".txt", ".log"}:
+            clean = redact_json_text(clean)
     if clean != text:
         st = f.stat()
         # write + rename: a hook killed mid-write can't leave a truncated draft; a fresh temp file (O_EXCL), so a
