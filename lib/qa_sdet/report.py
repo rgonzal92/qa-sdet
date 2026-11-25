@@ -264,11 +264,15 @@ def ticket_bugs(key, cases, bugs, known=()):
     ]
 
 
-def _bug_owners(b, cases, tickets):
-    """The plan tickets a bug counts for (as their verdicts count it), else the ticket it names (not 'none')."""
-    return [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)] or (
-        [str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else []
-    )
+def _bug_owners(bugs, cases, tickets):
+    """Per bug, the plan tickets it counts for (as their verdicts count it), else the ticket it names (not 'none').
+    One ticket_bugs pass per ticket: each pass reads every case."""
+    owned = [(str(t), {id(x) for x in ticket_bugs(t, cases, bugs, tickets)}) for t in tickets]
+    return [
+        [t for t, ids in owned if id(b) in ids]
+        or ([str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else [])
+        for b in bugs
+    ]
 
 
 def _first_word(v):
@@ -920,14 +924,13 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
     dups = _load_json(run_dir / ".data" / "jira-dups.json", [])
     dups = dups if isinstance(dups, dict) else {}
     default_proj = str(cfg.get("jiraProject") or "").strip() or "<PROJ>"
-    for b in bugs:
+    for b, owners in zip(bugs, _bug_owners(bugs, cases, tickets)):
         bid = b.get("id") or ""
         if not bid or _first_word(b.get("classification")) != "confirmed":
             continue
         draft = run_dir / "bugs" / f"{bid}.md"
         if not draft.is_file():
             continue
-        owners = _bug_owners(b, cases, tickets)
         proj = next((o.split("-", 1)[0] for o in owners if ops.KEY_RE.fullmatch(o.upper())), default_proj)
         title = _draft_title(draft, b.get("title") or bid)
         cmd = (
@@ -1012,9 +1015,8 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
         row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"),
         "|---|---|---|---|---|---|---|",
     ]
-    for b in bugs:
+    for b, owners in zip(bugs, _bug_owners(bugs, cases, tickets)):
         bid = b.get("id") or ""
-        owners = _bug_owners(b, cases, tickets)
         png = Path(run_dir) / "evidence" / f"{bid}.png"
         ev = Path(str(b.get("evidence") or ""))
         img = (

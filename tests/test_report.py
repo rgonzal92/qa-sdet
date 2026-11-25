@@ -2775,6 +2775,28 @@ class Frontier(Rendering):
 class FilingBundle(Rendering):
     """Persistent shell-safe filing commands & attachments folded inside REPORT.md."""
 
+    def test_bug_owners_are_found_once_per_ticket_not_once_per_bug(self):  # bugs x tickets x cases: 5 s at 800 cases
+        def lookups(n):
+            bugs = [
+                {
+                    "route": "/form",
+                    "title": f"Bug {i}",
+                    "severity": "HIGH",
+                    "classification": "CONFIRMED",
+                    "draft_path": f"bugs/BUG-{i}.md",
+                }
+                for i in range(1, n + 1)
+            ]
+            d = self.rundir(f"2026-11-23-PROJ-1+PROJ-2-{n}", plan=PLAN, runs=[("form", {**RUN_FORM, "bugs": bugs})])
+            for i in range(1, n + 1):
+                (d / f"bugs/BUG-{i}.md").write_text(f"# Bug {i}\n")
+            with mock.patch.object(report, "ticket_bugs", wraps=report.ticket_bugs) as spy:
+                r = report.render_report(d)
+            self.assertEqual(r.count("| /form | PROJ-1"), n)  # every untagged bug on /form still counts for PROJ-1
+            return spy.call_count
+
+        self.assertEqual(lookups(1), lookups(12))
+
     def test_confirmed_draft_gets_safe_filing_block_and_suspected_does_not(self):
         import subprocess
 
