@@ -162,9 +162,9 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
             con.execute("INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
                         "last_seen,last_run,symptom) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
                         "seen_count=seen_count + ?, "
-                        # a run older than the last sighting (ingested late) predates the fix: no regression, no last_run
+                        # a run older than the last sighting or than the fix (ingested late) predates it: no regression
                         "status=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
-                        "THEN 'REGRESSED' ELSE status END, "
+                        "AND excluded.last_seen >= coalesce(fixed_ts, '') THEN 'REGRESSED' ELSE status END, "
                         "last_run=CASE WHEN excluded.last_seen >= coalesce(last_seen, '') THEN excluded.last_run ELSE last_run END, "
                         "last_seen=max(coalesce(last_seen, ''), excluded.last_seen), "
                         "first_seen=min(coalesce(first_seen, excluded.first_seen), excluded.first_seen), "
@@ -372,14 +372,26 @@ def card(con, q):
     return "\n".join(x for x in out if x)
 
 
+# coverage that counts on a build (params: build, a week ago): runs that couldn't read the build count for a week
+ON_BUILD = "((build=? AND build!='unknown') OR (build='unknown' AND ts >= ?))"
+
+
+def _week_ago():
+    return datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rechecked(con, route, build):
+    """Hashes of the page's bugs some run re-checked on `build` (coverage `regression` with the hash as target)."""
+    return {r[0] for r in con.execute(f"SELECT lower(trim(target)) FROM coverage WHERE page=? AND heuristic='other:regression' "
+                                      f"AND result!='blocked' AND {ON_BUILD}", (route, build, _week_ago()))}
+
+
 def _coverage(con, route, build):
     """({heuristic: ['target:result', ...]}, heuristics tried, normalised targets checked) on `build`. Coverage from
     runs that couldn't read the build counts for a week, then it is retried."""
     cov, targets = {}, set()
-    week_ago = datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for c in con.execute("SELECT heuristic, target, result FROM coverage WHERE page=? AND ((build=? AND "
-                         "build!='unknown') OR (build='unknown' AND ts >= ?)) ORDER BY heuristic, result='pass', ts DESC",
-                         (route, build, week_ago)):  # failures first
+    for c in con.execute(f"SELECT heuristic, target, result FROM coverage WHERE page=? AND {ON_BUILD} "
+                         "ORDER BY heuristic, result='pass', ts DESC", (route, build, _week_ago())):  # failures first
         cov.setdefault(c["heuristic"], []).append(f"{core.short(c['target'], 40)}:{core.short(c['result'], 12)}")
         if c["result"] != "blocked":
             targets.add(core.norm(c["target"]))
@@ -420,18 +432,22 @@ def bug_lines(con, route, build=None):
         args.append(route)
     rows = con.execute(q + " ORDER BY last_seen DESC LIMIT 10", args).fetchall()
     fixed = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='FIXED'"
-                        + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
+                        + (" AND page=? ORDER BY last_seen DESC" if route is not None else " ORDER BY last_seen DESC LIMIT 5"),
                         [route] if route is not None else []).fetchall()
     line = lambda x: _bug_line(x, route is None)  # app-wide list: say which page
     out = []
     if rows:
         out += ["KNOWN BUGS (don't re-draft; to report a sighting put its hash in run.json):"] + [line(x) for x in rows]
-    rechecked = lambda h: build and build != core.UNKNOWN and con.execute(
-        "SELECT 1 FROM coverage WHERE page=? AND build=? AND heuristic='other:regression' AND lower(trim(target))=? "
-        "AND result!='blocked'", (route, build, h)).fetchone()
+    done = _rechecked(con, route, build) if route is not None else set()
+    # the ones still to re-check first: a bug fixed today keeps its old last_seen, and gaps counts it
+    fixed = sorted(fixed, key=lambda x: x["hash"] in done)
+    more, fixed = len(fixed) - 5, fixed[:5]
     if fixed:
+        on = f" on build {build}" if build and build != core.UNKNOWN else ""
         out += ["PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):"] + [
-            line(x) + (f" | re-checked on build {build}" if rechecked(x["hash"]) else "") for x in fixed]
+            line(x) + (f" | re-checked{on}" if x["hash"] in done else "") for x in fixed]
+        if more > 0:
+            out.append(f"(+{more} more FIXED: qa-mem bugs FIXED)")
     invalid = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='INVALID'"
                           + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
                           [route] if route is not None else []).fetchall()
@@ -469,7 +485,7 @@ def _search(con, q):
 def bugs(con, status="OPEN"):
     total = con.execute("SELECT count(*) FROM bugs WHERE status=?", (status,)).fetchone()[0]
     rows = con.execute("SELECT * FROM bugs WHERE status=? ORDER BY last_seen DESC LIMIT 30", (status,)).fetchall()
-    lines = [f"{x['hash']}" + (f" {x['jira_key']}" if x["jira_key"] else "")
+    lines = [f"{x['hash']} {x['status']}" + (f" {x['jira_key']}" if x["jira_key"] else "")
              + f" [{x['severity'] or '?'}] {x['classification'] or '?'} {x['page']} {core.short(x['title'], 100)} "
              f"(seen {x['seen_count']}) {x['draft_path'] or ''}" for x in rows]
     if total > len(rows):
@@ -494,21 +510,24 @@ def _jira_str(v):
 
 
 def _view_resolution(key):
-    """Fetch a single Done item's resolution via read-only `acli jira workitem view` (acli rejects `resolution` on `search`)."""
+    """A single Done item's resolution via read-only `acli jira workitem view` (acli rejects `resolution` on `search`):
+    '' when it has none, None when it couldn't be read (no acli, auth, timeout, odd output)."""
     import shutil, subprocess
     acli = shutil.which("acli")
     if not acli:
-        return ""
+        return None
     try:
         r = subprocess.run([acli, "jira", "workitem", "view", key, "--fields", "resolution", "--json"],
                            capture_output=True, text=True, errors="replace", timeout=20)
         if r.returncode != 0:
-            return ""
+            return None
         data = json.loads(r.stdout)
-        fields = data.get("fields") if isinstance(data, dict) and isinstance(data.get("fields"), dict) else {}
+        if not isinstance(data, dict):
+            return None
+        fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
         return _jira_str(fields.get("resolution")).strip()
     except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
-        return ""
+        return None
 
 
 def bug_sync(con, data):
@@ -522,7 +541,7 @@ def bug_sync(con, data):
         filed.setdefault(r["jira_key"].upper(), []).append(r)
     if not filed:
         return "no FILED bugs with a Jira key to sync"
-    fixed, triage, unchanged = [], [], 0
+    fixed, triage, unread, unchanged = [], [], [], 0
     with con:
         for it in data:
             if not isinstance(it, dict):
@@ -542,18 +561,23 @@ def bug_sync(con, data):
             has_res = "resolution" in fields or "resolution" in it
             res_obj = fields.get("resolution") if "resolution" in fields else it.get("resolution")
             res_name = _jira_str(res_obj).strip() if has_res else _view_resolution(key)
+            if res_name is None:  # unknown is not 'Fixed': a Won't Do must not become FIXED because acli failed
+                unread.append(key)
+                continue
             if res_name.lower() in REJECTED_RESOLUTIONS:
                 for b in filed[key]:
                     triage.append(f"- {b['hash']} {key} ({b['page']}) closed as {res_name} -> qa-mem bug-status {b['hash']} INVALID")
                 continue
             for b in filed[key]:
-                con.execute("UPDATE bugs SET status='FIXED' WHERE hash=? AND status='FILED'", (b["hash"],))
+                con.execute("UPDATE bugs SET status='FIXED', fixed_ts=? WHERE hash=? AND status='FILED'", (core.now(), b["hash"]))
                 fixed.append(f"- {b['hash']} {key} -> FIXED ({b['page']}): {core.short(b['title'], 80)}")
     out = []
     if fixed:
         out += [f"Marked FIXED ({len(fixed)}; ready for regression re-check):"] + fixed
     if triage:
         out += [f"Needs triage ({len(triage)}; closed without a fix):"] + triage
+    if unread:
+        out.append(f"Left FILED, couldn't read the resolution of {', '.join(unread)} (check acli: `acli jira auth status`)")
     if not fixed and not triage:
         out.append(f"bug-sync: 0 changes ({unchanged} still open)")
     elif unchanged:
@@ -566,11 +590,7 @@ def _unrechecked_fixed(con, route, build):
     rows = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE page=? AND status='FIXED'", (route,))]
     if not rows:
         return 0
-    if not build or build == core.UNKNOWN:
-        return len(rows)
-    checked = {r[0] for r in con.execute(
-        "SELECT lower(trim(target)) FROM coverage WHERE page=? AND build=? AND heuristic='other:regression' "
-        "AND result!='blocked'", (route, build))}
+    checked = _rechecked(con, route, build)
     return sum(h.lower() not in checked for h in rows)
 
 
@@ -584,6 +604,12 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             return json.dumps({"build": current or core.UNKNOWN, "pages": [], "unchecked_repos": []}, indent=1)
         return "no pages yet: /qa-sdet:qa-init maps them from the source, or /qa-sdet:qa-explore <route> visits one"
     verified = {pg["route"]: pg["last_verified"] for pg in pages if pg["last_verified"]}
+    visits = {}  # a page whose build was never read has no last_verified: its last run is the visit
+    for target, ts in con.execute("SELECT target, ts FROM runs WHERE ts IS NOT NULL"):
+        r = core.norm_route(target)
+        visits[r] = max(visits.get(r, ""), ts)
+    verified |= {pg["route"]: visits[pg["route"]] for pg in pages
+                 if not pg["last_verified"] and pg["build"] == core.UNKNOWN and visits.get(pg["route"])}
     changed, unchecked = _source_changes(con, verified)
     ranked = []
     for pg in pages:
@@ -609,6 +635,8 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append(f"{untested} untested field{'s' * (untested != 1)}")
         if open_bugs:
             parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
+        if "/:id" in r:  # a detail page: the explorer can't open it without a real record
+            parts.append("(needs a record id)")
         info = {"route": r, "name": pg["name"] or "", "never_explored": never, "old_build": old, "changed": bool(src),
                 "changed_files": src, "unrechecked_fixed": fixed_recheck, "untried": untried,
                 "untested_fields": untested, "open_bugs": open_bugs}
@@ -616,8 +644,10 @@ def gaps(con, changed_only=False, top=None, as_json=False):
                        f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
     ranked.sort(key=lambda x: x[0])
     shown = ranked[:top] if top is not None else ranked
-    if as_json:
-        return json.dumps({"build": current or core.UNKNOWN, "pages": [x[2] for x in shown],
+    if as_json:  # for batch runs: only pages an explorer can open; detail pages are named apart
+        openable = [x[2] for x in ranked if "/:id" not in x[2]["route"]]
+        return json.dumps({"build": current or core.UNKNOWN, "pages": openable[:top] if top is not None else openable,
+                           "needs_id": [x[2]["route"] for x in ranked if "/:id" in x[2]["route"]],
                            "unchecked_repos": unchecked}, indent=1)
     if not shown:
         return "no pages with source changes since their last visit"
@@ -626,7 +656,10 @@ def gaps(con, changed_only=False, top=None, as_json=False):
     if len(shown) > limit:
         out.append(f"(+{len(shown) - limit} more)")
     out += [f"source changes not checked for {repo} (not a git repo, or git failed)" for repo in unchecked]
-    route = shown[0][0][-1].replace("'", "'\\''")
+    route = next((x[2]["route"] for x in shown if "/:id" not in x[2]["route"]), None)
+    if route is None:
+        return "\n".join(out + ["Next: these pages need a record id: /qa-sdet:qa-explore '<a real record URL>'"])
+    route = route.replace("'", "'\\''")
     return "\n".join(out + [f"Next: /qa-sdet:qa-explore '{route}'"])
 
 

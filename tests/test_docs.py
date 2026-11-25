@@ -287,3 +287,9 @@ class Docs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_batch_explore_skips_routes_that_need_a_record_id(self):
+        """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""
+        skill = text("skills/qa-explore/SKILL.md")
+        self.assertIn("`needs_id`", skill)
+        self.assertIn('"needs_id"', text("lib/qa_sdet/memory.py"))  # the key gaps --json writes

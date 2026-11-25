@@ -73,6 +73,19 @@ class Bugs(MemBase):
         memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-20T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0], "REGRESSED")
 
+    def test_a_run_from_before_the_fix_ingested_late_does_not_regress(self):
+        """A run that finished after the last sighting but before the fix, ingested after the fix, predates it."""
+        bug = {"route": "/form", "title": "t", "symptom": "s"}
+        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
+        h = core.bug_hash("/form", "s")
+        with mock.patch.object(core, "now", return_value="2026-11-15T00:00:00Z"):
+            cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+        status = lambda: self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0]
+        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-12T00:00:00Z")
+        self.assertEqual(status(), "FIXED")
+        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-16T00:00:00Z")
+        self.assertEqual(status(), "REGRESSED")
+
     def test_reopening_a_bug_no_run_lists_removes_it(self):
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         r = run(bugs=[bug])
@@ -148,6 +161,12 @@ class Bugs(MemBase):
 
 
 class BugLines(MemBase):
+    def test_bugs_lines_name_the_status(self):
+        """prep joins OPEN, FILED and REGRESSED lists into one: each line must say which it is."""
+        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
+        self.con.execute("UPDATE bugs SET status='REGRESSED'")
+        self.assertIn(" REGRESSED ", memory.bugs(self.con, "REGRESSED"))
+
     def test_a_bug_without_severity_or_classification_prints_no_none(self):
         memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Bare bug"}]))
         self.assertNotIn("None", memory.bugs(self.con))
@@ -272,6 +291,25 @@ class BugSync(MemBase):
         self.assertIn("closed as Duplicate", out)
         self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h_dup,)).fetchone()[0], "FILED")
         self.assertEqual(mrun.call_args[0][0], ["/usr/bin/acli", "jira", "workitem", "view", "PROJ-20", "--fields", "resolution", "--json"])
+
+    def test_a_resolution_that_cannot_be_read_leaves_the_bug_filed(self):
+        """A failed lookup is no 'Fixed' resolution: a Won't Do / Duplicate must not become FIXED because acli failed."""
+        import subprocess
+        from support import done
+        h = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
+        h_ok = self.add_bug("/list", "fixed bug", "FILED", "PROJ-21")
+        search_out = json.dumps([
+            {"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
+            {"key": "PROJ-21", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}, "resolution": None}}])
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", return_value=done(1, err="401")):
+            code, out, err = qa_mem("bug-sync", stdin=search_out)
+        self.assertEqual((code, err), (0, ""))
+        statuses = dict(self.con.execute("SELECT hash, status FROM bugs").fetchall())
+        self.assertEqual(statuses[h], "FILED")
+        self.assertIn("PROJ-20", out.split("couldn't read", 1)[1])
+        self.assertEqual(statuses[h_ok], "FIXED")  # Done with an empty resolution, read fine: fixed, as before
+        self.assertIsNotNone(self.con.execute("SELECT fixed_ts FROM bugs WHERE hash=?", (h_ok,)).fetchone()[0])
 
 
 class Builds(MemBase):
@@ -654,6 +692,35 @@ class Card(MemBase):
         memory.ingest(self.con, run("2.0"), "2026-01-03T00:00:00Z")  # a new build: check it again
         self.assertNotIn("re-checked", self.fixed_line(memory.card(self.con, "/form"), h))
 
+    def test_a_newly_fixed_older_bug_is_on_the_card_gaps_counts(self):
+        """bug-status and bug-sync don't touch last_seen: an older bug fixed today must still be listed to re-check."""
+        memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": "old", "symptom": "old bug"}]),
+                      "2026-01-01T00:00:00Z")
+        h_old = core.bug_hash("/form", "old bug")
+        for i in range(6):
+            s = f"newer {i}"
+            memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": s, "symptom": s}]), f"2026-01-0{i + 2}T00:00:00Z")
+            h = core.bug_hash("/form", s)
+            cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+            memory.ingest(self.con, run("2.0", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
+                          f"2026-01-0{i + 2}T01:00:00Z")
+        cli.run_cmd(self.con, "bug-status", [h_old, "FIXED"])
+        self.assertIn("1 fixed bug to re-check", memory.gaps(self.con))
+        c = memory.card(self.con, "/form")
+        self.assertFalse(self.fixed_line(c, h_old).endswith("re-checked on build 2.0"), c)
+        self.assertIn("(+2 more FIXED: qa-mem bugs FIXED)", c)
+
+    def test_a_recheck_on_an_unreadable_build_counts_for_a_week(self):
+        """Like coverage: a re-check from a run that couldn't read the build holds for 7 days, then is due again."""
+        memory.ingest(self.con, run("unknown", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), core.now())
+        h = core.bug_hash("/form", "s")
+        cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+        memory.ingest(self.con, run("unknown", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), core.now())
+        self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 0)
+        self.assertTrue(self.fixed_line(memory.card(self.con, "/form"), h).endswith("| re-checked"))
+        self.con.execute("UPDATE coverage SET ts='2020-01-01T00:00:00Z'")
+        self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 1)
+
     def test_card_size_is_bounded(self):
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": f"fact {i} " + "y" * 280} for i in range(30)],
                                 locators=[{"name": f"loc{i} " + "n" * 250, "locator": "x" * 290} for i in range(30)],
@@ -745,6 +812,27 @@ class Gaps(MemBase):
         out = memory.gaps(self.con)
         self.assertIn("source changed (lib/kit/Button.jsx)", next(x for x in out.splitlines() if x.startswith("- /form ")))
         self.assertNotIn("source changed", next(x for x in out.splitlines() if x.startswith("- /other ")))  # 'lib/kitchen.js'
+
+    def test_source_changes_on_a_page_whose_build_was_never_read(self):
+        """No last_verified (build unreadable): the last run on the page is the visit to compare commits against."""
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        repo = git_repo(self.t / "app", {"src/Form.jsx": "a"})
+        self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", os.path.realpath(repo))
+        memory.ingest(self.con, {"run_id": "r1", "target": "http://qa/form", "build": "unknown",
+                                 "pages": [{"route": "/form"}]}, "2026-01-05T00:00:00Z")
+        self.assertNotIn("source changed", memory.gaps(self.con))
+        self.commit(repo, "src/Form.jsx", "2026-01-06T00:00:00Z")
+        self.assertIn("source changed (src/Form.jsx)", memory.gaps(self.con))
+
+    def test_routes_with_an_id_are_not_batch_picks(self):
+        """'/incidents/:id' can't be opened as is: gaps marks it, Next: and --json skip it."""
+        self.row("/incidents/:id", "rule", "title", "required", "src/Detail.jsx")
+        self.row("/incidents", "rule", "q", "max 50", "src/List.jsx")
+        out = memory.gaps(self.con)
+        self.assertIn("(needs a record id)", next(x for x in self.lines(out) if "/incidents/:id" in x))
+        self.assertTrue(out.rstrip().endswith("Next: /qa-sdet:qa-explore '/incidents'"), out)
+        data = json.loads(memory.gaps(self.con, top=1, as_json=True))
+        self.assertEqual(([p["route"] for p in data["pages"]], data["needs_id"]), (["/incidents"], ["/incidents/:id"]))
 
     def test_a_repo_git_cannot_read_is_named_not_fatal(self):
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", "/nowhere/repo")

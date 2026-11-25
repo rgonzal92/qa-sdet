@@ -351,6 +351,8 @@ def run_cmd(con, cmd, args):
                 con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, hits[0]))
             else:
                 con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
+            if status == "FIXED":  # a run that finished before this, ingested later, is no regression
+                con.execute("UPDATE bugs SET fixed_ts=? WHERE hash=?", (core.now(), hits[0]))
             # reopened, but its run files no longer list it (they were rewritten without it): it is no bug to track
             gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
                                "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount
