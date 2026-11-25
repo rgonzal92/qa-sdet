@@ -1421,20 +1421,18 @@ def plan_find(project, keys=None, run_dir=None):
     reusable, latest = None, None
     for p in dirs:
         st = _run_state(p)
-        if not st or {k.strip().upper() for k in st["tickets"]} != want:
+        if not st:
             continue
-        if reusable is None and (st["kind"] == "plan" or (st["kind"] == "ticket" and (not st["has_runs"] or st["zero_executed"]))):
+        have = {k.strip().upper() for k in st["tickets"]}
+        if reusable is None and have == want and (
+                st["kind"] == "plan" or (st["kind"] == "ticket" and (not st["has_runs"] or st["zero_executed"]))):
             reusable = st
-        if latest is None and st["kind"] == "ticket" and st["has_runs"]:
-            latest = st
+        # the newest run that tested them, alone or with other tickets (PROJ-101 of PROJ-100+101: its slice, TC ids
+        # kept): an older run of the ticket alone must not hide what a newer multi-ticket run found
+        if latest is None and st["kind"] == "ticket" and st["has_runs"] and want <= have:
+            latest = st if have == want else _slice(st, want)
         if reusable and latest:
             break
-    if latest is None:  # one ticket of a multi-ticket run (PROJ-101 of PROJ-100+101): its slice, TC ids kept
-        for p in dirs:
-            st = _run_state(p)
-            if st and st["kind"] == "ticket" and st["has_runs"] and want < {k.strip().upper() for k in st["tickets"]}:
-                latest = _slice(st, want)
-                break
     return {"reusable_plan": reusable, "latest_run": latest}
 
 
@@ -1456,29 +1454,34 @@ def block_scope(run):
 def next_action(run_dir, slug):
     """{action: continue | recover_sso | abort, block_scope, reason} for the coordinator after the explorer of
     run-<slug>.json: a page blocker doesn't stop the other routes (two in a row do: the app may be down), a sign-in
-    blocker is recovered with qa-login (the skill does it once per run), a browser one or a missing run file stops."""
+    blocker is recovered with qa-login (the skill does it once per run), a browser one or a missing run file stops.
+    The row of page blockers is counted from these calls (.data/next-action.json) and starts again after an abort, so
+    a --resume of the same folder isn't stopped by the run files of the session that stopped."""
     data = Path(run_dir) / ".data"
-    run = _load_json(data / f"run-{slug}.json", [])
+    f, state_file = data / f"run-{slug}.json", data / "next-action.json"
+    prev = _load_json(state_file, [])
+    prev = prev if isinstance(prev, dict) else {}
+    mtime = _mtime(f)
+    streak = prev.get("before" if (prev.get("slug"), prev.get("mtime")) == (slug, mtime) else "streak")  # asked again
+    streak = streak if isinstance(streak, int) and not isinstance(streak, bool) else 0
+
+    def answer(out, new_streak):
+        core._write(state_file, json.dumps({"slug": slug, "mtime": mtime, "before": streak, "streak": new_streak}) + "\n")
+        return out
+    run = _load_json(f, [])
     if not isinstance(run, dict):
-        return {"action": "abort", "block_scope": "browser", "reason": "explorer ended without a run file"}
+        return answer({"action": "abort", "block_scope": "browser", "reason": "explorer ended without a run file"}, 0)
     if _first_word(run.get("status")) != "blocked":
-        return {"action": "continue", "block_scope": None, "reason": f"run-{slug}.json is {run.get('status') or '?'}"}
+        return answer({"action": "continue", "block_scope": None, "reason": f"run-{slug}.json is {run.get('status') or '?'}"}, 0)
     scope, why = block_scope(run), _clip(run.get("summary"), 120)
     if scope == "session":
-        return {"action": "recover_sso", "block_scope": scope, "reason": why}
+        return answer({"action": "recover_sso", "block_scope": scope, "reason": why}, streak)
     if scope == "browser":
-        return {"action": "abort", "block_scope": scope, "reason": why}
-    runs = sorted(data.glob("run-*.json"), key=lambda f: (_mtime(f), f.name))
-    streak = 0
-    for f in reversed(runs):  # the newest run files, while they are page blockers
-        r = _load_json(f, [])
-        if not (isinstance(r, dict) and _first_word(r.get("status")) == "blocked" and block_scope(r) == "page"):
-            break
-        streak += 1
-    if streak >= 2:
-        return {"action": "abort", "block_scope": scope,
-                "reason": f"{streak} pages in a row blocked (the QA app may be down): {why}"}
-    return {"action": "continue", "block_scope": scope, "reason": why}
+        return answer({"action": "abort", "block_scope": scope, "reason": why}, 0)
+    if streak + 1 >= 2:
+        return answer({"action": "abort", "block_scope": scope,
+                       "reason": f"{streak + 1} pages in a row blocked (the QA app may be down): {why}"}, 0)
+    return answer({"action": "continue", "block_scope": scope, "reason": why}, streak + 1)
 
 
 def explore_next(project, run_dir=None):
@@ -1742,9 +1745,25 @@ def _with_drift(state, tickets):
     lr = state.get("latest_run")
     if drift and lr:
         moved = [c for c in lr["passed_cases"] if str(c.get("ticket")).upper() in {k.upper() for k in drift}]
+        whole = lambda c: {"case": x} if (x := _case_in_chain(lr["run_dir"], c["id"])) else {}
         lr = {**lr, "passed_cases": [c for c in lr["passed_cases"] if c not in moved],
-              "retest_cases": lr["retest_cases"] + [{**c, "status": "PASS"} for c in moved]}
+              "retest_cases": lr["retest_cases"] + [{**c, "status": "PASS", **whole(c)} for c in moved]}
     return {**state, "latest_run": lr, "drift": drift}
+
+
+def _case_in_chain(run_dir, cid, hops=10):
+    """The whole case object of TC id `cid` (steps, expected): from the plan that last had it in its cases, following
+    retest_of back (a pass an earlier partial retest carried is only a summary in prior_passed)."""
+    d = Path(run_dir)
+    for _ in range(hops):
+        plan = _load_json(d / ".data" / "plan.json", [])
+        plan = plan if isinstance(plan, dict) else {}
+        hit = next((c for c in _list(plan, "cases") if str(c.get("id")) == str(cid)), None)
+        prev = str(plan.get("retest_of") or "")
+        if hit or not prev or Path(prev).name != prev or prev in (".", ".."):  # a sibling run folder only
+            return hit
+        d = d.parent / prev
+    return None
 
 
 def trace(project, keys=None, fix_version=None):
@@ -1752,7 +1771,7 @@ def trace(project, keys=None, fix_version=None):
     and what it retested: a release or sprint sign-off view. Read-only."""
     qa_out = ops._project(project) / "qa-out"
     want = {k.strip().upper() for k in keys or []}
-    seen, rows = set(), []
+    rows, versions = {}, {}  # each ticket's newest run's row; the fix versions any of its runs gave it
     for p in _plan_folders(qa_out) if qa_out.is_dir() else []:
         d = load_run(p)
         plan, runs = d["plan"], d["runs"]
@@ -1763,15 +1782,18 @@ def trace(project, keys=None, fix_version=None):
         builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
         for t in _plan_tickets(plan):
             k = t["key"].upper()
-            if k in seen or (want and k not in want) or (fix_version and str(t.get("fix_version") or "") != fix_version):
+            if want and k not in want:
                 continue
-            seen.add(k)
+            versions.setdefault(k, set()).add(str(t.get("fix_version") or ""))
+            if k in rows:
+                continue
             acs = [_ac_key(_ac_id(a)) for a in _list(t, "acs") if _ac_id(a)]
             covered = {a for c in cases if c.get("ticket") == t["key"] for a in _case_acs(c)}
             v, why = vmap[t["key"]]
-            rows.append(row(t["key"], VERDICT_ICON[v], f"{sum(a in covered for a in acs)}/{len(acs)} AC", builds,
-                            len(ticket_bugs(t["key"], cases, bugs, list(vmap))), p.name,
-                            str(plan.get("retest_of") or ""), why))
+            rows[k] = row(t["key"], VERDICT_ICON[v], f"{sum(a in covered for a in acs)}/{len(acs)} AC", builds,
+                          len(ticket_bugs(t["key"], cases, bugs, list(vmap))), p.name,
+                          str(plan.get("retest_of") or ""), why)
+    rows = [r for k, r in rows.items() if not fix_version or fix_version in versions[k]]
     if not rows:
         return "no ticket runs match"
     return "\n".join([row("Ticket", "Verdict", "ACs covered", "Build", "Bugs", "Latest run", "Retest of", "Why"),

@@ -271,5 +271,31 @@ class Prep(Base):
         self.assertNotIn("TC-1", [c["id"] for c in lr["passed_cases"]])
 
 
+    def test_a_drifted_tickets_carried_pass_comes_back_with_its_case(self):
+        """A pass carried by an earlier partial retest has no case object in that plan: the original plan has it."""
+        import subprocess, time, os
+        from support import done, PLAN
+        self.config(jiraKeyPrefix="PROJ")
+        one = {**PLAN, "tickets": [{**PLAN["tickets"][0], "source_snapshot": {"fields_sha1": "old", "captured_at": "2026-11-20"}}],
+               "cases": PLAN["cases"][:2]}
+        first = self.rundir("2026-11-20-PROJ-1", plan=one, runs=[("form", {"target": "/form", "status": "COMPLETED", "build": "1",
+                            "cases": [{"id": "TC-1", "status": "FAIL"}, {"id": "TC-2", "status": "PASS"}]})])
+        t = time.time() - 5000
+        for f in (first, first / ".data/plan.json", first / ".data/run-form.json"):
+            os.utime(f, (t, t))
+        retest = {**one, "retest_of": "2026-11-20-PROJ-1", "cases": PLAN["cases"][:1],
+                  "prior_passed": [{"id": "TC-2", "ticket": "PROJ-1", "ac": "AC-2", "title": "Reject 131", "route": "/form", "build": "1"}]}
+        self.rundir("2026-11-22-PROJ-1", plan=retest, runs=[("form", {"target": "/form", "status": "COMPLETED", "build": "2",
+                    "cases": [{"id": "TC-1", "status": "PASS"}]})])
+        view = json.dumps({"key": "PROJ-1", "fields": {"summary": "Speed limit form", "description": "Max is now 120"}})
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=view), done(0, out="[]")]):
+            code, out, err = cli("prep", str(self.proj), "1")
+        self.assertEqual((code, err), (0, ""))
+        lr = json.loads(out)["plan_state"]["latest_run"]
+        moved = next(c for c in lr["retest_cases"] if c["id"] == "TC-2")
+        self.assertEqual(moved["case"]["steps"], ["Type 131"])  # the skill can put it back in the plan's cases
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 """REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira pass-comment draft."""
 import fcntl, json, os, re, threading, unittest
+from pathlib import Path
 from unittest import mock
 
 from support import Base, cli, PLAN, RUN_FORM, RUN_LIST
@@ -1236,6 +1237,38 @@ class Traceability(Rendering):
         self.assertEqual([x.split(" | ")[0] for x in rows], ["| PROJ-2"])  # only the 3.6 ticket
 
 
+class NewestRun(Rendering):
+    """A ticket's latest run is its newest one, whether it ran alone or with other tickets."""
+
+    def age(self, d, seconds=5000):
+        import time
+        t = time.time() - seconds
+        for f in (d, d / ".data/plan.json", *d.glob(".data/run-*.json")):
+            os.utime(f, (t, t))
+
+    def test_a_newer_multi_ticket_run_beats_an_older_run_of_the_ticket_alone(self):  # else a retest plans from stale results
+        alone = {**PLAN, "tickets": [PLAN["tickets"][1]], "cases": [c for c in PLAN["cases"] if c["ticket"] == "PROJ-2"]}
+        both = lambda tc3: [("list", {"target": "/list", "status": "COMPLETED", "build": "2",
+                                      "cases": [{"id": "TC-3", "status": tc3}, {"id": "TC-4", "status": "PASS"}]})]
+        self.age(self.rundir("2026-11-20-PROJ-2", plan=alone, runs=both("PASS")))
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=PLAN, runs=both("FAIL"))
+        lr = report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
+        self.assertEqual((lr["name"], lr["subset_of"]), ("2026-11-23-PROJ-1+PROJ-2", ["PROJ-1", "PROJ-2"]))
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
+        skill = (Path(report.__file__).parents[2] / "skills/qa-ticket/SKILL.md").read_text()
+        self.assertIn("keeps only `latest_run.tickets`", skill)  # not the other ticket of that run: it'd render BLOCKED
+
+    def test_trace_shows_the_newest_verdict_when_an_older_run_names_the_fix_version(self):
+        run = lambda st: [("form", {"target": "/form", "status": "COMPLETED", "build": "1",
+                                    "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": st}]})]
+        self.age(self.rundir("2026-11-20-PROJ-1", plan=PLAN1, runs=run("PASS")))  # fix_version 3.5
+        no_version = {**PLAN1, "tickets": [{k: v for k, v in PLAN1["tickets"][0].items() if k != "fix_version"}]}
+        self.rundir("2026-11-25-PROJ-1", plan=no_version, runs=run("FAIL"))
+        line = next(x for x in cli("trace", str(self.proj), "--fix-version", "3.5")[1].splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("❌ FAIL", line)
+        self.assertIn("2026-11-25-PROJ-1", line)
+
+
 class NextAction(Rendering):
     """`qa-mem next-action <run> <slug>`: after each explorer, continue, recover the sign-in once, or stop."""
 
@@ -1267,9 +1300,21 @@ class NextAction(Rendering):
     def test_two_page_blockers_in_a_row_stop_the_batch(self):  # the QA app may be down
         d = self.folder(("a", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}),
                         ("b", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
+        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # the coordinator asks after each route
         nxt = report.next_action(d, "b")
         self.assertEqual(nxt["action"], "abort")
         self.assertIn("2 pages in a row", nxt["reason"])
+
+    def test_a_resumed_run_starts_a_new_streak(self):  # its run files from the stopped session are no streak
+        blocked = {"status": "BLOCKED", "block_scope": "page", "summary": "403"}
+        d = self.folder(("a", blocked))
+        self.assertEqual(report.next_action(d, "a")["action"], "continue")
+        (d / ".data/run-b.json").write_text(json.dumps({**blocked, "summary": "500"}))
+        self.assertEqual(report.next_action(d, "b")["action"], "abort")  # 2 in a row: the run stops
+        (d / ".data/run-a.json").write_text(json.dumps(blocked))  # --resume: /a first again, still a 403
+        os.utime(d / ".data/run-a.json")
+        self.assertEqual(report.next_action(d, "a")["action"], "continue")
+        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # asked twice about one result: same answer
 
     def test_block_scope_is_checked_at_ingest(self):
         from qa_sdet import memory
