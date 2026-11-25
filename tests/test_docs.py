@@ -336,6 +336,12 @@ class Docs(unittest.TestCase):
         for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
             self.assertIn(marker, crawler)
 
+    def test_the_explorer_stops_on_every_page_start_blocker(self):  # found live: it reached a 404 target via goto
+        step1 = re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0)
+        for scope in ("`browser`", "`session`", "`page`"):
+            self.assertIn(scope, step1)
+        self.assertIn("don't reach it another way", step1)
+
     def test_continue_and_adaptive_use_explore_next(self):
         skill = text("skills/qa-explore/SKILL.md")
         for flag in ("--continue", "--adaptive"):
