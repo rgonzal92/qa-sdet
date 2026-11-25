@@ -191,6 +191,88 @@ class BugStatus(MemBase):
         memory.ingest(self.con, scrub.redact_json(run(bugs=[{"route": "/form", "title": "t", "symptom": "500 with cookie: sid=abc123"}])))
         self.assertEqual(buf.getvalue().strip(), self.con.execute("SELECT hash FROM bugs").fetchone()[0])
 
+    def test_bug_status_with_jira_key_and_v04_schema_upgrade(self):
+        # Existing v0.4 DB (has last_run + symptom, lacks jira_key) upgrades in place
+        v04 = Path(self.tmp.name) / "v04.db"
+        c = sqlite3.connect(v04)
+        c.execute("CREATE TABLE bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT, classification TEXT, "
+                  "status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT, seen_count INTEGER DEFAULT 1, "
+                  "last_run TEXT, symptom TEXT)")
+        c.execute("INSERT INTO bugs(hash,page,title,status,last_run,symptom) VALUES('abcd12345678','/form','old','OPEN','r1','s')")
+        c.commit()
+        c.close()
+        os.environ["QA_MEM_DB"] = str(v04)
+        upgraded = core.connect()
+        try:
+            cols = {r[1] for r in upgraded.execute("PRAGMA table_info(bugs)")}
+            self.assertIn("jira_key", cols)
+            self.assertEqual(upgraded.execute("SELECT title FROM bugs WHERE hash='abcd12345678'").fetchone()[0], "old")
+        finally:
+            upgraded.close()
+        # bug-status stores jira_key (positional or --jira) and displays it on bugs & card
+        code, out, _ = qa_mem("bug-status", "abcd1234", "FILED", "proj-99")
+        self.assertEqual(code, 0)
+        self.assertIn("PROJ-99", out)
+        self.assertIn("PROJ-99", qa_mem("bugs", "FILED")[1])
+        self.assertIn("PROJ-99", qa_mem("card", "/form")[1])
+        code, out, _ = qa_mem("bug-status", "abcd1234", "FILED", "--jira", "OPS-7")
+        self.assertEqual((code, "OPS-7" in out), (0, True))
+        self.assertEqual(qa_mem("bug-status", "abcd1234", "FILED", "not-a-key")[0], 2)
+
+
+class BugSync(MemBase):
+    """`qa-mem bug-sync`: read-only Jira status sync for FILED bugs."""
+
+    def add_bug(self, route, symptom, status="FILED", jira_key=None):
+        memory.ingest(self.con, run(bugs=[{"route": route, "title": symptom, "symptom": symptom}]))
+        h = core.bug_hash(route, symptom)
+        with self.con:
+            self.con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, h))
+        return h
+
+    def test_jql_and_transitions(self):
+        self.assertEqual(qa_mem("bug-sync", "--jql"), (0, "", ""))
+        h_done = self.add_bug("/form", "speed 131 saved", "FILED", "PROJ-10")
+        h_wont = self.add_bug("/list", "header align", "FILED", "PROJ-11")
+        h_open = self.add_bug("/map", "zoom drift", "FILED", "PROJ-12")
+        h_local = self.add_bug("/form", "local open", "OPEN", "PROJ-13")
+        code, jql, err = qa_mem("bug-sync", "--jql")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(jql.strip(), "key in (PROJ-10, PROJ-11, PROJ-12)")
+        payload = json.dumps([
+            {"key": "PROJ-10", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}},
+                                          "resolution": {"name": "Fixed"}}},
+            {"key": "PROJ-11", "fields": {"status": {"name": "Closed", "statusCategory": {"key": "done"}},
+                                          "resolution": {"name": "Won't Do"}}},
+            {"key": "PROJ-12", "fields": {"status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}}},
+            {"key": "PROJ-13", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
+        ])
+        code, out, err = qa_mem("bug-sync", stdin=payload)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("PROJ-10", out)
+        self.assertIn("/form", out)
+        self.assertIn(f"qa-mem bug-status {h_wont} INVALID", out)
+        statuses = dict(self.con.execute("SELECT hash, status FROM bugs").fetchall())
+        self.assertEqual(statuses[h_done], "FIXED")
+        self.assertEqual(statuses[h_wont], "FILED")
+        self.assertEqual(statuses[h_open], "FILED")
+        self.assertEqual(statuses[h_local], "OPEN")
+        self.assertEqual(qa_mem("bug-sync", stdin="{bad")[0], 2)
+
+    def test_bug_sync_fetches_resolution_via_view_when_search_omits_it(self):
+        import subprocess
+        from support import done
+        h_dup = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
+        search_out = json.dumps([{"key": "PROJ-20", "fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}}])
+        view_out = json.dumps({"key": "PROJ-20", "fields": {"resolution": {"name": "Duplicate"}}})
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", return_value=done(0, out=view_out)) as mrun:
+            code, out, err = qa_mem("bug-sync", stdin=search_out)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("closed as Duplicate", out)
+        self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h_dup,)).fetchone()[0], "FILED")
+        self.assertEqual(mrun.call_args[0][0], ["/usr/bin/acli", "jira", "workitem", "view", "PROJ-20", "--fields", "resolution", "--json"])
+
 
 class Builds(MemBase):
     """A new build marks old knowledge stale; a plan or an unreadable build never does."""
@@ -676,6 +758,41 @@ class Gaps(MemBase):
         code, out, _ = qa_mem("gaps")
         self.assertEqual(code, 0)
         self.assertIn("/form", out)
+
+    def test_gaps_changed_top_json_and_unrechecked_fixed(self):
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        repo = git_repo(self.t / "app", {"src/A.jsx": "a", "src/B.jsx": "b", "src/C.jsx": "c"})
+        rp = os.path.realpath(repo)
+        for route, src in (("/a", "src/A.jsx"), ("/b", "src/B.jsx"), ("/c", "src/C.jsx")):
+            self.row(route, "rule", "x", "req", src, rp)
+            self.visit(route, "1.0", "2026-01-05T00:00:00Z")
+        # Before any source changes: --changed reports none cleanly
+        code, out, _ = qa_mem("gaps", "--changed")
+        self.assertEqual(code, 0)
+        self.assertIn("no pages with source changes", out)
+        code, jout, _ = qa_mem("gaps", "--changed", "--json")
+        self.assertEqual((code, json.loads(jout)["pages"]), (0, []))
+        # Modify A and C; mark a FIXED bug on B (un-rechecked)
+        self.commit(repo, "src/A.jsx", "2026-01-06T00:00:00Z")
+        self.commit(repo, "src/C.jsx", "2026-01-07T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "fb", "build": "1.0", "pages": [{"route": "/b"}],
+                                 "bugs": [{"route": "/b", "title": "old", "symptom": "old"}]}, "2026-01-05T00:00:00Z")
+        h = core.bug_hash("/b", "old")
+        self.con.execute("UPDATE bugs SET status='FIXED' WHERE hash=?", (h,))
+        self.con.commit()
+        code, jout, _ = qa_mem("gaps", "--changed", "--json")
+        data = json.loads(jout)
+        self.assertEqual(code, 0)
+        self.assertEqual([p["route"] for p in data["pages"]], ["/a", "/c"])
+        self.assertTrue(all(p["changed"] for p in data["pages"]))
+        code, jtop, _ = qa_mem("gaps", "--top", "2", "--json")
+        self.assertEqual((code, len(json.loads(jtop)["pages"])), (0, 2))
+        code, jall, _ = qa_mem("gaps", "--json")
+        by_route = {p["route"]: p for p in json.loads(jall)["pages"]}
+        self.assertEqual(by_route["/b"]["unrechecked_fixed"], 1)
+        self.assertIn("1 fixed bug to re-check", qa_mem("gaps")[1])
+        for bad in ("0", "-2", "abc"):
+            self.assertEqual(qa_mem("gaps", "--top", bad)[0], 2, bad)
 
 
 class Search(MemBase):

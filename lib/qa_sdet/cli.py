@@ -60,7 +60,8 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
-    if cmd not in ("keys", "rundir", "marker", "browser-open", "login-ok", "prune", "annotate", "report", "setup-permissions"):
+    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "login-ok", "prune", "annotate", "report",
+                   "plan-find", "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -84,6 +85,11 @@ def wrapper_cmd(cmd, args):
             print("marker removed")
     elif cmd == "browser-open":
         return ops.browser_open(args)
+    elif cmd == "session-check":
+        o = _opts(args, flags=("--record", "--build"))
+        if o["_"]:
+            raise core.BadOption("session-check takes no positional arguments")
+        return ops.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
     elif cmd == "login-ok":
         ops.ensure_profile_dir()
         core._write(ops.signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
@@ -110,6 +116,13 @@ def wrapper_cmd(cmd, args):
             raise core.BadInput("usage: qa-mem report <run dir>")
         from . import report
         print(report.write_report(args[0]))
+    elif cmd == "plan-find":
+        from . import report
+        o = _opts(args, valued=("--keys", "--run"))
+        if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--run")) != 1:
+            raise core.BadInput("usage: qa-mem plan-find <project> (--keys K1,K2 | --run DIR)")
+        keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
+        print(json.dumps(report.plan_find(o["_"][0], keys=keys, run_dir=o.get("--run")), indent=1))
     elif cmd == "setup-permissions":
         from . import doctor
         o = _opts(args, flags=("--apply",), valued=("--settings",))
@@ -128,14 +141,19 @@ def wrapper_cmd(cmd, args):
 
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
-    "doctor": "", "browsers": "", "where": "", "card": "<route|page name>", "gaps": "", "search": "<words> [-word to exclude]",
-    "bugs": "[STATUS]", "hash": "<route> <symptom>", "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + ">",
+    "doctor": "", "browsers": "", "where": "", "card": "<route|page name>", "gaps": "[--changed] [--top N] [--json]",
+    "search": "<words> [-word to exclude]",
+    "bugs": "[STATUS]", "hash": "<route> <symptom>",
+    "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
+    "bug-sync": "[--jql]",
     "stale": "<build>", "ingest": "<run.json>", "ingest-pending": "<dir>...", "code": "[route] | code --repos",
     "codemap-scan": "[--full] [--out DIR] <source folder>...", "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
-    "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "login-ok": "", "prune": "<project> [<run dir>]",
+    "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
+    "login-ok": "", "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
+    "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }
 USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items())
@@ -297,7 +315,15 @@ def run_cmd(con, cmd, args):
         from . import scan
         print(json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1))
     elif cmd == "gaps":
-        print(memory.gaps(con))
+        o = _opts(args, flags=("--changed", "--json"), valued=("--top",))
+        if o["_"]:
+            raise core.BadOption("gaps takes no positional arguments")
+        top = None
+        if "--top" in o:
+            top = _count(o, "--top")
+            if top < 1:
+                raise core.BadInput("--top must be a whole number >= 1")
+        print(memory.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
@@ -306,8 +332,18 @@ def run_cmd(con, cmd, args):
             print(f"unknown status '{args[0]}'; use one of {sorted(core.STATUSES)}")
             return 2
         print(memory.bugs(con, status))
-    elif cmd == "bug-status" and len(args) == 2:
-        prefix, status = args[0].lower(), args[1].upper()
+    elif cmd == "bug-status":
+        o = _opts(args, valued=("--jira",))
+        pos = o["_"]
+        if len(pos) not in (2, 3) or (len(pos) == 3 and "--jira" in o):
+            return usage_error(cmd)
+        prefix, status = pos[0].lower(), pos[1].upper()
+        jira_raw = o["--jira"] if "--jira" in o else (pos[2] if len(pos) == 3 else None)
+        jira_key = None
+        if jira_raw is not None:
+            jira_key = jira_raw.strip().upper() if jira_raw.strip().isascii() else jira_raw.strip()
+            if not re.fullmatch(r"[A-Z][A-Z0-9]+-\d+", jira_key, re.ASCII):
+                raise core.BadInput(f"bug-status: not a Jira key: {jira_raw!r} (use e.g. PROJ-123)")
         if not re.fullmatch(r"[0-9a-f]{4,12}", prefix) or status not in core.STATUSES:
             print(f"need a hex hash prefix (4-12 chars) and a status in {sorted(core.STATUSES)}")
             return 2
@@ -316,11 +352,34 @@ def run_cmd(con, cmd, args):
             print(f"{len(hits)} bugs match '{prefix}'" + (": " + ", ".join(hits[:10]) if hits else "") + "; give one hash")
             return 1
         with con:
-            con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
+            if jira_key is not None:
+                con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, hits[0]))
+            else:
+                con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
             # reopened, but its run files no longer list it (they were rewritten without it): it is no bug to track
             gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
                                "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount
-        print(f"removed {hits[0]}: no run lists this bug any more" if gone else f"updated {hits[0]} -> {status}")
+        extra = f" ({jira_key})" if jira_key else ""
+        print(f"removed {hits[0]}: no run lists this bug any more" if gone else f"updated {hits[0]} -> {status}{extra}")
+    elif cmd == "bug-sync":
+        o = _opts(args, flags=("--jql",))
+        if o["_"]:
+            raise core.BadOption("bug-sync takes no positional arguments")
+        if o.get("--jql"):
+            jql = memory.bug_sync_jql(con)
+            if jql:
+                print(jql)
+            return 0
+        try:
+            data = json.loads(sys.stdin.read())
+        except (OSError, ValueError, RecursionError) as e:
+            raise core.BadInput(f"bug-sync: can't read Jira JSON ({e})")
+        print(memory.bug_sync(con, data))
+    elif cmd == "prep":
+        if len(args) < 2:
+            return usage_error(cmd)
+        from . import report
+        print(json.dumps(report.prep(con, args[0], args[1:]), indent=1, ensure_ascii=False))
     elif cmd == "ingest" and len(args) == 1:
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:

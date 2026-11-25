@@ -402,11 +402,12 @@ def _untested_rules(con, route, targets):
     return out
 
 
-BUG_COLS = "hash,page,severity,status,title,symptom,seen_count"
+BUG_COLS = "hash,page,severity,status,title,symptom,seen_count,jira_key"
 
 
 def _bug_line(x, with_page, n=100):
-    return (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] " + (f"{core.short(x['page'], n)} " if with_page else "")
+    jk = f" {x['jira_key']}" if x["jira_key"] else ""
+    return (f"- {x['hash']} {x['status']}{jk} [{x['severity'] or '?'}] " + (f"{core.short(x['page'], n)} " if with_page else "")
             + f"{core.short(x['title'], n)} | symptom: {core.short(x['symptom'] or x['title'], n + 20)} (seen {x['seen_count']})")
 
 
@@ -469,20 +470,120 @@ def _search(con, q):
 def bugs(con, status="OPEN"):
     total = con.execute("SELECT count(*) FROM bugs WHERE status=?", (status,)).fetchone()[0]
     rows = con.execute("SELECT * FROM bugs WHERE status=? ORDER BY last_seen DESC LIMIT 30", (status,)).fetchall()
-    lines = [f"{x['hash']} [{x['severity'] or '?'}] {x['classification'] or '?'} {x['page']} {core.short(x['title'], 100)} "
+    lines = [f"{x['hash']}" + (f" {x['jira_key']}" if x["jira_key"] else "")
+             + f" [{x['severity'] or '?'}] {x['classification'] or '?'} {x['page']} {core.short(x['title'], 100)} "
              f"(seen {x['seen_count']}) {x['draft_path'] or ''}" for x in rows]
     if total > len(rows):
         lines.append(f"... {total - len(rows)} older {status} bugs not shown (search facts or ask for a page's card)")
     return "\n".join(lines) or f"no {status} bugs"
 
 
-def gaps(con):
+DONE_STATUSES = {"done", "closed", "resolved", "verified", "released"}
+REJECTED_RESOLUTIONS = {"won't do", "wont do", "won't fix", "wont fix", "duplicate", "cannot reproduce",
+                        "declined", "invalid", "not a bug", "rejected"}
+
+
+def bug_sync_jql(con):
+    """Read-only JQL covering every FILED bug with a linked Jira key, or '' when none exist."""
+    keys = [r[0] for r in con.execute(
+        "SELECT DISTINCT jira_key FROM bugs WHERE status='FILED' AND jira_key IS NOT NULL AND jira_key!='' ORDER BY jira_key")]
+    return f"key in ({', '.join(keys)})" if keys else ""
+
+
+def _jira_str(v):
+    return str(v.get("name") or v.get("value") or "") if isinstance(v, dict) else str(v or "")
+
+
+def _view_resolution(key):
+    """Fetch a single Done item's resolution via read-only `acli jira workitem view` (acli rejects `resolution` on `search`)."""
+    import shutil, subprocess
+    acli = shutil.which("acli")
+    if not acli:
+        return ""
+    try:
+        r = subprocess.run([acli, "jira", "workitem", "view", key, "--fields", "resolution", "--json"],
+                           capture_output=True, text=True, errors="replace", timeout=20)
+        if r.returncode != 0:
+            return ""
+        data = json.loads(r.stdout)
+        fields = data.get("fields") if isinstance(data, dict) and isinstance(data.get("fields"), dict) else {}
+        return _jira_str(fields.get("resolution")).strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
+        return ""
+
+
+def bug_sync(con, data):
+    """Sync FILED bugs with read-only Jira search JSON: Done/Resolved (non-rejected) -> FIXED; rejected -> triage hint."""
+    if isinstance(data, dict):
+        data = next((data[k] for k in ("issues", "workItems", "values") if isinstance(data.get(k), list)), None)
+    if not isinstance(data, list):
+        raise core.BadInput("bug-sync: expected a list of Jira items (or an object with issues / workItems / values)")
+    filed = {}
+    for r in con.execute("SELECT hash, page, title, jira_key FROM bugs WHERE status='FILED' AND jira_key IS NOT NULL AND jira_key!=''"):
+        filed.setdefault(r["jira_key"].upper(), []).append(r)
+    if not filed:
+        return "no FILED bugs with a Jira key to sync"
+    fixed, triage, unchanged = [], [], 0
+    with con:
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            key = str(it.get("key") or "").strip().upper()
+            if key not in filed:
+                continue
+            fields = it.get("fields") if isinstance(it.get("fields"), dict) else {}
+            st_obj = fields.get("status") if fields.get("status") is not None else it.get("status")
+            st_name = _jira_str(st_obj).strip()
+            cat = st_obj.get("statusCategory") if isinstance(st_obj, dict) else None
+            cat_key = str((cat.get("key") or cat.get("name") or "") if isinstance(cat, dict) else "").strip().lower()
+            is_done = cat_key == "done" or st_name.lower() in DONE_STATUSES
+            if not is_done:
+                unchanged += len(filed[key])
+                continue
+            has_res = "resolution" in fields or "resolution" in it
+            res_obj = fields.get("resolution") if "resolution" in fields else it.get("resolution")
+            res_name = _jira_str(res_obj).strip() if has_res else _view_resolution(key)
+            if res_name.lower() in REJECTED_RESOLUTIONS:
+                for b in filed[key]:
+                    triage.append(f"- {b['hash']} {key} ({b['page']}) closed as {res_name} -> qa-mem bug-status {b['hash']} INVALID")
+                continue
+            for b in filed[key]:
+                con.execute("UPDATE bugs SET status='FIXED' WHERE hash=? AND status='FILED'", (b["hash"],))
+                fixed.append(f"- {b['hash']} {key} -> FIXED ({b['page']}): {core.short(b['title'], 80)}")
+    out = []
+    if fixed:
+        out += [f"Marked FIXED ({len(fixed)}; ready for regression re-check):"] + fixed
+    if triage:
+        out += [f"Needs triage ({len(triage)}; closed without a fix):"] + triage
+    if not fixed and not triage:
+        out.append(f"bug-sync: 0 changes ({unchanged} still open)")
+    elif unchanged:
+        out.append(f"{unchanged} filed bug(s) still open")
+    return "\n".join(out)
+
+
+def _unrechecked_fixed(con, route, build):
+    """Count of FIXED bugs on `route` not yet re-checked on `build`."""
+    rows = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE page=? AND status='FIXED'", (route,))]
+    if not rows:
+        return 0
+    if not build or build == core.UNKNOWN:
+        return len(rows)
+    checked = {r[0] for r in con.execute(
+        "SELECT lower(trim(target)) FROM coverage WHERE page=? AND build=? AND heuristic='other:regression' "
+        "AND result!='blocked'", (route, build))}
+    return sum(h.lower() not in checked for h in rows)
+
+
+def gaps(con, changed_only=False, top=None, as_json=False):
     """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
-    verified on an older build, then the most untried heuristics and untested fields, then the most open bugs."""
+    verified on an older build, un-rechecked FIXED bugs, then the most untried heuristics and untested fields, then open bugs."""
     pages = con.execute("SELECT route, name, build, last_verified FROM pages WHERE route != '*'").fetchall()
-    if not pages:
-        return "no pages yet: /qa-sdet:qa-init maps them from the source, or /qa-sdet:qa-explore <route> visits one"
     current = core.meta(con, "build")
+    if not pages:
+        if as_json:
+            return json.dumps({"build": current or core.UNKNOWN, "pages": [], "unchecked_repos": []}, indent=1)
+        return "no pages yet: /qa-sdet:qa-init maps them from the source, or /qa-sdet:qa-explore <route> visits one"
     verified = {pg["route"]: pg["last_verified"] for pg in pages if pg["last_verified"]}
     changed, unchecked = _source_changes(con, verified)
     ranked = []
@@ -492,26 +593,41 @@ def gaps(con):
         old = not never and not unread and pg["build"] != b
         _, tried, targets = _coverage(con, r, b)
         untried, untested = sum(h not in tried for h in core.HEURISTICS), len(_untested_rules(con, r, targets))
-        bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)).fetchone()[0]
+        open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)).fetchone()[0]
+        fixed_recheck = _unrechecked_fixed(con, r, b)
         src = changed.get(r, [])
+        if changed_only and not src:
+            continue
         parts = ["never explored" if never else "build never read" if unread
                  else f"verified on build {pg['build']}: re-verify" if old else f"build {b}"]
         if src:
             parts.append(f"source changed ({core.short(src[0], 60)}" + (f", +{len(src) - 1}" if len(src) > 1 else "") + ")")
+        if fixed_recheck:
+            parts.append(f"{fixed_recheck} fixed bug{'s' * (fixed_recheck != 1)} to re-check")
         if not never:  # a page never explored has every heuristic untried
             parts.append(f"{untried} untried")
         if untested:
             parts.append(f"{untested} untested field{'s' * (untested != 1)}")
-        if bugs:
-            parts.append(f"{bugs} open bug{'s' * (bugs != 1)}")
-        ranked.append(((not never, not src, not old, -(untried + untested), -bugs, r),
-                       f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts)))
-    ranked.sort()
-    out = [f"PAGES TO EXPLORE (most urgent first; current build {current or 'unknown'}):"] + [x for _, x in ranked[:20]]
-    if len(ranked) > 20:
-        out.append(f"(+{len(ranked) - 20} more)")
+        if open_bugs:
+            parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
+        info = {"route": r, "name": pg["name"] or "", "never_explored": never, "old_build": old, "changed": bool(src),
+                "changed_files": src, "unrechecked_fixed": fixed_recheck, "untried": untried,
+                "untested_fields": untested, "open_bugs": open_bugs}
+        ranked.append(((not never, not src, not old, not fixed_recheck, -(untried + untested), -open_bugs, r),
+                       f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
+    ranked.sort(key=lambda x: x[0])
+    shown = ranked[:top] if top is not None else ranked
+    if as_json:
+        return json.dumps({"build": current or core.UNKNOWN, "pages": [x[2] for x in shown],
+                           "unchecked_repos": unchecked}, indent=1)
+    if not shown:
+        return "no pages with source changes since their last visit"
+    limit = top if top is not None else 20
+    out = [f"PAGES TO EXPLORE (most urgent first; current build {current or 'unknown'}):"] + [x[1] for x in shown[:limit]]
+    if len(shown) > limit:
+        out.append(f"(+{len(shown) - limit} more)")
     out += [f"source changes not checked for {repo} (not a git repo, or git failed)" for repo in unchecked]
-    route = ranked[0][0][-1].replace("'", "'\\''")
+    route = shown[0][0][-1].replace("'", "'\\''")
     return "\n".join(out + [f"Next: /qa-sdet:qa-explore '{route}'"])
 
 

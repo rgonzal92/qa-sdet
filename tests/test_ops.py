@@ -308,5 +308,62 @@ class Prune(Base):
                 ops.annotate(png, [(0, 0, 10, 10)], "x")
 
 
+class SessionCheck(Base):
+    """`qa-mem session-check`: headless SSO check, optional --record and --build."""
+
+    CFG = dict(app="x", browser="chrome", qaBaseUrl="https://qa.example.com/app",
+               allowedHosts=["qa.example.com"], ssoHost="login.microsoftonline.com",
+               buildSource={"type": "selector", "value": "footer .version"})
+
+    def test_valid_session_record_and_build(self):
+        self.config(**self.CFG)
+        # browser_open (close qa-login, open qa) -> eval host/form -> eval build -> close qa
+        seq = [done(0), done(0, out="opened"),
+               done(0, out='{"host":"qa.example.com","hasPassword":false}\n'),
+               done(0, out="1.43.0\n"), done(0)]
+        with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
+            code, out, err = cli("session-check", "--record", "--build")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("ok", out)
+        self.assertIn("build=1.43.0", out)
+        self.assertTrue(ops.signed_in_stamp().exists())
+        self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
+
+    def test_expired_sso_host_or_password_form_returns_1_without_stamp(self):
+        self.config(**self.CFG)
+        for payload in ('{"host":"login.microsoftonline.com","hasPassword":false}',
+                        '{"host":"LOGIN.MICROSOFTONLINE.COM:443","hasPassword":false}',
+                        '{"host":"qa.example.com","hasPassword":true}'):
+            ops.signed_in_stamp().unlink(missing_ok=True)
+            seq = [done(0), done(0), done(0, out=payload), done(0)]
+            with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
+                code, out, err = cli("session-check", "--record")
+            self.assertEqual(code, 1, payload)
+            self.assertIn("session expired", err)
+            self.assertFalse(ops.signed_in_stamp().exists())
+            self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
+
+    def test_error_paths_profile_in_use_non_allowlisted_and_close_on_eval_error(self):
+        self.config(**{**self.CFG, "allowedHosts": ["other.example.com"]})
+        with mock.patch.object(subprocess, "run") as mrun:
+            code, _, err = cli("session-check")
+        self.assertEqual(code, 2)
+        self.assertIn("allowedHosts", err)
+        mrun.assert_not_called()
+
+        self.config(**self.CFG)
+        in_use = "Error: Browser is already in use for /x/profiles/main"
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=in_use)]):
+            code, _, err = cli("session-check")
+        self.assertEqual(code, 2)
+        self.assertIn("browser profile in use", err)
+
+        # Eval failure still closes the browser and returns 2
+        with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0), done(1, err="boom"), done(0)]) as mrun:
+            code, _, err = cli("session-check")
+        self.assertEqual(code, 2)
+        self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
+
+
 if __name__ == "__main__":
     unittest.main()

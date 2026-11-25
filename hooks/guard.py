@@ -1043,13 +1043,26 @@ def _filter_ok(name, rest, cwd, bases):
         if not files and rec:
             return False  # `grep -r` / `-d recurse` with no path walks the whole cwd
     return all("$" not in f and not GLOB_RE.search(f) and any(real(f, cwd).startswith(b + os.sep) for b in roots) for f in files)
-def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-mem, head/tail/grep run directly, output to qa-out
+def _acli_approvable(rest):
+    """Strictly read-only acli calls that never mutate auth state or open a browser (`--web` / `-w`)."""
+    if any(a in ("-w", "--web") or a.startswith("--web=") for a in rest):
+        return False
+    pos = list(takewhile(lambda a: not a.startswith("-"), rest))
+    if not pos and rest and all(a in ("--version", "-v", "--help", "-h") for a in rest):
+        return True
+    return (pos[:3] == ["jira", "auth", "status"]
+            or pos[:3] in (["jira", "workitem", "view"], ["jira", "workitem", "search"])
+            or pos[:4] == ["jira", "workitem", "comment", "list"])
+
+
+def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if i != 0 or ins or feeds or any(o not in ("/dev/null", "/dev/stdout", "/dev/stderr") and (
             "$" in o or not any(real(o, cwd).startswith(b + os.sep) for b in bases)) for o in map(unmark, outs)):
         return False
     q = qamem_args(name, rest, {cwd}, allow_var=False)
-    return name == "playwright-cli" or (name in ("head", "tail", "grep") and _filter_ok(name, rest, cwd, bases)) or (
+    return name == "playwright-cli" or (name == "acli" and _acli_approvable(rest)) or (
+        name in ("head", "tail", "grep") and _filter_ok(name, rest, cwd, bases)) or (
         q is not None and not (q[:1] == ["setup-permissions"] and "--apply" in q))
 def check_segment(seg, cwds, start, ctx, depth, docs):
     """Check one simple command. Mutates cwds on cd."""

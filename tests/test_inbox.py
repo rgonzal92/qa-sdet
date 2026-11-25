@@ -101,6 +101,96 @@ class Inbox(Base):
             report.inbox(a, self.proj, [{"key": "OPS-1"}])
         self.assertEqual(sorted(json.loads(core.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
 
+    def test_status_change_last_qa_column_and_empty_updated_omitted(self):
+        from support import PLAN, RUN_FORM
+        self.config(jiraKeyPrefix="PROJ")
+        # Legacy list in inbox_seen migrates cleanly without marking PROJ-5 NEW
+        con = core.connect()
+        try:
+            with con:
+                core.set_meta(con, "inbox_seen", json.dumps(["PROJ-5"]))
+        finally:
+            con.close()
+        # Local runs: PROJ-1 failed, PROJ-2 passed (use PLAN1-style single runs)
+        p_pass = {"kind": "ticket", "tickets": [{"key": "PROJ-5"}],
+                  "cases": [{"id": "TC-1", "ticket": "PROJ-5", "route": "/form"}]}
+        r_pass = {"target": "/form", "build": "1.0", "status": "COMPLETED", "cases": [{"id": "TC-1", "status": "PASS"}]}
+        self.rundir("2026-11-23-PROJ-5", plan=p_pass, runs=[("form", r_pass)])
+        p_fail = {"kind": "ticket", "tickets": [{"key": "PROJ-7"}],
+                  "cases": [{"id": "TC-1", "ticket": "PROJ-7", "route": "/form"}]}
+        r_fail = {"target": "/form", "build": "1.0", "status": "COMPLETED", "cases": [{"id": "TC-1", "status": "FAIL"}]}
+        self.rundir("2026-11-23-PROJ-7", plan=p_fail, runs=[("form", r_fail)])
+        # Items without `updated` (as real acli returns): Updated column omitted; Last QA shown
+        items = [{"key": "PROJ-5", "fields": {"summary": "Passed one", "status": {"name": "In QA"}, "priority": {"name": "Low"}}},
+                 {"key": "PROJ-7", "fields": {"summary": "Failed one", "status": {"name": "In Progress"}, "priority": {"name": "High"}}}]
+        code, out, _ = cli("inbox", str(self.proj), stdin=json.dumps(items))
+        self.assertEqual(code, 0)
+        self.assertNotIn("| Updated |", out)
+        self.assertIn("| New | Key | Summary | Status | Priority | Last QA |", out)
+        self.assertIn("|  | PROJ-5 | Passed one | In QA | Low | ✅ PASS |", out)
+        self.assertIn("| NEW | PROJ-7 | Failed one | In Progress | High | ❌ FAIL |", out)
+        self.assertEqual(out.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7")
+        # Next check: PROJ-7 status changes In Progress -> Ready for QA -> flagged CHANGED; unchanged PASS PROJ-5 skipped
+        items2 = [items[0], {"key": "PROJ-7", "fields": {"summary": "Failed one", "status": {"name": "Ready for QA"}, "priority": {"name": "High"}}}]
+        code, out2, _ = cli("inbox", str(self.proj), stdin=json.dumps(items2))
+        self.assertEqual(code, 0)
+        self.assertIn("| CHANGED | PROJ-7 |", out2)
+        self.assertEqual(out2.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7")
+        # Next check: nothing new or changed -> Next skips ✅ PASS PROJ-5 and picks PROJ-7
+        code, out3, _ = cli("inbox", str(self.proj), stdin=json.dumps(items2))
+        self.assertEqual(code, 0)
+        self.assertEqual(out3.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7")
+
+
+class Prep(Base):
+    """`qa-mem prep`: single deterministic read-only ticket+plan+rules+memory context bundle."""
+
+    def test_prep_bundles_acli_ac_field_comments_rules_plan_and_scrubs(self):
+        import subprocess
+        from support import done, PLAN
+        self.config(jiraProject="PROJ", jiraKeyPrefix="PROJ", jiraAcField="customfield_10042", qaBaseUrl="https://qa.example")
+        (self.proj / "qa-rules.md").write_text("never click Confirm\n")
+        self.rundir("2026-11-23-plan-PROJ-1", plan={**PLAN, "kind": "plan", "tickets": [PLAN["tickets"][0]],
+                                                    "cases": PLAN["cases"][:2]})
+        view_json = json.dumps({"key": "PROJ-1", "fields": {"summary": "Speed", "customfield_10042": "Max 130"}})
+        comm_json = json.dumps({"comments": [{"author": {"displayName": "Dev"}, "created": "2026-11-24",
+                                              "body": {"type": "doc", "content": [{"type": "paragraph", "content": [
+                                                  {"type": "text", "text": "See token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk"}]}]}}]})
+        seq = [done(0), done(0, out=view_json), done(0, out=comm_json)]
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
+            code, out, err = cli("prep", str(self.proj), "1")
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(out)
+        self.assertEqual(data["keys"], ["PROJ-1"])
+        self.assertTrue(data["acli"])
+        self.assertIn("customfield_10042", mrun.call_args_list[1][0][0][mrun.call_args_list[1][0][0].index("--fields") + 1])
+        self.assertEqual(data["tickets"][0]["fields"]["customfield_10042"], "Max 130")
+        self.assertEqual(data["tickets"][0]["comments"][0]["body"], "See token [REDACTED-JWT]")
+        self.assertNotIn("eyJhbGci", out)
+        self.assertIn("[REDACTED-JWT]", out)
+        self.assertIn("never click Confirm", data["rules"])
+        self.assertIsNotNone(data["plan_state"]["reusable_plan"])
+
+    def test_prep_fallback_without_acli_and_custom_field_retry(self):
+        import subprocess
+        from support import done
+        self.config(jiraKeyPrefix="PROJ", jiraAcField="customfield_99999")
+        with mock.patch("shutil.which", return_value=None):
+            code, out, err = cli("prep", str(self.proj), "12")
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(out)
+        self.assertEqual((data["keys"], data["acli"], data["tickets"]), (["PROJ-12"], False, []))
+        # Retry without custom field when acli rejects it
+        seq = [done(0), done(1, err="unknown field customfield_99999"),
+               done(0, out=json.dumps({"key": "PROJ-12", "fields": {"summary": "Ok"}})), done(0, out="[]")]
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
+            code, out, err = cli("prep", str(self.proj), "12")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["tickets"][0]["fields"]["summary"], "Ok")
+        self.assertNotIn("customfield_99999", " ".join(mrun.call_args_list[2][0][0]))
+
 
 if __name__ == "__main__":
     unittest.main()

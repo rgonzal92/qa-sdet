@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS coverage(page TEXT, target TEXT, heuristic TEXT, resu
 CREATE INDEX IF NOT EXISTS coverage_page ON coverage(page, build);
 CREATE TABLE IF NOT EXISTS bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT,
   classification TEXT, status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT,
-  seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT);
+  seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT, jira_key TEXT);
 CREATE INDEX IF NOT EXISTS bugs_page ON bugs(page, status);
 CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, PRIMARY KEY(run_id, src, hash));
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
@@ -111,6 +111,9 @@ def connect():
             raise BadInput(f"{p} is from before qa-sdet 0.4 ({table} lacks {', '.join(sorted(cols - have))}): move it "
                            "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again")
     con.executescript(SCHEMA)
+    if "jira_key" not in {r[1] for r in con.execute("PRAGMA table_info(bugs)")}:
+        with con:
+            con.execute("ALTER TABLE bugs ADD COLUMN jira_key TEXT")
     if con.execute(f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1").fetchone():  # one-time clean-up (read first: no write lock)
         with con:
             con.execute(f"DELETE FROM meta WHERE {STALE_META}")

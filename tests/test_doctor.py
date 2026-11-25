@@ -190,6 +190,20 @@ class Doctor(Base):
         self.assertIn("make it readable: chmod", (os.chmod(core.CONFIG.parent, 0), self.doctor_out(),
                                                   os.chmod(core.CONFIG.parent, 0o700))[1])
 
+    def test_doctor_validates_jira_ac_field_and_inbox_jql(self):
+        good = dict(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
+                    ssoHost="login.x.com", buildSource={"type": "selector", "value": "footer"})
+        self.config(**good, jiraAcField="customfield_10042", inboxJql='status = "Ready for QA" ORDER BY updated DESC')
+        out = self.doctor_out()
+        self.assertIn("ok   jiraAcField is a Jira custom field id", out)
+        self.assertIn("ok   inboxJql is a single-line JQL query", out)
+        for bad, want in [(dict(jiraAcField="bad field"), "FIX  jiraAcField"),
+                          (dict(jiraAcField=123), "FIX  jiraAcField"),
+                          (dict(inboxJql="a\nb"), "FIX  inboxJql"),
+                          (dict(inboxJql=["x"]), "FIX  inboxJql")]:
+            self.config(**{**good, **bad})
+            self.assertIn(want, self.doctor_out(), bad)
+
 
 class Browsers(Base):
     """Which browsers are installed, and the chosen one."""

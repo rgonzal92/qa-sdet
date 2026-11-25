@@ -147,6 +147,14 @@ def doctor():
             ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
             line(ok_t, "releaseTemplates lists release names with {version}",
                  'a list such as ["Release-A-{version}"]: the pass-comment draft fills in the fix version')
+        ac_field = cfg.get("jiraAcField")
+        if ac_field not in (None, ""):
+            line(isinstance(ac_field, str) and bool(re.fullmatch(r"customfield_\d+", ac_field.strip())),
+                 "jiraAcField is a Jira custom field id", 'e.g. "jiraAcField": "customfield_10042"')
+        jql = cfg.get("inboxJql")
+        if jql not in (None, ""):
+            line(isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
+                 "inboxJql is a single-line JQL query", 'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"')
     try:
         import PIL
         line(True, f"Pillow {PIL.__version__}")

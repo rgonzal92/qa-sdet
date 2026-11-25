@@ -231,6 +231,24 @@ class Docs(unittest.TestCase):
             self.assertIn(meta["model"], ("haiku", "sonnet", "opus", "inherit"), path.name)
             self.assertIn(meta["effort"], ("low", "medium", "high", "xhigh", "max"), path.name)
 
+    def test_productivity_workflow_contracts_in_docs(self):
+        """Skills and references wire the new session-check, batch explore, resume/retest, bug-sync and prep flows."""
+        self.assertIn("qa-mem session-check", text("references/run-setup.md"))
+        self.assertIn("qa-mem session-check --record", text("skills/qa-login/SKILL.md"))
+        for token in ("qa-mem prep", "qa-mem plan-find", "--resume", "--retest", "--all"):
+            self.assertIn(token, text("skills/qa-ticket/SKILL.md"))
+        for token in ("--changed", "--top", "qa-mem gaps --changed"):
+            self.assertIn(token, text("skills/qa-explore/SKILL.md"))
+        for token in ("inboxJql", "qa-mem bug-sync"):
+            self.assertIn(token, text("skills/qa-inbox/SKILL.md"))
+        self.assertIn("jiraAcField", text("references/jira.md"))
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": "qa-mem session-check --record"},
+                                             "cwd": os.path.realpath(d)}), (None, True))
+
 
 if __name__ == "__main__":
     unittest.main()

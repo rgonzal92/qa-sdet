@@ -866,6 +866,17 @@ class R8ApproveAndLog(Case):
         self.assertEqual(hook({"tool_name": "Read", "cwd": str(PROJ), "tool_input": {"file_path": "/etc/hosts"}}), "")
         self.assertEqual(hook("not json"), "")
 
+    def test_readonly_acli_auto_approved_and_writes_or_web_not(self):
+        for cmd in ("acli jira auth status", "acli jira workitem view PROJ-1 --json",
+                    "acli jira workitem search --jql 'project = P' --json",
+                    "acli jira workitem comment list --key PROJ-1 --json",
+                    "acli jira workitem search --jql 'project = P' --json | qa-mem inbox ."):
+            self.assertEqual(decision(cmd), "allow", cmd)
+        for cmd in ("acli jira auth login", "acli jira workitem search --jql 'project = P' --web",
+                    "acli jira workitem search --jql 'project = P' -w"):
+            self.assertIsNone(decision(cmd), cmd)
+        self.assertEqual(decision(ACLI_W), "deny")
+
     def test_denials_are_logged_masked_and_capped(self):
         proj = project()
         cmd = "curl -H 'Authorization: Bearer abc.def' 'https://u:pw123@x.example/?token=s3cr3t' && acli jira workitem create"

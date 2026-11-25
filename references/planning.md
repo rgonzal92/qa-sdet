@@ -21,7 +21,7 @@ The skill writes `<run>/.data/plan.json`; `qa-mem report '<run>'` renders it.
   "questions": ["Q1 [BLOCKING] Is 130 itself allowed?", {"text": "…", "status": "resolved", "answer": "…"}]
 }
 ```
-`kind` is `ticket` (qa-ticket), `plan` (qa-plan) or `explore` (qa-explore). `created` is `date -u +%Y-%m-%dT%H:%M:%SZ`. `fix_version` and `fixed_note` are optional and fill the Jira pass-comment draft.
+`kind` is `ticket` (qa-ticket), `plan` (qa-plan) or `explore` (qa-explore). `created` is `date -u +%Y-%m-%dT%H:%M:%SZ`. `fix_version` and `fixed_note` are optional and fill the Jira pass-comment draft. For a partial `--retest`, set optional `"retest_of": "<prior run folder name>"` and `"prior_passed": [{"id", "ticket", "ac", "title", "route", "build"}]` for cases that passed on an earlier build and are not re-run here (the renderer flags them honestly as `PASS WITH NOTES` and notes them in the pass-comment draft's `CHECK BEFORE POSTING` block).
 
 ## Ticket and plan
 - `acs`: only what the ticket states. A missing rule, an ambiguous word, an unclear role or state is a question: `Q1 [BLOCKING]`, `[HIGH]` or `[LOW]`. Done when every AC and question is numbered.

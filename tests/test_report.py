@@ -824,5 +824,102 @@ class JiraDraft(Rendering):
             con.close()
 
 
+class PlanFindAndRetest(Rendering):
+    """`qa-mem plan-find` and honest partial-retest reporting (`retest_of` + `prior_passed`)."""
+
+    def test_reusable_plan_includes_zero_execution_blocked_run(self):
+        blocked = {"run_id": "t-1", "mode": "ticket", "target": "/form", "build": "unknown",
+                   "status": "BLOCKED", "summary": "session expired, run /qa-sdet:qa-login",
+                   "cases": [{"id": "TC-1", "status": "BLOCKED"}, {"id": "TC-2", "status": "NOT_RUN"}]}
+        d = self.rundir("2026-11-24-PROJ-1", plan=PLAN1, runs=[("form", blocked)])
+        code, out, err = cli("plan-find", str(self.proj), "--keys", "PROJ-1")
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(out)
+        self.assertEqual(data["reusable_plan"]["run_dir"], str(d.resolve()))
+        self.assertEqual(data["latest_run"]["run_dir"], str(d.resolve()))
+        self.assertTrue(data["latest_run"]["can_resume"])
+        self.assertEqual(data["latest_run"]["incomplete_routes"], ["/form"])
+
+    def test_latest_run_resume_and_retest_breakdown(self):
+        d = self.rundir("2026-11-24-PROJ-1+PROJ-2", plan=PLAN, runs=[("form", RUN_FORM)])
+        code, out, err = cli("plan-find", str(self.proj), "--keys", "PROJ-1,PROJ-2")
+        self.assertEqual((code, err), (0, ""))
+        lr = json.loads(out)["latest_run"]
+        self.assertEqual(lr["run_dir"], str(d.resolve()))
+        self.assertEqual(lr["builds"], ["1.42"])
+        self.assertEqual(lr["counts"], {"PASS": 1, "FAIL": 1, "BLOCKED": 0, "NOT_RUN": 2, "QUESTION": 0})
+        self.assertEqual(lr["incomplete_routes"], ["/list"])
+        self.assertEqual(lr["completed_routes"], ["/form"])
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-2", "TC-3", "TC-4"])
+        self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-1"])
+        self.assertTrue(lr["can_resume"])
+        self.assertTrue(lr["can_retest"])
+        # Inspect directly by --run
+        code2, out2, _ = cli("plan-find", str(self.proj), "--run", str(d))
+        self.assertEqual((code2, json.loads(out2)["latest_run"]["run_dir"]), (0, str(d.resolve())))
+        # Bad args
+        self.assertEqual(cli("plan-find", str(self.proj))[0], 2)
+        self.assertEqual(cli("plan-find", str(self.proj), "--keys", "PROJ-1", "--run", str(d))[0], 2)
+        self.assertEqual(cli("plan-find", str(self.proj), "--run", str(self.proj / "qa-out/missing"))[0], 2)
+
+    def test_partial_retest_verdict_is_pass_with_notes_and_honest_draft(self):
+        plan = {**PLAN1, "retest_of": "2026-11-23-PROJ-1",
+                "cases": [PLAN1["cases"][1]],  # only TC-2 retested
+                "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}
+        run_pass = {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "PASS", "actual": "Error shown"}]}
+        d, r = self.render_run([("form", run_pass)], plan=plan)
+        self.assertIn("retest of 2026-11-23-PROJ-1", r)
+        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
+        self.assertIn("verified on prior build 1.42; not re-run here", r)
+        self.assertIn("- AC-1 Saves 0-130 — verified on prior build 1.42 (TC-1)", r)
+        self.assertIn("<summary>Prior-build passes not re-run here (1)</summary>", r)
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
+        self.assertIn("Partial retest of 2026-11-23-PROJ-1", draft)
+        self.assertIn("TC-1 - PASS (prior build 1.42): Save 130", draft)
+        self.assertIn("TC-2 - PASS: Reject 131", draft)
+        # If the retested case fails, verdict is FAIL with no draft
+        run_fail = {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "FAIL", "actual": "Still saves 131"}]}
+        d2, r2 = self.render_run([("form", run_fail)], plan=plan)
+        self.assertIn("**Verdict: ❌ FAIL**", r2)
+        self.assertFalse((d2 / "jira-comment-PROJ-1.md").exists())
+
+
+class FilingBundle(Rendering):
+    """Persistent shell-safe filing commands & attachments folded inside REPORT.md."""
+
+    def test_confirmed_draft_gets_safe_filing_block_and_suspected_does_not(self):
+        import subprocess
+        self.config(jiraProject="DEMO")
+        title = "Can't save `id` and $(echo INJECTED) at 131"
+        bugs = [
+            {"route": "/form", "title": title, "symptom": "131 saved", "severity": "HIGH",
+             "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md", "ticket": "PROJ-1"},
+            {"route": "/form", "title": "Flaky toast", "symptom": "toast", "severity": "LOW",
+             "classification": "SUSPECTED", "draft_path": "bugs/BUG-2.md"},
+        ]
+        d = self.rundir("2026-11-24-PROJ-1", plan=PLAN1, runs=[("form", {**RUN1, "bugs": bugs})])
+        (d / "bugs/BUG-1.md").write_text(f"# {title}\n\nbody\n")
+        (d / "bugs/BUG-2.md").write_text("# Flaky toast\n\nbody\n")
+        (d / "evidence/BUG-1.png").write_bytes(b"png")
+        (d / "evidence/BUG-1.webm").write_bytes(b"webm")
+        (d / "repro/BUG-1.spec.ts").write_text("test('x', () => {});")
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("<summary>Filing commands &amp; attachments (1 confirmed)</summary>", r)
+        self.assertNotIn("Flaky toast\n", r.split("Filing commands", 1)[1])
+        h = core.bug_hash("/form", "131 saved")
+        self.assertIn(f"qa-mem bug-status {h} FILED <JIRA-KEY>", r)
+        self.assertIn("BUG-1.png", r.split("Filing commands", 1)[1])
+        self.assertIn("BUG-1.webm", r.split("Filing commands", 1)[1])
+        self.assertIn("BUG-1.spec.ts", r.split("Filing commands", 1)[1])
+        # Verify the printed acli command is shell-safe (does not execute $(echo INJECTED) or backticks)
+        cmd = next(ln for ln in r.splitlines() if ln.startswith("acli jira workitem create "))
+        out = subprocess.run(["bash", "-c", cmd.replace("acli ", "printf '%s\\n' ", 1)], capture_output=True, text=True).stdout
+        self.assertNotIn("INJECTED\n", out)
+        self.assertIn("$(echo INJECTED)", out)
+        # Draft file itself stays clean (no filing command injected into --description-file)
+        self.assertNotIn("acli jira", (d / "bugs/BUG-1.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

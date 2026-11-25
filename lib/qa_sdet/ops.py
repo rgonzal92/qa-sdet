@@ -1,4 +1,6 @@
-"""Run folders, markers, `browser-open`, prune and annotate."""
+"""Run folders, markers, `browser-open`, `session-check`, prune and annotate."""
+import contextlib
+import io
 import json
 import os
 import re
@@ -9,6 +11,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from . import core
 
 
@@ -215,6 +218,118 @@ def browser_open(args):
     sys.stdout.write(r.stdout or "")
     sys.stderr.write(r.stderr or "")
     return code_
+
+
+def _allowed_hosts(cfg):
+    listed = cfg.get("allowedHosts")
+    hosts = {h.lower().strip().rstrip(".").removeprefix("*.") for h in listed if isinstance(h, str) and h.strip()} \
+        if isinstance(listed, list) else set()
+    return hosts | {"localhost", "127.0.0.1", "::1"} if hosts & {"localhost", "127.0.0.1", "::1"} else hosts
+
+
+def _url_allowed(url, hosts):
+    try:
+        u = urlsplit(str(url or ""))
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower().rstrip(".")
+    return u.scheme in ("http", "https") and bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
+
+
+def _norm_host(raw):
+    s = str(raw or "").strip().lower()
+    if not s:
+        return "", ""
+    try:
+        u = urlsplit(s if "://" in s else "http://" + s)
+    except ValueError:
+        return "", ""
+    hostname = (u.hostname or "").rstrip(".")
+    netloc = u.netloc.rpartition("@")[2].rstrip(".")
+    return netloc, hostname
+
+
+def _unwrap_raw(text):
+    t = (text or "").strip()
+    try:
+        v = json.loads(t)
+        return v if isinstance(v, (dict, str)) else t
+    except ValueError:
+        return t
+
+
+def session_check(record=False, read_build=False):
+    """Headless check that the `main` browser profile is signed in at qaBaseUrl (not redirected to ssoHost or a login
+    form). Exit 0 = signed in, 1 = session expired, 2 = config/browser/tool error."""
+    try:
+        cfg = core.config(strict=True)
+    except (OSError, ValueError) as e:
+        raise core.BadInput(f"session-check: unreadable {core.CONFIG} ({e})")
+    base_url = str(cfg.get("qaBaseUrl") or "").strip()
+    hosts = _allowed_hosts(cfg)
+    if not _url_allowed(base_url, hosts):
+        raise core.BadInput(f"session-check: qaBaseUrl {base_url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
+    sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = browser_open([base_url])
+    if rc:
+        return 2
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PLAYWRIGHT_MCP_", "PWTEST_"))}
+    try:
+        js = "JSON.stringify({host: location.host, hasPassword: Boolean(document.querySelector('input[type=\"password\"]'))})"
+        try:
+            r = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", js], env=env, capture_output=True, text=True,
+                               errors="replace", timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"browser tool failed: session-check eval failed ({e})", file=sys.stderr)
+            return 2
+        if r.returncode != 0:
+            detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
+            print(f"browser tool failed: session-check eval failed ({detail})", file=sys.stderr)
+            return 2
+        parsed = _unwrap_raw(r.stdout)
+        if isinstance(parsed, str):
+            parsed = _unwrap_raw(parsed)
+        if not isinstance(parsed, dict) or "host" not in parsed:
+            print(f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})", file=sys.stderr)
+            return 2
+        cur_netloc, cur_host = _norm_host(parsed.get("host"))
+        is_sso = bool(sso_host) and ((":" in sso_netloc and cur_netloc == sso_netloc) or (":" not in sso_netloc and cur_host == sso_host))
+        if is_sso or parsed.get("hasPassword"):
+            print("session expired, run /qa-sdet:qa-login", file=sys.stderr)
+            return 1
+        build = None
+        if read_build:
+            bs = cfg.get("buildSource") if isinstance(cfg.get("buildSource"), dict) else {}
+            btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
+            bjs = None
+            if btype == "selector" and bval:
+                bjs = f"document.querySelector({json.dumps(bval)})?.textContent || ''"
+            elif btype == "url" and bval and (bval.startswith("/") or _url_allowed(bval, hosts)):
+                bjs = f"fetch({json.dumps(bval)}).then(r => r.text())"
+            elif btype == "header" and bval:
+                bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
+            if bjs:
+                try:
+                    br = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", bjs], env=env, capture_output=True,
+                                        text=True, errors="replace", timeout=20)
+                    if br.returncode == 0:
+                        raw_b = _unwrap_raw(br.stdout)
+                        build = core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout)
+                except (OSError, subprocess.TimeoutExpired):
+                    build = core.UNKNOWN
+            else:
+                build = core.UNKNOWN
+        if record:
+            ensure_profile_dir()
+            core._write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
+        print(f"ok  build={build}" if read_build else "ok")
+        return 0
+    finally:
+        try:
+            subprocess.run(["playwright-cli", "-s=qa", "close"], env=env, capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def prune(project, days=7, t=None, run=None):
