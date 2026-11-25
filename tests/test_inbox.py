@@ -191,6 +191,33 @@ class Prep(Base):
         self.assertEqual(json.loads(out)["tickets"][0]["fields"]["summary"], "Ok")
         self.assertNotIn("customfield_99999", " ".join(mrun.call_args_list[2][0][0]))
 
+    def test_prep_flattens_adf_description_and_ac_field(self):
+        """Jira Cloud returns description and custom fields as ADF trees: prep gives them as text, words not glued."""
+        import subprocess
+        from support import done
+        self.config(jiraKeyPrefix="PROJ", jiraAcField="customfield_10042")
+        para = lambda *nodes: {"type": "paragraph", "content": list(nodes)}
+        txt = lambda t: {"type": "text", "text": t}
+        desc = {"type": "doc", "content": [
+            para(txt("Owner "), {"type": "mention", "attrs": {"id": "1", "text": "@Ann"}}, txt(" see "),
+                 {"type": "inlineCard", "attrs": {"url": "https://wiki.example/x"}}),
+            para({"type": "status", "attrs": {"text": "IN REVIEW"}}, txt(" due "),
+                 {"type": "date", "attrs": {"timestamp": "1795478400000"}}),
+            {"type": "table", "content": [{"type": "tableRow", "content": [
+                {"type": "tableHeader", "content": [para(txt("Field"))]},
+                {"type": "tableCell", "content": [para(txt("Max"))]}]}]}]}
+        acs = {"type": "doc", "content": [{"type": "bulletList", "content": [
+            {"type": "listItem", "content": [para(txt("Saves 130"))]},
+            {"type": "listItem", "content": [para(txt("Rejects 131"))]}]}]}
+        view = json.dumps({"key": "PROJ-1", "fields": {"summary": "Speed", "description": desc, "customfield_10042": acs}})
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=view), done(0, out="[]")]):
+            code, out, err = cli("prep", str(self.proj), "1")
+        self.assertEqual((code, err), (0, ""))
+        fields = json.loads(out)["tickets"][0]["fields"]
+        self.assertEqual(fields["description"], "Owner @Ann see https://wiki.example/x\nIN REVIEW due 2026-11-24\nField | Max")
+        self.assertEqual(fields["customfield_10042"], "- Saves 130\n- Rejects 131")
+
 
 if __name__ == "__main__":
     unittest.main()

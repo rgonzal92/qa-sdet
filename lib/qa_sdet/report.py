@@ -7,7 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from . import core, scrub, ops
@@ -162,17 +162,24 @@ def merged_cases(plan, runs, warnings=None):
     return out
 
 
-def run_bugs(runs):
-    """Every bug of every run, once, with id (BUG-n from its draft) and route."""
-    out, seen = [], set()
-    for _, r in runs:
+def run_bugs(runs, warnings=None):
+    """Every bug of every run, once, with id (BUG-n from its draft) and route. Two different bugs under one BUG-n
+    (two explorers numbered alike) are both kept and named in `warnings`."""
+    out, seen = [], {}
+    for name, r in runs:
         route = core.norm_route(r.get("target")) if str(r.get("target") or "").startswith(("/", "http", "#")) else ""
         for b in _list(r, "bugs"):
             b = {**b, "id": bug_id(b), "route": core.norm_route(b.get("route")) or route, "target": route}
             key = b["id"] or (b["route"], core.norm(b.get("title")))
-            if key not in seen:
-                seen.add(key)
+            first = seen.get(key)
+            if first is None:
+                seen[key] = b
                 out.append(b)
+            elif b["id"] and (first["route"], core.norm(first.get("title"))) != (b["route"], core.norm(b.get("title"))):
+                out.append(b)
+                if warnings is not None:
+                    warnings.append(f"{name}: {b['id']} is also the id of another bug ({core.short(first.get('title'), 50)}); "
+                                    f"one draft file can't hold both: both are listed, check bugs/{b['id']}.md")
     return out
 
 
@@ -245,9 +252,14 @@ def _ac_id(ac):
     return str(ac["id"]).strip() if isinstance(ac.get("id"), (str, int)) and not isinstance(ac["id"], bool) else ""
 
 
+def _ac_key(a):
+    """An AC id as compared: case and spaces don't count ('ac-1 ' is AC-1)."""
+    return re.sub(r"\s+", "", str(a)).upper()
+
+
 def _case_acs(c):
-    """The AC ids a case covers: "AC-1" or "AC-1, AC-2"."""
-    return {a.strip() for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
+    """The AC ids a case covers, as _ac_key gives them: "AC-1" or "AC-1, AC-2"."""
+    return {_ac_key(a) for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
 
 
 def _blocked_runs(cases, runs):
@@ -310,7 +322,7 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
              and (owner(q) == me or owner(q) not in plan_keys)] + \
         [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"] + \
             [_bug_word(b) for b in its_bugs] + \
-            [f"{_ac_id(a)} has no test case" for a in _list(ticket, "acs") if _ac_id(a) and _ac_id(a) not in covered]
+            [f"{_ac_id(a)} has no test case" for a in _list(ticket, "acs") if _ac_id(a) and _ac_key(_ac_id(a)) not in covered]
     if prior_mine:
         pb = ", ".join(sorted({str(c.get("build") or core.UNKNOWN) for c in prior_mine}))
         notes.append(f"{len(prior_mine)} case{'s' * (len(prior_mine) != 1)} verified on prior build {pb}; not re-run here")
@@ -384,8 +396,8 @@ def _ac_lines(t, cases, with_status, prior_passed=()):
     out = []
     for ac in _list(t, "acs"):
         aid = _ac_id(ac)
-        mine = [c for c in cases if aid in _case_acs(c)]
-        prior = [c for c in prior_passed if aid in _case_acs(c)]
+        mine = [c for c in cases if _ac_key(aid) in _case_acs(c)]
+        prior = [c for c in prior_passed if _ac_key(aid) in _case_acs(c)]
         ids = f" ({one_line(', '.join(str(c['id']) for c in (mine or prior) if c.get('id')))})" if (mine or prior) else ""
         if not mine and not prior:
             state = " — not covered"
@@ -543,7 +555,8 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
                f"--summary {shlex.quote(title)} --description-file {shlex.quote(str(draft))}")
         # a re-sighting (a regression's draft) is stored under the hash it names, not one of its new wording
         h = core.given_hash(b.get("hash")) or \
-            core.bug_hash(core.norm_route(b.get("route")), core.cap(scrub.redact(b.get("symptom") or b.get("title"))))
+            core.bug_hash(core.norm_route(b.get("route")),  # as ingest: a blank symptom falls back to the title
+                          core.cap(scrub.redact(core._s(b.get("symptom")))) or core.cap(scrub.redact(core._s(b.get("title")))))
         attachments = [p for p in (run_dir / "evidence" / f"{bid}.png", run_dir / "evidence" / f"{bid}.webm",
                                    run_dir / "repro" / f"{bid}.spec.ts") if p.is_file()]
         block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", "", "```sh", cmd,
@@ -612,10 +625,18 @@ def _text(path):
         return ""
 
 
+def _names_request(named, method, path):
+    """Whether lower-cased text names a call by method and path: 'POST /api/zones' or 'POST http://host/api/zones'.
+    A path alone (the run's own target, a passing note's 'GET /api/zones') explains no other call failing there."""
+    return re.search(rf"\b{re.escape(method.lower())}\s+(?:https?://[^/\s]+)?{re.escape(path.lower())}(?![\w/.-])",
+                     named) is not None
+
+
 def _signals(run_dir, name, run):
     """[(signal, count)] from .data/requests-<slug>.log and console-<slug>.log of run file `name`: failed requests
-    (4xx, 5xx, FAILED) and console errors, each once, minus those the run JSON or a bug draft names (the request path,
-    or the message's first 60 characters). "Failed to load resource" lines repeat the requests log and are skipped.
+    (4xx, 5xx, FAILED) and console errors, each once, minus those the run JSON or a bug draft names (a request by its
+    method and path, a message by its first 60 characters). "Failed to load resource" lines repeat the requests log
+    and are skipped.
     shortcut: no host filter, so a failing third-party call shows too; filter by allowedHosts if real runs get noisy."""
     data, slug, found = Path(run_dir) / ".data", name[len("run-"):-len(".json")], {}
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
@@ -627,7 +648,7 @@ def _signals(run_dir, name, run):
         except ValueError:  # an odd host such as an unclosed [IPv6
             path = m.group(2)
         status = m.group(3) if m.group(3) != "FAILED" else f"FAILED {m.group(4)}".strip()
-        found.setdefault(f"{m.group(1)} {path} → {status}", [path, 0])[1] += 1
+        found.setdefault(f"{m.group(1)} {path} → {status}", [(m.group(1), path), 0])[1] += 1
     for line in scrub.redact(_text(data / f"console-{slug}.log")).splitlines():
         if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
             continue  # blank, stack lines, headers
@@ -636,7 +657,8 @@ def _signals(run_dir, name, run):
         if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
             found.setdefault(f"console: {msg}", [msg[:60], 0])[1] += 1
     named = (json.dumps(run, ensure_ascii=False) + "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))).lower()
-    return [(key, n) for key, (needle, n) in found.items() if needle.lower() not in named]
+    explained = lambda w: _names_request(named, *w) if isinstance(w, tuple) else w.lower() in named
+    return [(key, n) for key, (what, n) in found.items() if not explained(what)]
 
 
 # ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
@@ -718,6 +740,13 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
             shots.append((r or "test page", Path(run_dir) / "evidence" / f"{pick['id']}.png"))
         else:
             placeholders.append(f"screenshot for {r or 'the test page'}")
+    if not mine:  # every case carried from the retested run: its images and builds are the ones to use
+        prior_dir = Path(run_dir).parent / " ".join(str(retest_of).split()) if retest_of else None
+        for c in prior_passed:
+            png = prior_dir / "evidence" / f"{c.get('id')}.png" if prior_dir and _evidence_file(prior_dir, c.get("id")) else None
+            if png and route_of(c) not in {r for r, _ in shots}:
+                shots.append((route_of(c) or "test page", png))
+        builds = [c.get("build") for c in prior_passed]
     lines = ["CHECK BEFORE POSTING (not part of the comment)"]
     if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):  # one page on an unknown build is enough to check
         shown = (fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix) if fix else "<version>"
@@ -751,8 +780,13 @@ def render_report_parts(run_dir, cfg=None):
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
     tickets = _plan_tickets(plan)
     keys = [t["key"] for t in tickets]
-    cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs)
+    cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs, d["warnings"])
     prior_all = _prior_passed(plan, keys)
+    for t in tickets:  # a case naming an AC its ticket doesn't list covers nothing: say so
+        have = {_ac_key(_ac_id(a)) for a in _list(t, "acs") if _ac_id(a)}
+        for c in (c for c in cases if have and c.get("ticket") == t["key"]):
+            d["warnings"] += [f"{c['id']} names {a}, which {t['key']} doesn't have: fix the case's `ac` in plan.json"
+                              for a in sorted(_case_acs(c) - have)]
     retest_of = str(plan.get("retest_of") or "").strip() if isinstance(plan.get("retest_of"), str) else ""
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
@@ -781,7 +815,9 @@ def render_report_parts(run_dir, cfg=None):
         for t in tickets:
             v, why = vmap.get(t["key"]) or ("NOT STARTED", "")
             mine = [c for c in cases if c.get("ticket") == t["key"]]
-            out.append(row(_ticket_title(t), VERDICT_ICON[v], why, _counts(mine), len(ticket_bugs(t["key"], cases, bugs, keys))))
+            prior_n = sum(c.get("ticket") == t["key"] for c in prior_all)
+            out.append(row(_ticket_title(t), VERDICT_ICON[v], why, _counts(mine) + (f" (+{prior_n} prior)" if prior_n else ""),
+                           len(ticket_bugs(t["key"], cases, bugs, keys))))
     elif tickets and with_status:
         t = tickets[0]
         v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
@@ -1019,6 +1055,13 @@ def _run_state(run_dir):
                "route": core.norm_route(c.get("route")) or "", "title": c.get("title") or "",
                "build": case_build.get(c["id"]) or (builds[-1] if builds else core.UNKNOWN)}
               for c in cases if trusted(c)]
+    # an earlier retest's prior passes, not re-run here: carried on, or a chained retest would drop them
+    ids = {c["id"] for c in cases}
+    passed += [{"id": str(c["id"]), "ticket": c.get("ticket") or "", "ac": c.get("ac") or "",
+                "route": core.norm_route(c.get("route")) or "", "title": core._s(c.get("title")),
+                "build": core._s(c.get("build")) or core.UNKNOWN}
+               for c in _prior_passed(plan, tickets) if isinstance(c.get("id"), (str, int)) and not isinstance(c["id"], bool)
+               and str(c["id"]) and str(c["id"]) not in ids]
     zero_exec = bool(runs) and all(c["status"] in ("BLOCKED", "NOT_RUN") for c in cases) and \
         all(_first_word(r.get("status")) == "blocked" for _, r in runs)
     kind = str(plan.get("kind") or "")
@@ -1200,6 +1243,18 @@ def _acli_json(acli, argv, timeout=30):
         return None, f"unreadable JSON ({e})"
 
 
+ADF_JOIN = {"doc": "\n", "bulletList": "\n", "orderedList": "\n", "blockquote": "\n", "panel": "\n", "table": "\n",
+            "expand": "\n", "tableRow": " | ", "tableCell": " ", "tableHeader": " ", "listItem": " "}
+
+
+def _adf_attr_text(node):
+    """Text of the inline nodes that carry it in attrs: a mention, a link card, a status lozenge, a date."""
+    a = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+    if node.get("type") == "date" and str(a.get("timestamp") or "").isdigit():
+        return datetime.fromtimestamp(int(a["timestamp"]) / 1000, timezone.utc).strftime("%Y-%m-%d")
+    return next((str(a[k]) for k in ("text", "url", "shortName") if isinstance(a.get(k), (str, int)) and str(a[k])), "")
+
+
 def _adf_text(node, depth=0):
     """Flatten Jira Cloud Atlassian Document Format (ADF) JSON to plain text so prep stays compact."""
     if depth > 20 or node is None:
@@ -1212,8 +1267,9 @@ def _adf_text(node, depth=0):
         if isinstance(node.get("text"), str):
             return node["text"]
         if isinstance(node.get("content"), list):
-            sep = "\n" if node.get("type") in ("doc", "bulletList", "orderedList", "blockquote", "panel", "table") else ""
-            return sep.join(t for t in (_adf_text(c, depth + 1) for c in node["content"]) if t)
+            text = ADF_JOIN.get(node.get("type"), "").join(t for t in (_adf_text(c, depth + 1) for c in node["content"]) if t)
+            return f"- {text}" if node.get("type") == "listItem" and text else text
+        return _adf_attr_text(node)
     if isinstance(node, list):
         return "\n".join(t for t in (_adf_text(c, depth + 1) for c in node) if t)
     return ""
@@ -1266,6 +1322,10 @@ def prep(con, project, key_args):
             comm_raw, comm_err = _acli_json(acli, ["jira", "workitem", "comment", "list", "--key", key, "--json"])
             item = {"key": key, "fields": data.get("fields", data) if isinstance(data, dict) else data,
                     "comments": _trim_comments(comm_raw) if comm_raw is not None else []}
+            if isinstance(item["fields"], dict):  # Jira Cloud gives rich text as ADF trees: text is what a plan needs
+                for f in ("description", ac_field):
+                    if f and isinstance(item["fields"].get(f), dict) and item["fields"][f].get("type") == "doc":
+                        item["fields"][f] = _adf_text(item["fields"][f])
             if ac_field and not used_ac and not err:
                 item["ac_field_skipped"] = ac_field
             if err:

@@ -427,6 +427,28 @@ class Report(Base):
             "PROJ-1 ❌ FAIL, PROJ-2 ⛔ BLOCKED | 1 |"])
         self.assertNotIn("old-layout", idx)
 
+    def test_two_bugs_sharing_a_bug_id_are_both_kept_and_named(self):
+        """Two page explorers that both wrote BUG-1: neither bug may vanish from the report."""
+        b1 = {"route": "/form", "title": "Speed accepts 131", "draft_path": "bugs/BUG-1.md", "severity": "LOW",
+              "classification": "SUSPECTED"}
+        b2 = {"route": "/list", "title": "List sorts wrong", "draft_path": "bugs/BUG-1.md", "severity": "LOW",
+              "classification": "SUSPECTED"}
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED,
+                        runs=[("form", {**RUN1, "bugs": [b1]}), ("list", {**RUN1, "target": "/list", "cases": [], "bugs": [b2]}),
+                              ("form-2", {**RUN1, "cases": [], "bugs": [b1]})])  # the same bug listed again: once
+        r = report.render_report(d)
+        table = r.split("### Bugs to file")[1].split("\n\n")[0]
+        self.assertEqual((table.count("Speed accepts 131"), table.count("List sorts wrong")), (1, 1))
+        self.assertIn("BUG-1 is also the id of another bug", r.split("## Problems reading this folder")[1])
+
+    def test_ac_ids_match_whatever_their_case_and_unknown_ones_are_named(self):
+        plan = {**PLAN1_ANSWERED, "cases": [{**PLAN1["cases"][0], "ac": "ac-1"}, {**PLAN1["cases"][1], "ac": " AC-2 , AC-9"}]}
+        d = self.rundir("2026-11-23-PROJ-1", plan=plan, runs=[("form", RUN1)])
+        r = report.render_report(d)
+        self.assertIn("**Verdict: ✅ PASS**", r)
+        self.assertNotIn("not covered", r)
+        self.assertIn("TC-2 names AC-9, which PROJ-1 doesn't have", r.split("## Problems reading this folder")[1])
+
     def test_page_column_when_a_ticket_spans_pages(self):
         cases = [{"id": "TC-1", "route": "/a", "status": "PASS", "actual": "", "notes": ""},
                  {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": ""}]
@@ -685,6 +707,19 @@ class Signals(Rendering):
         self.assertIn("### Browser signals no bug explains (2)\n"
                       "- /form: GET /api/x → FAILED net::ERR_UNSAFE_PORT\n"
                       "- /form: console: TypeError: rows is undefined\n", sec)
+
+    def test_a_path_alone_explains_no_failed_request(self):
+        """The run's own target, or a path a passing note mentions, must not hide another call failing on it."""
+        requests = ("1. [POST] http://localhost:8765/form => [500] Internal Server Error\n"
+                    "2. [DELETE] http://localhost:8765/api/zones => [500] Internal Server Error\n"
+                    "3. [PUT] http://localhost:8765/api/zones => [500] Internal Server Error\n"
+                    "4. [GET] http://localhost:8765/api/zones/7 => [404] Not Found\n")
+        r = self.signals_run(run={**RUN1, "notes": "GET /api/zones returns the list."}, requests=requests, console=None,
+                             drafts=["## Evidence\n- Network: PUT http://localhost:8765/api/zones → 500"])
+        self.assertIn("- /form: POST /form → 500", r)
+        self.assertIn("- /form: DELETE /api/zones → 500", r)
+        self.assertIn("- /form: GET /api/zones/7 → 404", r)
+        self.assertNotIn("PUT /api/zones", r)
 
     def test_no_logs_or_only_explained_ones_leave_nothing_to_act_on(self):
         for requests, console, drafts in ((None, None, ()), ("3. [GET] http://h/api/closures.json => [404] Not found\n",
@@ -1020,6 +1055,32 @@ class PlanFindAndRetest(Rendering):
             con.close()
         self.assertEqual({k: re.search(rf"\| {k} \|.*\| ([^|]+) \|$", inbox, re.M).group(1) for k in want}, want)
 
+    def test_a_chained_retest_keeps_the_earlier_prior_passes(self):
+        """Run 1 -> retest 2 -> retest 3: what retest 2 carried as prior passes must reach retest 3's plan."""
+        plan = {**PLAN1, "retest_of": "r1", "cases": [PLAN1["cases"][1]], "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}
+        d = self.rundir("2026-11-24-PROJ-1", plan=plan,
+                        runs=[("form", {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "FAIL", "actual": "x"}]})])
+        st = report._run_state(d)
+        self.assertEqual([(c["id"], c["build"]) for c in st["passed_cases"]], [("TC-1", "1.42")])
+        self.assertEqual([c["id"] for c in st["retest_cases"]], ["TC-2"])
+
+    def test_a_ticket_carried_only_by_prior_passes_reads_honestly(self):
+        """Multi-ticket partial retest: PROJ-2 was not re-run at all. No 0/0/0, no 'unknown build in this run'."""
+        plan = {**PLAN, "retest_of": "2026-11-23-PROJ-1+PROJ-2", "cases": [c for c in PLAN["cases"] if c["ticket"] == "PROJ-1"],
+                "questions": [],
+                "prior_passed": [{**c, "build": "1.42"} for c in PLAN["cases"] if c["ticket"] == "PROJ-2"]}
+        prior = self.rundir("2026-11-23-PROJ-1+PROJ-2")
+        pid = plan["prior_passed"][0]["id"]
+        (prior / f"evidence/{pid}.png").write_bytes(b"png")
+        run = {**RUN1, "build": "1.43", "cases": [{"id": c["id"], "status": "PASS"} for c in plan["cases"]]}
+        d, r = self.render_run([("form", run)], plan=plan)
+        row = next(x for x in r.splitlines() if x.startswith("| PROJ-2"))
+        self.assertIn(f"0 / 0 / 0 (+{len(plan['prior_passed'])} prior)", row)
+        draft = (d / "jira-comment-PROJ-2.md").read_text()
+        self.assertNotIn("unknown in this run", draft)
+        self.assertNotIn("No screenshot", draft)
+        self.assertIn(f"2026-11-23-PROJ-1+PROJ-2/evidence/{pid}.png", draft)
+
     def test_partial_retest_verdict_is_pass_with_notes_and_honest_draft(self):
         plan = {**PLAN1, "retest_of": "2026-11-23-PROJ-1",
                 "cases": [PLAN1["cases"][1]],  # only TC-2 retested
@@ -1077,6 +1138,14 @@ class FilingBundle(Rendering):
         self.assertIn("$(echo INJECTED)", out)
         # Draft file itself stays clean (no filing command injected into --description-file)
         self.assertNotIn("acli jira", (d / "bugs/BUG-1.md").read_text())
+
+    def test_a_blank_symptom_hashes_the_title_like_ingest(self):
+        bug = {"route": "/form", "title": "Speed accepts 999", "symptom": "   ", "severity": "HIGH",
+               "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md"}
+        d = self.rundir("2026-11-24-PROJ-1", plan=PLAN1, runs=[("form", {**RUN1, "bugs": [bug]})])
+        (d / "bugs/BUG-1.md").write_text("# Speed accepts 999\n")
+        report.write_report(d)
+        self.assertIn(f"qa-mem bug-status {core.bug_hash('/form', 'Speed accepts 999')} FILED", (d / "REPORT.md").read_text())
 
     def test_a_resighted_bugs_follow_up_names_the_hash_memory_stores(self):  # a reworded regression named no bug
         con = core.connect()
