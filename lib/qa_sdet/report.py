@@ -1505,10 +1505,104 @@ def next_action(run_dir, slug):
     return answer({"action": "continue", "block_scope": scope, "reason": why}, streak + 1)
 
 
+FRONTIER_SCORE = {"incomplete": 60, "endpoint": 50, "downstream": 40, "shared": 30}  # + 1-4 for the bug's severity
+LEAD_SCORE = {"HIGH": 55, "MEDIUM": 35, "LOW": 20}
+FRONTIER_CAP = 8
+HYPOTHESIS_CAP = 400
+SAFE_ROUTE_RE = re.compile(r"[/#][\w#!/.:~%@+,=-]*")  # a path the coordinator can single-quote into a command
+
+
+def _safe_text(v, cap=HYPOTHESIS_CAP):
+    """One line of page-derived text (a lead's reason, a bug's title) the coordinator can put in single quotes: no
+    control characters, no `'`, at most `cap` characters."""
+    return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(v or "")).split()).replace("'", "\u2019")[:cap]
+
+
+def _focus_terms(*texts):
+    from . import memory
+    words = [w.lower() for t in texts for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", str(t or ""))]
+    return list(dict.fromkeys(w for w in words if w not in memory.STOP_WORDS))[:4]
+
+
+def _frontier(con, runs, explored, done, incomplete, leads):
+    """Where to look next, best first: unfinished routes, every page calling a CONFIRMED bug's exact endpoint (no caller
+    cliff), the readers of what a write bug saved, pages sharing a call or component with a bug that names no endpoint,
+    and the explorers' leads. [{route, entry_route, entry_chain, priority, score, source, hypothesis, focus_terms,
+    endpoint, pattern}], a detail route with the chain of pages that opens it (none: nobody reached it). `con` may be None."""
+    from . import codemap, memory
+    found = {}
+
+    def add(route, source, score, hypothesis, terms_from, endpoint=None, pattern=None):
+        route = core.norm_route(route)
+        if not SAFE_ROUTE_RE.fullmatch(route) or route in explored and source != "incomplete":
+            return
+        if route not in found or score > found[route]["score"]:
+            found[route] = {"route": route, "score": score, "source": source, "hypothesis": _safe_text(hypothesis),
+                            "focus_terms": _focus_terms(*terms_from), "endpoint": endpoint, "pattern": pattern}
+    for route in incomplete:
+        status = (done.get(route) or {}).get("status")
+        add(route, "incomplete", FRONTIER_SCORE["incomplete"],
+            f"This route was left unfinished in this run ({_clip(status, 30) if status else 'never run'}): do its checks.", ())
+    for lead in leads:
+        said = " - ".join(x for x in (_clip(lead.get("target"), 120), _clip(lead.get("reason"), 200)) if x)
+        add(lead["route"], "lead", LEAD_SCORE.get(lead["priority"], 35),
+            f"An explorer left this lead: {said or lead.get('kind') or 'look here'}", (lead.get("target"), lead.get("reason")))
+    for _, r in runs:
+        for b in _list(r, "bugs"):
+            if core.norm(b.get("classification")) != "confirmed" or not b.get("route") or con is None:
+                continue
+            route, weight = core.norm_route(b.get("route")), memory.SEVERITY_WEIGHT.get((core.norm(b.get("severity")).split() or [""])[0], 1)
+            title, ref = _clip(b.get("title"), 100), codemap._api_ref(b.get("endpoint")) if b.get("endpoint") else ("", "")
+            pattern = memory._pattern(b.get("pattern"))
+            terms = (b.get("title"), b.get("symptom"))
+            if ref[1]:
+                endpoint, group = f"{ref[0]} {ref[1]}".strip(), codemap.page_group(con, route)
+                calling = codemap.callers(con, ref)
+                for page in codemap.shown(con, calling - group):
+                    add(page, "endpoint", FRONTIER_SCORE["endpoint"] + weight,
+                        f"A CONFIRMED bug on {route} ({title}) went through {endpoint}; this page calls it too: check for the same failure.",
+                        terms, endpoint, pattern)
+                if ref[0] in codemap.WRITE_METHODS:
+                    for x in codemap.resource_links(con, {ref}, calling | group)["consumers"]:
+                        add(x["route"], "downstream", FRONTIER_SCORE["downstream"] + weight,
+                            f"{route} writes through {endpoint} (bug: {title}); this page reads that resource: check it shows what was saved.",
+                            terms, endpoint, pattern)
+            else:
+                for page in memory._near_pages(con, route):
+                    add(page, "shared", FRONTIER_SCORE["shared"] + weight,
+                        f"A CONFIRMED bug on {route} ({title}); this page shares a call or component with it: check for the same failure.",
+                        terms, None, pattern)
+    out = sorted(found.values(), key=lambda x: (-x["score"], x["route"]))[:FRONTIER_CAP]
+    for x in out:
+        chain = memory.entry_chain(con, x["route"]) if con is not None else []
+        chain = chain if chain and SAFE_ROUTE_RE.fullmatch(chain[0]["from"]) else []
+        x["priority"] = "HIGH" if x["score"] >= 50 else "MEDIUM" if x["score"] >= 30 else "LOW"
+        x |= {"entry_route": chain[0]["from"] if chain else None, "entry_chain": chain}
+    return out
+
+
+def _run_patterns(runs):
+    """The defect patterns (else the heuristic) of the CONFIRMED bugs this run found so far, one per pattern, with the
+    sentence to hand the pages still to explore."""
+    from . import memory
+    out = {}
+    for _, r in runs:
+        for b in _list(r, "bugs"):
+            tag = memory._pattern(b.get("pattern") or b.get("heuristic"))
+            if tag and core.norm(b.get("classification")) == "confirmed" and tag not in out:
+                route, title = core.norm_route(b.get("route") or r.get("target")), _clip(b.get("title"), 100)
+                out[tag] = {"pattern": tag, "route": route, "title": _safe_text(title, 100),
+                            "hypothesis": _safe_text(f"Seen earlier in this run on {route}: {tag} ({title}). Try the same kind "
+                                                     "of failure here first.")}
+    return list(out.values())[:5]
+
+
 def explore_next(project, run_dir=None):
     """What an explore run (the newest, or `run_dir`) left to do: planned routes with no run file, or INCOMPLETE, or
-    blocked by the sign-in or browser; the leads its explorers left on routes it didn't explore; and pages sharing an
-    endpoint with a CONFIRMED bug it found (the code map's sharing_pages), not explored in it."""
+    blocked by the sign-in or browser; the leads its explorers left on routes it didn't explore; and pages a CONFIRMED
+    bug it found may reach (`blast_radius_routes`: the pages calling the bug's exact endpoint, else those sharing a call
+    or component). `frontier` ranks them all with why (a `hypothesis` to hand the explorer) and the chain of pages that
+    opens a detail route; `run_patterns` are the bug patterns this run has found, to try first on the pages still to do."""
     proj = ops._project(project)
     qa_out = proj / "qa-out"
     if run_dir is not None:
@@ -1526,23 +1620,24 @@ def explore_next(project, run_dir=None):
         _first_word(r.get("status")) == "blocked" and block_scope(r) != "page")
     incomplete = [x for x in dict.fromkeys(planned) if x and x not in done] + [x for x, r in done.items() if unfinished(r)]
     explored = set(planned) | set(done)
-    radius = []
-    confirmed = {core.norm_route(b.get("route")) for _, r in d["runs"] for b in _list(r, "bugs")
-                 if core.norm(b.get("classification")) == "confirmed" and b.get("route")}
-    if confirmed and core.db_path().is_file():
+    leads = _leads(d["runs"], skip=explored)
+    con = None
+    if core.db_path().is_file():
         import sqlite3
-        from . import codemap
         try:
             con = sqlite3.connect(core.db_path().resolve().as_uri() + "?mode=ro", uri=True)
             con.row_factory = sqlite3.Row
-            try:
-                radius = sorted({p for route in confirmed for p in codemap.sharing_pages(con, route)} - explored)
-            finally:
-                con.close()
+            frontier = _frontier(con, d["runs"], explored, done, incomplete, leads)
         except sqlite3.Error:
-            radius = []
-    return {"run": str(folders[0]), "incomplete_routes": incomplete,
-            "leads": _leads(d["runs"], skip=explored)[:5], "blast_radius_routes": radius[:5]}
+            con, frontier = None, _frontier(None, d["runs"], explored, done, incomplete, leads)
+        finally:
+            if con is not None:
+                con.close()
+    else:
+        frontier = _frontier(None, d["runs"], explored, done, incomplete, leads)
+    radius = sorted(x["route"] for x in frontier if x["source"] in ("endpoint", "shared"))
+    return {"run": str(folders[0]), "incomplete_routes": incomplete, "leads": leads[:5], "blast_radius_routes": radius[:5],
+            "frontier": frontier, "run_patterns": _run_patterns(d["runs"])}
 
 
 def _slice(st, want):
