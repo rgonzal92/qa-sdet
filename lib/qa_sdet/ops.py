@@ -174,7 +174,8 @@ def _brief_slug(data, route, tag=""):
             )
         except (OSError, AttributeError):
             owner = ""
-        if owner == route or (owner is None and not run_file.exists()):
+        same = owner is not None and core.route_key(owner) == core.route_key(route)  # /zones/ is /zones: --resume
+        if same or (owner is None and not run_file.exists()):
             return slug
         n += 1
 
@@ -839,6 +840,21 @@ def _probe_headers(headers, content_type, body, method):
     return out
 
 
+def _own_record(text):
+    """Is this GET body one record of the run: a JSON object (or the object in its `data`, or that object's JSON:API
+    `attributes`) with a text field of its own named qa-sdet-…? An enveloped list or a real record holding a qa-sdet-
+    child is not."""
+    try:
+        doc = json.loads(text)
+    except (ValueError, RecursionError):
+        return False
+    doc = doc["data"] if isinstance(doc, dict) and isinstance(doc.get("data"), dict) else doc
+    if not isinstance(doc, dict):
+        return False
+    fields = list(doc.values()) + (list(doc["attributes"].values()) if isinstance(doc.get("attributes"), dict) else [])
+    return any(isinstance(v, str) and v.startswith(API_SCOPE) for v in fields)
+
+
 def api_probe(method, url, body=None, content_type=None, headers=()):
     """One authenticated request from inside the signed-in `qa` browser (the session stays in the browser: no cookie or
     token is read or printed). Prints {status, ok, headers, body}: only contract headers, the body scrubbed and cut at
@@ -878,7 +894,8 @@ def api_probe(method, url, body=None, content_type=None, headers=()):
                 is_list = isinstance(json.loads(before.get("body") or ""), list)
             except (ValueError, RecursionError):
                 is_list = False
-            if not (before.get("ok") and before.get("contains") is True) or is_list:
+            own = _own_record(str(before.get("body") or ""))
+            if not (before.get("ok") and before.get("contains") is True and own) or is_list:
                 raise core.BadInput(
                     f"api-probe: {method} refused: a GET of {url} (HTTP {before['status']}) doesn't show one "
                     f"{API_SCOPE}… record"

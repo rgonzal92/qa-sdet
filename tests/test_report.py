@@ -162,6 +162,14 @@ class Verdict(unittest.TestCase):
             "NOT STARTED",
         )
 
+    def test_a_bug_named_only_by_a_case_of_no_ticket_still_counts_on_its_route(self):  # it was nobody's: a false PASS
+        bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
+        own = self.case("TC-9", "FAIL", ticket=None, bug="BUG-1", actual="two zones saved")  # an explorer's own case
+        for known in ((), ("T-1", "T-2")):
+            got = report.verdict("T-1", [self.case("TC-1", "PASS"), own], bug, known=known)
+            self.assertEqual(got[0], "FAIL", known)
+            self.assertIn("BUG-1 HIGH", got[1])
+
     def test_known_bug_named_by_hash_belongs_to_that_ticket_only(self):
         cases = [
             {"id": "TC-1", "ticket": "A-1", "route": "/list", "status": "PASS"},
@@ -2224,6 +2232,26 @@ class NewestRun(Rendering):
         self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
         skill = (Path(report.__file__).parents[2] / "skills/qa-ticket/SKILL.md").read_text()
         self.assertIn("keeps only `latest_run.tickets`", skill)  # not the other ticket of that run: it'd render BLOCKED
+
+    def test_re_rendering_an_older_run_does_not_make_it_the_newest(self):  # nor a vim swap file beside its REPORT.md
+        run = lambda st: [
+            (
+                "form",
+                {
+                    "target": "/form",
+                    "status": "COMPLETED",
+                    "build": "1",
+                    "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": st}],
+                },
+            )
+        ]
+        old = self.rundir("2026-11-20-PROJ-1", plan=PLAN1, runs=run("PASS"))
+        self.age(old)
+        self.rundir("2026-11-25-PROJ-1", plan=PLAN1, runs=run("FAIL"))
+        report.write_report(old)
+        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]["name"], "2026-11-25-PROJ-1")
+        line = next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("❌ FAIL", line)
 
     def test_trace_shows_the_newest_verdict_when_an_older_run_names_the_fix_version(self):
         run = lambda st: [

@@ -715,11 +715,31 @@ class ApiProbe(Base):
                 ("someone else's record", self.page(200, '{"name":"Main street"}', contains=False)),
                 ("no such record", self.page(404, "qa-sdet- not found", contains=True)),
                 ("a collection", self.page(200, '[{"name":"qa-sdet-a"},{"name":"B"}]', contains=True)),
+                (  # found in audit: most APIs wrap a list in an object
+                    "an enveloped list",
+                    self.page(200, '{"items": [{"name": "qa-sdet-a"}, {"name": "Main"}], "total": 2}', contains=True),
+                ),
+                (  # a real record holding a qa-sdet- child
+                    "a parent record",
+                    self.page(200, '{"id": 17, "name": "Main St", "segments": [{"name": "qa-sdet-s"}]}', contains=True),
+                ),
+                ("not JSON", self.page(200, "<p>qa-sdet-a</p>", contains=True)),
             ):
                 code, _, err, mrun = self.probe(*args, seq=[pre])
                 self.assertEqual(code, 2, (m, why))
                 self.assertIn("qa-sdet-", err)
                 self.assertEqual(mrun.call_count, 1, "the write itself never ran")
+
+    def test_a_record_inside_a_data_envelope_is_still_one_record(self):  # {"data": {...}}, JSON:API attributes
+        self.marker(api_writes=True)
+        for body in (
+            '{"data": {"id": 7, "name": "qa-sdet-zone-1"}}',
+            '{"data": {"id": "7", "type": "zones", "attributes": {"name": "qa-sdet-zone-1"}}}',
+        ):
+            code, out, _, _ = self.probe(
+                "DELETE", self.URL + "/7", seq=[self.page(200, body, contains=True), self.page(204)]
+            )
+            self.assertEqual((code, out["status"]), (0, 204), body)
 
     def test_a_write_whose_record_check_fails_is_never_sent(self):  # no proof the record is the run's: no write
         self.marker(api_writes=True)
@@ -908,6 +928,28 @@ class Dispatch(Base):
         self.assertEqual(self.dispatch("/list?a=2", "--focus", "ties")[1]["slug"], "list-2")
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")  # --resume of that route: same run file
         self.assertIn("FOCUS: ties", (self.run_dir / ".data/brief-list-2.md").read_text())
+
+    def test_resume_dispatches_an_unfinished_route_back_into_its_run_file(self):  # found in audit: stuck BLOCKED
+        from qa_sdet import report
+
+        self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")
+        (self.run_dir / ".data/run-list.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "r1",
+                    "target": "https://qa.example.com/list?a=1",
+                    "status": "BLOCKED",
+                    "block_scope": "session",
+                    "summary": "session expired",
+                    "cases": [{"id": "TC-1", "status": "NOT_RUN"}],
+                }
+            )
+        )
+        routes = report.plan_find(self.proj, run_dir=str(self.run_dir))["latest_run"]["incomplete_routes"]
+        self.assertEqual(routes, ["/list?a=1", "/list?a=2"])  # each with its query: one brief and run file each
+        out = self.dispatch(routes[0])[1]
+        self.assertEqual((out["slug"], out["case_count"]), ("list", 1))  # rewrites run-list.json, with its case
+        self.assertEqual(self.dispatch("/list/?a=1")[1]["slug"], "list")  # the same route written another way
 
     def seed_list_and_detail(self):
         from qa_sdet import memory

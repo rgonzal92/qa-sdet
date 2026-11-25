@@ -244,7 +244,7 @@ def ticket_bugs(key, cases, bugs, known=()):
     (unless a case of another ticket names it: then it is that ticket's bug, not every ticket's on a shared page)."""
     mine = [c for c in cases if c.get("ticket") == key]
     refs = set().union(*map(_case_bugs, mine))
-    named = set().union(*map(_case_bugs, cases))
+    named = set().union(*(_case_bugs(c) for c in cases if c.get("ticket") and c.get("ticket") != key))
     routes = {core.norm_route(c.get("route")) for c in mine if c.get("route")}
     tickets = {str(c.get("ticket")).strip().upper() for c in cases if c.get("ticket")} | {
         str(k).strip().upper() for k in known
@@ -2000,11 +2000,12 @@ def write_report(run_dir: str | Path) -> Path:
 
 # ---------- plan-find: deterministic plan reuse, --resume and --retest state ----------
 def _plan_folders(qa_out):
-    """Run folders with a plan.json, the most recently changed first (folder, plan or a run file): plan-find's latest
-    run and the inbox's Last QA come from the same order."""
+    """Run folders with a plan.json, the most recently changed first (plan or a run file; not the folder, which a
+    re-rendered REPORT.md or an editor's swap file touches): plan-find's latest run and the inbox's Last QA come from
+    the same order."""
     dirs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink() and (p / ".data" / "plan.json").is_file()]
     when = lambda p: max(
-        (_mtime(x) for x in [p, p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()),
+        (_mtime(x) for x in [p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()),
         default=0.0,
     )
     return sorted(dirs, key=lambda p: (when(p), p.name), reverse=True)
@@ -2032,24 +2033,28 @@ def _run_state(run_dir):
         for x in _list(r, "cases"):
             if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):
                 case_build[str(x["id"])] = b
+    # routes as dispatch keys them (path and query: /list?a=1 and /list?a=2 are two briefs and run files), spelled so a
+    # --resume dispatch of one finds its brief, cases and run file again
     routes_order = []
     for c in cases:
-        rt = core.norm_route(c.get("route")) or ""
-        if rt and rt not in routes_order:
-            routes_order.append(rt)
+        k = core.route_key(c.get("route"))
+        if k[0] and k not in routes_order:
+            routes_order.append(k)
     run_status_by_route = {}
     for _, r in runs:
-        rt = core.norm_route(r.get("target")) or ""
-        if rt:
-            run_status_by_route[rt] = _first_word(r.get("status"))
+        k = core.route_key(r.get("target"))
+        if k[0]:
+            run_status_by_route[k] = _first_word(r.get("status"))
     incomplete = []
-    for rt in routes_order:
-        rcases = [c for c in cases if (core.norm_route(c.get("route")) or "") == rt]
-        if run_status_by_route.get(rt) in ("blocked", "incomplete") or any(
+    for k in routes_order:
+        rcases = [c for c in cases if core.route_key(c.get("route")) == k]
+        if run_status_by_route.get(k, run_status_by_route.get((k[0], ""))) in ("blocked", "incomplete") or any(
             c["status"] in ("BLOCKED", "NOT_RUN") for c in rcases
         ):
-            incomplete.append(rt)
-    completed = [rt for rt in routes_order if rt not in incomplete]
+            incomplete.append(k)
+    spell = lambda k: k[0] + (f"?{k[1]}" if k[1] else "")
+    completed = [spell(k) for k in routes_order if k not in incomplete]
+    incomplete = [spell(k) for k in incomplete]
     # verdict()'s rules per case: a PASS that a run ended BLOCKED reported (or ran on its page), or on the page of (or
     # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
     # not make it a prior pass and drop the reason the ticket didn't pass
@@ -2502,8 +2507,8 @@ def _slice(st, want):
         "retest_cases": retest,
         "passed_cases": passed,
         "total_cases": len(retest) + len(passed),
-        "incomplete_routes": [r for r in st["incomplete_routes"] if r in {c["route"] for c in retest}],
-        "completed_routes": [r for r in st["completed_routes"] if r in routes],
+        "incomplete_routes": [r for r in st["incomplete_routes"] if core.norm_route(r) in {c["route"] for c in retest}],
+        "completed_routes": [r for r in st["completed_routes"] if core.norm_route(r) in routes],
     }
 
 
