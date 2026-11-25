@@ -1367,6 +1367,135 @@ class States(MemBase):
         self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
 
 
+class ObservedEndpoints(MemBase):
+    """The calls a run's browser really made (requests-<slug>.log), kept as shapes, against the endpoints the code maps."""
+
+    def setUp(self):
+        super().setUp()
+        self.config(allowedHosts=["localhost"])
+        self.n = 0
+
+    def calls(self, page, *values):
+        with self.con:
+            self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
+            for i, v in enumerate(values):
+                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                                 (page, "api", v, v, f"a{page}.js:1", "/repo", "frontend", core.now(), f"a{page}.js"))
+
+    def explore(self, lines, target="/map", build="1.0", ts=None, **extra):
+        """A run of `target` whose browser made these requests ("GET /api/x => [200]" lines), ingested as the hook does."""
+        self.n += 1
+        d = Path(self.tmp.name) / "proj/qa-out" / f"r{self.n}" / ".data"
+        d.mkdir(parents=True)
+        (d / "plan.json").write_text(json.dumps({"kind": "explore", "title": target, "tickets": [], "cases": []}))
+        (d / "requests-x.log").write_text("".join(f"{i}. [{l.split()[0]}] http://localhost:8765{l.split()[1]} => {l.split('=> ')[1]} OK\n"
+                                                  for i, l in enumerate(lines, 1)))
+        f = d / "run-x.json"
+        f.write_text(json.dumps({**run(build=build), "run_id": f"r{self.n}", "target": target, "pages": [{"route": target}], **extra}))
+        t = ts or time.time() - 1000 + self.n
+        os.utime(f, (t, t))
+        memory.ingest_pending(d.parent.parent)
+        return d.parent
+
+    def seen(self, route="/map"):
+        return [tuple(x) for x in self.con.execute("SELECT method, path, status_class, build FROM observed_endpoints WHERE route=? "
+                                                   "ORDER BY method, path, status_class", (route,))]
+
+    def test_a_run_keeps_the_shape_and_status_class_of_each_call_never_the_query(self):
+        self.explore(["GET /api/incidents.json?token=abc123secretvalue&page=2 => [200]", "GET /api/zones/4521 => [404]",
+                      "POST /api/zones => [500]", "GET /api/units => [FAILED]", "GET /api/zones/4522 => [404]",
+                      "GET /api/other => [302]"])
+        self.assertEqual(self.seen(), [("GET", "/api/incidents.json", "2xx", "1.0"), ("GET", "/api/other", "3xx", "1.0"),
+                                       ("GET", "/api/units", "failed", "1.0"), ("GET", "/api/zones/:id", "4xx", "1.0"),
+                                       ("POST", "/api/zones", "5xx", "1.0")])
+        dump = json.dumps([tuple(x) for x in self.con.execute("SELECT * FROM observed_endpoints")])
+        self.assertNotIn("abc123secretvalue", dump)
+        self.assertNotIn("page=2", dump)
+
+    def test_only_the_apps_own_hosts_and_no_static_files_are_kept(self):
+        d = self.explore(["GET /api/x => [200]"])
+        (d / ".data/requests-x.log").write_text(
+            "1. [GET] http://localhost:8765/api/mine => [200] OK\n2. [GET] https://cdn.example.net/api/theirs => [200] OK\n"
+            "3. [GET] http://localhost:8765/static/app.js => [200] OK\n4. [GET] http://localhost:8765/logo.png => [200] OK\n")
+        os.utime(d / ".data/run-x.json", (time.time(), time.time() + 1))
+        (d / ".data/run-x.json.ingested").unlink()
+        memory.ingest_pending(d.parent)
+        self.assertEqual({x[1] for x in self.seen()}, {"/api/x", "/api/mine"})  # /api/x: the first ingest of this folder
+
+    def test_a_run_without_a_request_log_or_a_crawl_adds_nothing_and_never_fails(self):
+        d = self.explore(["GET /api/x => [200]"], target="/a")
+        (d / ".data/requests-x.log").unlink()
+        self.assertEqual(self.seen("/a"), [("GET", "/api/x", "2xx", "1.0")])  # the first run's rows stay
+        self.explore(["GET /api/crawl => [200]"], target="/c", mode="map")  # the read-only crawl: one log for many pages
+        self.assertEqual(self.seen("/c"), [])
+
+    def test_a_rewritten_run_does_not_duplicate_and_each_build_has_its_own_rows(self):
+        self.explore(["GET /api/x => [200]"])
+        self.explore(["GET /api/x => [200]"])
+        self.explore(["GET /api/x => [200]"], build="2.0")
+        self.assertEqual(self.seen(), [("GET", "/api/x", "2xx", "1.0"), ("GET", "/api/x", "2xx", "2.0")])
+
+    def test_a_page_keeps_its_100_freshest_rows(self):
+        self.explore([f"GET /api/r{i} => [200]" for i in range(130)])
+        self.assertEqual(len(self.seen()), 100)
+
+    def test_gaps_and_the_card_name_mapped_endpoints_the_run_never_made(self):
+        self.calls("/map", "GET /api/incidents.json", "GET /api/closures.json", "DELETE /api/zones/{id}", "POST /api/zones",
+                   "GET /api/a", "GET /api/b", "GET /api/c")
+        self.explore(["GET /api/incidents.json => [200]", "POST /api/zones => [200]"])
+        card = memory.card(self.con, "/map")
+        line = next(x for x in card.splitlines() if x.startswith("UNEXERCISED ENDPOINTS"))
+        self.assertIn("not yet observed on build 1.0", line)
+        self.assertIn("DELETE /api/zones/:id", line)  # writes first
+        self.assertNotIn("incidents", line)  # seen, though the code writes it .json-less
+        self.assertEqual(line.split("oracle): ")[1].count(";"), 3)  # at most 4 named
+        self.assertIn("(+1 more)", line)
+        listing = next(p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/map")
+        self.assertEqual(len(listing["unexercised_apis"]), 5)
+        self.assertEqual(listing["unexercised_apis"][0], "DELETE /api/zones/:id")
+        self.assertIn("5 unexercised endpoints", memory.gaps(self.con))
+        self.assertIn("5 unexercised endpoints", listing["risk_reasons"])
+
+    def test_nothing_is_flagged_for_a_page_with_no_observations_on_this_build_or_after_the_call_is_made(self):
+        self.calls("/map", "GET /api/closures.json")
+        self.assertNotIn("UNEXERCISED", memory.card(self.con, "/map"))  # never explored with a request log: unknown, not a gap
+        self.explore(["GET /api/other => [200]"])
+        self.assertIn("UNEXERCISED ENDPOINTS", memory.card(self.con, "/map"))
+        self.explore(["GET /api/closures.json => [200]"])
+        self.assertNotIn("UNEXERCISED", memory.card(self.con, "/map"))
+        self.explore(["GET /api/other => [200]"], build="2.0")  # a new build: the call is due again
+        self.assertIn("GET /api/closures", memory.card(self.con, "/map"))
+
+    def test_a_method_the_code_does_not_show_matches_any_observed_method(self):
+        self.calls("/map", "api.get('zones')", "fetch(`${BASE}/units/${id}`)")
+        self.explore(["GET /api/zones => [200]"])
+        line = next(x for x in memory.card(self.con, "/map").splitlines() if x.startswith("UNEXERCISED"))
+        self.assertNotIn("zones", line)
+        self.assertIn("units", line)
+
+    def test_unexercised_apis_order_pages_inside_their_tier_never_across_tiers(self):
+        for r, n in (("/a", 2), ("/b", 4)):
+            self.calls(r, *[f"GET /api/{r[1]}{i}" for i in range(n)])
+        self.explore(["GET /api/other => [200]"], target="/a")
+        self.explore(["GET /api/other => [200]"], target="/b")
+        order = lambda: [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
+        self.assertEqual(order(), ["/b", "/a"])  # the same tier: more unexercised calls first
+        with self.con:
+            self.con.execute("INSERT INTO bugs(hash,page,title,status,severity,first_seen,last_seen,symptom) "
+                             "VALUES('h','/a','t','REGRESSED','HIGH','x','x','s')")
+        self.assertEqual(order(), ["/a", "/b"])  # a regressed bug is a higher tier, whatever /b leaves untried
+
+    def test_an_old_database_gains_the_table_and_forgetting_a_page_clears_it(self):
+        self.con.execute("DROP TABLE observed_endpoints")
+        self.con.commit()
+        con = core.connect()  # as a 0.4 DB of before this table: created on connect
+        self.assertEqual(con.execute("SELECT count(*) FROM observed_endpoints").fetchone()[0], 0)
+        con.close()
+        self.explore(["GET /api/x => [200]"])
+        memory.forget_page(self.con, "/map", force=True)
+        self.assertEqual(self.seen(), [])
+
+
 class Database(MemBase):
     """core.connect."""
 

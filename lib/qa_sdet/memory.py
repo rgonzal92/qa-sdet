@@ -347,6 +347,46 @@ def _store_signals(con, run, f, ts):
                     "page=? ORDER BY last_seen DESC LIMIT ?)", (page, page, SIGNALS_PER_PAGE))  # IGNORED ones stay
 
 
+OBSERVED_PER_PAGE = 100  # freshest shapes kept per page
+STATIC_FILE = re.compile(r"\.(js|mjs|css|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?)$", re.I)  # .json stays
+
+
+def _store_observed(con, run, f, ts):
+    """The calls the run's browser made (.data/requests-<slug>.log), kept per page and build as (method, path shape,
+    status class): never a query string, a body or a host outside allowedHosts. The read-only crawl is skipped (one log
+    for many pages)."""
+    from . import report
+    slug = f.name[len("run-"):-len(".json")]
+    log = f.parent / f"requests-{slug}.log"
+    target = str(run.get("target") or "")
+    if not log.is_file() or core.norm(run.get("mode")) == "map" or not target.startswith(("/", "http", "#")):
+        return
+    page, build = core.norm_route(target), core.norm_build(core.txt(run.get("build"), "build"))
+    hosts, rows = core.allowed_hosts(core.config()), set()
+    for line in scrub.redact(report._text(log)).splitlines():
+        m = report.REQUEST_LINE.fullmatch(line)
+        if not m:
+            continue
+        _, method, url, code, _ = m.groups()
+        try:
+            path = urlsplit(url).path or url
+        except ValueError:
+            continue
+        shape = core._ids(path)
+        klass = "failed" if code == "FAILED" else f"{code[0]}xx"
+        if not shape or STATIC_FILE.search(shape) or method not in codemap.HTTP_METHODS.split("|") or klass[0] == "1" \
+                or hosts and url.lower().startswith(("http://", "https://")) and not core.url_allowed(url, hosts):
+            continue
+        rows.add((method, shape, klass))
+    with con:
+        for method, shape, klass in rows:
+            con.execute("INSERT INTO observed_endpoints(method,path,status_class,route,build,ts) VALUES(?,?,?,?,?,?) "
+                        "ON CONFLICT(route,method,path,status_class,build) DO UPDATE SET ts=max(ts, excluded.ts)",
+                        (method, shape, klass, page, build, ts))
+        con.execute("DELETE FROM observed_endpoints WHERE route=? AND rowid NOT IN (SELECT rowid FROM observed_endpoints "
+                    "WHERE route=? ORDER BY ts DESC, rowid DESC LIMIT ?)", (page, page, OBSERVED_PER_PAGE))
+
+
 def signals(con, route=None, status="ACTIVE"):
     where, args = [], []
     if route:
@@ -555,6 +595,12 @@ def _ingest_files(con, pending):
                     raise  # locked: the whole file is retried on the next hook run (ingest is idempotent)
                 except (OSError, ValueError, sqlite3.DatabaseError) as e:
                     print(f"qa-mem: signals of {f.name} not kept: {e}", file=sys.stderr)
+                try:  # the calls its browser made, as shapes: what the card's UNEXERCISED ENDPOINTS reads
+                    _store_observed(con, doc, f, ts)
+                except sqlite3.OperationalError:
+                    raise
+                except (OSError, ValueError, sqlite3.DatabaseError) as e:
+                    print(f"qa-mem: requests of {f.name} not kept: {e}", file=sys.stderr)
             core._write(done, f"{digest}\n{core.now()}\n{note}")
             err.unlink(missing_ok=True)
             n += 1
@@ -691,6 +737,10 @@ def card(con, q, focus=None, ids=False):
     if due:
         out.append(f"UNVISITED STATES (on this page, not opened on {'build ' + b if b and b != core.UNKNOWN else 'this build'}: "
                    "open each, check it, report it as visited): " + "; ".join(due[:8]) + (f" (+{len(due) - 8})" if len(due) > 8 else ""))
+    apis = [] if code_only else _unexercised_apis(con, r, b)
+    if apis:
+        out.append(f"UNEXERCISED ENDPOINTS (mapped in the code, not yet observed on build {b}: exercise them or say why not in "
+                   "not_tested; a hint, never an oracle): " + "; ".join(apis[:4]) + (f" (+{len(apis) - 4} more)" if len(apis) > 4 else ""))
     leads = con.execute("SELECT to_route, trigger FROM transitions WHERE from_route=? ORDER BY ts DESC LIMIT 5", (r,)).fetchall()
     if leads:
         out.append("LEADS TO: " + "; ".join(f"{x['to_route']}" + (f" ({x['trigger']})" if x["trigger"] else "") for x in leads))
@@ -733,6 +783,22 @@ def _changed_here(con, route, pg):
 def _field_words(label):
     """A rule label's words, camelCase split ('POST /api/zones speedLimit' -> post api zones speed limit)."""
     return set(core.norm(re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", re.sub(r"\s\(\d+\)$", "", label))).split())
+
+
+def _unexercised_apis(con, route, build, bound=None):
+    """['METHOD /path'] the page's code maps (a frontend `api` row, its module and shell routes included) that no run
+    observed on `build` (writes first). Empty for a page with no observed call on this build at all: without a request
+    log nothing is known, which isn't a gap."""
+    group = codemap.page_group(con, route, bound)
+    mapped = codemap._group_calls(con, group)
+    if not mapped or not build:
+        return []
+    seen = {codemap._api_ref(f"{m} {p}") for m, p in con.execute(
+        f"SELECT DISTINCT method, path FROM observed_endpoints WHERE route IN ({','.join('?' * len(group))}) AND {ON_BUILD}",
+        (*sorted(group), build, _week_ago()))}
+    todo = sorted((c for c in mapped if seen and not any(codemap._same_call(c, o) for o in seen)),
+                  key=lambda c: (c[0] not in codemap.WRITE_METHODS, c[1], c[0]))
+    return [f"{m} /{p}" if m else f"/{p}" for m, p in todo]
 
 
 def _due_states(con, route, build):
@@ -1246,7 +1312,7 @@ def forget_fact(con, fid):
 
 def forget_page(con, route, force=False):
     """Retire a page (a typo or a removed route): its facts, locators, coverage, states, transitions (to and from it),
-    signals, questions and the page; bugs stay as history.
+    signals, observed endpoints, questions and the page; bugs stay as history.
     Refused while it has open bugs, unless force. Returns (removed, reason)."""
     page = core.norm_route(route)
     open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (page, *core.VISIBLE)).fetchone()[0]
@@ -1258,6 +1324,7 @@ def forget_page(con, route, force=False):
         for table in ("facts", "locators", "coverage", "page_states", "signals", "questions"):
             con.execute(f"DELETE FROM {table} WHERE page=?", (page,))
         con.execute("DELETE FROM transitions WHERE from_route=? OR to_route=?", (page, page))
+        con.execute("DELETE FROM observed_endpoints WHERE route=?", (page,))
         con.execute("DELETE FROM pages WHERE route=?", (page,))
     return True, f"forgot {page} (its bugs are kept)"
 
@@ -1452,6 +1519,7 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)).fetchone()[0]
         fixed_recheck = _unrechecked_fixed(con, r, b)
         states = len(_due_states(con, r, b))
+        apis = _unexercised_apis(con, r, b, bound)
         src = changed.get(r, [])
         if changed_only and not src:
             continue
@@ -1467,6 +1535,8 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append(f"{untested} untested field{'s' * (untested != 1)}")
         if states:
             parts.append(f"{states} unvisited state{'s' * (states != 1)}")
+        if apis:
+            parts.append(f"{len(apis)} unexercised endpoint{'s' * (len(apis) != 1)}")
         if open_bugs:
             parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
         if r in regressed:
@@ -1483,10 +1553,10 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         info = {"route": r, "name": pg["name"] or "", "tier": TIERS[tier], "hotspot": hot.get(r, 0),
                 "never_explored": never, "old_build": old, "changed": bool(src), "changed_files": src,
                 "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested,
-                "unvisited_states": states, "open_bugs": open_bugs, "risk_reasons": parts}
+                "unvisited_states": states, "unexercised_apis": apis, "open_bugs": open_bugs, "risk_reasons": parts}
         if chain:
             info |= {"entry_route": chain[0]["from"], "entry_trigger": chain[0]["trigger"], "entry_chain": chain}
-        ranked.append(((tier, -hot.get(r, 0), -(untried + untested), -open_bugs, r),
+        ranked.append(((tier, -hot.get(r, 0), -(untried + untested + states + len(apis)), -open_bugs, r),
                        f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
     ranked.sort(key=lambda x: x[0])
     shown = ranked[:top] if top is not None else ranked

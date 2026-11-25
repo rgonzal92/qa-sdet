@@ -471,6 +471,13 @@ class Docs(unittest.TestCase):
         self.assertIn("spend.jsonl", text("references/run-setup.md"))
         self.assertIn(ops.SPEND_LEDGER, text("README.md") + text("references/run-setup.md"))
 
+    def test_observed_endpoints_are_documented_where_gaps_and_the_card_are(self):
+        for doc in ("README.md", "CHANGELOG.md"):
+            self.assertIn("unexercised_apis", text(doc), doc)
+        self.assertIn("unexercised_apis", text("skills/qa-memory/SKILL.md"))
+        self.assertIn("UNEXERCISED ENDPOINTS", text("agents/qa-explorer.md"))
+        self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/memory.py"))  # the card line the explorer prompt names
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
