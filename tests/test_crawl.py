@@ -2,7 +2,6 @@
 limit). A fake playwright-cli stands in for the browser: pages by URL, each with the locators it holds."""
 
 import json
-import os
 import subprocess
 import time
 import unittest
@@ -10,7 +9,7 @@ from unittest import mock
 
 from support import Base, cli, done
 
-from qa_sdet import core, crawl, memory, ops
+from qa_sdet import core, crawl, memory
 
 CFG = dict(
     app="x",
@@ -298,55 +297,15 @@ class Crawl(Base):
         self.assertEqual(seen[0]["status"], "INCOMPLETE")
         self.assertEqual([p["route"] for p in seen[0]["pages"]], ["/alarms"])
 
-    def test_budget_stop_at_the_reserve_saves_results_as_incomplete(self):
-        con = core.connect()
-        with con:
-            for n in range(5):
-                con.execute(
-                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (f"/p{n}", "locator", "Ack", "getByTestId('ack')", "f", "/repo", "frontend", "t", "s"),
-                )
-                con.execute(
-                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (f"/p{n}", "route", f"P{n}", "", "f", "/repo", "frontend", "t", "s"),
-                )
-                self.pages[f"{BASE}/p{n}"] = page(found=["getByTestId('ack')"])
-        con.close()
-        ops.marker_start(self.proj, budget=10)  # reserve 3: page-start 1, then 2 per route: 3 routes
-        code, out, run, b, _ = self.crawl()
-        self.assertEqual(
-            (code, run["status"], run["stop_reason"], len(run["pages"])), (0, "INCOMPLETE", "budget_limit", 3)
-        )
-        self.assertEqual(json.loads((self.proj / "qa-out/.active").read_text())["used"], 7)
-        self.assertEqual(b.calls[-1], ["playwright-cli", "-s=qa", "close"])  # the finish ran, uncharged
-        self.assertTrue((self.run_dir / ".data/requests-init-crawl.log").exists())
-
-    def test_each_browser_command_is_charged_to_the_marker(self):
-        ops.marker_start(self.proj, budget=100)
-        _, _, _, b, _ = self.crawl()
-        charged = 1 + len(b.gotos()) + len(b.evals())  # page-start, every goto and every eval
-        self.assertEqual(json.loads((self.proj / "qa-out/.active").read_text())["used"], charged)
-
-    def test_no_marker_budget_is_unlimited(self):
-        ops.marker_start(self.proj)
-        code, _, run, _, _ = self.crawl()
+    def test_a_crawl_is_never_cut_short_by_the_marker(self):  # keys an older marker may still hold mean nothing
+        marker = self.proj / "qa-out/.active"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 1, "deadline": time.time() - 5}))
+        before = marker.read_text()
+        code, _, run, b, _ = self.crawl()
         self.assertEqual((code, run["status"]), (0, "COMPLETED"))
-        self.assertEqual(json.loads((self.proj / "qa-out/.active").read_text())["used"], 0)
-
-    def test_another_projects_marker_is_never_charged(self):
-        other = self.t / "other"
-        other.mkdir()
-        ops.marker_start(other, budget=5)
-        with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=str(other)):
-            code, _, run, _, _ = self.crawl()
-        self.assertEqual((code, run["status"]), (0, "COMPLETED"))
-        self.assertEqual(json.loads((other / "qa-out/.active").read_text())["used"], 0)
-
-    def test_deadline_passed_stops_before_any_goto(self):
-        ops.marker_start(self.proj, minutes=1, t=time.time() - 120)
-        code, out, run, b, _ = self.crawl()
-        self.assertEqual((code, run["status"], run["stop_reason"], run["pages"]), (0, "INCOMPLETE", "time_limit", []))
-        self.assertEqual(b.gotos(), [])
+        self.assertEqual(marker.read_text(), before)
+        self.assertEqual(b.calls[-1], ["playwright-cli", "-s=qa", "close"])
 
     def test_sign_in_page_blocks_and_keeps_the_pages_so_far(self):
         self.pages[f"{BASE}/zones"] = page(host="login.microsoftonline.com")

@@ -1,14 +1,12 @@
 """`qa-mem crawl` and `qa-mem discover`: the read-only map passes (qa-init --crawl, qa-explore --discover), run by the
-coordinator in one Bash call. Python drives playwright-cli as page-start does: no agent and no turn limit, and no model
-retypes a locator. Page text never steers it: a page only answers which locators exist and which links it holds, and
-every link is checked against allowedHosts before it is followed. The guard can't see these browser commands, so each
-one is charged to the run marker here, with the guard's own locked counter."""
+coordinator in one Bash call. Python drives playwright-cli as page-start does: no agent, and no model retypes a
+locator. Page text never steers it: a page only answers which locators exist and which links it holds, and every link is
+checked against allowedHosts before it is followed."""
 
 import json
 import re
 import subprocess
 import sys
-import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +14,6 @@ from urllib.parse import urlsplit
 
 from . import codemap, core, ops
 
-HOOKS = Path(__file__).resolve().parents[2] / "hooks"
 GOTO_SECONDS, EVAL_SECONDS = 60, 30
 MAX_FRAMES = 5  # iframes checked per route, by index
 CHUNK = 200  # locators per eval: keeps one argument far below Linux's 128 KB limit
@@ -147,30 +144,7 @@ HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set()
 HARVEST_JS = f"JSON.stringify({{...JSON.parse({HARVESTER_JS}), ...{ops.PAGE_STATE_JS}}})"
 
 
-# ---------- the browser, the budget and the run file ----------
-class _Stop(Exception):
-    """The run's budget or time is used up (the stop_reason): finish with what is saved."""
-
-
-class _Marker:
-    """Charges each browser command to the run marker as the guard charges a Bash call; no marker: unlimited."""
-
-    def __init__(self, project):
-        if str(HOOKS) not in sys.path:
-            sys.path.insert(0, str(HOOKS))
-        import guard  # its locked counter: --budget and --minutes mean what they mean for every other browser command
-
-        self.guard = guard
-        self.path, m = guard.read_marker(str(project))
-        if self.path and Path(self.path).resolve() != (Path(project) / "qa-out" / ".active").resolve():
-            self.path, m = None, None  # read_marker's $CLAUDE_PROJECT_DIR fallback: another project's run
-        self.deadline = float((m or {}).get("deadline") or 0)
-
-    def charge(self):
-        if self.path and self.guard.spend_budget(self.path, 1, explorer=True):
-            raise _Stop("time_limit" if self.deadline and time.time() > self.deadline else "budget_limit")
-
-
+# ---------- the browser and the run file ----------
 def _pw(args, timeout):
     """(ok, output) of one `playwright-cli -s=qa` command: its stdout, or the error text."""
     try:
@@ -225,13 +199,12 @@ def _run_dir(run, what):
 
 
 def _session(run, slug, url, cfg, hosts, walk, page_blocks):
-    """Open the browser at url (page-start), run walk(rec, marker) -> (status, fields), and finish on every path: save
+    """Open the browser at url (page-start), run walk(rec) -> (status, fields), and finish on every path: save
     the browser signals, close it, write the final run file. A start page with an HTTP error blocks only when
     page_blocks (discover starts there; a crawl goes on to its routes)."""
-    rec, marker, opened = _Run(run, slug, url, cfg), _Marker(run.parent.parent), False
+    rec, opened = _Run(run, slug, url, cfg), False
     status, fields = "INCOMPLETE", {}
     try:
-        marker.charge()  # page-start's one command, as the guard counts it
         started = ops._start_page(cfg, hosts, url)
         opened = started["status"] == "ok" or started["block_scope"] == "page"
         rec.doc["build"] = started.get("build") or core.UNKNOWN
@@ -243,13 +216,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
         else:
             if started["status"] != "ok":
                 rec.notes.append(f"start page {url}: {started['reason']}")
-            status, fields = walk(rec, marker)
-    except _Stop as e:
-        fields = {
-            "stop_reason": str(e),
-            "summary": f"stopped early: the run's {'time' if str(e) == 'time_limit' else 'budget'} "
-            f"is used up; {len(rec.doc['pages'])} pages saved",
-        }
+            status, fields = walk(rec)
     finally:
         if opened:
             for name, args in (("requests", ["requests", "--all"]), ("console", ["console", "error", "--all"])):
@@ -279,12 +246,11 @@ def _land(rec, cfg, hosts, where, state):
     return None
 
 
-def _check(marker, idx, specs, target=None):
+def _check(idx, specs, target=None):
     """((found, invalid, first answer), None) of specs[idx] in the top document or a frame, or (None, error text)."""
     found, invalid, state = set(), set(), {}
     for k in range(0, len(idx), CHUNK):
         part = idx[k : k + CHUNK]
-        marker.charge()
         ok, out = _pw(
             ["--raw", "eval", check_js([specs[i] for i in part], frame=bool(target))] + ([target] if target else []),
             EVAL_SECONDS,
@@ -343,14 +309,13 @@ def crawl(con, run, routes=()):
             )
     n = dict(routes=len(plan), loaded=0, locators_checked=0, locators_confirmed=0, unchecked=0)
 
-    def walk(rec, marker):
+    def walk(rec):
         rec.notes += skipped
         fails = 0
         for k, (route, locs, specs) in enumerate(plan, 1):
             todo = [i for i, s in enumerate(specs) if s]
-            marker.charge()
             ok, out = _pw(["goto", base + route], GOTO_SECONDS)
-            res, err = _check(marker, todo, specs) if ok else (None, out)
+            res, err = _check(todo, specs) if ok else (None, out)
             if res is None:
                 fails += 1
                 rec.notes.append(f"{route}: failed ({core.short(' '.join(err.split()), 120)})")
@@ -374,7 +339,7 @@ def crawl(con, run, routes=()):
                 left = [i for i in todo if i not in found | invalid]
                 if not left:
                     break
-                res, err = _check(marker, left, specs, FRAME.format(f))
+                res, err = _check(left, specs, FRAME.format(f))
                 if res is None:  # no such frame (it went away) is no failure
                     if "does not match any elements" not in err:
                         rec.notes.append(f"{route}: frame {f} check failed ({core.short(' '.join(err.split()), 120)})")
@@ -429,18 +394,16 @@ def discover(run, url=None, depth=2, max_pages=25):
     origin = "{0.scheme}://{0.netloc}".format(urlsplit(start))
     n = dict(pages=0, states=0, links=0)
 
-    def walk(rec, marker):
+    def walk(rec):
         first = urlsplit(start).path or "/"
         queue, seen, fails, opened = deque([(first, 0)]), {core.norm_route(first)}, 0, True
         while queue and len(rec.doc["pages"]) < max_pages:
             path, level = queue.popleft()
             ok, out = True, ""
             if not opened:  # page-start already opened the first page
-                marker.charge()
                 ok, out = _pw(["goto", origin + path], GOTO_SECONDS)
             opened = False
             if ok:
-                marker.charge()
                 ok, out = _pw(["--raw", "eval", HARVEST_JS], EVAL_SECONDS)
             h = _parsed(out) if ok else None
             if h is None:

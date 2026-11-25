@@ -1,14 +1,14 @@
 ---
 name: qa-ticket
 description: Test one or more Jira items in the QA app: test plan, test cases, a run per page, and a report with a verdict per ticket. Supports resuming interrupted runs (--resume) and selective retesting after fixes (--retest). Use when given Jira keys or ticket numbers to test, resume or retest ("test PROJ-123", "QA 1234", "retest 1234"). For a plan or cases without running them, use qa-plan.
-argument-hint: <ticket numbers or keys, e.g. 1234 1250 OPS-7> [--faults] [--api-writes] [--budget N] [--minutes M] [--review] [--resume [run]] [--retest [run]] [--all] [--verify]
+argument-hint: <ticket numbers or keys, e.g. 1234 1250 OPS-7> [--faults] [--api-writes] [--review] [--resume [run]] [--retest [run]] [--all] [--verify]
 ---
 
 Test these Jira items and report a verdict per ticket: $ARGUMENTS
 
 Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. First read `${CLAUDE_SKILL_DIR}/../../references/run-setup.md` and `${CLAUDE_SKILL_DIR}/../../references/jira.md`.
 
-Flags: `--faults`, `--api-writes` (lets the explorer send POST, PUT, PATCH and DELETE with `qa-mem api-probe`, only on `qa-sdet-` records it created; reads always work), `--budget N` and `--minutes M` (optional, per route), `--review` (stop after the test cases), `--resume [run]` (finish unfinished `NOT_RUN`/`BLOCKED` routes of an interrupted run in place), `--retest [run]` (new run folder reusing the prior run's `plan.json` and TC IDs, running only non-`PASS` cases and passes the prior verdict didn't trust unless `--all` is given). Every other argument is a ticket.
+Flags: `--faults`, `--api-writes` (lets the explorer send POST, PUT, PATCH and DELETE with `qa-mem api-probe`, only on `qa-sdet-` records it created; reads always work), `--review` (stop after the test cases), `--resume [run]` (finish unfinished `NOT_RUN`/`BLOCKED` routes of an interrupted run in place), `--retest [run]` (new run folder reusing the prior run's `plan.json` and TC IDs, running only non-`PASS` cases and passes the prior verdict didn't trust unless `--all` is given). Every other argument is a ticket.
 
 ## 1. Analyze
 1. Config (run-setup; ask for `jiraKeyPrefix` once when missing).

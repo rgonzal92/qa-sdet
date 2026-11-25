@@ -3,7 +3,6 @@ name: qa-mapper
 description: Reads the source files that qa-mem codemap-scan listed for one area (frontend, backend or tests) and writes qa-out/init/code-map-<area>[-<n>].json with the app's routes, element locators, validation rules and API endpoints. Called by the qa-init skill.
 tools: Read, Grep, Glob, Write
 model: haiku
-maxTurns: 25
 effort: high
 ---
 

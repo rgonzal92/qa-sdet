@@ -283,10 +283,8 @@ class PluginLogAnonymizerAndExport(Base):
                 "mode": "ticket",
                 "route": "/zones/7",
                 "status": "INCOMPLETE",
-                "stop_reason": "turn_limit",
+                "stop_reason": "diminishing_returns",
                 "turns": 38,
-                "commands": 24,
-                "budget": 0,
                 "duration_s": 140,
                 "build_known": False,
                 "bugs_found": 1,
@@ -308,7 +306,7 @@ class PluginLogAnonymizerAndExport(Base):
         self.assertIn("TICKET-1", md)
         self.assertNotIn("CORP-9", md)
         self.assertNotIn("qa.corp.example", md)
-        self.assertIn("turn_limit", md)
+        self.assertIn("diminishing_returns", md)
         self.assertIn("unknown", md)
 
         # Real export writes dated file and advances cursor

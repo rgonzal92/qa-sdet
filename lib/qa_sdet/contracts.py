@@ -12,9 +12,7 @@ JsonObj = dict[str, Any]  # a parsed JSON object: agents and users write these f
 CaseStatus = Literal["PASS", "FAIL", "BLOCKED", "NOT_RUN", "QUESTION"]  # core.CASE_STATUSES
 BugStatus = Literal["OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"]  # core.STATUSES
 BlockScope = Literal["page", "session", "browser"]  # memory.BLOCK_SCOPES
-StopReason = Literal[  # memory.STOP_REASONS
-    "saturated", "charter_complete", "diminishing_returns", "turn_limit", "budget_limit", "time_limit", "blocked"
-]
+StopReason = Literal["saturated", "charter_complete", "diminishing_returns", "blocked"]  # memory.STOP_REASONS
 Verdict = Literal["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS", "NOT STARTED"]  # report.VERDICT_ICON
 
 
@@ -131,11 +129,7 @@ class Plan(TypedDict, total=False):  # <run>/.data/plan.json
 
 class Marker(TypedDict, total=False):  # qa-out/.active, written by ops.marker_start, read by hooks/guard.py
     expires: int
-    deadline: int
-    budget: int
     faults: bool
     api_writes: bool
-    used: int
     run_dir: str
     slug: str
-    max_turns: int

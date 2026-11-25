@@ -10,7 +10,7 @@ Every command starts `playwright-cli -s=qa <cmd>` (the allow rules match that sh
 | Silent failure | `console error`, `requests`, then `response-body <n>` / `request-body <n>` | `request <n>`, `response-headers <n>` (denied: cookies); `--clear` (it also empties the `--all` list your step 9 saves) |
 | Read a value | `--raw eval "document.querySelector('#x').textContent"`; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | snapshot + reading |
 | Many input values | one `--raw eval` loop (below) | a fill and a read per value; `run-code` (denied) |
-| Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"` (each still counts toward a budget) | one call per command |
+| Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"` | one call per command |
 
 Many values in one eval; repeat a suspicious one with real `fill` / `click` before calling it a bug (the recording needs them; its code goes into the repro spec):
 ```
@@ -92,14 +92,14 @@ playwright-cli -s=qa --raw eval "(() => { const out = [], vis = el => { if (!el 
 ```
 
 ## Browser conditions: narrow window, dark mode, unsaved edits, uploads
-Each check is optional and costs browser commands (each call counts toward a budget). Every hit is a lead: give it an oracle and repro it twice.
+Every hit is a lead: give it an oracle and repro it twice.
 
-**Narrow window** (once per page, after the given cases, when the page's budget is 20 or more commands or there is none). Note the window size, then in one Bash call resize, run the broken-output probe above, and restore the size even when the probe fails (`;`, not `&&`):
+**Narrow window** (once per page, after the given cases). Note the window size, then in one Bash call resize, run the broken-output probe above, and restore the size even when the probe fails (`;`, not `&&`):
 ```
 playwright-cli -s=qa --raw eval "innerWidth + ' ' + innerHeight"
 playwright-cli -s=qa resize 390 844; playwright-cli -s=qa --raw eval "<the broken-output probe's script>"; playwright-cli -s=qa resize <the width> <the height>
 ```
-A page wider than the window, or a button or field another element covers, at phone width is a QUESTION (does this app support a window that narrow?) unless an AC, the card or `RULES:` says it does: then it is a bug (`ui-state`). Out of budget: one `not_tested` line, category `heuristic`, text `narrow window`.
+A page wider than the window, or a button or field another element covers, at phone width is a QUESTION (does this app support a window that narrow?) unless an AC, the card or `RULES:` says it does: then it is a bug (`ui-state`).
 
 **Dark mode** (only when the brief's `FOCUS:` names dark mode, theme, colour scheme or contrast). Run this read-only eval in light, then dark, then clear the emulation:
 ```

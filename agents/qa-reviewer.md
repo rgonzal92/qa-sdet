@@ -3,7 +3,6 @@ name: qa-reviewer
 description: Read-only second opinion on a run's serious bug drafts (qa-ticket / qa-explore with --verify). Checks each draft's oracle, severity and repro spec against the plan and references/bug-draft.md, and returns a short JSON review. Never decides a verdict.
 tools: Read
 model: sonnet
-maxTurns: 4
 effort: medium
 ---
 

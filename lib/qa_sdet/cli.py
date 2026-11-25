@@ -63,7 +63,7 @@ def _opts(
 
 def _count(o: Mapping[str, Any], name: str, most: int | None = None) -> int:
     try:
-        n = int(o[name]) if name in o else 0  # `--budget ""` is a mistake, not "unlimited"
+        n = int(o[name]) if name in o else 0  # `--depth ""` is a mistake, not "none"
     except (ValueError, TypeError):
         n = -1
     if n < 0:
@@ -96,7 +96,6 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         "explore-next",
         "plan-find",
         "setup-permissions",
-        "spend",
         "plugin-log",
         "discover",
     ):
@@ -116,23 +115,15 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or ""))
         )
     elif cmd == "marker":
-        o = _opts(args[1:], flags=("--faults", "--api-writes"), valued=("--budget", "--minutes", "--max-turns"))
+        o = _opts(args[1:], flags=("--faults", "--api-writes"))
         if not args or args[0] not in ("start", "stop") or len(o["_"]) != 1:
             raise core.BadInput(
-                "usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] [--api-writes] "
-                "[--max-turns N] | marker stop <project>"
+                "usage: qa-mem marker start <project> [--faults] [--api-writes] | marker stop <project>"
             )
         if args[0] == "start":
             print(
                 json.dumps(
-                    ops.marker_start(
-                        o["_"][0],
-                        _count(o, "--budget"),
-                        _count(o, "--minutes", ops.MARKER_HOURS * 60),
-                        o.get("--faults", False),
-                        api_writes=o.get("--api-writes", False),
-                        max_turns=_count(o, "--max-turns", 1000),
-                    )
+                    ops.marker_start(o["_"][0], o.get("--faults", False), api_writes=o.get("--api-writes", False))
                 )
             )
         else:
@@ -272,27 +263,6 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         from . import report
 
         print(json.dumps(report.next_action(args[0], args[1])))
-    elif cmd == "spend":
-        o = _opts(
-            args,
-            valued=("--total-budget", "--total-minutes", "--budget", "--minutes", "--more-budget", "--more-minutes"),
-        )
-        if len(o["_"]) != 1:
-            raise core.BadInput(
-                "usage: qa-mem spend <run dir> [--total-budget N] [--total-minutes M] [--more-budget N] "
-                "[--more-minutes M] [--budget N] [--minutes M]"
-            )
-        print(
-            json.dumps(
-                ops.spend(
-                    o["_"][0],
-                    *(
-                        _count(o, f"--{k}")
-                        for k in ("total-budget", "total-minutes", "budget", "minutes", "more-budget", "more-minutes")
-                    ),
-                )
-            )
-        )
     elif cmd == "explore-next":
         o = _opts(args, valued=("--run",))
         if len(o["_"]) != 1:
@@ -471,16 +441,16 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...",
     "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
-    "marker": "start <project> [--budget N] [--minutes M] [--faults] [--api-writes] [--max-turns N] | marker stop <project>",
+    "marker": "start <project> [--faults] [--api-writes] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]",
     "session-check": "[--record] [--build]",
     "page-start": "<url>",
     "crawl": "<run dir> [<route>...]",
     "discover": "<run dir> [<url>] [--depth D] [--max-pages N]",
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
-    "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
+    "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] "
     "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
-    "[--hypothesis '<why this page>'] [--max-turns N]",
+    "[--hypothesis '<why this page>']",
     "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> [--box x,y,w,h ...] --label <text>",
@@ -490,7 +460,6 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "trace": "<project> [--keys K1,K2] [--fix-version VER]",
     "next-action": "<run dir> <slug>",
     "explore-next": "<project> [--run DIR]",
-    "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]",
     "signals-triage": "<run dir> --slug <slug>",
     "body-check": "<run dir> --slug <slug> <#>   (the response body of request <#> on stdin)",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)",
@@ -916,12 +885,9 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
                 "--route",
                 "--mode",
                 "--focus",
-                "--budget",
-                "--minutes",
                 "--known-bugs",
                 "--target-route",
                 "--hypothesis",
-                "--max-turns",
             ),
         )
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
@@ -936,15 +902,12 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
                     o["--route"],
                     mode=o.get("--mode"),
                     focus=o.get("--focus"),
-                    budget=_count(o, "--budget"),
-                    minutes=_count(o, "--minutes", ops.MARKER_HOURS * 60),
                     faults=o.get("--faults", False),
                     known_bugs=o.get("--known-bugs") or "",
                     open_record=o.get("--open-record", False),
                     api_writes=o.get("--api-writes", False),
                     hypothesis=o.get("--hypothesis"),
                     target_route=o.get("--target-route"),
-                    max_turns=_count(o, "--max-turns", 1000),
                 )
             )
         )

@@ -21,7 +21,6 @@ from . import core, scrub
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:  # NOSONAR
     import sqlite3
-    from typing import Any
 
     from .contracts import Marker
 
@@ -132,39 +131,26 @@ def make_rundir(project, label, day=None):
     return run
 
 
-MARKER_HOURS = 8  # the guard ignores a marker after this (a crashed run); also caps --minutes
+MARKER_HOURS = 8  # the guard ignores a marker after this (a crashed run)
 
 
 def marker_start(
     project: str | Path,
-    budget: int = 0,
-    minutes: int = 0,
     faults: bool = False,
     t: float | None = None,
     run_dir: str | Path | None = None,
     slug: str | None = None,
     api_writes: bool = False,
-    max_turns: int = 0,
 ) -> Marker:
-    """qa-out/.active for the guard: 0 = unlimited budget / no deadline. Written atomically. run_dir and slug (from
-    dispatch) name the explorer's run for the hooks. faults and api_writes are the run's opt-in flags (route / network-state-set;
-    POST, PUT, PATCH, DELETE through api-probe). max_turns: the turn count the wind-down hook warns before (default: the
-    agent's own maxTurns); for a test run with a small limit."""
+    """qa-out/.active for the guard, written atomically. run_dir and slug (from dispatch) name the explorer's run for the
+    hooks. faults and api_writes are the run's opt-in flags (route / network-state-set; POST, PUT, PATCH, DELETE through
+    api-probe). A run has no limit: it goes until the agent reaches its verdict."""
     t = time.time() if t is None else t
     root = _project(project) / "qa-out"
     root.mkdir(exist_ok=True)
-    data: Marker = {
-        "expires": int(t + MARKER_HOURS * 3600),
-        "deadline": int(t + minutes * 60) if minutes else 0,
-        "budget": int(budget or 0),
-        "faults": bool(faults),
-        "api_writes": bool(api_writes),
-        "used": 0,
-    }
+    data: Marker = {"expires": int(t + MARKER_HOURS * 3600), "faults": bool(faults), "api_writes": bool(api_writes)}
     if run_dir:
         data |= {"run_dir": str(run_dir), "slug": str(slug)}
-    if max_turns:
-        data["max_turns"] = int(max_turns)
     core._write(root / ".active", json.dumps(data) + "\n")
     return data
 
@@ -202,18 +188,15 @@ def dispatch(
     route: str,
     mode: str | None = None,
     focus: str | None = None,
-    budget: int = 0,
-    minutes: int = 0,
     faults: bool = False,
     known_bugs: str = "",
     open_record: bool = False,
     api_writes: bool = False,
     hypothesis: str | None = None,
     target_route: str | None = None,
-    max_turns: int = 0,
 ) -> dict[str, object]:
     """One explorer's setup: starts the run marker, picks the route's slug, writes <run>/.data/brief-<slug>.md (target,
-    limits, config, card, this route's cases and its tickets' AC, the project's qa-rules.md, the charter, known Jira bugs;
+    flags, config, card, this route's cases and its tickets' AC, the project's qa-rules.md, the charter, known Jira bugs;
     scrubbed) and returns {slug, target, brief, mode, case_count}. open_record: the explorer starts on the list page
     `route` and tests the detail page it leads to, so its brief, cases, card and slug are that detail page's (the list
     page's own brief and run file stay); without a known detail page the slug is `<route>-record`. target_route names that
@@ -267,8 +250,6 @@ def dispatch(
         f"slug: {slug}",
         f"refs: {REFS}",
         f"mode: {mode}",
-        f"budget: {budget or 'unlimited'}",
-        f"minutes: {minutes or 'unlimited'}",
         f"faults: {'yes' if faults else 'no'}",
         f"api_writes: {'yes' if api_writes else 'no'}",
     ]
@@ -329,98 +310,8 @@ def dispatch(
         ]
     brief = data / f"brief-{slug}.md"
     core._write(brief, scrub.redact("\n".join(out)) + "\n")
-    marker_start(
-        run.parent.parent, budget, minutes, faults, run_dir=run, slug=slug, api_writes=api_writes, max_turns=max_turns
-    )
+    marker_start(run.parent.parent, faults, run_dir=run, slug=slug, api_writes=api_writes)
     return {"slug": slug, "target": target, "brief": str(brief), "mode": mode, "case_count": len(cases)}
-
-
-SPEND_LEDGER = "spend.jsonl"
-MIN_PAGE_COMMANDS, MIN_PAGE_MINUTES = 10, 2  # a page with less than this left can't do its checks and its step 9
-
-
-def _note_spend(root):
-    """Append the stopping explorer's spend (browser commands used: kept only for a run with a budget; start and end
-    times) to <its run folder>/.data/spend.jsonl, which `qa-mem spend` totals. Best effort; never through a link."""
-    try:
-        m = json.loads((root / ".active").read_text())
-        data = Path(m["run_dir"]) / ".data"
-        line = {
-            "slug": str(m["slug"]),
-            "used": int(float(m.get("used") or 0)),
-            "budget": int(float(m.get("budget") or 0)),
-            "started": int(float(m["expires"]) - MARKER_HOURS * 3600),
-            "ended": int(time.time()),
-        }
-        if data.is_dir() and data.parent.parent == root:
-            fd = os.open(
-                data / SPEND_LEDGER, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644
-            )
-            with os.fdopen(fd, "w") as f:
-                f.write(json.dumps(line) + "\n")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-        pass
-
-
-def spend(
-    run_dir: str | Path,
-    total_budget: int = 0,
-    total_minutes: int = 0,
-    budget: int = 0,
-    minutes: int = 0,
-    more_budget: int = 0,
-    more_minutes: int = 0,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """What the run's explorers spent so far (from marker stops) and what the next page may: {pages, commands_used,
-    minutes_used (from the first page's start), commands_left, minutes_left (None without a cap), budget, minutes (the
-    limits to dispatch the next page with: its own, or what is left of the caps, whichever is less; 0 = none), exhausted,
-    why}. total_*: caps on the whole run; more_*: caps on what is spent from now (the extra pages of --adaptive); both
-    given: the stricter. exhausted: less than MIN_PAGE_COMMANDS or MIN_PAGE_MINUTES left. Commands are counted only for
-    pages dispatched with a budget, so a run with a total budget gives every page one."""
-    data = Path(run_dir) / ".data"
-    if not data.is_dir():
-        raise core.BadInput(f"spend: not a run folder: {run_dir}")
-    rows = []
-    try:
-        fd = os.open(data / SPEND_LEDGER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd) as f:
-            lines = f.read(1 << 20).splitlines()
-    except OSError:
-        lines = []
-    for line in lines:
-        try:
-            r = json.loads(line)
-            rows.append((max(int(r["used"]), 0), int(r["started"])))
-        except (ValueError, KeyError, TypeError, OverflowError):
-            continue
-    used = sum(u for u, _ in rows)
-    now = time.time() if now is None else now
-    mins = -(-max(int(now) - min(t for _, t in rows), 0) // 60) if rows else 0
-    caps = lambda total, more, so_far: min([c for c in (total, so_far + more if more else 0) if c] or [0])
-    cmd_cap, min_cap = caps(total_budget, more_budget, used), caps(total_minutes, more_minutes, mins)
-    cmd_left = cmd_cap - used if cmd_cap else None
-    min_left = min_cap - mins if min_cap else None
-    why = [
-        f"{left} of {cap} {unit} left"
-        for left, cap, unit, floor in (
-            (cmd_left, cmd_cap, "browser commands", MIN_PAGE_COMMANDS),
-            (min_left, min_cap, "minutes", MIN_PAGE_MINUTES),
-        )
-        if left is not None and left < floor
-    ]
-    least = lambda own, left: min([x for x in (own, left) if x] or [0]) if left is None or left > 0 else 0
-    return {
-        "pages": len(rows),
-        "commands_used": used,
-        "minutes_used": mins,
-        "commands_left": cmd_left,
-        "minutes_left": min_left,
-        "budget": least(budget, cmd_left),
-        "minutes": least(minutes, min_left),
-        "exhausted": bool(why),
-        "why": ("the run's total is nearly used up: " + "; ".join(why)) if why else "",
-    }
 
 
 def _log_run_summary(root):
@@ -450,8 +341,6 @@ def _log_run_summary(root):
         fields = {
             "run": rdir.name,
             "slug": slug,
-            "commands": int(float(m.get("used") or 0)),
-            "budget": int(float(m.get("budget") or 0)),
             "turns": turns,
             "duration_s": max(0, int(time.time() - started)) if started > 0 else 0,
         }
@@ -501,9 +390,8 @@ def _log_run_summary(root):
 
 def marker_stop(project: str | Path) -> None:
     root = _project(project) / "qa-out"
-    _note_spend(root)
     _log_run_summary(root)
-    for name in (".active", ".active.lock", ".active.warned", ".active.progress"):
+    for name in (".active", ".active.progress"):
         (root / name).unlink(missing_ok=True)
 
 

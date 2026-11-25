@@ -15,7 +15,6 @@ import sys
 import tempfile
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -28,7 +27,7 @@ D = HOME / ".local/share/qa-sdet"  # the data folder: memory DB and browser prof
 PROF, MAIN = D / "profiles", D / "profiles/main"
 CK, DB = MAIN / "Default/Cookies", D / "app.db"
 CFG = HOME / ".config/qa-sdet/config.json"
-PROJ, RUN = TMP / "proj", TMP / "run"  # a project without a run marker; one with a marker and no budget
+PROJ, RUN = TMP / "proj", TMP / "run"  # a project without a run marker; one with a marker
 Q = ROOT / "bin/qa-mem"
 sys.path.insert(0, str(ROOT / "lib"))
 from support import load_hook
@@ -877,11 +876,10 @@ class R4Explorer(Case):
             self.assertIn("the user's", bash(cmd, RUN, explorer=True) or "", cmd)
             self.assertIsNone(bash(cmd, RUN), cmd)  # the main session (the user's request) may
 
-    def test_the_run_marker_is_the_coordinators(self):  # a steered explorer could lift its budget or turn on faults
+    def test_the_run_marker_is_the_coordinators(self):  # a steered explorer could turn on faults or API writes
         for cmd in (
             f"qa-mem dispatch '{RUN}/qa-out/r' --route /x --faults",
             f"qa-mem marker start '{RUN}' --faults",
-            f"qa-mem marker start '{RUN}' --budget 999",
             f"qa-mem marker stop '{RUN}'",
             f"python3 {Q} marker stop .",
             "rm -f qa-out/.active",
@@ -896,9 +894,7 @@ class R4Explorer(Case):
             self.assertIsNone(bash(cmd, RUN), cmd)  # the skill's main session runs setup and teardown
         self.assertIsNone(bash("cat qa-out/.active", RUN, explorer=True))  # reading it is fine
 
-    def test_the_marker_files_by_glob_and_the_warning_and_lock_files(
-        self,
-    ):  # found in review: a glob passed, .warned re-armed it
+    def test_the_marker_files_by_glob(self):  # found in review: a glob passed
         (RUN / "qa-out/.active.progress").touch()
         try:
             for cmd in (
@@ -906,9 +902,6 @@ class R4Explorer(Case):
                 "rm -f qa-out/.act?ve",
                 "rm qa-out/.[a]ctive",
                 f"rm -f {RUN}/qa-out/.active*",
-                "rm -f qa-out/.active.warned",
-                "rm -f qa-out/.active.lock",
-                "printf x > qa-out/.active.warned",
             ):
                 self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
                 self.assertIsNone(bash(cmd, RUN), cmd)
@@ -919,7 +912,7 @@ class R4Explorer(Case):
 
     def test_the_progress_file_beside_the_marker_is_the_coordinators_too(
         self,
-    ):  # deleting it would reset the turn count
+    ):  # deleting it would reset the spin and failure counts
         for cmd in (
             "rm -f qa-out/.active.progress",
             "printf x>qa-out/.active.progress",
@@ -1377,150 +1370,43 @@ class Matrix(Case):
 
 
 class R6Marker(Case):
-    def test_budget_counts_and_stops(self):
-        cwd = project(budget=2)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used")
-        self.assertIsNone(bash("playwright-cli -s=qa goto http://localhost:1/a", cwd))
-        self.assertIsNone(bash("playwright-cli -s=qa click e1", cwd))
-        self.assertIn("used up", bash("playwright-cli -s=qa click e2", cwd))
-        self.assertIsNone(bash("playwright-cli -s=qa close", cwd))  # finishing always works
-        self.assertIsNotNone(bash(EVIL, cwd))  # denied for its host, not counted
-        self.assertEqual(used(), 2)
-
-    def test_a_call_auto_mode_denies_is_refunded(self):  # it never ran; PermissionDenied names it by tool_use_id
-        cwd = project(budget=10)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
-        call = {
-            "tool_name": "Bash",
-            "tool_input": {"command": "playwright-cli -s=qa click e1 && playwright-cli -s=qa click e2"},
-            "cwd": str(cwd),
-            "tool_use_id": "toolu_1",
-        }
-        self.assertIsNone(g.evaluate(call)[0])
-        self.assertIsNone(g.evaluate({**call, "tool_use_id": "toolu_2"})[0])
-        self.assertEqual(used(), 4)
-        denied = {**call, "hook_event_name": "PermissionDenied", "reason": "auto mode classifier"}
-        hook(denied, script="denied.py", project=str(cwd))
-        self.assertEqual(used(), 2)
-        hook(denied, script="denied.py", project=str(cwd))  # told twice: refunded once
-        self.assertEqual(used(), 2)
-
-    def test_evidence_counts_the_browser_commands_it_runs(self):  # --ref: scroll, highlight, screenshot, hide
-        cwd = project(budget=20)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
-        self.assertIsNone(bash(f"qa-mem evidence {cwd}/qa-out/r/evidence/BUG-1.png --selector '#f' --label x", cwd))
-        self.assertEqual(used(), 2)
-        self.assertIsNone(bash(f"qa-mem evidence {cwd}/qa-out/r/evidence/BUG-2.png --ref e5 --label x", cwd))
-        self.assertEqual(used(), 6)
-
-    def test_denied_spends_nothing_and_a_substitution_counts_once(self):
-        cwd = project(budget=10)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
-        self.assertIsNotNone(bash(f"playwright-cli -s=qa click e1 && rm -rf {D}", cwd))
-        self.assertIsNotNone(bash("qa-mem browser-open https://evil.com", cwd))
-        self.assertEqual(used(), 0)
-        self.assertIsNone(bash('t=$(playwright-cli -s=qa --raw eval "document.title")', cwd))
-        self.assertEqual(used(), 1)
-        self.assertIsNone(bash(f"python3 {Q} browser-open https://qa.traffic.example/", cwd))
-        self.assertEqual(used(), 2)
-
-    def test_loops_only_with_a_budget(self):
-        loops = [
+    def test_browser_commands_are_never_counted_or_capped(self):  # every run goes until the agent's verdict
+        cwd = project(budget=2, used=2, deadline=time.time() - 5, max_turns=1)  # keys an older marker may still hold
+        before = Path(cwd, "qa-out/.active").read_text()
+        for cmd in (
+            "playwright-cli -s=qa goto http://localhost:1/a",
+            " && ".join(["playwright-cli -s=qa click e1"] * 9),
             "for b in ID Road; do playwright-cli -s=qa click e$b; done",
-            "while read u; do playwright-cli -s=qa click e1; done < u.txt",
-            "if true; then for v in 1 2; do playwright-cli -s=qa click e$v; done; fi",
-            "time for v in 1 2; do playwright-cli -s=qa click e1; done",
-            "for a in 1; do for b in 1; do echo; done; playwright-cli -s=qa click e1; done",
-            "for u in a b; do qa-mem browser-open https://qa.traffic.example/$u; done",
-            # a function body runs once per call of it
             "snap() { playwright-cli -s=qa snapshot; }; snap; snap",
-            "function snap { playwright-cli -s=qa snapshot; }; snap; snap",
-            "snap( ) ( playwright-cli -s=qa snapshot ); snap; snap",
-            "o() { qa-mem browser-open https://qa.traffic.example/; }; o; o",
-        ]
-        self.table(loops, True, project(budget=50))
-        self.table(
-            [
-                "for i in 1 2; do echo $i; done; playwright-cli -s=qa requests",
-                "a=(1 2); playwright-cli -s=qa requests",
-                'playwright-cli -s=qa eval "(function () { return 1 })()"',
-            ],
-            False,
-            project(budget=50),
-        )
-        self.table(loops, False, RUN)
-
-    def test_deadline_and_stop_messages(self):
-        late = project(deadline=time.time() - 5)
-        spent = project(budget=2, used=2)
-        for cwd in (late, spent):
+            "for u in a b; do qa-mem browser-open https://qa.traffic.example/$u; done",
+            "qa-mem api-probe GET https://qa.traffic.example/api/zones",
+        ):
             for explorer in (False, True):
-                r = bash("playwright-cli -s=qa snapshot", cwd, explorer)
-                self.assertIn("<out>/.data/run-<slug>.json", r)
-            self.assertIsNone(bash("ls", cwd))
-        stale = project(deadline=time.time() - 700)
-        self.assertIn("time budget is used up", bash("playwright-cli -s=qa screenshot", stale, True))
-        self.assertIn("delete", bash("playwright-cli -s=qa screenshot", stale))  # the user gets the cleanup hint
+                self.assertIsNone(bash(cmd, cwd, explorer), cmd)
+        self.assertEqual(Path(cwd, "qa-out/.active").read_text(), before)
+        self.assertIsNotNone(bash(EVIL, cwd))  # the host check holds
 
-    def test_signal_dump_runs_past_the_limits(
-        self,
-    ):  # the explorer's step 9: a run that ran out still keeps its signals
-        for cwd in (project(deadline=time.time() - 5), project(budget=2, used=2)):
-            for cmd in (
-                f"playwright-cli -s=qa requests --all > '{cwd}/qa-out/r/.data/requests-form.log'",
-                f"playwright-cli -s=qa console error --all > '{cwd}/qa-out/r/.data/console-form.log'",
-            ):
-                self.assertIsNone(bash(cmd, cwd, True), cmd)
-            self.assertIsNotNone(
-                bash("playwright-cli -s=qa snapshot", cwd, True)
-            )  # what drives the app is still counted
+    def test_a_call_with_a_denied_part_is_denied(self):
+        self.assertIsNotNone(bash(f"playwright-cli -s=qa click e1 && rm -rf {D}", RUN))
+        self.assertIsNotNone(bash("qa-mem browser-open https://evil.com", RUN))
+        self.assertIsNone(bash('t=$(playwright-cli -s=qa --raw eval "document.title")', RUN))
+        self.assertIsNone(bash(f"python3 {Q} browser-open https://qa.traffic.example/", RUN))
 
-    def test_batch_over_budget_says_what_is_left(self):
-        cwd = project(budget=15, used=7)
-        self.assertIn("only 8 of the run's 15 are left", bash("; ".join(["playwright-cli -s=qa click e1"] * 9), cwd))
-        self.assertIsNone(bash("playwright-cli -s=qa click e1", cwd))
-        marker(cwd, budget=15, used=15)
-        self.assertIn("is used up", bash("playwright-cli -s=qa click e1", cwd))
+    def test_the_explorer_saves_its_signals_into_its_run_folder(self):  # step 9
+        for cmd in (
+            f"playwright-cli -s=qa requests --all > '{RUN}/qa-out/r/.data/requests-form.log'",
+            f"playwright-cli -s=qa console error --all > '{RUN}/qa-out/r/.data/console-form.log'",
+        ):
+            self.assertIsNone(bash(cmd, RUN, True), cmd)
 
-    def test_one_call_cannot_jump_over_the_cleanup_warning(
-        self,
-    ):  # a 9-command && chain took a live run from 9 left to 0
-        cwd = project(budget=12, used=3)
-        chain = lambda n: " && ".join(["playwright-cli -s=qa click e1"] * n)
-        self.assertIn("send at most 6 now", bash(chain(9), cwd, True))
-        self.assertIsNone(bash(chain(6), cwd, True))  # down to the reserve: the hook warns with 3 left
-        # no warning yet (the call that got there never ran: Claude Code denied it after the guard counted it), so the
-        # first call into the reserve is refused once, and that refusal is the warning
-        r = bash(chain(3), cwd, True)
-        self.assertIn("only 3 browser commands are left", r)
-        self.assertIn("delete the qa-sdet-", r)
-        self.assertIsNone(bash(chain(3), cwd, True))  # told: the reserve is its to spend
-        self.assertIn("used up", bash("playwright-cli -s=qa click e1", cwd, True))
-        warned = project(budget=12, used=9)
-        (warned / "qa-out/.active.warned").write_text(
-            str(json.loads((warned / "qa-out/.active").read_text())["expires"])
-        )
-        self.assertIsNone(bash("playwright-cli -s=qa click e1", warned, True))  # the hook already warned: no refusal
-        self.assertEqual((g.cleanup_reserve(2), g.cleanup_reserve(12), g.cleanup_reserve(100)), (3, 3, 15))
-
-    def test_page_start_and_evidence_are_hosts_checked_and_counted(self):
-        cwd = project(budget=20)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+    def test_page_start_and_evidence_are_hosts_checked(self):
+        cwd = project()
         self.assertIn("non-allowlisted host", bash("qa-mem page-start https://evil.com/", cwd, True))
         self.assertIsNone(bash("qa-mem page-start https://qa.traffic.example/form", cwd, True))
-        self.assertEqual(used(), 1)
         self.assertIsNone(
             bash(f"qa-mem evidence '{cwd}/qa-out/r/evidence/TC-1.png' --selector '#msg' --label 'ok'", cwd, True)
         )
-        self.assertEqual(used(), 3)  # an eval and a screenshot
-
-    def test_used_is_untouched_without_a_budget(self):
-        for m in ({}, {"deadline": time.time() + 600}, {"budget": 0, "deadline": time.time() + 600}):
-            cwd = project()
-            marker(cwd, **m)
-            for k in range(5):
-                self.assertIsNone(bash(f"playwright-cli -s=qa click e{k}", cwd))
-            self.assertNotIn("used", json.loads(Path(cwd, "qa-out/.active").read_text()), m)
+        self.assertIsNone(bash(f"qa-mem evidence {cwd}/qa-out/r/evidence/BUG-2.png --ref e5 --label x", cwd))
 
     def test_faults_gate(self):
         cwd = project()
@@ -1536,9 +1422,8 @@ class R6Marker(Case):
         with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=str(cwd)):  # the marker found via the project folder
             self.assertIsNone(bash("playwright-cli -s=qa route '**/api/**'", project()))
 
-    def test_api_probe_is_hosts_checked_header_checked_and_counted(self):
-        cwd = project(budget=30)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+    def test_api_probe_is_hosts_checked_and_header_checked(self):
+        cwd = project()
         url = "https://qa.traffic.example/api/zones"
         for explorer in (False, True):
             self.assertIn(
@@ -1553,17 +1438,14 @@ class R6Marker(Case):
                     self.assertIn("refused", bash(f"qa-mem api-probe GET {url} {form}", cwd, explorer) or "", h)
             self.assertIsNotNone(bash("qa-mem api-probe GET", cwd, explorer))  # no URL to check
             self.assertIsNotNone(bash("qa-mem api-probe GET $URL", cwd, explorer))
-        self.assertEqual(used(), 0)  # a denial spends nothing
-        for cmd, n in (
-            (f"qa-mem api-probe GET {url}", 1),
-            (f"qa-mem api-probe head {url}/1", 1),
-            (f"qa-mem api-probe OPTIONS {url}", 1),
-            (f"qa-mem api-probe GET {url} --header 'Accept: application/json' --header 'X-Trace: 1'", 1),
-            (f"python3 {Q} api-probe GET {url}", 1),
+        for cmd in (
+            f"qa-mem api-probe GET {url}",
+            f"qa-mem api-probe head {url}/1",
+            f"qa-mem api-probe OPTIONS {url}",
+            f"qa-mem api-probe GET {url} --header 'Accept: application/json' --header 'X-Trace: 1'",
+            f"python3 {Q} api-probe GET {url}",
         ):
-            before = used()
             self.assertIsNone(bash(cmd, cwd, True), cmd)
-            self.assertEqual(used() - before, n, cmd)
         for ok in (
             '--json \'{"name": "qa-sdet-a"}\'',
             '--json \'{"url": "https://evil.com/x"}\'',  # a body is data, not a URL
@@ -1571,20 +1453,20 @@ class R6Marker(Case):
         ):
             self.assertIsNone(bash(f"qa-mem api-probe GET {url} {ok}", cwd, True), ok)
 
-    def test_api_probe_writes_need_the_run_flag_and_cost_what_they_run(self):
+    def test_api_probe_writes_need_the_run_flag(self):
         url, body = "https://qa.traffic.example/api/zones", '--json \'{"name": "qa-sdet-z"}\''
-        writes = [("POST", 1), ("put", 2), ("PATCH", 2), ("DELETE", 2)]
+        writes = ("POST", "put", "PATCH", "DELETE")
         for why, m in (
             ("no marker", None),
             ("flag off", {"api_writes": False}),
-            ("flag absent", {"budget": 40}),
+            ("flag absent", {}),
             ("expired", {"api_writes": True, "expires": time.time() - 5}),
         ):
             cwd = project()
             if m is not None:
                 marker(cwd, **m)
             for explorer in (False, True):
-                for method, _ in writes:
+                for method in writes:
                     self.assertIn(
                         "--api-writes",
                         bash(f"qa-mem api-probe {method} {url}/1 {body}", cwd, explorer) or "",
@@ -1592,20 +1474,13 @@ class R6Marker(Case):
                     )
             for method in ("GET", "HEAD", "OPTIONS"):
                 self.assertIsNone(bash(f"qa-mem api-probe {method} {url}", cwd, True), (why, method))
-        cwd = project(budget=40, api_writes=True)
-        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
-        for method, n in writes:  # PUT, PATCH and DELETE read the record first: two browser commands
-            before = used()
+        cwd = project(api_writes=True)
+        for method in writes:
             self.assertIsNone(bash(f"qa-mem api-probe {method} {url}/1 {body}", cwd, True), method)
-            self.assertEqual(used() - before, n, method)
         self.assertIsNotNone(
             bash(f"qa-mem api-probe DELETE https://evil.com/api/zones/1 {body}", cwd, True)
         )  # the host check holds
         self.assertIsNotNone(bash(f"qa-mem api-probe POST {url} --header 'Cookie: a=b' {body}", cwd, True))
-        used_up = project(budget=2, used=1, api_writes=True)
-        self.assertIn(
-            "browser commands", bash(f"qa-mem api-probe DELETE {url}/1 {body}", used_up, True) or ""
-        )  # 2 > 1 left
 
     def test_the_explorer_cannot_turn_on_api_writes(self):  # only the coordinator's marker may say it
         for cmd in (
@@ -1617,7 +1492,7 @@ class R6Marker(Case):
             "tee qa-out/.active < /tmp/m",
         ):
             self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
-        cwd = project(budget=9, api_writes=False)  # a marker the explorer can't change keeps writes off
+        cwd = project(api_writes=False)  # a marker the explorer can't change keeps writes off
         self.assertIn(
             "--api-writes", bash("qa-mem api-probe DELETE https://qa.traffic.example/api/zones/1", cwd, True) or ""
         )
@@ -1650,7 +1525,7 @@ class R6Marker(Case):
     ]
 
     def test_raw_eval_writes_are_denied_for_every_role_even_with_api_writes(self):
-        cwd = project(budget=50, api_writes=True)
+        cwd = project(api_writes=True)
         for js in self.EVAL_WRITES:
             for verb in ("eval", "--raw eval"):
                 cmd = f"playwright-cli -s=qa {verb} {shlex.quote(js)}"
@@ -1661,49 +1536,25 @@ class R6Marker(Case):
         )
         self.table([f"playwright-cli -s=qa --raw eval {shlex.quote(js)}" for js in self.EVAL_OK], False, cwd=cwd)
 
-    def test_raw_eval_denials_spend_nothing(self):
-        cwd = project(budget=10)
-        self.assertIsNotNone(bash(f"playwright-cli -s=qa --raw eval {shlex.quote(self.EVAL_WRITES[0])}", cwd, True))
-        self.assertEqual(json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0), 0)
-
     def test_malformed_markers_are_no_run(self):
-        cwd = project(budget=1)
+        cwd = project(faults=True)
         ms = int(time.time() * 1000)
         for text in (
-            json.dumps({"expires": ms + 7200000, "deadline": ms, "budget": 5}),
+            json.dumps({"expires": ms + 7200000}),  # epoch milliseconds: it would never expire
             "{oops",
-            json.dumps({"budget": 5}),
-            json.dumps({"expires": time.time() + 600, "budget": "150 (default)"}),
+            json.dumps({"faults": True}),
+            json.dumps({"expires": "soon"}),
             "[1]",
-            '{"expires": %d, "budget": Infinity}' % (time.time() + 600),
-            '{"expires": %d, "deadline": NaN}' % (time.time() + 600),
-            '{"expires": %d, "used": -1000, "budget": 10}' % (time.time() + 600),
+            '{"expires": Infinity}',
+            '{"expires": NaN}',
+            json.dumps({"expires": -1}),
+            json.dumps({"expires": time.time() + 600, "faults": "yes"}),
             json.dumps({"expires": time.time() + 600, "api_writes": "yes"}),
             json.dumps({"expires": time.time() + 600, "api_writes": 1}),
         ):
             Path(cwd, "qa-out/.active").write_text(text)
             self.assertEqual(g.read_marker(str(cwd)), (None, None), text)
-            self.assertIsNone(bash("playwright-cli -s=qa click e1", cwd), text)
-            self.assertIsNone(bash("playwright-cli -s=qa click e1", cwd, True), text)
-
-    def test_spend_budget_never_loses_a_count(self):
-        active = marker(project(), budget=1000)
-        with ThreadPoolExecutor(16) as ex:
-            list(ex.map(lambda _: g.spend_budget(active, 1), range(64)))
-        self.assertEqual(json.loads(active.read_text())["used"], 64)
-
-    def test_planted_lock_link_is_not_written_through(self):
-        cwd = project(budget=10)
-        victim = TMP / "bashrc"
-        victim.write_text("keep me\n")
-        os.symlink(victim, Path(cwd, "qa-out/.active.lock"))
-        self.assertEqual(
-            hook(
-                {"tool_name": "Bash", "tool_input": {"command": "playwright-cli -s=qa click e1"}, "cwd": str(cwd)}
-            ).count('"deny"'),
-            1,
-        )  # the crash fallback denies
-        self.assertEqual(victim.read_text(), "keep me\n")
+            self.assertIsNotNone(bash("playwright-cli -s=qa route '**/api/**'", cwd), text)  # no run: no faults
 
 
 class R7Mapper(Case):
@@ -1944,11 +1795,6 @@ class R8ApproveAndLog(Case):
             ("Grep", {"path": str(cwd), "glob": ".env", "pattern": "SECRET"}),
         ]:
             self.assertIsNotNone(tool(name, MAPPER, cwd, **tin), (name, tin))
-        # 8. spend_budget race when .active is deleted before flock acquires
-        p = project(budget=10)
-        active = p / "qa-out/.active"
-        active.unlink()
-        self.assertIsNone(g.spend_budget(active, 1))
         # 9. deeply nested JSON does not crash guard.py or denied.py
         deep = "[" * 3000 + "]" * 3000
         self.assertEqual(hook(deep, "guard.py"), "")
@@ -2053,12 +1899,10 @@ class R8ApproveAndLog(Case):
             g.mask("http://localhost:8765?email=qa@example.com"), "http://localhost:8765?email=qa@example.com"
         )
         self.assertEqual(g.mask("https://u:pw@host:8443/x"), "https://[masked]@host:8443/x")
-        # M8: huge budget integer in .active does not crash read_marker with OverflowError
+        # M8: a huge integer in .active does not crash read_marker with OverflowError
         p = project()
         (p / "qa-out").mkdir(exist_ok=True)
-        (p / "qa-out/.active").write_text(
-            json.dumps({"expires": time.time() + 3600, "budget": 10**400, "used": 0, "deadline": 0, "faults": False})
-        )
+        (p / "qa-out/.active").write_text(json.dumps({"expires": 10**400, "faults": False}))
         self.assertEqual(g.read_marker(str(p)), (None, None))
         # L5: denied.py handles NUL in cwd without crashing; guard handles deleted cwd
         self.assertEqual(

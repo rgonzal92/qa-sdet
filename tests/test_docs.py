@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from support import load_hook
 
-from qa_sdet import cli, core, doctor, ops, report
+from qa_sdet import cli, core, doctor, report
 
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
@@ -114,11 +114,6 @@ class Docs(unittest.TestCase):
         for printed in ('"browser profile in use:', "can't start\"", '"browser tool failed'):
             self.assertIn(printed, ops_src)
 
-    def test_minutes_cap_is_documented(self):
-        with self.assertRaises(core.BadInput):
-            cli._count({"--minutes": str(ops.MARKER_HOURS * 60 + 1)}, "--minutes", ops.MARKER_HOURS * 60)
-        self.assertIn(f"at most {ops.MARKER_HOURS * 60}", text("references/run-setup.md"))
-
     def test_readme_verdicts_and_permission_rules_match_code(self):
         readme = text("README.md")
         for icon in report.VERDICT_ICON.values():
@@ -200,7 +195,7 @@ class Docs(unittest.TestCase):
                     .replace("<run>", f"{proj}/qa-out/run")
                     .replace("<route>", "/form")
                 )
-                cmd = re.sub(r" \[[^\]]*\]", " --budget 5 --faults", cmd)  # the optional flags
+                cmd = re.sub(r" \[[^\]]*\]", " --faults", cmd)  # the optional flags
                 with mock.patch.dict(os.environ, env):
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
                     ev = lambda agent: g.evaluate(
@@ -452,9 +447,7 @@ class Docs(unittest.TestCase):
             g, env = load_guard(os.path.realpath(d))
             proj = Path(os.path.realpath(d)) / "proj"
             (proj / "qa-out").mkdir(parents=True)
-            marker = lambda **m: (proj / "qa-out/.active").write_text(
-                json.dumps({"expires": time.time() + 3600, "budget": 100, **m})
-            )
+            marker = lambda **m: (proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600, **m}))
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
                 ev = lambda cmd: g.evaluate(
@@ -647,13 +640,18 @@ class Docs(unittest.TestCase):
         for key in ("frontier", "run_patterns"):  # the keys explore-next writes
             self.assertIn(f'"{key}"', text("lib/qa_sdet/report.py"))
 
-    def test_the_turn_wind_down_is_documented_and_reads_the_agents_limit(self):
-        for doc in ("README.md", "references/run-setup.md"):
-            self.assertIn("--max-turns", text(doc), doc)
-        self.assertIn(".active.progress", text("README.md"))
-        self.assertIn("--max-turns", cli.COMMANDS["dispatch"] + cli.COMMANDS["marker"])
-        for agent in ("qa-explorer",):  # the hook warns before this file's maxTurns: it must say what to do
-            self.assertRegex(text(f"agents/{agent}.md"), r"turns are (nearly used|left)")
+    def test_no_doc_or_agent_offers_a_run_limit(self):  # every run goes until the agent reaches its verdict
+        gone = re.compile(
+            r"--budget|--minutes|--max-turns|--total-budget|--total-minutes|--more-budget|qa-mem spend"
+            r"|turn_limit|budget_limit|time_limit|maxTurns"
+        )
+        for doc in [ROOT / "README.md", *DOCS]:
+            self.assertIsNone(gone.search(doc.read_text()), doc.name)
+        for name in ("marker", "dispatch"):
+            self.assertIsNone(gone.search(cli.COMMANDS[name]), name)
+        self.assertNotIn("spend", cli.COMMANDS)
+        # a run Claude Code or the user cuts short still keeps its results
+        self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
 
     def test_stop_reason_and_the_expansion_gate_are_documented(self):
         from qa_sdet import memory
@@ -661,25 +659,11 @@ class Docs(unittest.TestCase):
         for reason in memory.STOP_REASONS:
             self.assertIn(reason, text("references/run-json.md"), reason)
         self.assertIn("stop_reason", text("agents/qa-explorer.md"))
-        self.assertIn("turn_limit", text("hooks/posttooluse.py"))  # the wind-down note names the value to write
         skill = text("skills/qa-explore/SKILL.md")
         for word in ("expand_recommended", "stop_reason"):
             self.assertIn(word, skill)
         self.assertIn("expand_recommended", text("README.md"))
         self.assertIn('"expand_recommended"', text("lib/qa_sdet/report.py"))
-
-    def test_run_wide_caps_reach_the_cli_the_skill_the_setup_and_the_readme(self):
-        for flag in ("--total-budget", "--total-minutes"):
-            for doc in ("README.md", "skills/qa-explore/SKILL.md", "references/run-setup.md"):
-                self.assertIn(flag, text(doc), f"{doc}: {flag}")
-            self.assertIn(flag, cli.COMMANDS["spend"])
-        self.assertIn("qa-mem spend", text("skills/qa-explore/SKILL.md"))
-        self.assertIn("--more-budget 120 --more-minutes 20", text("skills/qa-explore/SKILL.md"))
-        self.assertIn(
-            "--more-budget 120 --more-minutes 20", text("references/run-setup.md")
-        )  # the ceiling the docs state
-        self.assertIn("spend.jsonl", text("references/run-setup.md"))
-        self.assertIn(ops.SPEND_LEDGER, text("README.md") + text("references/run-setup.md"))
 
     def test_observed_endpoints_are_documented_where_gaps_and_the_card_are(self):
         for doc in ("README.md", "CHANGELOG.md"):
@@ -709,15 +693,6 @@ class Docs(unittest.TestCase):
             + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
         )
         self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
-
-    def test_agents_have_a_turn_limit(
-        self,
-    ):  # a looping agent burned turns until its context ran out, results unwritten
-        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-reviewer": 4}
-        for path in AGENTS:
-            meta = dict(re.findall(r"^([\w-]+): (.*)$", path.read_text().split("---\n")[1], re.M))
-            self.assertEqual(int(meta["maxTurns"]), limits[path.stem], path.name)
-        self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
 
     def test_the_critic_is_opt_in_and_read_only(self):
         meta = dict(re.findall(r"^([\w-]+): (.*)$", text("agents/qa-reviewer.md").split("---\n")[1], re.M))

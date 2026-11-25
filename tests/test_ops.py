@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, Base, cli, cli_mod, core, done, load_hook
+from support import ROOT, Base, cli, cli_mod, core, done
 
 from qa_sdet import ops
 
@@ -114,19 +114,18 @@ class RunDir(Base):
 class Marker(Base):
     """`qa-mem marker`: the run marker the guard reads."""
 
-    def test_start_unlimited_and_limited_then_stop(self):
+    def test_start_then_stop(self):
         code, out, _ = cli("marker", "start", str(self.proj))
         m = json.loads((self.proj / "qa-out/.active").read_text())
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), m)
-        self.assertEqual((m["budget"], m["deadline"], m["faults"], m["used"]), (0, 0, False, 0))
+        self.assertEqual(sorted(m), ["api_writes", "expires", "faults"])  # no budget, deadline or turn count
+        self.assertIs(m["faults"], False)
         self.assertAlmostEqual(m["expires"], time.time() + 8 * 3600, delta=5)
-        cli("marker", "start", str(self.proj), "--budget", "40", "--minutes", "10", "--faults")
-        m = json.loads((self.proj / "qa-out/.active").read_text())
-        self.assertEqual((m["budget"], m["faults"]), (40, True))
-        self.assertAlmostEqual(m["deadline"], time.time() + 600, delta=5)
+        cli("marker", "start", str(self.proj), "--faults")
+        self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["faults"], True)
         self.assertEqual([p.name for p in (self.proj / "qa-out").iterdir()], [".active"])  # no temp file left
-        (self.proj / "qa-out/.active.lock").write_text("")
+        (self.proj / "qa-out/.active.progress").write_text("x")
         self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)
         self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
         self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)  # already gone: fine
@@ -137,42 +136,17 @@ class Marker(Base):
         cli("marker", "start", str(self.proj), "--api-writes")
         self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["api_writes"], True)
 
-    def test_max_turns_is_recorded_only_when_given_and_progress_goes_with_the_marker(self):
-        marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
-        cli("marker", "start", str(self.proj))
-        self.assertNotIn("max_turns", marker())  # the hook then reads the agent's own maxTurns
-        cli("marker", "start", str(self.proj), "--max-turns", "12")
-        self.assertEqual(marker()["max_turns"], 12)
-        for name in (".active.progress", ".active.warned"):
-            (self.proj / "qa-out" / name).write_text("x")
-        cli("marker", "stop", str(self.proj))
-        self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
-        for bad in ("-1", "x", "1001"):
-            self.assertEqual(cli("marker", "start", str(self.proj), "--max-turns", bad)[0], 2, bad)
-
     def test_bad_input(self):
         for argv in (
             ("marker",),
             ("marker", "go", str(self.proj)),
-            ("marker", "start", str(self.proj), "--budget", "-1"),
-            ("marker", "start", str(self.proj), "--budget", "x"),
-            ("marker", "start", str(self.proj), "--budget", ""),
-            ("marker", "start", str(self.proj), "--minutes", ""),
             ("marker", "start", str(self.proj), "--bogus"),
+            ("marker", "start", str(self.proj), "--budget", "5"),  # the run limits are gone
+            ("marker", "start", str(self.proj), "--minutes", "5"),
+            ("marker", "start", str(self.proj), "--max-turns", "5"),
         ):
             self.assertEqual(cli(*argv)[0], 2, argv)
         self.assertFalse((self.proj / "qa-out/.active").exists())
-
-    def test_marker_the_guard_accepts(self):  # --minutes 5000 wrote a deadline the guard reads as malformed
-        guard = load_hook("guard_r7")
-        cli("marker", "start", str(self.proj), "--minutes", "480", "--budget", "0")
-        with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=""):
-            path, marker = guard.read_marker(str(self.proj))
-        self.assertEqual(marker["budget"], 0)  # read as a run (a malformed one would be no run at all)
-        code, _, err = cli("marker", "start", str(self.proj), "--minutes", "5000")
-        self.assertEqual(code, 2)
-        self.assertIn("at most 480", err)
-        self.assertEqual(guard.spend_budget(path, 3), None)  # the earlier marker is untouched and still spendable
 
     def test_stop_on_a_missing_project_is_an_error(self):  # `marker stop /typo` said "marker removed"
         code, out, err = cli("marker", "stop", str(self.t / "nope"))
@@ -558,7 +532,7 @@ class ApiProbe(Base):
 
     def marker(self, **fields):
         (self.proj / "qa-out").mkdir(exist_ok=True)
-        m = {"expires": int(time.time()) + 3600, "deadline": 0, "budget": 0, "faults": False, "used": 0, **fields}
+        m = {"expires": int(time.time()) + 3600, "faults": False, **fields}
         (self.proj / "qa-out/.active").write_text(json.dumps(m))
 
     def page(self, status=200, body="", headers=None, url=None, contains=None, **extra):
@@ -885,7 +859,7 @@ class Dispatch(Base):
             self.assertIn("not a JSON object", r.stderr)
 
     def test_brief_holds_this_routes_cases_its_tickets_acs_rules_and_card(self):
-        code, out, _ = self.dispatch("/list?a=1", "--budget", "20", "--known-bugs", "PROJ-77 Sort breaks on ties")
+        code, out, _ = self.dispatch("/list?a=1", "--known-bugs", "PROJ-77 Sort breaks on ties")
         self.assertEqual(code, 0)
         self.assertEqual(
             {k: out[k] for k in ("slug", "target", "mode", "case_count")},
@@ -896,8 +870,6 @@ class Dispatch(Base):
         for want in (
             "out: " + str(self.run_dir),
             "slug: list",
-            "budget: 20",
-            "minutes: unlimited",
             "faults: no",
             "TC-1",
             "Saves 0-130",
@@ -909,10 +881,10 @@ class Dispatch(Base):
             str(ROOT / "references"),
         ):
             self.assertIn(want, brief)
-        for gone in ("TC-3", "Sorted by date", "abcdefghijklmnopqrst"):  # another route's case and ticket; a secret
-            self.assertNotIn(gone, brief)
+        for gone in ("TC-3", "Sorted by date", "abcdefghijklmnopqrst", "budget:", "minutes:"):
+            self.assertNotIn(gone, brief)  # another route's case and ticket; a secret; the run limits are gone
         m = json.loads((self.proj / "qa-out/.active").read_text())
-        self.assertEqual((m["budget"], m["run_dir"], m["slug"]), (20, str(self.run_dir), "list"))
+        self.assertEqual((m["run_dir"], m["slug"]), (str(self.run_dir), "list"))
 
     def test_api_writes_goes_to_the_marker_and_the_brief(self):
         marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
@@ -923,95 +895,13 @@ class Dispatch(Base):
         self.assertIs(marker()["api_writes"], True)
         self.assertIn("faults: yes\napi_writes: yes", Path(out["brief"]).read_text())
 
-    def test_max_turns_goes_to_the_marker(self):
-        marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
+    def test_the_run_limit_flags_and_spend_are_gone(self):
+        for flag in ("--budget", "--minutes", "--max-turns"):
+            self.assertEqual(self.dispatch("/list?a=1", flag, "5")[0], 2, flag)
+        self.assertEqual(cli("spend", str(self.run_dir))[0], 2)
         self.dispatch("/list?a=1")
-        self.assertNotIn("max_turns", marker())
-        self.dispatch("/list?a=1", "--max-turns", "10")
-        self.assertEqual(marker()["max_turns"], 10)
-
-    def spent(self, route, used, minutes_ago=0, budget=50):
-        """One explorer run to its teardown: dispatch (a marker with a budget), `used` commands, marker stop."""
-        out = self.dispatch(route, "--budget", str(budget))[1]
-        f = self.proj / "qa-out/.active"
-        m = json.loads(f.read_text())
-        f.write_text(json.dumps({**m, "used": used, "expires": m["expires"] - minutes_ago * 60}))
         cli("marker", "stop", str(self.proj))
-        return out
-
-    def spend(self, *args):
-        code, out, err = cli("spend", str(self.run_dir), *args)
-        self.assertEqual(code, 0, err)
-        return json.loads(out)
-
-    def test_a_marker_stop_keeps_what_the_explorer_spent_in_the_run_folder(self):
-        self.spent("/list?a=1", 37)
-        ledger = [json.loads(x) for x in (self.run_dir / ".data/spend.jsonl").read_text().splitlines()]
-        self.assertEqual([(x["slug"], x["used"]) for x in ledger], [("list", 37)])
-        self.assertFalse((self.proj / "qa-out/.active").exists())
-        cli("marker", "start", str(self.proj))  # a crawl has no run folder: nothing to record
-        cli("marker", "stop", str(self.proj))
-        (self.proj / "qa-out/.active").write_text("{oops")  # a broken marker is still removed
-        self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)
-        self.assertEqual(len((self.run_dir / ".data/spend.jsonl").read_text().splitlines()), 1)
-
-    def test_spend_reports_the_run_so_far_and_the_limits_for_the_next_page(self):
-        self.assertEqual(
-            {k: self.spend()[k] for k in ("pages", "commands_used", "exhausted", "budget", "minutes")},
-            {"pages": 0, "commands_used": 0, "exhausted": False, "budget": 0, "minutes": 0},
-        )
-        self.spent("/list?a=1", 37)
-        self.spent("/list?a=2", 20)
-        got = self.spend()
-        self.assertEqual(
-            (got["pages"], got["commands_used"], got["commands_left"], got["exhausted"]), (2, 57, None, False)
-        )
-        got = self.spend("--total-budget", "100")
-        self.assertEqual(
-            (got["commands_left"], got["budget"], got["exhausted"]), (43, 43, False)
-        )  # the next page can't pass it
-        got = self.spend("--total-budget", "100", "--budget", "30")
-        self.assertEqual(got["budget"], 30)  # the per-page limit still applies when it is the smaller
-        got = self.spend("--total-budget", "60")
-        self.assertEqual((got["commands_left"], got["exhausted"]), (3, True))  # too few left for a page to do anything
-        self.assertIn("60", got["why"])
-        got = self.spend("--more-budget", "120")  # counted from now: what the extra pages may spend
-        self.assertEqual((got["commands_left"], got["budget"]), (120, 120))
-        got = self.spend("--total-budget", "500", "--more-budget", "120")
-        self.assertEqual(got["commands_left"], 120)  # the stricter of the two
-
-    def test_spend_counts_minutes_from_the_first_page_and_caps_them(self):
-        self.spent("/list?a=1", 10, minutes_ago=12)
-        got = self.spend("--total-minutes", "30", "--minutes", "20")
-        self.assertGreaterEqual(got["minutes_used"], 11)
-        self.assertLessEqual(got["minutes_used"], 13)
-        self.assertEqual((got["minutes"], got["exhausted"]), (min(20, got["minutes_left"]), False))
-        self.assertLessEqual(got["minutes"], 19)
-        got = self.spend("--total-minutes", "13")
-        self.assertTrue(got["exhausted"])
-        got = self.spend("--more-minutes", "20")
-        self.assertEqual(got["minutes_left"], 20)
-
-    def test_spend_input_is_checked(self):
-        for argv in (
-            ("spend",),
-            ("spend", str(self.t / "nope")),
-            ("spend", str(self.run_dir), "--total-budget", "-1"),
-            ("spend", str(self.run_dir), "--total-budget", "x"),
-            ("spend", str(self.run_dir), "--bogus", "1"),
-        ):
-            self.assertEqual(cli(*argv)[0], 2, argv)
-
-    def test_a_ledger_line_with_a_wrong_type_or_a_planted_link_is_ignored(self):
-        self.spent("/list?a=1", 10)
-        ledger = self.run_dir / ".data/spend.jsonl"
-        ledger.write_text(ledger.read_text() + '{oops\n{"slug": "x", "used": "many", "started": "never"}\n[1]\n')
-        self.assertEqual(self.spend()["commands_used"], 10)
-        ledger.unlink()
-        (self.t / "victim").write_text("keep")
-        ledger.symlink_to(self.t / "victim")
-        self.spent("/list?a=2", 5)  # marker stop must not write through the link
-        self.assertEqual((self.t / "victim").read_text(), "keep")
+        self.assertFalse((self.run_dir / ".data/spend.jsonl").exists())
 
     def test_routes_with_one_slug_get_their_own_and_a_route_keeps_its_slug(self):
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")

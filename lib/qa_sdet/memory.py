@@ -49,9 +49,6 @@ STOP_REASONS = (
     "saturated",
     "charter_complete",
     "diminishing_returns",
-    "turn_limit",
-    "budget_limit",
-    "time_limit",
     "blocked",
 )
 BLOCK_SCOPES = ("page", "session", "browser")  # what a BLOCKED run blocks: this page, the sign-in, the browser

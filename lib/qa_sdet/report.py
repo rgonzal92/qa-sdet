@@ -102,7 +102,7 @@ def _plan_tickets(plan):
 NOT_TESTED_CATEGORIES = [
     ("safety", "Safety rules (not done on purpose)"),
     ("out_of_scope", "Out of scope for this ticket"),
-    ("not_reached", "Not reached (budget, time or route)"),
+    ("not_reached", "Not reached (route or run ended)"),
     ("needs_setup", "Needs a fault, account or data this run lacks"),
     ("heuristic", "Heuristics not run"),
     ("other", "Other"),
@@ -822,7 +822,7 @@ def verify_run(run_dir, slug, since=0):
     if missing := [cid for cid in given if cid not in told]:
         todo.append(
             f"give every case of your brief a status in `cases`: {', '.join(missing)} missing "
-            "(NOT_RUN with why, when the budget or time ran out first)"
+            "(NOT_RUN with why, when the run ended before you reached it)"
         )
     done = [(str(c.get("id")), core.case_status(c.get("status")), c) for c in _list(run, "cases")]
     if blank := [
@@ -1809,7 +1809,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
             for name, r in runs
             for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))
         ]
-        if left:  # step 9 couldn't delete them (budget or time used up): they stay in the shared QA app
+        if left:  # step 9 couldn't delete them: they stay in the shared QA app
             action += (
                 [f"### Test data left in the app ({len(left)})"]
                 + [f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left]

@@ -134,46 +134,11 @@ class Hooks(Base):
         self.assertEqual(entry["matcher"], "Bash|Write")
         self.assertIn("/hooks/posttooluse.py", entry["hooks"][0]["command"])
         self.assertIn("[ -d qa-out ]", entry["hooks"][0]["command"])  # no Python start in unrelated projects
-        failed = hooks["PostToolUseFailure"][0]  # a failed Bash call spends budget too, and fires only this event
+        failed = hooks["PostToolUseFailure"][0]  # a failed Bash call fires only this event
         self.assertEqual((failed["matcher"], failed["hooks"][0]["command"]), ("Bash", entry["hooks"][0]["command"]))
 
-    def test_explorer_is_warned_once_before_the_budget_runs_out(self):
-        """Step 9 deletes test data through the UI, which the guard refuses once the budget is used up: warn first."""
-        import time
-
-        (self.proj / "qa-out").mkdir(exist_ok=True)
-        marker = self.proj / "qa-out/.active"
-        call = {
-            "tool_name": "Bash",
-            "agent_type": "qa-sdet:qa-explorer",
-            "cwd": str(self.proj),
-            "tool_input": {"command": "playwright-cli -s=qa click e1"},
-            "tool_response": {},
-        }
-        marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 10}))
-        self.assertEqual(self.post(call), "")
-        marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 17}))
-        self.assertEqual(self.post({**call, "agent_type": ""}), "")  # the main session is no explorer
-        note = self.post(call)
-        self.assertIn("3 browser commands left", note)
-        self.assertIn("qa-sdet-", note)
-        self.assertEqual(self.post(call), "")  # once per run
-        marker.write_text(
-            json.dumps({"expires": time.time() + 3601, "budget": 20, "used": 20})
-        )  # a new run, a failed call
-        self.assertIn(
-            "0 browser commands left",
-            self.post({**call, "hook_event_name": "PostToolUseFailure", "error": "Exit code 1"}),
-        )
-        marker.write_text(
-            json.dumps({"expires": time.time() + 7200, "deadline": time.time() + 90})
-        )  # a new run, by time
-        self.assertIn("left", self.post(call))
-        marker.unlink()
-        self.assertEqual(self.post(call), "")
-
     def default_run(self, **m):
-        """A run marker with no budget and no deadline (a default `qa-explore`), as the hook reads it."""
+        """A run marker (a `qa-explore` run), as the hook reads it."""
         import time
 
         (self.proj / "qa-out").mkdir(exist_ok=True)
@@ -191,64 +156,31 @@ class Hooks(Base):
         }
         return self.post(data | ({"error": "Exit code 1"} if failed else {}))
 
-    def test_a_default_run_is_warned_once_before_the_turn_limit(self):
-        """No --budget or --minutes: the explorer used to reach maxTurns with no step 9 and no run file."""
-        self.default_run(max_turns=20)  # the wind-down is at max_turns - max(8, max_turns // 4) = 12 calls
-        calls = [f"playwright-cli -s=qa click e{n}" for n in range(1, 13)]
-        self.assertEqual([self.pw(c) for c in calls[:11]], [""] * 11)
-        note = self.pw(calls[11])
-        self.assertIn("12 of the 20 turns", note)
-        self.assertIn("qa-sdet-", note)
-        self.assertIn("run-<slug>.json", note)
-        self.assertEqual(self.pw("playwright-cli -s=qa click e13"), "")  # once per run
+    def test_an_explorer_hears_no_wind_down_however_long_it_runs(self):
+        """No limits: a run goes until the agent reaches its verdict, whatever keys an older marker still holds."""
+        import time
 
-    def test_every_call_counts_as_a_turn_a_failed_one_and_a_write_too(self):
-        self.default_run(max_turns=20)
-        for n in range(1, 6):
-            self.pw(f"playwright-cli -s=qa click e{n}", failed=True)  # a failed Bash call fires only PostToolUseFailure
-        for _ in range(6):
-            self.pw(tool="Write", cmd="")  # an explorer's Write is a turn as well
-        self.assertIn(
-            "12 of the 20 turns", self.pw("qa-mem signals-triage qa-out/r --slug x")
-        )  # any Bash call, the 12th
+        self.default_run(max_turns=5, budget=20, used=19, deadline=time.time() + 30)
+        self.assertEqual([self.pw(f"playwright-cli -s=qa click e{n}") for n in range(60)], [""] * 60)
+        self.assertFalse((self.proj / "qa-out/.active.warned").exists())
 
-    def test_the_turn_limit_defaults_to_the_agents_frontmatter(self):
-        self.default_run()  # no max_turns in the marker
-        limit = lambda agent: int(
-            re.search(r"^maxTurns:\s*(\d+)", (ROOT / f"agents/{agent}.md").read_text(), re.M).group(1)
-        )
-        for agent, role in (("qa-explorer", "qa-sdet:qa-explorer"),):
-            (self.proj / "qa-out/.active.progress").unlink(missing_ok=True)
-            (self.proj / "qa-out/.active.warned").unlink(missing_ok=True)
-            line = limit(agent) - max(8, limit(agent) // 4)
-            seen = [self.pw(f"playwright-cli -s=qa click e{n}", agent=role) for n in range(1, line + 1)]
-            self.assertEqual(seen[:-1], [""] * (line - 1), agent)
-            self.assertIn(f"{line} of the {limit(agent)} turns", seen[-1], agent)
-
-    def test_the_turn_wind_down_is_for_explorers_only(self):
-        self.default_run(max_turns=20)
+    def test_the_progress_count_is_for_explorers_only(self):
+        self.default_run()
         for agent in ("", "qa-sdet:qa-mapper", "qa-sdet:qa-reviewer", "qa-sdet:qa-crawler"):
             self.assertEqual([self.pw(f"playwright-cli click e{n}", agent=agent) for n in range(15)], [""] * 15, agent)
         self.assertFalse((self.proj / "qa-out/.active.progress").exists())
 
-    def test_a_budget_warning_already_given_is_not_repeated_by_the_turn_count(self):
-        self.default_run(max_turns=20, budget=20, used=18)
-        self.assertIn("2 browser commands left", self.pw("playwright-cli -s=qa click e1"))
-        self.assertEqual([self.pw(f"playwright-cli -s=qa click e{n}") for n in range(2, 16)], [""] * 14)
-
-    def test_a_new_run_counts_its_turns_from_zero(self):
+    def test_a_new_run_counts_from_zero(self):
         import time
 
-        marker = self.default_run(max_turns=20)
-        for n in range(1, 12):
-            self.pw(f"playwright-cli -s=qa click e{n}")
-        marker.write_text(
-            json.dumps({"expires": time.time() + 7200, "max_turns": 20})
-        )  # the next explorer; stale progress stays
-        self.assertEqual(self.pw("playwright-cli -s=qa click e50"), "")
+        marker = self.default_run()
+        for _ in range(7):
+            self.pw()  # a look: no progress
+        marker.write_text(json.dumps({"expires": time.time() + 7200}))  # the next explorer; stale progress stays
+        self.assertEqual(self.pw(), "")  # the 8th look of the old run would be a spin
 
     def test_a_planted_or_malformed_progress_file_is_never_followed_and_never_fails(self):
-        self.default_run(max_turns=20)
+        self.default_run()
         victim = Path(self.tmp.name) / "victim.txt"
         victim.write_text("keep")
         link = self.proj / "qa-out/.active.progress"
@@ -466,7 +398,7 @@ class Hooks(Base):
         self.assertEqual(seen[10:], ["", ""])  # once
 
     def test_a_new_interaction_or_a_file_written_is_progress(self):
-        self.default_run(max_turns=999)
+        self.default_run()
         for n in range(1, 31):  # 30 different clicks, each looked at: never a spin
             self.assertEqual(self.pw(f"playwright-cli -s=qa click e{n}"), "")
             self.assertEqual(self.pw("playwright-cli -s=qa snapshot"), "")
@@ -586,7 +518,7 @@ class Hooks(Base):
 
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
         (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
-        ops.marker_start(self.proj, budget=20, run_dir=d, slug="form", max_turns=20)
+        ops.marker_start(self.proj, run_dir=d, slug="form")
         # 3 failed playwright-cli calls -> tool_fail + stuck nudge
         for _ in range(3):
             self.pw("playwright-cli -s=qa click e5", failed=True)
@@ -623,7 +555,7 @@ class Hooks(Base):
                     "run_id": "r1",
                     "mode": "ticket",
                     "status": "INCOMPLETE",
-                    "stop_reason": "turn_limit",
+                    "stop_reason": "diminishing_returns",
                     "cases": [{"id": "TC-1", "status": "PASS", "actual": "ok"}, {"id": "TC-2", "status": "NOT_RUN"}],
                 }
             )
@@ -652,7 +584,7 @@ class Hooks(Base):
                 summaries[0]["build_known"],
                 summaries[0]["missing_run_file"],
             ),
-            ("INCOMPLETE", "turn_limit", False, False),
+            ("INCOMPLETE", "diminishing_returns", False, False),
         )
         self.assertGreaterEqual(summaries[0]["turns"], 3)
 

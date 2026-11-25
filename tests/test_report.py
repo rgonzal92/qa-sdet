@@ -2455,20 +2455,19 @@ class Continuation(Rendering):
                 "saturated",
                 "charter_complete",
                 "diminishing_returns",
-                "turn_limit",
-                "budget_limit",
-                "time_limit",
                 "blocked",
             ),
         )
         memory.check_run({"run_id": "r"})  # a run file from before the field
         memory.check_run({"run_id": "r", "stop_reason": ""})
-        for bad in ("bored", "Turn_Limit", 5, ["turn_limit"]):
+        for bad in ("bored", "Saturated", 5, ["saturated"], "turn_limit", "budget_limit", "time_limit"):
             with self.assertRaises(ValueError, msg=bad):
                 memory.check_run({"run_id": "r", "stop_reason": bad})
-        d, r = self.render_run([("form", {**RUN_FORM, "stop_reason": "turn_limit", "notes": "tried the form"})])
+        d, r = self.render_run(
+            [("form", {**RUN_FORM, "stop_reason": "diminishing_returns", "notes": "tried the form"})]
+        )
         notes = r.split("## Exploration notes")[1]
-        self.assertIn("Stopped: turn_limit", notes)
+        self.assertIn("Stopped: diminishing_returns", notes)
         self.assertIn("tried the form", notes)
         d, r = self.render_run([("form", {**RUN_FORM, "notes": "tried the form"})])
         self.assertNotIn("Stopped:", r)  # without the field the notes read as before

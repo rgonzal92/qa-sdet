@@ -1,16 +1,13 @@
 """PostToolUse and PostToolUseFailure entry point (hooks.json): feedback an agent can still act on, as additionalContext.
-- The qa-explorer hears once when its run's budget or time is nearly used up: step 9 deletes its test records through
-  the UI, which the guard refuses once the budget or time is gone. A failed Bash call spent its commands too, and fires
-  only PostToolUseFailure.
+A failed Bash call fires only PostToolUseFailure.
 - A qa-mapper hears at once when the code map it just wrote can't be saved. At its stop it could be too late: a parallel
   mapper's stop hook may have read the file first.
 - A file written in a run folder is checked as it lands: a bug draft or repro spec (references/bug-draft.md), a run JSON
   (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there. A bug draft
   that looks like a NOT A BUG or an already fixed bug in memory says so (a read-only lookup; it never blocks the write).
-- An explorer near its maxTurns hears once, even in a run with no budget or deadline (a default run), so it reaches
-  step 9 before Claude Code ends it. Its calls are counted in qa-out/.active.progress
-  (Bash and Write calls only: a Read or Grep is not seen here, so the line is drawn early).
-- An explorer whose same playwright-cli command failed 3 times since its last real progress hears once to change approach.
+- An explorer's Bash and Write calls are counted in qa-out/.active.progress: one whose same playwright-cli command failed
+  3 times since its last real progress hears to change approach, and 8 browser calls in a row without progress (a spin)
+  get one nudge.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
 
 import contextlib
@@ -20,7 +17,6 @@ import json
 import os
 import re
 import sys
-import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CODE_MAP = re.compile(r"code-map-(frontend|backend|tests)(-\d+)?\.json")
@@ -52,79 +48,6 @@ def _log_event(qa_out, event_type, fields):
 
 def role(data):
     return str(data.get("agent_type") or "").strip().lower().split(":")[-1].strip()
-
-
-def max_turns(m, who):
-    """The agent's turn limit: the marker's max_turns, else maxTurns in the agent's own frontmatter."""
-    try:
-        n = int(float(m.get("max_turns")))
-        if n > 0:
-            return n
-    except (TypeError, ValueError, OverflowError):
-        pass
-    try:
-        with open(os.path.join(os.path.dirname(HERE), "agents", f"{who}.md"), encoding="utf-8") as fh:
-            text = fh.read(2000)
-        return int(re.search(r"^maxTurns:\s*(\d+)", text, re.M).group(1))  # type: ignore[union-attr]  # no match: AttributeError, caught below
-    except (OSError, AttributeError):
-        return 0
-
-
-def turn_line(limit):
-    """Calls to count before the wind-down: the last few turns are kept for step 9 (a Read or Grep isn't counted)."""
-    return max(limit - max(8, limit // 4), 1)
-
-
-def wind_down(path, m, who, turns):
-    """The one wind-down warning: the budget or time nearly used up, else (any run) the turn limit near."""
-    import guard
-
-    budget, used, deadline = (
-        int(float(m.get("budget") or 0)),
-        int(float(m.get("used") or 0)),
-        float(m.get("deadline") or 0),
-    )
-    left, secs, low = budget - used, deadline - time.time(), []
-    if budget and left <= guard.cleanup_reserve(budget):
-        low.append(f"{max(left, 0)} browser command{'' if left == 1 else 's'}")
-    if deadline and secs <= 120:
-        low.append(f"{max(int(secs), 0)} seconds")
-    limit = max_turns(m, who)
-    if not low and not (limit and turns >= turn_line(limit)):
-        return None
-    if guard.warned(path, m):  # one warning per run marker (the guard may have given it by refusing a call)
-        return None
-    guard.mark_warned(path, m)
-    trigger = (
-        "+".join(
-            k
-            for k, cond in (
-                ("budget", budget and left <= guard.cleanup_reserve(budget)),
-                ("time", deadline and secs <= 120),
-            )
-            if cond
-        )
-        or "turn_limit"
-    )
-    _log_event(
-        path.parent,
-        "nudge",
-        {
-            "agent": who,
-            "kind": "wind_down",
-            "trigger": trigger,
-            "turns": turns,
-            "run": os.path.basename(m["run_dir"]) if m.get("run_dir") else None,
-            "slug": m.get("slug"),
-        },
-    )
-    if low:
-        return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
-    done = (
-        "Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
-        "browser and write run-<slug>.json with stop_reason turn_limit"
-    )
-    return f"qa-sdet: {turns} of the {limit} turns you have are used, and the run ends at {limit} however much budget is left. {done}."
 
 
 def code_map_feedback(data):
@@ -331,8 +254,8 @@ def classify(data, recs):
 
 
 def replay(recs):
-    """(calls counted, playwright-cli calls since the last progress, failures per call since then, nudges given)."""
-    turns = spin = 0
+    """(playwright-cli calls since the last progress, failures per call since then, nudges given)."""
+    spin = 0
     fails, given = {}, set()
     for r in recs:
         if r.get("t") == "n":
@@ -341,7 +264,6 @@ def replay(recs):
             else:
                 given.add(r.get("n"))
             continue
-        turns += 1
         if r.get("p"):
             fails.clear()
             spin = 0
@@ -349,11 +271,11 @@ def replay(recs):
             spin += 1
             if not r.get("ok"):
                 fails[r.get("s")] = fails.get(r.get("s"), 0) + 1
-    return turns, spin, fails, given
+    return spin, fails, given
 
 
 def run_feedback(data, who):
-    """Count this call in the run's progress file, then: the same failing call repeated, a spin, the wind-down."""
+    """Count this call in the run's progress file, then: the same failing call repeated, or a spin."""
     sys.path.insert(0, HERE)
     import guard
 
@@ -364,7 +286,7 @@ def run_feedback(data, who):
     recs = read_progress(state, expires)
     rec = classify(data, recs)
     append_progress(state, expires, rec)
-    turns, spin, fails, given = replay(recs + [rec])
+    spin, fails, given = replay(recs + [rec])
     notes, sig = [], rec.get("s")
     run_name = os.path.basename(m["run_dir"]) if m.get("run_dir") else None
     if sig and fails.get(sig, 0) >= STUCK_AFTER:
@@ -398,7 +320,6 @@ def run_feedback(data, who):
                 "slug": m.get("slug"),
             },
         )
-    notes.append(wind_down(path, m, who, turns))
     return " ".join(x for x in notes if x) or None
 
 
