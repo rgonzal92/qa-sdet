@@ -185,15 +185,21 @@ def _codemap_behind(con, rows):
 
 
 HTTP_METHODS = r"GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS"
+# a whole fetch call: one string literal, then at most an inline options object (one level of nesting)
+FETCH_CALL_RE = re.compile(r"\bfetch\(\s*(['\"`])[^'\"`]*\1\s*(,\s*\{(?:[^{}]|\{[^{}]*\})*\})?\s*\)")
 
 
 def _api_ref(text):
     """(METHOD or '', 'api/zones/:id') from 'POST /api/zones/{id:int}', "fetch(`${BASE}/zones/${encodeURIComponent(id)}`)",
     "'/api/zones/' + id", 'https://h/api/x', "api.get('zones')": the lowercase shape a frontend call and a backend route
-    share. ('', '') when there is no path."""
+    share. ('', '') when there is no path. The method is '' (any) when the text doesn't show it."""
     t = str(text or "").strip()[:500]
     m = re.match(rf"({HTTP_METHODS})\s", t, re.I) or re.search(rf"\.({HTTP_METHODS})\s*(?:<[^()]*?>)?\s*\(", t, re.I)
+    m = m or re.search(rf"\bmethod\s*:\s*['\"`]({HTTP_METHODS})['\"`]", t, re.I)  # fetch(u, {method: 'PUT'})
     method = m.group(1).upper() if m else ""  # a leading verb or a client call, never a word inside the path
+    call = None if method else FETCH_CALL_RE.search(t)
+    if call and not re.search(r"\bmethod\b", call.group(0)):
+        method = "GET"  # fetch's default; a cut snippet or options in a variable may hide the method: left open
     t = re.sub(r"https?://[^/\s'\"`]+", "", t)  # scheme and host
     t = re.sub(r"(^|['\"`(\s])\$\{[^}]*\}/", r"\1/", t)  # a leading ${BASE}/ style prefix, whatever it is called
     t = re.sub(r"\$\{[^}]*\}", ":id", t)  # other template expressions are values: ${id}, ${encodeURIComponent(id)}

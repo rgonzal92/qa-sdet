@@ -466,7 +466,7 @@ class Code(CodeMapCase):
         self.assertIn("GET /zones = list", c)  # single segment, absolute URL on the frontend side
         self.assertNotIn("DELETE /zones", c)  # different method
         self.assertNotIn("POST /zones name", c)
-        self.assertEqual(codemap._api_ref("fetch(`${BASE}/zones/${id}`)"), ("", "zones/:id"))
+        self.assertEqual(codemap._api_ref("fetch(`${BASE}/zones/${id}`)"), ("GET", "zones/:id"))  # complete, no method
 
     def test_backend_links_need_the_same_resource(self):
         ui = git_repo(self.dir / "ui", {"src/I.jsx": "fetch('/api/incidents/1/status', {method: 'PATCH'})"})
@@ -501,6 +501,17 @@ class Code(CodeMapCase):
         self.assertEqual(r("fetch('/api/zones/' + id + '/detours')"), ("", "api/zones/:id/detours"))
         self.assertEqual(r("api.get<Zone[]>('/zones')"), ("GET", "zones"))
         self.assertEqual(r("http.post<Zone>('/api/zones', z)"), ("POST", "api/zones"))
+
+    def test_fetch_methods(self):
+        """A method in the options is read; a complete fetch without one is a GET; a cut or variable call stays open."""
+        r = codemap._api_ref
+        self.assertEqual(r("fetch(`${API}/zones`, {method: 'PUT'})"), ("PUT", "zones"))
+        self.assertEqual(r("axios({ method: 'delete', url: '/api/zones' })"), ("DELETE", "api/zones"))
+        self.assertEqual(r("fetch('api/incidents.json', { headers: { 'x-api-key': k } })"), ("GET", "api/incidents"))
+        self.assertEqual(r("fetch(`${API}/zones`)"), ("GET", "zones"))
+        for open_call in ("fetch(`${API}/zones`, opts)", "fetch(`${API}/zones`, {method})", "fetch(`${API}/zones`",
+                          "fetch('/api/zones/' + id + '/detours')"):
+            self.assertEqual(r(open_call)[0], "", open_call)  # the method may be elsewhere: matches any
 
     def test_round1_codemap_stale_card_star_and_hash_routes(self):
         repo = git_repo(self.dir / "ui", {"src/A.jsx": "<button data-testid='save'/>"})
@@ -576,6 +587,14 @@ class SharedEndpoints(CodeMapCase):
         self.assertEqual(self.shared("/incidents"), "")
         self.assertEqual(codemap.sharing_pages(self.con, "*"), [])
         self.assertEqual(codemap.sharing_pages(self.con, "/nowhere"), [])
+
+    def test_a_plain_fetch_is_a_get_and_shares_only_with_gets(self):
+        self.calls("/zones", "fetch(`${API}/zones`)")
+        self.calls("/zones/admin", "DELETE /api/zones")
+        self.calls("/zones/report", "GET /api/zones")
+        self.bug("/zones/admin", "purge deletes every zone")
+        self.assertEqual(codemap.sharing_pages(self.con, "/zones"), ["/zones/report"])
+        self.assertEqual(self.shared("/zones"), "")
 
     def test_an_endpoint_most_pages_call_links_nothing(self):
         for i in range(7):
