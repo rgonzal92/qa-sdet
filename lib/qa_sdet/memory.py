@@ -362,6 +362,13 @@ def card(con, q):
         out.append(f"UNTESTED TARGETS (code rules no run covered on {on}; write the label as the coverage target): "
                    + "; ".join(untested[:10]) + more)
     out.append(bug_lines(con, r))
+    sharing = codemap.sharing_pages(con, r)
+    if sharing:
+        rows = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?,'FIXED') AND page IN "
+                           f"({','.join('?' * len(sharing))}) ORDER BY last_seen DESC LIMIT 5", [*core.VISIBLE, *sharing]).fetchall()
+        if rows:
+            out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
+                + [_bug_line(x, True) for x in rows]
     return "\n".join(x for x in out if x)
 
 
@@ -394,25 +401,31 @@ def _untested_rules(con, route, targets):
     return out
 
 
+BUG_COLS = "hash,page,severity,status,title,symptom,seen_count,draft_path"
+
+
+def _bug_line(x, with_page):
+    return (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] " + (f"{x['page']} " if with_page else "")
+            + f"{core.short(x['title'], 100)} | symptom: {core.short(x['symptom'] or x['title'], 120)} (seen {x['seen_count']})")
+
+
 def bug_lines(con, route):
-    q = "SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status IN (?,?,?)"
+    q = f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?)"
     args = list(core.VISIBLE)
     if route is not None:
         q += " AND page=?"
         args.append(route)
     rows = con.execute(q + " ORDER BY last_seen DESC LIMIT 10", args).fetchall()
-    fixed = con.execute("SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status='FIXED'"
+    fixed = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='FIXED'"
                         + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
                         [route] if route is not None else []).fetchall()
-    line = lambda x: (f"- {x['hash']} {x['status']} [{x['severity'] or '?'}] "
-                      + (f"{x['page']} " if route is None else "")  # app-wide list: say which page
-                      + f"{core.short(x['title'], 100)} | symptom: {core.short(x['symptom'] or x['title'], 120)} (seen {x['seen_count']})")
+    line = lambda x: _bug_line(x, route is None)  # app-wide list: say which page
     out = []
     if rows:
         out += ["KNOWN BUGS (don't re-draft; to report a sighting put its hash in run.json):"] + [line(x) for x in rows]
     if fixed:
         out += ["PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):"] + [line(x) for x in fixed]
-    invalid = con.execute("SELECT hash,page,severity,status,title,symptom,seen_count FROM bugs WHERE status='INVALID'"
+    invalid = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='INVALID'"
                           + (" AND page=?" if route is not None else "") + " ORDER BY last_seen DESC LIMIT 5",
                           [route] if route is not None else []).fetchall()
     if invalid:

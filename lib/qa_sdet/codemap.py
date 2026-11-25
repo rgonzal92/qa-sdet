@@ -230,11 +230,8 @@ def _same_endpoint(a, b):
         and all(API_BASE_SEG_RE.fullmatch(x) for x in l[:len(l) - len(s)])
 
 
-def _codemap_rows(con, route):
-    """This page's rows plus the backend rows ('*') for the endpoints its frontend calls (same path; same method
-    when both sides name one)."""
-    rows = con.execute("SELECT kind,label,value,file,repo,area FROM codemap WHERE page=? ORDER BY kind, label",
-                       (route,)).fetchall()
+def _called(rows):
+    """{(METHOD or '', path)} of the frontend `api` rows among `rows`: the endpoints a page calls."""
     called = set()
     for x in rows:
         if x["kind"] == "api":
@@ -242,14 +239,52 @@ def _codemap_rows(con, route):
             ref = ref if ref[1] else _api_ref(x["label"])
             if ref[1]:
                 called.add(ref)
+    return called
+
+
+def _same_call(a, b):
+    """Two (method, path) refs name one call: same endpoint, and same method when both name one (a call written
+    without a method matches any)."""
+    return _same_endpoint(a[1], b[1]) and (not a[0] or not b[0] or a[0] == b[0])
+
+
+def _codemap_rows(con, route):
+    """This page's rows plus the backend rows ('*') for the endpoints its frontend calls (same path; same method
+    when both sides name one)."""
+    rows = con.execute("SELECT kind,label,value,file,repo,area,src FROM codemap WHERE page=? ORDER BY kind, label",
+                       (route,)).fetchall()
+    called = _called(rows)
     if called and route != "*":
-        for x in con.execute("SELECT kind,label,value,file,repo,area FROM codemap WHERE page='*' AND kind IN ('api','rule') "
+        for x in con.execute("SELECT kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
                              "ORDER BY kind, label"):
             ref = _api_ref(x["label"])
-            m, p = ref if ref[1] else _api_ref(x["value"])
-            if p and any(_same_endpoint(p, c) and (not m or not cm or m == cm) for cm, c in called):
+            ref = ref if ref[1] else _api_ref(x["value"])
+            if ref[1] and any(_same_call(ref, c) for c in called):
                 rows.append(x)
     return rows
+
+
+APP_WIDE_CALLERS = 5
+
+
+def sharing_pages(con, route):
+    """Other pages whose frontend calls an endpoint this page calls: a bug in that endpoint may show on both."""
+    mine = _called(con.execute("SELECT kind,label,value FROM codemap WHERE page=? AND kind='api'", (route,))) \
+        if route != "*" else set()
+    if not mine:
+        return []
+    theirs = {}
+    for x in con.execute("SELECT page,kind,label,value FROM codemap WHERE kind='api' AND page NOT IN ('*', ?)", (route,)):
+        theirs.setdefault(x["page"], []).append(x)
+    theirs = {page: _called(rows) for page, rows in theirs.items()}
+    out = set()
+    for ref in mine:
+        pages = {page for page, refs in theirs.items() if any(_same_call(ref, c) for c in refs)}
+        # shortcut: an endpoint more than APP_WIDE_CALLERS other pages call (session, config) links nothing, or every
+        # card would list every bug; upgrade to per-endpoint bug links if real shared bugs get missed
+        if len(pages) <= APP_WIDE_CALLERS:
+            out |= pages
+    return sorted(out)
 
 
 def codemap_block(con, route, shown=None):

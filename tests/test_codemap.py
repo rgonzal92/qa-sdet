@@ -534,6 +534,73 @@ class Code(CodeMapCase):
         self.assertEqual(codemap.find_page(self.con, "#/zones/42")["route"], "/#/zones/:id")
 
 
+class SharedEndpoints(CodeMapCase):
+    """Bugs on other pages that call the same endpoint: one backend bug stays one record, re-checked on each page."""
+
+    SECTION = "BUGS ON PAGES SHARING AN ENDPOINT"
+
+    def calls(self, page, *values):
+        with self.con:
+            self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
+            for i, v in enumerate(values):
+                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                                 (page, "api", f"call {i}", v, f"src{page}.jsx:{i}", "/repo", "frontend", core.now(), f"src{page}.jsx"))
+
+    def bug(self, page, symptom, status="OPEN"):
+        memory.ingest(self.con, {"run_id": f"r-{page}-{symptom}", "build": "1", "pages": [{"route": page}],
+                                 "bugs": [{"route": page, "title": symptom, "symptom": symptom, "severity": "HIGH",
+                                           "classification": "CONFIRMED"}]})
+        h = core.bug_hash(page, symptom)
+        with self.con:
+            self.con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, h))
+        return h
+
+    def shared(self, route):
+        card = memory.card(self.con, route)
+        return card.split(self.SECTION, 1)[1] if self.SECTION in card else ""
+
+    def test_card_shows_a_bug_from_a_page_calling_the_same_endpoint(self):
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones/:id", "POST /api/zones", "GET /api/zones/:id")
+        h = self.bug("/zones/new", "server accepts speed 131")
+        self.assertIn(h, self.shared("/zones/:id"))
+        self.assertIn("/zones/new", self.shared("/zones/:id"))
+        self.assertEqual(self.shared("/zones/new"), "")  # its own bug is under KNOWN BUGS, not here
+
+    def test_other_methods_and_endpoints_are_not_shared(self):
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones", "GET /api/zones")
+        self.calls("/incidents", "GET /api/incidents")
+        self.bug("/zones/new", "server accepts speed 131")
+        self.assertEqual(self.shared("/zones"), "")
+        self.assertEqual(self.shared("/incidents"), "")
+        self.assertEqual(codemap.sharing_pages(self.con, "*"), [])
+        self.assertEqual(codemap.sharing_pages(self.con, "/nowhere"), [])
+
+    def test_an_endpoint_most_pages_call_links_nothing(self):
+        for i in range(7):
+            self.calls(f"/p{i}", "GET /api/me")
+        self.bug("/p0", "profile call fails")
+        self.assertEqual(self.shared("/p1"), "")
+
+    def test_fixed_bugs_show_and_invalid_ones_do_not(self):
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones/:id", "POST /api/zones")
+        fixed, invalid = self.bug("/zones/new", "speed 131 saved", "FIXED"), self.bug("/zones/new", "label typo", "INVALID")
+        self.assertIn(fixed, self.shared("/zones/:id"))
+        self.assertNotIn(invalid, self.shared("/zones/:id"))
+
+    def test_a_sighting_on_the_other_page_stays_one_bug(self):
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones/:id", "POST /api/zones")
+        h = self.bug("/zones/new", "server accepts speed 131")
+        memory.ingest(self.con, {"run_id": "r-edit", "build": "1", "pages": [{"route": "/zones/:id"}],
+                                 "bugs": [{"route": "/zones/4521", "title": "Server accepts speed 131 on edit",
+                                           "hash": h, "severity": "HIGH", "classification": "CONFIRMED"}]})
+        rows = self.con.execute("SELECT hash, page, seen_count FROM bugs").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(h, "/zones/new", 2)])
+
+
 class ShellMenu(CodeMapCase):
     """The app shell's menu config gives route rows written by code, not by a mapper."""
 
