@@ -156,6 +156,25 @@ class Docs(unittest.TestCase):
                     self.assertIn("host", g.check("playwright-cli -s=qa goto /form", str(proj)))  # a bare path has no host
                     self.assertIn("--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj)))  # also with no run
 
+    def test_inbox_command_passes_a_custom_jql_whole(self):  # doctor's own example broke the double-quoted --jql
+        import ast, shlex
+        hint = next(n.value for n in ast.walk(ast.parse((ROOT / "lib/qa_sdet/doctor.py").read_text()))
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str) and '"inboxJql":' in n.value)
+        jql = json.loads("{" + hint.removeprefix("e.g. ") + "}")["inboxJql"]  # status = "Ready for QA" ORDER BY updated DESC
+        self.assertIn('"', jql)
+        line = next(x for x in text("skills/qa-inbox/SKILL.md").splitlines() if "acli jira workitem search --jql" in x)
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            proj = Path(os.path.realpath(d)) / "my project"
+            (proj / "qa-out").mkdir(parents=True)
+            for value in (jql, "summary ~ 'it''s' ORDER BY updated DESC"):  # the skill's rule: each ' written '\''
+                cmd = line.strip("`").replace("<JQL>", value.replace("'", "'\\''")).replace("${CLAUDE_PROJECT_DIR}", str(proj))
+                words = shlex.split(cmd.split(" | ")[0])
+                self.assertEqual(words[words.index("--jql") + 1], value, cmd)
+                with mock.patch.dict(os.environ, env):
+                    self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}),
+                                     (None, True), cmd)  # still approved without a prompt
+
     def test_explorer_signal_dump_is_approved_by_the_guard(self):
         """Step 9 saves the browser signals and closes the browser in one call: the guard must approve all of it."""
         chain = re.search(r"`(playwright-cli -s=qa requests --all [^`]+)`", text("agents/qa-explorer.md")).group(1)
