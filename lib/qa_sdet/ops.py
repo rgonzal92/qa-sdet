@@ -335,26 +335,29 @@ def _close_qa(env):
 
 
 def _sign_in_state(cfg, env):
-    """(signed_in, problem) of the page the `qa` session shows: problem is a 'browser tool failed: …' line when the check
-    itself failed; signed_in is False on ssoHost or a page with a password field."""
-    js = "JSON.stringify({host: location.host, hasPassword: Boolean(document.querySelector('input[type=\"password\"]'))})"
+    """(signed_in, problem, status) of the page the `qa` session shows: problem is a 'browser tool failed: …' line when
+    the check itself failed; signed_in is False on ssoHost or a page with a password field; status is the HTTP status of
+    the page's own document (0 when the browser doesn't expose it)."""
+    js = ("JSON.stringify({host: location.host, hasPassword: Boolean(document.querySelector('input[type=\"password\"]')), "
+          "status: (performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0})")
     try:
         r = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", js], env=env, capture_output=True, text=True,
                            errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
-        return None, f"browser tool failed: session-check eval failed ({e})"
+        return None, f"browser tool failed: session-check eval failed ({e})", 0
     if r.returncode != 0:
         detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
-        return None, f"browser tool failed: session-check eval failed ({detail})"
+        return None, f"browser tool failed: session-check eval failed ({detail})", 0
     parsed = _unwrap_raw(r.stdout)
     if isinstance(parsed, str):
         parsed = _unwrap_raw(parsed)
     if not isinstance(parsed, dict) or "host" not in parsed:
-        return None, f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})"
+        return None, f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})", 0
     sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
     cur_netloc, cur_host = _norm_host(parsed.get("host"))
     is_sso = bool(sso_host) and ((":" in sso_netloc and cur_netloc == sso_netloc) or (":" not in sso_netloc and cur_host == sso_host))
-    return not (is_sso or parsed.get("hasPassword")), None
+    status = parsed.get("status") if isinstance(parsed.get("status"), int) else 0
+    return not (is_sso or parsed.get("hasPassword")), None, status
 
 
 def _read_build(cfg, hosts, env):
@@ -402,7 +405,7 @@ def session_check(record=False, read_build=False):
         return 2
     env = _pw_env()
     try:
-        signed_in, problem = _sign_in_state(cfg, env)
+        signed_in, problem, _ = _sign_in_state(cfg, env)
         if problem:
             print(problem, file=sys.stderr)
             return 2
@@ -422,7 +425,8 @@ def session_check(record=False, read_build=False):
 def page_start(url):
     """The explorer's start in one call: open the `qa` session at `url` in the signed-in profile, check the sign-in, read
     the build. Prints one JSON line: {status: ok, build, url} with the browser left open (exit 0), or {status: blocked,
-    block_scope: browser|session, reason} (exit 1; a sign-in page closes the browser)."""
+    block_scope: browser|session|page, reason} (exit 1; a sign-in page closes the browser, an HTTP error page leaves it open
+    for the explorer's finish)."""
     cfg, hosts = _qa_config("page-start")
     if not core.url_allowed(url, hosts):
         raise core.BadInput(f"page-start: {url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
@@ -435,11 +439,14 @@ def page_start(url):
         out({"status": "blocked", "block_scope": "browser", "reason": core.short(first, 300)})
         return 1
     env = _pw_env()
-    signed_in, problem = _sign_in_state(cfg, env)
+    signed_in, problem, status = _sign_in_state(cfg, env)
     if problem or not signed_in:
         _close_qa(env)
         out({"status": "blocked", "block_scope": "browser" if problem else "session",
              "reason": problem or "session expired, run /qa-sdet:qa-login"})
+        return 1
+    if status >= 400:  # this page only (a 403, 404 or 500): the coordinator goes on with the other pages
+        out({"status": "blocked", "block_scope": "page", "reason": f"the page returned HTTP {status}"})
         return 1
     out({"status": "ok", "build": _read_build(cfg, hosts, env) or core.UNKNOWN, "url": url})
     return 0

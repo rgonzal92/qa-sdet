@@ -390,6 +390,15 @@ class PageStart(Base):
         self.assertIn("/qa-sdet:qa-login", out["reason"])
         self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
+    def test_an_error_status_is_a_page_blocker_that_leaves_the_browser_open(self):  # the explorer's step 9 closes it
+        self.config(**self.CFG)
+        code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":404}')])
+        self.assertEqual((code, out), (1, {"status": "blocked", "block_scope": "page", "reason": "the page returned HTTP 404"}))
+        self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
+        code, out, _ = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":0}'),
+                                   done(0, out="1.43.0\n")])  # 0: the browser doesn't expose it, so no blocker
+        self.assertEqual((code, out["status"]), (0, "ok"))
+
     def test_browser_trouble_is_a_browser_blocker_and_bad_hosts_are_refused(self):
         self.config(**self.CFG)
         code, out, _ = self.start([done(0), done(0, out="Error: Browser is already in use for /x/profiles/main")])
