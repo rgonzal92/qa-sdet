@@ -962,6 +962,66 @@ class Retrieval(MemBase):
         self.assertIn("date filter uses UTC", out)
 
 
+class Curation(MemBase):
+    """Questions answered once stay answered (DECISIONS); the user's own facts (remember, pinned) and clean-up (forget)."""
+
+    def test_an_answered_question_becomes_a_decision_on_the_card(self):
+        q = "Is 130 inclusive?"
+        memory.ingest(self.con, {**run(), "questions": [q, "Units?"]}, "2026-01-01T00:00:00Z")
+        c = memory.card(self.con, "/form")
+        self.assertIn("OPEN QUESTIONS", c)
+        self.assertIn(q, c.split("OPEN QUESTIONS")[1])
+        memory.ingest(self.con, {**run(), "questions": [{"text": q, "status": "resolved", "answer": "Yes, 0..130"}]},
+                      "2026-01-02T00:00:00Z")
+        memory.ingest(self.con, {**run(), "questions": [q]}, "2026-01-03T00:00:00Z")  # asked again: stays answered
+        c = memory.card(self.con, "/form")
+        self.assertIn(f"- {q} → Yes, 0..130", c.split("DECISIONS")[1])
+        qid = self.con.execute("SELECT id FROM questions WHERE text='Units?'").fetchone()[0]
+        self.assertEqual(qa_mem("answer", str(qid), "km/h. Authorization: Bearer abcdefghijklmnopqrst")[0], 0)
+        out = qa_mem("questions", "resolved")[1]
+        self.assertIn("Units? → km/h", out)
+        self.assertNotIn("abcdefghijklmnopqrst", out)
+        self.assertEqual(qa_mem("questions", "open")[1].strip(), "no open questions")
+        self.assertEqual(qa_mem("answer", "999", "x")[0], 1)
+
+    def test_plan_questions_are_remembered_too(self):
+        d = Path(self.tmp.name) / "qa-out/r/.data"
+        d.mkdir(parents=True)
+        (d / "plan.json").write_text(json.dumps({"kind": "ticket", "tickets": [{"key": "P-1"}], "cases": [],
+                                                 "questions": [{"text": "Q1 [BLOCKING] Is 0 valid?", "status": "resolved",
+                                                                "answer": "No", "ticket": "PROJ-1"}]}))
+        memory.ingest_pending(d.parent.parent)
+        self.assertEqual(tuple(self.con.execute("SELECT page, ticket, status, answer FROM questions").fetchone()),
+                         ("*", "PROJ-1", "resolved", "No"))
+        self.assertIn("Is 0 valid? → No (PROJ-1)", memory.ticket_context(self.con, "Speed rules for PROJ-1")["decisions"][0])
+
+    def test_remembered_facts_are_pinned_and_forget_cleans_up(self):
+        memory.ingest(self.con, run("1.0"))  # the page is on build 1.0
+        code, out, _ = qa_mem("remember", "/form", "flow", "Create a corridor first. Authorization: Bearer abcdefghijklmnopqrst")
+        self.assertEqual(code, 0)
+        qa_mem("remember", "/form", "note", "Header is blue", "--build-scoped")
+        self.assertEqual(qa_mem("remember", "/form", "wish", "x")[0], 2)
+        memory.ingest(self.con, run("2.0", facts=[{"kind": "note", "text": f"n{i} {'z' * i}"} for i in range(110)]))
+        c = memory.card(self.con, "/form")
+        pinned = next(x for x in c.splitlines() if "Create a corridor first" in x)
+        self.assertIn("[pinned]", pinned)
+        self.assertFalse(pinned.endswith("*"))  # a new build doesn't make it stale; the 100-fact cap kept it
+        self.assertNotIn("abcdefghijklmnopqrst", c)
+        self.assertIsNone(self.con.execute("SELECT 1 FROM facts WHERE text='Header is blue' AND stale=0").fetchone())
+        fid = self.con.execute("SELECT id FROM facts WHERE text LIKE 'Create a corridor%'").fetchone()[0]
+        self.assertIn(f"#{fid}", qa_mem("card", "/form", "--ids")[1])
+        self.assertEqual(qa_mem("forget", "fact", str(fid))[0], 0)
+        self.assertNotIn("Create a corridor", memory.card(self.con, "/form"))
+        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
+        code, out, _ = qa_mem("forget", "page", "/form")
+        self.assertEqual(code, 1)
+        self.assertIn("open bug", out)
+        self.assertEqual(qa_mem("forget", "page", "/form", "--force")[0], 0)
+        self.assertIsNone(self.con.execute("SELECT 1 FROM pages WHERE route='/form'").fetchone())
+        self.assertEqual(self.con.execute("SELECT count(*) FROM facts WHERE page='/form'").fetchone()[0], 0)
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)  # bug history stays
+
+
 class Database(MemBase):
     """core.connect."""
 
@@ -1073,9 +1133,9 @@ class IngestPending(MemBase):
     def test_run_json_in_data_with_drafts_in_bugs(self):
         d = self.rundir(plan=PLAN, runs=[("form", RUN_FORM)])
         (d / "bugs/BUG-1.md").write_text("draft")
-        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 1)
+        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 2)
         self.assertTrue((d / ".data/run-form.json.ingested").exists())
-        self.assertFalse((d / ".data/plan.json.ingested").exists())  # the plan is not ingested
+        self.assertTrue((d / ".data/plan.json.ingested").exists())  # only its questions are kept (facts and bugs come from runs)
         con = core.connect()
         try:
             self.assertEqual(con.execute("SELECT draft_path FROM bugs").fetchone()[0], str((d / "bugs/BUG-1.md").resolve()))

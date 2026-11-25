@@ -98,7 +98,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             same_build = bool(known and old and old["build"] == build)
             current = known and (not late or same_build)
             if known and not late and old and old["build"] not in (build, core.UNKNOWN, None):  # new build: re-verify
-                con.execute("UPDATE facts SET stale=1 WHERE page=?", (route,))
+                con.execute("UPDATE facts SET stale=1 WHERE page=? AND pinned=0", (route,))  # the user's own stay
                 con.execute("UPDATE locators SET stale=1 WHERE page=?", (route,))
             if late:
                 con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
@@ -143,7 +143,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                                  core.coverage_result(c.get("result")), build, rid, ts))
         for pg in pages:  # size caps: keep the freshest knowledge per page
             con.execute("DELETE FROM facts WHERE page=? AND id NOT IN (SELECT id FROM facts WHERE page=? "
-                        "ORDER BY stale, ts DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_FACTS))
+                        "ORDER BY pinned DESC, stale, ts DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_FACTS))
             con.execute("DELETE FROM coverage WHERE page=? AND rowid NOT IN (SELECT rowid FROM coverage WHERE page=? "
                         "ORDER BY ts DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_COVERAGE))
             con.execute("DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
@@ -197,8 +197,36 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             # only this run ever saw it and the user hasn't triaged it: it was never a bug
             con.execute("DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
                         "(SELECT 1 FROM sightings WHERE hash=?)", (h, h))
+        target = core.norm_route(core.cap(run.get("target"))) if str(run.get("target") or "").startswith(("/", "http", "#")) else ""
+        _store_questions(con, run.get("questions"), target or "*", ts)
         con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
         con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
+
+
+def _store_questions(con, items, page, ts, ticket=None):
+    """Upsert questions (strings, or {text, status, answer, ticket}) asked on `page` ('*': app-wide). A resolved one
+    with its answer stays resolved when a later run asks it again: answered questions become DECISIONS on cards."""
+    for x in items if isinstance(items, list) else []:
+        q = x if isinstance(x, dict) else {"text": x} if isinstance(x, str) else None
+        text = core.cap(q.get("text")) if q and isinstance(q.get("text"), str) else ""
+        if not text:
+            continue
+        resolved = str(q.get("status") or "").strip().lower() == "resolved"
+        answer = core.cap(q.get("answer")) if isinstance(q.get("answer"), str) else ""
+        tk = q.get("ticket") if isinstance(q.get("ticket"), str) and q.get("ticket").strip() else ticket
+        con.execute("INSERT INTO questions(page,ticket,text,status,answer,first_seen,last_seen) VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT(page,text) DO UPDATE SET last_seen=max(coalesce(last_seen,''), excluded.last_seen), "
+                    "ticket=coalesce(ticket, excluded.ticket), "
+                    "status=CASE WHEN excluded.status='resolved' THEN 'resolved' ELSE status END, "
+                    "answer=CASE WHEN excluded.status='resolved' AND excluded.answer!='' THEN excluded.answer ELSE answer END",
+                    (page, tk, text, "resolved" if resolved else "open", answer, ts, ts))
+
+
+def ingest_plan(con, plan, ts):
+    """A plan.json's questions (plans hold no facts or bugs). App-wide ('*'), tagged with their ticket."""
+    if isinstance(plan, dict):
+        with con:
+            _store_questions(con, plan.get("questions"), "*", ts)
 
 
 def check_report_fields(run):
@@ -268,7 +296,8 @@ def _pending(root):
     ingest, oldest first. Sentinels hold the sha1 of the file they cover, so clock skew or copied mtimes can't
     cause loops."""
     out = []
-    for f in [*root.glob("*/.data/run-*.json"), *(root / "init").glob("code-map-*.json")]:  # run folders; code maps: qa-out/init only
+    for f in [*root.glob("*/.data/run-*.json"), *root.glob("*/.data/plan.json"),
+              *(root / "init").glob("code-map-*.json")]:  # run folders (runs and plans); code maps: qa-out/init only
         try:
             data, mtime = f.read_bytes(), f.stat().st_mtime
         except OSError:
@@ -360,7 +389,9 @@ def _ingest_files(con, pending):
         ts = datetime.fromtimestamp(min(mtime, time.time()), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             note = ""
-            if f.name.startswith("code-map-"):
+            if f.name == "plan.json":
+                ingest_plan(con, scrub.redact_json(json.loads(data)), ts)
+            elif f.name.startswith("code-map-"):
                 cm = scrub.redact_json(json.loads(data))
                 dropped = codemap.apply_codemap(con, cm, codemap.load_scan(cm, f), ts)
                 note = f"dropped rows: {dropped}\n" if dropped else ""
@@ -378,7 +409,7 @@ def _ingest_files(con, pending):
     return n
 
 
-def card(con, q, focus=None):
+def card(con, q, focus=None, ids=False):
     pg = codemap.find_page(con, q)
     if not pg:
         tip = "" if con.execute("SELECT 1 FROM codemap LIMIT 1").fetchone() else \
@@ -405,10 +436,13 @@ def card(con, q, focus=None):
     on_focus = con.execute("SELECT f.id,f.kind,f.text,f.stale,f.source FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
                            "WHERE facts_fts MATCH ? AND f.page=? ORDER BY rank LIMIT 15",
                            (_fts_query([[w] for w in focus_words], []), r)).fetchall() if focus_words else []
+    pinned = con.execute("SELECT id,kind,text,stale,source FROM facts WHERE pinned=1 AND page IN (?, '*') ORDER BY ts DESC "
+                         "LIMIT 10", (r,)).fetchall()  # the user's own (qa-mem remember), app-wide ones included
     rest = con.execute("SELECT id,kind,text,stale,source FROM facts WHERE page=? ORDER BY stale, CASE WHEN kind IN "
                        "('rule','validation','flow','api') OR lower(coalesce(source,'')) NOT IN ('','observed') THEN 0 "
                        "ELSE 1 END, ts DESC LIMIT 60", (r,)).fetchall()
-    for f in list({x["id"]: x for x in on_focus + rest}.values()):
+    pinned_ids = {x["id"] for x in pinned}
+    for f in list({x["id"]: x for x in pinned + on_focus + rest}.values()):
         words = set(core.norm(f["text"]).split())
         # Runs restate facts in new words; show only the freshest of near-duplicates.
         if any(k == f["kind"] and len(words & w) >= 0.8 * max(len(words | w), 1)
@@ -420,9 +454,19 @@ def card(con, q, focus=None):
             break
     if facts:
         out.append("FACTS (* = stale, re-verify; 'from X' = stated in X, not yet observed):")
-        out += [f"- [{f['kind']}] {f['text']}"
-                + (f" (from {f['source']})" if f["source"] and f["source"].lower() != "observed" else "")
-                + (" *" if f["stale"] or not current else "") for f in facts]
+        out += [f"- [{f['kind']}]" + (" [pinned]" if f["id"] in pinned_ids else "") + f" {f['text']}"
+                + (f" (from {f['source']})" if f["source"] and f["source"].lower() not in ("observed", "user") else "")
+                + (f" #{f['id']}" if ids else "")
+                + (" *" if f["id"] not in pinned_ids and (f["stale"] or not current) else "") for f in facts]
+    decided = con.execute("SELECT text, answer, ticket FROM questions WHERE status='resolved' AND page IN (?, '*') "
+                          "ORDER BY page='*', last_seen DESC LIMIT 5", (r,)).fetchall()
+    if decided:
+        out += ["DECISIONS (answered questions: oracles; don't ask them again):"] + [
+            f"- {x['text']} → {x['answer'] or '(answered)'}" + (f" ({x['ticket']})" if x["ticket"] else "") for x in decided]
+    asked = con.execute("SELECT id, text FROM questions WHERE status='open' AND page=? ORDER BY last_seen DESC LIMIT 3",
+                        (r,)).fetchall()
+    if asked:
+        out += ["OPEN QUESTIONS (asked before, no answer yet):"] + [f"- #{x['id']} {x['text']}" for x in asked]
     shown = set()
     if current:
         locs, size = [], 0
@@ -628,10 +672,76 @@ def ticket_context(con, text, n=8):
         top = ranked[:3]
         facts += [x for x in _search(con, one) if x["page"] in top and x["id"] not in {f["id"] for f in facts}]
         bug_rows += [x for x in _search_bugs(con, one) if x["page"] in top and x["hash"] not in {b["hash"] for b in bug_rows}]
+    keys = {k.upper() for k in re.findall(r"\b[A-Z][A-Z0-9]+-\d+\b", str(text))}
+    decisions = [x for x in con.execute("SELECT text, answer, ticket, page FROM questions WHERE status='resolved' "
+                                        "ORDER BY last_seen DESC LIMIT 200")
+                 if (x["ticket"] or "").upper() in keys
+                 or len({w.rstrip("s") for w in core.norm(x["text"]).split()} & stems) >= 2][:10]
     return {"terms": terms,
+            "decisions": [f"{x['text']} → {x['answer'] or '(answered)'}" + (f" ({x['ticket']})" if x["ticket"] else "")
+                          for x in decisions],
             "candidate_routes": [{"route": r, "name": names[r], "why": ", ".join(why[r])} for r in ranked],
             "relevant_facts": [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in facts[:15]],
             "relevant_bugs": [_bug_line(x, True) for x in bug_rows[:15]]}
+
+
+def questions(con, status="open"):
+    rows = con.execute("SELECT * FROM questions" + ("" if status == "all" else " WHERE status=?") + " ORDER BY last_seen DESC "
+                       "LIMIT 50", () if status == "all" else (status,)).fetchall()
+    return "\n".join(f"#{x['id']} [{x['status']}] {x['page']}" + (f" ({x['ticket']})" if x["ticket"] else "")
+                     + f" {x['text']}" + (f" → {x['answer']}" if x["answer"] else "") for x in rows) or f"no {status} questions"
+
+
+def answer(con, qid, text):
+    """Resolve question #qid with the user's answer (scrubbed): it shows as a DECISION on cards. False: no such question."""
+    with con:
+        n = con.execute("UPDATE questions SET status='resolved', answer=?, last_seen=? WHERE id=?",
+                        (core.cap(scrub.redact(text)), core.now(), qid)).rowcount
+    return n == 1
+
+
+FACT_KINDS = ("rule", "flow", "api", "validation", "note")
+
+
+def remember(con, route, kind, text, pin=True, source="user"):
+    """A fact the user states (scrubbed). Pinned by default: a new build doesn't make it stale and the per-page cap
+    never drops it. route '*' is app-wide (shown on every card while pinned). Returns the fact's id."""
+    if kind not in FACT_KINDS:
+        raise core.BadInput(f"remember: kind must be one of {', '.join(FACT_KINDS)}")
+    page = "*" if route.strip() == "*" else core.norm_route(route)
+    text = core.cap(scrub.redact(text))
+    if not page or not text:
+        raise core.BadInput("remember: give a route (or *), a kind and the fact")
+    with con:
+        if page != "*":
+            con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
+        con.execute("INSERT INTO facts(page,kind,text,source,build,ts,stale,pinned) VALUES(?,?,?,?,?,?,0,?) "
+                    "ON CONFLICT(page,kind,text) DO UPDATE SET pinned=excluded.pinned, stale=0, ts=excluded.ts, "
+                    "source=excluded.source", (page, kind, text, source, core.meta(con, "build"), core.now(), int(pin)))
+    return con.execute("SELECT id FROM facts WHERE page=? AND kind=? AND text=?", (page, kind, text)).fetchone()[0]
+
+
+def forget_fact(con, fid):
+    with con:
+        row = con.execute("SELECT page, kind, text FROM facts WHERE id=?", (fid,)).fetchone()
+        con.execute("DELETE FROM facts WHERE id=?", (fid,))
+    return row
+
+
+def forget_page(con, route, force=False):
+    """Retire a page (a typo or a removed route): its facts, locators, coverage and the page; bugs stay as history.
+    Refused while it has open bugs, unless force. Returns (removed, reason)."""
+    page = core.norm_route(route)
+    open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (page, *core.VISIBLE)).fetchone()[0]
+    if open_bugs and not force:
+        return False, f"{page} has {open_bugs} open bug(s); triage them first (qa-mem bug-status) or pass --force (bugs are kept)"
+    if not con.execute("SELECT 1 FROM pages WHERE route=?", (page,)).fetchone():
+        return False, f"no page {page}"
+    with con:
+        for table in ("facts", "locators", "coverage"):
+            con.execute(f"DELETE FROM {table} WHERE page=?", (page,))
+        con.execute("DELETE FROM pages WHERE route=?", (page,))
+    return True, f"forgot {page} (its bugs are kept)"
 
 
 def _search(con, q, page=None):

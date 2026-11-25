@@ -33,7 +33,8 @@ SCHEMA = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS pages(route TEXT PRIMARY KEY, name TEXT, build TEXT, last_verified TEXT);
 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, page TEXT NOT NULL, kind TEXT NOT NULL,
-  text TEXT NOT NULL, source TEXT, build TEXT, ts TEXT, stale INTEGER DEFAULT 0, UNIQUE(page, kind, text));
+  text TEXT NOT NULL, source TEXT, build TEXT, ts TEXT, stale INTEGER DEFAULT 0, pinned INTEGER DEFAULT 0,
+  UNIQUE(page, kind, text));
 CREATE INDEX IF NOT EXISTS facts_page ON facts(page, kind);
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, content='facts', content_rowid='id',
   tokenize='porter unicode61');
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, PRIMARY K
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
   summary TEXT, ts TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY, page TEXT NOT NULL, ticket TEXT, text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open', answer TEXT, first_seen TEXT, last_seen TEXT, UNIQUE(page, text));
 CREATE TABLE IF NOT EXISTS codemap(page TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, value TEXT,
   file TEXT, repo TEXT NOT NULL, area TEXT NOT NULL, ts TEXT, src TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(page, kind, label, repo, area, src));
@@ -135,6 +138,9 @@ def connect():
         if col not in have:
             with con:
                 con.execute(f"ALTER TABLE bugs ADD COLUMN {col} TEXT")
+    if "pinned" not in {r[1] for r in con.execute("PRAGMA table_info(facts)")}:
+        with con:
+            con.execute("ALTER TABLE facts ADD COLUMN pinned INTEGER DEFAULT 0")
     if (meta(con, "fts") or "") != FTS_VERSION:  # a new or changed index: fill it from the tables once
         with con:
             con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")

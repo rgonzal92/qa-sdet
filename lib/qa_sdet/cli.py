@@ -153,7 +153,10 @@ def wrapper_cmd(cmd, args):
 
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
-    "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>]", "gaps": "[--changed] [--top N] [--json]",
+    "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
+    "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
+    "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
     "bugs": "[STATUS]", "hash": "<route> <symptom>",
     "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
@@ -344,10 +347,44 @@ def _main(argv):
 
 def run_cmd(con, cmd, args):
     if cmd == "card" and args:
-        o = _opts(args, valued=("--focus",))
+        o = _opts(args, flags=("--ids",), valued=("--focus",))
         if not o["_"]:
             return usage_error(cmd)
-        print(memory.card(con, " ".join(o["_"]), o.get("--focus")))
+        print(memory.card(con, " ".join(o["_"]), o.get("--focus"), o.get("--ids", False)))
+    elif cmd == "questions":
+        if len(args) > 1 or (args and args[0] not in ("open", "resolved", "all")):
+            return usage_error(cmd)
+        print(memory.questions(con, args[0] if args else "open"))
+    elif cmd == "answer":
+        if len(args) < 2 or not args[0].lstrip("#").isdigit():
+            return usage_error(cmd)
+        if not memory.answer(con, int(args[0].lstrip("#")), " ".join(args[1:])):
+            print(f"no question #{args[0].lstrip('#')} (qa-mem questions lists them)")
+            return 1
+        print(f"question #{args[0].lstrip('#')} answered: cards show it under DECISIONS")
+    elif cmd == "remember":
+        o = _opts(args, flags=("--build-scoped",), valued=("--source",))
+        if len(o["_"]) < 3:
+            return usage_error(cmd)
+        try:
+            fid = memory.remember(con, o["_"][0], o["_"][1], " ".join(o["_"][2:]), not o.get("--build-scoped", False),
+                                  o.get("--source") or "user")
+        except core.BadInput as e:
+            print(f"qa-mem: {e}", file=sys.stderr)
+            return 2
+        print(f"remembered #{fid}" + ("" if o.get("--build-scoped") else " (pinned: kept across builds)"))
+    elif cmd == "forget":
+        o = _opts(args, flags=("--force",))
+        if len(o["_"]) != 2 or o["_"][0] not in ("fact", "page") or (o["_"][0] == "fact" and not o["_"][1].lstrip("#").isdigit()):
+            return usage_error(cmd)
+        if o["_"][0] == "fact":
+            row = memory.forget_fact(con, int(o["_"][1].lstrip("#")))
+            print(f"forgot fact #{o['_'][1].lstrip('#')}: {row['page']} [{row['kind']}] {row['text']}" if row
+                  else "no such fact (qa-mem card <route> --ids shows them)")
+            return 0 if row else 1
+        done, why = memory.forget_page(con, o["_"][1], o.get("--force", False))
+        print(why)
+        return 0 if done else 1
     elif cmd == "code":
         o = _opts(args, flags=("--repos",))
         if o.get("--repos") and o["_"]:
@@ -465,8 +502,8 @@ def run_cmd(con, cmd, args):
             core.set_meta(con, "build", build)
             core.set_meta(con, "build_ts", core.now())
             for table in ("facts", "locators"):
-                con.execute(f"UPDATE {table} SET stale=1 WHERE page IN (SELECT route FROM pages WHERE build!=?)",
-                            (build,))
+                con.execute(f"UPDATE {table} SET stale=1 WHERE page IN (SELECT route FROM pages WHERE build!=?)"
+                            + (" AND pinned=0" if table == "facts" else ""), (build,))  # the user's own facts stay
                 # a corrected build (stale 1.44 then stale 1.43): what was verified on it is current again
                 con.execute(f"UPDATE {table} SET stale=0 WHERE build=? AND page IN "
                             f"(SELECT route FROM pages WHERE build=?)", (build, build))
