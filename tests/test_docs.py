@@ -228,6 +228,37 @@ class Docs(unittest.TestCase):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
                 self.assertIsNone(g.check(probe, os.path.realpath(d), explorer=True), probe[:80])
 
+    def test_the_browser_condition_recipes_pass_the_guard_and_the_fixtures_are_the_ones_named(self):
+        """Narrow window, dark mode, dirty-form dialog and uploads: every command the tips give is allowed to the explorer,
+        and an upload from the plugin's references folder needs no guard change."""
+        tips = text("references/playwright-cli-tips.md")
+        probe = tips.split("## Look for broken output")[1].split("```")[1].strip()
+        script = probe.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
+        section = tips.split("## Browser conditions")[1].split("\n## ")[0]
+        fixtures = ROOT / "references/upload-fixtures"
+        names = re.findall(r"upload '<refs>/upload-fixtures/([\w.-]+)'", section)
+        self.assertEqual(sorted(names), sorted(p.name for p in fixtures.iterdir()))  # the three, no others
+        self.assertTrue(all(p.stat().st_size < 1024 and p.name.startswith("qa-sdet-") for p in fixtures.iterdir()))
+        self.assertEqual((fixtures / "qa-sdet-empty.txt").stat().st_size, 0)
+        self.assertEqual((fixtures / "qa-sdet-1x1.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertNotIn(b"%PDF", (fixtures / "qa-sdet-fake.pdf").read_bytes())  # text with a .pdf name, not a PDF
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            cmds = []
+            for block in section.split("```")[1::2]:  # a command starts at `playwright-cli`; a script may span lines
+                for line in block.strip().splitlines():
+                    cmds.append(line) if line.startswith("playwright-cli") else cmds.__setitem__(-1, cmds[-1] + "\n" + line)
+            self.assertEqual(len(cmds), 7)  # window size, narrow chain, dark eval, dark chain, three uploads
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                for cmd in cmds:
+                    cmd = cmd.replace("<the broken-output probe's script>", script).replace("<the same script>", "1") \
+                        .replace("<refs>", str(ROOT / "references")).replace("<the width> <the height>", "1280 800")
+                    self.assertIsNone(g.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
+        self.assertIn("Never `dialog-accept`", section)
+        self.assertIn("FOCUS:", section.split("**Dark mode**")[1].split("**Unsaved edits**")[0])
+        self.assertIn("Browser conditions", text("agents/qa-explorer.md"))
+
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)

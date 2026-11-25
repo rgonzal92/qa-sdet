@@ -91,6 +91,46 @@ playwright-cli -s=qa --raw eval "(() => { const out = [], vis = el => { if (!el 
   return out.slice(0, 20).join(' | ') || 'none'; })()"
 ```
 
+## Browser conditions: narrow window, dark mode, unsaved edits, uploads
+Each check is optional and costs browser commands (each call counts toward a budget). Every hit is a lead: give it an oracle and repro it twice.
+
+**Narrow window** (once per page, after the given cases, when the page's budget is 20 or more commands or there is none). Note the window size, then in one Bash call resize, run the broken-output probe above, and restore the size even when the probe fails (`;`, not `&&`):
+```
+playwright-cli -s=qa --raw eval "innerWidth + ' ' + innerHeight"
+playwright-cli -s=qa resize 390 844; playwright-cli -s=qa --raw eval "<the broken-output probe's script>"; playwright-cli -s=qa resize <the width> <the height>
+```
+A page wider than the window, or a button or field another element covers, at phone width is a QUESTION (does this app support a window that narrow?) unless an AC, the card or `RULES:` says it does: then it is a bug (`ui-state`). Out of budget: one `not_tested` line, category `heuristic`, text `narrow window`.
+
+**Dark mode** (only when the brief's `FOCUS:` names dark mode, theme, colour scheme or contrast). Run this read-only eval in light, then dark, then clear the emulation:
+```
+playwright-cli -s=qa --raw eval "(() => { const num = c => /^rgba?\(/.test(c) ? c.match(/[\d.]+/g).slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }) : null,
+    lum = c => { const x = num(c); return x ? 0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2] : NaN; };
+  const bgOf = el => { for (; el; el = el.parentElement) { const c = getComputedStyle(el).backgroundColor, a = c.match(/[\d.]+/g); if (a && (a.length < 4 || +a[3] > 0.5)) return c; } return 'rgb(255, 255, 255)'; };
+  const out = [], w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = w.nextNode()) && out.length < 8;) { const p = n.parentElement, t = n.textContent.trim(); if (!t || !p || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName)) continue;
+    const r = p.getBoundingClientRect(), cs = getComputedStyle(p); if (!(r.width > 0 && r.height > 0) || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+    const a = lum(cs.color) + 0.05, b = lum(bgOf(p)) + 0.05, ratio = Math.max(a, b) / Math.min(a, b); if (ratio < 1.5) out.push(t.slice(0, 30) + ' (' + ratio.toFixed(1) + ')'); }
+  return 'page background ' + bgOf(document.body) + ' | text you can barely read: ' + (out.join(', ') || 'none'); })()"
+playwright-cli -s=qa set-color-scheme dark; playwright-cli -s=qa --raw eval "<the same script>"; playwright-cli -s=qa clear-color-scheme
+```
+The page background is the same in both: the app ignores dark mode, which is not a bug (never ask for it). The background changed and text appears in the dark run that the light run didn't list (light text on a light panel, dark text on dark): a hybrid rendering bug (`ui-state`), with a screenshot in each scheme as evidence.
+
+**Unsaved edits** (a page with an edit or create form). `fill` one field with a `qa-sdet-` value, then `click` a link that leaves the page (a menu entry or Cancel; never a delete link). The page then shows one of three things:
+- A dialog: the output has `### Modal state` and `"confirm" dialog` (or `beforeunload`). Run `playwright-cli -s=qa dialog-dismiss` (it stays on the page) and read the field: it must still hold the value. Never `dialog-accept` here: it leaves the page and loses the edit, and a confirm you didn't expect may be a destructive one.
+- A modal inside the page (`Discard changes?`): press its Cancel or Stay button, never Discard.
+- No guard: the page is left and the edit is lost. Policy-dependent: a QUESTION unless an AC says unsaved changes are protected.
+
+**Uploads** (a page with `<input type="file">`; uploads are the page's own feature, so skip it on a page where one could reach other users: `RULES:`). Click the input (or the button that opens it): the output shows `[File chooser]: can be handled by upload`. Then give it a fixture from the plugin's `<refs>/upload-fixtures/` (tiny, synthetic, no secrets), one per check, and read the page's answer:
+```
+playwright-cli -s=qa upload '<refs>/upload-fixtures/qa-sdet-empty.txt'
+playwright-cli -s=qa upload '<refs>/upload-fixtures/qa-sdet-fake.pdf'
+playwright-cli -s=qa upload '<refs>/upload-fixtures/qa-sdet-1x1.png'
+```
+- `qa-sdet-empty.txt` (0 bytes): refused with a clear message, unless an AC accepts empty files.
+- `qa-sdet-fake.pdf` (plain text named `.pdf`): a page that promises PDFs must not take it on its name; the server answers a 4xx, not a saved "document" (check `requests`).
+- `qa-sdet-1x1.png` (a valid 1x1 image): accepted or refused for a stated limit (minimum size, dimensions); the preview must not break.
+Each upload that is saved creates a record: name it `qa-sdet-…` where the page lets you, and delete it in step 9 like any record you made. Never upload anything but these three files.
+
 ## Server-boundary probes (no secrets read)
 A limit the page enforces is not proof the server does: `max`, `required`, a `<select>` list and a disabled button stop a value before it is sent. Test the server in this order; `curl` carries no sign-in and the guard denies a write sent with `eval`.
 
