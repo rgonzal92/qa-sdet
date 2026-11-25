@@ -202,6 +202,22 @@ class Crawl(Base):
             err,
         )
 
+    def test_sign_in_and_sign_out_routes_are_never_opened(self):  # found in audit: /logout ends the session
+        con = core.connect()
+        with con:
+            for pg in ("/login", "/logout", "/Account/LogOff"):
+                for kind, label, value in (("route", pg, ""), ("locator", "Go", "getByTestId('go')")):
+                    con.execute(
+                        "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (pg, kind, label, value, "src/x.tsx", "/repo", "frontend", "t", "s"),
+                    )
+        con.close()
+        code, _, run, b, err = self.crawl()
+        self.assertEqual((code, run["status"]), (0, "COMPLETED"), err)
+        self.assertEqual(b.gotos(), [f"{BASE}/alarms", f"{BASE}/zones"])
+        for pg in ("/login", "/logout", "/Account/LogOff"):
+            self.assertIn(f"{pg}: sign-in or sign-out page, not opened", run["notes"])
+
     def test_crawl_checks_every_mapped_locator_of_every_static_route(self):
         code, out, run, b, err = self.crawl()
         self.assertEqual(code, 0, err)
@@ -382,16 +398,18 @@ class Discover(Base):
         code, run, b, err = self.discover(pages, "--depth", "1")
         self.assertEqual(code, 0, err)
         self.assertEqual(b.gotos(), [f"{BASE}/zones", f"{BASE}/alarms"])  # the start page is already open
-        self.assertEqual([p["route"] for p in run["pages"]], ["/app", "/app/zones", "/app/alarms"])
+        # routes under qaBaseUrl (…/app), as the code map, crawl and dispatch read them: found in audit, /app/zones was
+        # dispatched to …/app/app/zones and made a second card for /zones
+        self.assertEqual([p["route"] for p in run["pages"]], ["/", "/zones", "/alarms"])
         start = run["pages"][0]
         self.assertEqual(
             start["states"], [{"key": "tab: Active", "kind": "tab", "trigger": "Active", "status": "unvisited"}]
         )
         self.assertEqual(
             start["transitions"][0],
-            {"to": "/app/zones", "trigger": "Zones", "kind": "link", "sample_path": "/app/zones"},
+            {"to": "/zones", "trigger": "Zones", "kind": "link", "sample_path": "/zones"},
         )
-        self.assertEqual(run["pages"][1]["transitions"][0]["to"], "/app/zones/new")  # depth 2: recorded, not visited
+        self.assertEqual(run["pages"][1]["transitions"][0]["to"], "/zones/new")  # depth 2: recorded, not visited
         self.assertEqual((run["mode"], run["status"]), ("map", "COMPLETED"))
         memory.check_run(run)
 
@@ -418,13 +436,18 @@ class Discover(Base):
                     ["/app/items/7/delete", "x"],
                     ["/app/x", "Delete all"],
                     ["/app/oauth/callback", "SSO"],
+                    ["/app/Account/LogOff", "Log Off"],  # found in audit: these signed the session out
+                    ["/app/log-off", "x"],
+                    ["/app/signoff", "x"],
+                    ["/app/end-session", "x"],
+                    ["/app/session/end", "Sign out"],
                     ["/app/ok", "OK"],
                 ]
             )
         }
         _, run, b, _ = self.discover(pages)
         self.assertEqual(b.gotos(), [f"{BASE}/ok"])
-        self.assertEqual([t["to"] for t in run["pages"][0]["transitions"]], ["/app/ok"])
+        self.assertEqual([t["to"] for t in run["pages"][0]["transitions"]], ["/ok"])
 
     def test_off_host_links_skipped(self):
         pages = {

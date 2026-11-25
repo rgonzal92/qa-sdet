@@ -20,7 +20,9 @@ CHUNK = 200  # locators per eval: keeps one argument far below Linux's 128 KB li
 FAILS_IN_A_ROW = 3  # pages that fail to load or answer in a row end the run: the app or the browser is down
 NOTES_CAP = 1500
 FRAME = "iframe >> nth={} >> internal:control=enter-frame >> :root"  # eval inside the frame, cross-origin too
-SKIP_LINK_RE = re.compile(r"logout|sign-?out|delete|remove", re.I)  # as the harvester's own filter
+SKIP_LINK_RE = re.compile(
+    r"log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove", re.I
+)  # the in-page harvester's own filter, too
 
 # ---------- locators: the four documented forms (references/code-map.md) become DOM checks ----------
 _STR = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
@@ -137,7 +139,7 @@ def check_js(spec, frame=False):
 # page; key by the hash too when a hash-routed app needs discover.
 HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set();
   for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim();
-    if (u.host === location.host && !/logout|sign-?out|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
+    if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
   for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
     out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"""
@@ -274,6 +276,7 @@ def crawl(con, run, routes=()):
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     if not core.url_allowed(base, hosts):
         raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
+    routes_given = bool(routes)
     if routes:
         bad = next(
             (r for r in routes if not core.norm_route(r).startswith(("/", "#")) or ":" in core.norm_route(r)), None
@@ -291,7 +294,10 @@ def crawl(con, run, routes=()):
             )
             if ":" not in x[0]
         ]
-    plan, skipped = [], []
+    # a sign-in page blocks the run and a sign-out page ends the session: only when the user names them
+    auth = [] if routes_given else [r for r in routes if ops._auth_segment(base + r) or SKIP_LINK_RE.search(r)]
+    routes = [r for r in routes if r not in auth]
+    plan, skipped = [], [f"{r}: sign-in or sign-out page, not opened" for r in auth]
     for route in routes:
         locs = list(
             dict.fromkeys(
@@ -392,6 +398,8 @@ def discover(run, url=None, depth=2, max_pages=25):
     if not core.url_allowed(start, hosts):
         raise core.BadInput(f"discover: {start!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
     origin = "{0.scheme}://{0.netloc}".format(urlsplit(start))
+    prefix = urlsplit(str(cfg.get("qaBaseUrl") or "")).path.rstrip("/")  # routes are kept under qaBaseUrl, as crawl's
+    app = lambda p: (p[len(prefix) :] or "/") if prefix and (p == prefix or p.startswith(prefix + "/")) else p
     n = dict(pages=0, states=0, links=0)
 
     def walk(rec):
@@ -432,7 +440,7 @@ def discover(run, url=None, depth=2, max_pages=25):
                     or SKIP_LINK_RE.search(f"{to} {label}")
                 ):
                     continue
-                links.append({"to": to, "trigger": label, "kind": "link", "sample_path": to})
+                links.append({"to": app(to), "trigger": label, "kind": "link", "sample_path": app(to)})
                 if (
                     level < depth and core.norm_route(to) not in seen
                 ):  # one sample per pattern: /x/12 and /x/34 are /x/:id
@@ -444,7 +452,7 @@ def discover(run, url=None, depth=2, max_pages=25):
                         f"{st[0]}: {st[1]}",
                         {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1], "status": "unvisited"},
                     )
-            rec.doc["pages"].append({"route": path, "states": list(states.values()), "transitions": links})
+            rec.doc["pages"].append({"route": app(path), "states": list(states.values()), "transitions": links})
             n.update(pages=n["pages"] + 1, states=n["states"] + len(states), links=n["links"] + len(links))
             print(f"discover {n['pages']} {path}: {len(links)} links, {len(states)} states", file=sys.stderr)
             rec.save()

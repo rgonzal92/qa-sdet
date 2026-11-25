@@ -62,7 +62,7 @@ Once after the page loads: its same-host links and the triggers of in-page state
 ```
 playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, seen = new Set();
   for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim();
-    if (u.host === location.host && !/logout|sign-?out|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
+    if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
   for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
     out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"
