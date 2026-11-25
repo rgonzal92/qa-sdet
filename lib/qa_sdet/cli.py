@@ -154,7 +154,7 @@ def wrapper_cmd(cmd, args):
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
     "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
-    "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "patterns": "[--min-pages N] [--json]", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
@@ -351,6 +351,11 @@ def run_cmd(con, cmd, args):
         if not o["_"]:
             return usage_error(cmd)
         print(memory.card(con, " ".join(o["_"]), o.get("--focus"), o.get("--ids", False)))
+    elif cmd == "patterns":
+        o = _opts(args, flags=("--json",), valued=("--min-pages",))
+        if o["_"]:
+            return usage_error(cmd)
+        print(memory.patterns(con, max(2, _count(o, "--min-pages")) if "--min-pages" in o else 2, o.get("--json", False)))
     elif cmd == "questions":
         if len(args) > 1 or (args and args[0] not in ("open", "resolved", "all")):
             return usage_error(cmd)

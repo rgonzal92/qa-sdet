@@ -602,6 +602,35 @@ class SharedEndpoints(CodeMapCase):
         self.bug("/p0", "profile call fails")
         self.assertEqual(self.shared("/p1"), "")
 
+    def endpoint_bug(self, page, symptom, endpoint, title=None):
+        memory.ingest(self.con, {"run_id": f"r-{page}-{symptom}", "build": "1", "pages": [{"route": page}],
+                                 "bugs": [{"route": page, "title": title or symptom, "symptom": symptom, "severity": "HIGH",
+                                           "classification": "CONFIRMED", "endpoint": endpoint}]})
+        return core.bug_hash(page, symptom)
+
+    def test_a_bug_on_an_endpoint_most_pages_call_reaches_every_caller(self):  # APP_WIDE_CALLERS hid it
+        for i in range(8):
+            self.calls(f"/p{i}", "GET /api/corridors")
+        self.calls("/detours", "fetch('/api/corridors')")
+        h = self.endpoint_bug("/p0", "corridors list empty on 500", "GET /api/corridors")
+        self.assertIn(h, self.shared("/detours"))
+        self.assertIn("GET api/corridors", self.shared("/detours"))
+
+    def test_an_endpoint_bug_does_not_leak_to_pages_that_share_another_call(self):  # a CSS bug rode on a shared GET
+        self.calls("/zones/new", "POST /api/zones", "GET /api/units")
+        self.calls("/closures", "GET /api/units")
+        h = self.endpoint_bug("/zones/new", "speed 131 saved", "POST /api/zones")
+        self.assertNotIn(h, self.shared("/closures"))
+
+    def test_a_bug_sighted_on_this_page_is_known_here(self):
+        self.calls("/zones/new", "POST /api/zones")
+        h = self.endpoint_bug("/zones/new", "speed 131 saved", "POST /api/zones")
+        memory.ingest(self.con, {"run_id": "r-edit", "build": "1", "pages": [{"route": "/zones/:id"}],
+                                 "bugs": [{"route": "/zones/:id", "title": "x", "hash": h}]})
+        known = memory.card(self.con, "/zones/:id").split("KNOWN BUGS", 1)[1]
+        self.assertIn(h, known)
+        self.assertEqual(self.con.execute("SELECT page FROM sightings WHERE run_id='r-edit'").fetchone()[0], "/zones/:id")
+
     def test_fixed_bugs_show_and_invalid_ones_do_not(self):
         self.calls("/zones/new", "POST /api/zones")
         self.calls("/zones/:id", "POST /api/zones")

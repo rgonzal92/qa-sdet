@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS coverage(page TEXT, target TEXT, heuristic TEXT, resu
 CREATE INDEX IF NOT EXISTS coverage_page ON coverage(page, build);
 CREATE TABLE IF NOT EXISTS bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT,
   classification TEXT, status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT,
-  seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT, jira_key TEXT, fixed_ts TEXT);
+  seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT, jira_key TEXT, fixed_ts TEXT, heuristic TEXT, endpoint TEXT,
+  pattern TEXT, ticket TEXT);
 CREATE INDEX IF NOT EXISTS bugs_page ON bugs(page, status);
 CREATE VIRTUAL TABLE IF NOT EXISTS bugs_fts USING fts5(title, symptom, page, jira_key, status, content='bugs',
   content_rowid='rowid', tokenize='porter unicode61');
@@ -64,7 +65,7 @@ CREATE TRIGGER IF NOT EXISTS bugs_au AFTER UPDATE ON bugs BEGIN
   VALUES ('delete', old.rowid, old.title, old.symptom, old.page, old.jira_key, old.status);
   INSERT INTO bugs_fts(rowid, title, symptom, page, jira_key, status)
   VALUES (new.rowid, new.title, new.symptom, new.page, new.jira_key, new.status); END;
-CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, PRIMARY KEY(run_id, src, hash));
+CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, page TEXT, build TEXT, PRIMARY KEY(run_id, src, hash));
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
   summary TEXT, ts TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -134,10 +135,13 @@ def connect():
         con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE facts_fts;")
     con.executescript(SCHEMA)
     have = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
-    for col in ("jira_key", "fixed_ts"):  # columns added within 0.4: added in place
-        if col not in have:
-            with con:
-                con.execute(f"ALTER TABLE bugs ADD COLUMN {col} TEXT")
+    for table, cols in (("bugs", ("jira_key", "fixed_ts", "heuristic", "endpoint", "pattern", "ticket")),
+                        ("sightings", ("page", "build"))):  # columns added within 0.4: added in place
+        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        for col in cols:
+            if col not in have:
+                with con:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
     if "pinned" not in {r[1] for r in con.execute("PRAGMA table_info(facts)")}:
         with con:
             con.execute("ALTER TABLE facts ADD COLUMN pinned INTEGER DEFAULT 0")

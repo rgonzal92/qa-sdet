@@ -70,7 +70,8 @@ def check_run(run):
                     core.txt(item.get(f), f"{key}.{f}")
     check_report_fields(run)
     for b in bug_list:
-        for f in ("title", "symptom", "severity", "classification", "draft_path", "hash", "route", "evidence", "ticket"):
+        for f in ("title", "symptom", "severity", "classification", "draft_path", "hash", "route", "evidence", "ticket",
+                  "heuristic", "endpoint", "pattern"):
             core.txt(b.get(f), f"bugs.{f}")
         if b.get("annotated") is not None and not isinstance(b["annotated"], bool):
             raise ValueError("'bugs.annotated' must be true or false")
@@ -170,10 +171,14 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             fresh = int(not ran(h) and not con.execute(
                 "SELECT 1 FROM bugs WHERE hash=? AND last_run=?", (h, rid)).fetchone())
             now_seen.add(h)
-            con.execute("INSERT OR IGNORE INTO sightings VALUES(?,?,?)", (rid, src, h))
+            con.execute("INSERT OR IGNORE INTO sightings(run_id,src,hash,page,build) VALUES(?,?,?,?,?)",
+                        (rid, src, h, b["route"], build))  # where it showed: a shared-endpoint bug on another page too
             # a FIXED bug seen again by another run becomes REGRESSED.
             con.execute("INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
-                        "last_seen,last_run,symptom) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
+                        "last_seen,last_run,symptom,heuristic,endpoint,pattern,ticket) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(hash) DO UPDATE SET "
+                        "heuristic=coalesce(excluded.heuristic, heuristic), endpoint=coalesce(excluded.endpoint, endpoint), "
+                        "pattern=coalesce(excluded.pattern, pattern), ticket=coalesce(excluded.ticket, ticket), "
                         "seen_count=seen_count + ?, "
                         # a run older than the last sighting or than the fix (ingested late) predates it: no regression
                         "status=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
@@ -187,7 +192,10 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                         "symptom=coalesce(symptom, excluded.symptom)",
                         (h, b.get("route"), core.cap(b["title"]), core.cap(b.get("severity"))[:20] or None,
                          core.cap(b.get("classification"))[:20] or None,
-                         resolve_draft(b.get("draft_path"), run_dir), ts, ts, rid, symptom, fresh, fresh))
+                         resolve_draft(b.get("draft_path"), run_dir), ts, ts, rid, symptom,
+                         core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
+                         _endpoint(b.get("endpoint")), _pattern(b.get("pattern")),
+                         core.cap(b.get("ticket"))[:30] or None, fresh, fresh))
         for h in before - now_seen:  # listed by an earlier version of this run.json only
             con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
             if ran(h):
@@ -201,6 +209,23 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
         _store_questions(con, run.get("questions"), target or "*", ts)
         con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
         con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
+
+
+def _endpoint(raw):
+    """'POST api/zones' (method and the call shape the code map uses) from 'POST /api/zones/42', or None."""
+    method, path = codemap._api_ref(raw) if raw else ("", "")
+    return f"{method} {path}".strip() if path else None
+
+
+def _endpoint_ref(stored):
+    m, _, path = str(stored or "").partition(" ")
+    return (m, path) if path and re.fullmatch(codemap.HTTP_METHODS, m) else ("", str(stored or ""))
+
+
+def _pattern(raw):
+    """A defect class as a short kebab-case tag ('Silent error as EMPTY!' -> silent-error-as-empty), or None."""
+    tag = re.sub(r"[^a-z0-9]+", "-", str(raw or "").lower()).strip("-")[:60].strip("-")
+    return tag or None
 
 
 def _store_questions(con, items, page, ts, ticket=None):
@@ -499,13 +524,13 @@ def card(con, q, focus=None, ids=False):
         out.append(f"UNTESTED TARGETS (code rules no run covered on {on}; write the label as the coverage target): "
                    + "; ".join(untested[:shown_n]) + more)
     out.append(bug_lines(con, r, b))
-    sharing = codemap.sharing_pages(con, r)
-    if sharing:
-        rows = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?,'FIXED') AND page IN "
-                           f"({','.join('?' * len(sharing))}) ORDER BY last_seen DESC LIMIT 3", [*core.VISIBLE, *sharing]).fetchall()
-        if rows:
-            out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
-                + [_bug_line(x, True, 60) for x in rows]
+    shared = _shared_bugs(con, r)
+    if shared:
+        out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
+            + [_bug_line(x, True, 60) + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "") for x in shared]
+    recurring = _patterns(con)[:3]
+    if recurring:
+        out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [_pattern_line(g) for g in recurring]
     return "\n".join(x for x in out if x)
 
 
@@ -521,6 +546,66 @@ def _rechecked(con, route, build):
     """Hashes of the page's bugs some run re-checked on `build` (coverage `regression` with the hash as target)."""
     return {r[0] for r in con.execute(f"SELECT lower(trim(target)) FROM coverage WHERE page=? AND heuristic='other:regression' "
                                       f"AND result!='blocked' AND {ON_BUILD}", (route, build, _week_ago()))}
+
+
+def _shared_bugs(con, route, limit=3):
+    """Bugs on other pages that this page may show too: bugs recorded with an endpoint this page calls (any number of
+    callers: only bugs of that endpoint match), and for bugs without one the pages sharing a call (sharing_pages)."""
+    mine = codemap._called(con.execute("SELECT kind,label,value FROM codemap WHERE page=? AND kind='api'", (route,))) \
+        if route != "*" else set()
+    found = {}
+    cols = f"{BUG_COLS},endpoint,last_seen"
+    if mine:
+        for x in con.execute(f"SELECT {cols} FROM bugs WHERE endpoint IS NOT NULL AND page!=? AND status IN (?,?,?,'FIXED')",
+                             (route, *core.VISIBLE)):
+            if any(codemap._same_call(_endpoint_ref(x["endpoint"]), c) for c in mine):
+                found[x["hash"]] = x
+    sharing = codemap.sharing_pages(con, route)
+    if sharing:
+        for x in con.execute(f"SELECT {cols} FROM bugs WHERE endpoint IS NULL AND status IN (?,?,?,'FIXED') AND page IN "
+                             f"({','.join('?' * len(sharing))})", [*core.VISIBLE, *sharing]):
+            found[x["hash"]] = x
+    return sorted(found.values(), key=lambda x: x["last_seen"] or "", reverse=True)[:limit]
+
+
+def _patterns(con, min_pages=2):
+    """Bugs of one kind (their pattern tag, else the heuristic that found them) on min_pages+ pages, most pages first.
+    INVALID bugs are never a pattern; a page counts when the bug was found or sighted there."""
+    seen = {}
+    for h, page in con.execute("SELECT hash, page FROM sightings WHERE page IS NOT NULL"):
+        seen.setdefault(h, set()).add(page)
+    groups = {}
+    for x in con.execute("SELECT hash, page, title, status, heuristic, pattern FROM bugs WHERE status != 'INVALID' "
+                         "AND (pattern IS NOT NULL OR heuristic IS NOT NULL) ORDER BY last_seen DESC"):
+        g = groups.setdefault(x["pattern"] or x["heuristic"], {"pattern": x["pattern"], "heuristics": [], "bugs": [],
+                                                               "pages": set(), "regressed": 0})
+        g["bugs"].append(x)
+        g["pages"] |= {x["page"]} | seen.get(x["hash"], set())
+        g["regressed"] += x["status"] == "REGRESSED"
+        if x["heuristic"]:
+            g["heuristics"].append(x["heuristic"])
+    out = []
+    for key, g in groups.items():
+        if len(g["pages"]) >= min_pages:
+            heur = max(set(g["heuristics"]), key=g["heuristics"].count) if g["heuristics"] else None
+            out.append({"pattern": key, "heuristic": heur if g["pattern"] else None, "bugs": len(g["bugs"]),
+                        "pages": len(g["pages"]), "regressed": g["regressed"],
+                        "examples": [f"{x['hash']} {x['title']}" for x in g["bugs"][:2]]})
+    return sorted(out, key=lambda g: (-g["pages"], -g["bugs"], g["pattern"]))
+
+
+def _pattern_line(g):
+    return (f"- {g['pattern']}" + (f" ({g['heuristic']})" if g["heuristic"] else "")
+            + f": {g['bugs']} bugs on {g['pages']} pages" + (f" ({g['regressed']} regressed)" if g["regressed"] else "")
+            + f", e.g. {core.short(g['examples'][0], 80)}")
+
+
+def patterns(con, min_pages=2, as_json=False):
+    rows = _patterns(con, min_pages)
+    if as_json:
+        return json.dumps(rows, indent=1)
+    return "\n".join([f"RECURRING PATTERNS (one kind of bug on {min_pages}+ pages; most pages first):"]
+                     + [_pattern_line(g) for g in rows]) if rows else f"no bug pattern on {min_pages}+ pages yet"
 
 
 def _coverage(con, route, build):
@@ -564,9 +649,9 @@ def bug_lines(con, route, build=None):
     (coverage `regression` with its hash as the target) says so: the explorer re-checks the others."""
     q = f"SELECT {BUG_COLS} FROM bugs WHERE status IN (?,?,?)"
     args = list(core.VISIBLE)
-    if route is not None:
-        q += " AND page=?"
-        args.append(route)
+    if route is not None:  # also a bug from another page that a run saw here (a shared endpoint)
+        q += " AND (page=? OR hash IN (SELECT hash FROM sightings WHERE page=?))"
+        args += [route, route]
     rows = con.execute(q + " ORDER BY last_seen DESC LIMIT 10", args).fetchall()
     fixed = con.execute(f"SELECT {BUG_COLS} FROM bugs WHERE status='FIXED'"
                         + (" AND page=? ORDER BY last_seen DESC" if route is not None else " ORDER BY last_seen DESC LIMIT 5"),
@@ -678,6 +763,7 @@ def ticket_context(con, text, n=8):
                  if (x["ticket"] or "").upper() in keys
                  or len({w.rstrip("s") for w in core.norm(x["text"]).split()} & stems) >= 2][:10]
     return {"terms": terms,
+            "patterns": [_pattern_line(g) for g in _patterns(con)[:3]],
             "decisions": [f"{x['text']} → {x['answer'] or '(answered)'}" + (f" ({x['ticket']})" if x["ticket"] else "")
                           for x in decisions],
             "candidate_routes": [{"route": r, "name": names[r], "why": ", ".join(why[r])} for r in ranked],

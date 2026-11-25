@@ -1022,6 +1022,29 @@ class Curation(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)  # bug history stays
 
 
+class Patterns(MemBase):
+    """`qa-mem patterns`: how this app breaks again and again, from the heuristic and pattern each bug was recorded with."""
+
+    def bug(self, page, symptom, **extra):
+        memory.ingest(self.con, {"run_id": f"r-{page}-{symptom}", "target": page, "build": "1", "pages": [{"route": page}],
+                                 "bugs": [{"route": page, "title": symptom, "symptom": symptom, **extra}]})
+
+    def test_patterns_across_pages_rank_and_show_on_cards_and_in_prep(self):
+        for page in ("/incidents", "/zones", "/closures"):
+            self.bug(page, f"{page} shows 0 items on a 500", heuristic="error-handling", pattern="Silent error as EMPTY!")
+        self.bug("/zones", "speed 131 saved", heuristic="boundary")
+        self.bug("/form", "label typo", heuristic="boundary")
+        self.con.execute("UPDATE bugs SET status='INVALID' WHERE symptom='label typo'")  # never a pattern
+        out = memory.patterns(self.con)
+        self.assertTrue(out.splitlines()[1].startswith("- silent-error-as-empty (error-handling): 3 bugs on 3 pages"), out)
+        self.assertNotIn("boundary", out)  # one page only once the INVALID one is out
+        self.assertEqual(json.loads(qa_mem("patterns", "--json")[1])[0]["pages"], 3)
+        self.assertIn("RECURRING APP PATTERNS", memory.card(self.con, "/schedules") + memory.card(self.con, "/zones"))
+        self.assertIn("silent-error-as-empty", memory.ticket_context(self.con, "Schedules list error states")["patterns"][0])
+        row = self.con.execute("SELECT heuristic, pattern FROM bugs WHERE page='/incidents'").fetchone()
+        self.assertEqual(tuple(row), ("error-handling", "silent-error-as-empty"))
+
+
 class Database(MemBase):
     """core.connect."""
 
