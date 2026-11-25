@@ -231,6 +231,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "impact": "<route|page name|METHOD /path> [--json]", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
+    "blindspots": "[route] [--json]",
     "search": "<words> [-word to exclude]",
     "bugs": "[STATUS]", "hash": "<route> <symptom>",
     "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
@@ -522,6 +523,11 @@ def run_cmd(con, cmd, args):
             return 2
         from . import scan
         print(json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1))
+    elif cmd == "blindspots":
+        o = _opts(args, flags=("--json",))
+        if len(o["_"]) > 1:
+            raise core.BadOption("blindspots takes at most one route")
+        print(memory.blindspots(con, o["_"][0] if o["_"] else None, o.get("--json", False)))
     elif cmd == "gaps":
         o = _opts(args, flags=("--changed", "--json"), valued=("--top",))
         if o["_"]:

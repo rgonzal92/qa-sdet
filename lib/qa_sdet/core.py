@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS codemap(page TEXT NOT NULL, kind TEXT NOT NULL, label
   file TEXT, repo TEXT NOT NULL, area TEXT NOT NULL, ts TEXT, src TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(page, kind, label, repo, area, src));
 CREATE INDEX IF NOT EXISTS codemap_page ON codemap(page, kind);
+CREATE TABLE IF NOT EXISTS blind_spots(page TEXT NOT NULL, category TEXT NOT NULL, text TEXT NOT NULL COLLATE NOCASE,
+  build TEXT, first_seen TEXT, last_seen TEXT, seen_runs INTEGER DEFAULT 1, last_run TEXT, resolved INTEGER DEFAULT 0,
+  PRIMARY KEY(page, category, text));
 CREATE TABLE IF NOT EXISTS observed_endpoints(method TEXT NOT NULL, path TEXT NOT NULL, status_class TEXT NOT NULL,
   route TEXT NOT NULL, build TEXT NOT NULL, ts TEXT, PRIMARY KEY(route, method, path, status_class, build));
 """

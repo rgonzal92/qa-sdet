@@ -478,6 +478,14 @@ class Docs(unittest.TestCase):
         self.assertIn("UNEXERCISED ENDPOINTS", text("agents/qa-explorer.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/memory.py"))  # the card line the explorer prompt names
 
+    def test_blindspots_is_a_command_and_documented(self):
+        self.assertIn("blindspots", cli.COMMANDS)
+        for doc in ("README.md", "skills/qa-memory/SKILL.md", "CHANGELOG.md"):
+            self.assertIn("blindspots", text(doc), doc)
+        for section in ("UNVISITED STATES", "UNEXERCISED ENDPOINTS", "UNTESTED TARGETS"):  # what the stop check reads in the brief
+            self.assertIn(section, text("lib/qa_sdet/report.py"))
+            self.assertIn(section, text("README.md") + text("lib/qa_sdet/memory.py"))
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)

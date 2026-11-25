@@ -237,8 +237,30 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                         "(SELECT 1 FROM sightings WHERE hash=?)", (h, h))
         target = core.norm_route(core.cap(run.get("target"))) if str(run.get("target") or "").startswith(("/", "http", "#")) else ""
         _store_questions(con, run.get("questions"), target or "*", ts)
+        if explored and target:
+            _store_blind_spots(con, run, target, rid, build, ts)
         con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
         con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
+
+
+BLIND_SPOTS_PER_PAGE = 50
+
+
+def _store_blind_spots(con, run, page, rid, build, ts):
+    """The ledger of what runs leave untested, per page: each `not_tested` line of the run counts once per run. A line
+    a later COMPLETED run no longer repeats is marked resolved (covered, or no longer deferred); repeating it again
+    reopens it. An unfinished run says nothing about what a finished one left out."""
+    from . import report
+    for cat, text in report._not_tested(run):
+        con.execute("INSERT INTO blind_spots(page,category,text,build,first_seen,last_seen,last_run) VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT(page,category,text) DO UPDATE SET seen_runs=seen_runs + (last_run IS NOT excluded.last_run), "
+                    "last_run=excluded.last_run, build=excluded.build, last_seen=excluded.last_seen, resolved=0 "
+                    "WHERE excluded.last_seen >= coalesce(blind_spots.last_seen, '')",
+                    (page, cat, core.cap(text), build, ts, ts, rid))
+    if core.norm(run.get("status")) == "completed":
+        con.execute("UPDATE blind_spots SET resolved=1 WHERE page=? AND last_run IS NOT ? AND last_seen <= ?", (page, rid, ts))
+    con.execute("DELETE FROM blind_spots WHERE page=? AND rowid NOT IN (SELECT rowid FROM blind_spots WHERE page=? "
+                "ORDER BY last_seen DESC, rowid DESC LIMIT ?)", (page, page, BLIND_SPOTS_PER_PAGE))
 
 
 def _endpoint(raw):
@@ -1325,6 +1347,7 @@ def forget_page(con, route, force=False):
             con.execute(f"DELETE FROM {table} WHERE page=?", (page,))
         con.execute("DELETE FROM transitions WHERE from_route=? OR to_route=?", (page, page))
         con.execute("DELETE FROM observed_endpoints WHERE route=?", (page,))
+        con.execute("DELETE FROM blind_spots WHERE page=?", (page,))
         con.execute("DELETE FROM pages WHERE route=?", (page,))
     return True, f"forgot {page} (its bugs are kept)"
 
@@ -1578,6 +1601,62 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         return "\n".join(out + ["Next: these pages need a record id: /qa-sdet:qa-explore '<a real record URL>'"])
     route = route.replace("'", "'\\''")
     return "\n".join(out + [f"Next: /qa-sdet:qa-explore '{route}'"])
+
+
+def _write_errors_untried(con, route, build, bound=None):
+    """['POST /api/zones'] writes (POST, PUT, PATCH) the page's runs sent on `build` that only ever got a 2xx: the
+    server's refusal of bad input was never provoked."""
+    group = sorted(codemap.page_group(con, route, bound))
+    seen = {}
+    for m, p, k in con.execute(f"SELECT method, path, status_class FROM observed_endpoints WHERE route IN "
+                               f"({','.join('?' * len(group))}) AND {ON_BUILD}", (*group, build, _week_ago())):
+        seen.setdefault((m, p), set()).add(k)
+    return sorted(f"{m} {p}" for (m, p), k in seen.items() if m in ("POST", "PUT", "PATCH") and "2xx" in k and not k & {"4xx", "5xx"})
+
+
+def blindspots(con, route=None, as_json=False):
+    """What the runs left unchecked, per page (the most first) or for one route: mapped endpoints no run observed on the
+    current build, writes that only ever got a 2xx, unvisited in-page states, and `not_tested` lines 2+ runs repeated;
+    `systemic` are deferrals that hit 2+ pages (one blocker: --faults, a role, test data). Hints, never verdicts."""
+    bound = codemap.module_bindings(con)
+    mounted = {m for _, m in bound.values()}
+    current = core.meta(con, "build")
+    only = core.norm_route(route) if route else None
+    pages = [pg for pg in con.execute("SELECT route, build FROM pages WHERE route != '*'")
+             if (pg["route"] not in mounted or pg["route"] in bound) and (only is None or pg["route"] == only)]
+    out = []
+    for pg in pages:
+        r, b = pg["route"], current or pg["build"]
+        item = {"route": r, "build": b,
+                "unexercised_apis": _unexercised_apis(con, r, b, bound), "untested_write_errors": _write_errors_untried(con, r, b, bound),
+                "unvisited_states": [x["state_key"] for x in _due_states(con, r, b)],
+                "not_tested": [{"category": x["category"], "text": x["text"], "runs": x["seen_runs"]} for x in con.execute(
+                    "SELECT category, text, seen_runs FROM blind_spots WHERE page=? AND resolved=0 AND seen_runs >= 2 "
+                    "ORDER BY seen_runs DESC, last_seen DESC", (r,))]}
+        if any(item[k] for k in ("unexercised_apis", "untested_write_errors", "unvisited_states", "not_tested")):
+            out.append(item)
+    out.sort(key=lambda i: (-sum(len(i[k]) for k in ("unexercised_apis", "untested_write_errors", "unvisited_states", "not_tested")), i["route"]))
+    systemic = [{"category": c, "text": t, "pages": n} for c, t, n in con.execute(
+        "SELECT category, min(text), count(DISTINCT page) FROM blind_spots WHERE resolved=0 GROUP BY category, lower(text) "
+        "HAVING count(DISTINCT page) >= 2 ORDER BY 3 DESC, 1, 2")] if only is None else []
+    if as_json:
+        return json.dumps({"build": current or core.UNKNOWN, "pages": out, "systemic": systemic}, indent=1)
+    if not out and not systemic:
+        return f"no blind spots recorded for {only}" if only else "no blind spots recorded yet"
+    lines = [f"BLIND SPOTS (what runs left unchecked on build {current or 'unknown'}; hints, never verdicts):"]
+    for i in out:
+        lines.append(f"{i['route']}:")
+        for key, head in (("unexercised_apis", "mapped in the code, not observed on this build"),
+                          ("untested_write_errors", "writes that only ever got a 2xx (server-side validation never provoked)"),
+                          ("unvisited_states", "in-page states nobody opened")):
+            if i[key]:
+                lines.append(f"  {head}: " + "; ".join(i[key]))
+        if i["not_tested"]:
+            lines.append("  left untested again and again: " + "; ".join(
+                f"{x['category']}: {x['text']} ({x['runs']} runs)" for x in i["not_tested"]))
+    if systemic:
+        lines.append("ONE BLOCKER ON SEVERAL PAGES: " + "; ".join(f"{x['category']}: {x['text']} ({x['pages']} pages)" for x in systemic))
+    return "\n".join(lines)
 
 
 TIERS = ("changed or regressed", "new, with forms", "old build", "current")

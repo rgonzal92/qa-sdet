@@ -1496,6 +1496,91 @@ class ObservedEndpoints(MemBase):
         self.assertEqual(self.seen(), [])
 
 
+class BlindSpots(ObservedEndpoints):
+    """What the runs keep leaving unchecked: the not_tested ledger and `qa-mem blindspots`."""
+
+    def defer(self, *items, target="/map", status="COMPLETED", **extra):
+        return self.explore(["GET /api/x => [200]"], target=target, not_tested=list(items), status=status, **extra)
+
+    def rows(self, page="/map"):
+        return [tuple(x) for x in self.con.execute(
+            "SELECT category, text, seen_runs, resolved FROM blind_spots WHERE page=? ORDER BY category, text", (page,))]
+
+    def test_a_deferral_repeated_by_later_runs_is_counted_once_per_run(self):
+        item = {"category": "needs_setup", "text": "error-handling needs --faults"}
+        d = self.defer(item, "no second account")
+        self.assertEqual(self.rows(), [("needs_setup", "error-handling needs --faults", 1, 0), ("other", "no second account", 1, 0)])
+        f = d / ".data/run-x.json"
+        (d / ".data/run-x.json.ingested").unlink()
+        memory.ingest_pending(d.parent)  # the same run again: not a second sighting
+        self.assertEqual(self.rows()[0][2], 1)
+        self.defer({**item, "text": "Error-handling  needs --faults"})  # a later run, the same words
+        self.assertEqual(self.rows()[0], ("needs_setup", "error-handling needs --faults", 2, 0))
+
+    def test_a_deferral_a_completed_later_run_no_longer_makes_is_resolved_and_comes_back_unresolved(self):
+        self.defer({"category": "not_reached", "text": "the export dialog"})
+        self.defer({"category": "needs_setup", "text": "admin role"})
+        self.assertEqual(self.rows(), [("needs_setup", "admin role", 1, 0), ("not_reached", "the export dialog", 1, 1)])  # gone
+        self.defer({"category": "not_reached", "text": "the export dialog"})
+        self.assertEqual(self.rows(), [("needs_setup", "admin role", 1, 1), ("not_reached", "the export dialog", 2, 0)])
+        self.defer(status="INCOMPLETE")  # an unfinished run proves nothing
+        self.assertEqual([r[3] for r in self.rows()], [1, 0])
+
+    def test_a_crawl_and_a_blocked_run_leave_the_ledger_alone_and_it_is_capped_per_page(self):
+        self.defer("x", mode="map")
+        self.defer("y", status="BLOCKED")
+        self.assertEqual(self.rows(), [])
+        self.defer(*[f"item {i}" for i in range(60)])
+        self.assertEqual(len(self.rows()), 50)
+
+    def test_blindspots_lists_the_four_kinds_for_a_page_and_as_json(self):
+        self.calls("/map", "GET /api/closures.json", "POST /api/zones")
+        with self.con:
+            self.con.execute("INSERT INTO page_states(page,state_key,kind,trigger,status,build,ts) VALUES('/map','tab: Layers','tab','t','unvisited','1.0','x')")
+        faults = {"category": "needs_setup", "text": "error-handling needs --faults"}
+        self.explore(["POST /api/zones => [200]", "POST /api/zones => [200]", "PUT /api/units => [200]", "PUT /api/units => [422]"],
+                     not_tested=[faults, {"category": "safety", "text": "bulk delete"}])
+        self.defer(faults)
+        out = memory.blindspots(self.con, "/map")
+        self.assertIn("/map", out)
+        self.assertIn("GET /api/closures", out)  # mapped, never observed
+        self.assertIn("POST /api/zones", out.split("write")[1])  # only ever 2xx: its server-side validation was never provoked
+        self.assertNotIn("PUT /api/units", out.split("write")[1])  # saw a 422
+        self.assertIn("tab: Layers", out)
+        self.assertIn("error-handling needs --faults (2 runs)", out)
+        self.assertNotIn("bulk delete", out)  # told once only: not recurring
+        page = json.loads(memory.blindspots(self.con, "/map", as_json=True))["pages"][0]
+        self.assertEqual(page["route"], "/map")
+        self.assertEqual(page["unexercised_apis"], ["GET /api/closures"])
+        self.assertEqual(page["untested_write_errors"], ["POST /api/zones"])
+        self.assertEqual(page["unvisited_states"], ["tab: Layers"])
+        self.assertEqual([(x["category"], x["text"], x["runs"]) for x in page["not_tested"]],
+                         [("needs_setup", "error-handling needs --faults", 2)])
+
+    def test_blindspots_across_the_app_name_the_blockers_that_hit_several_pages(self):
+        faults = {"category": "needs_setup", "text": "error-handling needs --faults"}
+        for page in ("/a", "/b", "/c"):
+            self.defer(faults, target=page)
+        self.defer(faults, {"category": "needs_setup", "text": "another"}, target="/a")
+        data = json.loads(memory.blindspots(self.con, as_json=True))
+        self.assertEqual(data["systemic"], [{"category": "needs_setup", "text": "error-handling needs --faults", "pages": 3}])
+        self.assertIn("error-handling needs --faults (3 pages)", memory.blindspots(self.con))
+        self.assertEqual(memory.blindspots(self.con, "/nope"), "no blind spots recorded for /nope")
+
+    def test_nothing_recorded_says_so_and_an_old_database_gains_the_table(self):
+        self.assertEqual(memory.blindspots(self.con), "no blind spots recorded yet")
+        self.con.execute("DROP TABLE blind_spots")
+        self.con.commit()
+        con = core.connect()
+        self.assertEqual(con.execute("SELECT count(*) FROM blind_spots").fetchone()[0], 0)
+        con.close()
+
+    def test_forgetting_a_page_clears_its_ledger(self):
+        self.defer("x")
+        memory.forget_page(self.con, "/map", force=True)
+        self.assertEqual(self.rows(), [])
+
+
 class Database(MemBase):
     """core.connect."""
 

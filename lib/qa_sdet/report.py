@@ -643,6 +643,12 @@ def verify_run(run_dir, slug, since=0):
         todo.append(f"say in `actual` what you saw for each PASS and FAIL case: {', '.join(blank)} need `actual`")
     if no_bug := [cid for cid, status, c in done if status == "FAIL" and not str(c.get("bug") or "").strip()]:
         todo.append(f"a FAIL names its bug in `bug` (BUG-<n>, a known bug's hash or a Jira key): {', '.join(no_bug)} failed without a `bug`")
+    brief = _text(data / f"brief-{slug}.md")
+    open_items = [k for k in ("UNVISITED STATES", "UNEXERCISED ENDPOINTS", "UNTESTED TARGETS") if re.search(rf"^{k} \(", brief, re.M)]
+    if open_items and _first_word(run.get("status")) == "completed" and re.search(r"^mode: explore$", brief, re.M) \
+            and not any(_list(pg, "coverage") for pg in _list(run, "pages")) and not _not_tested(run):
+        todo.append(f"your card listed {', '.join(open_items)}, but `coverage` and `not_tested` are both empty: check them, or add a "
+                    "`not_tested` line for each saying why you did not")
     listed = {bug_id(b) for b in _list(run, "bugs")} - {""}
     drafts = [p.stem for p in sorted((run_dir / "bugs").glob("BUG-*.md")) if p.is_file() and _mtime(p) >= since]
     if unlisted := [x for x in drafts if x not in listed]:

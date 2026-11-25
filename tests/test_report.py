@@ -1392,6 +1392,44 @@ class NextAction(Rendering):
 
 
 
+class ExploreStopCheck(Base):
+    """verify_run's explore-mode check: a COMPLETED page that left the card's open items unmentioned is sent back once."""
+
+    CARD = {"states": "UNVISITED STATES (on this page, not opened on build 1): tab: Layers",
+            "apis": "UNEXERCISED ENDPOINTS (mapped in the code, not yet observed on build 1.0): GET /api/closures",
+            "rules": "UNTESTED TARGETS (code rules no adversarial check covered on build 1): Speed"}
+
+    def stop(self, card=(), mode="explore", **run_fields):
+        d = self.proj / "qa-out/2026-11-25-explore"
+        (d / ".data").mkdir(parents=True, exist_ok=True)
+        (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\nmode: " + mode + "\n\n## Card\nPAGE /form\n"
+                                              + "\n".join(self.CARD[k] for k in card) + "\nUNTRIED: boundary\n")
+        for k in ("requests", "console"):
+            (d / f".data/{k}-form.log").write_text("")
+        (d / ".data/run-form.json").write_text(json.dumps({"run_id": "r", "mode": mode, "status": "COMPLETED", **run_fields}))
+        return report.verify_run(d, "form")
+
+    def test_a_completed_explore_page_that_mentions_none_of_the_cards_open_items_is_sent_back_once(self):
+        todo = self.stop(["states", "apis"])
+        self.assertEqual(len(todo), 1)  # one instruction line: the explorer gets one fix turn
+        self.assertIn("UNVISITED STATES", todo[0])
+        self.assertIn("UNEXERCISED ENDPOINTS", todo[0])
+        self.assertNotIn("UNTESTED TARGETS", todo[0])
+        self.assertIn("not_tested", todo[0])
+
+    def test_any_coverage_or_not_tested_entry_counts_as_having_looked(self):
+        cov = [{"route": "/form", "coverage": [{"target": "Speed", "heuristic": "boundary", "result": "pass"}]}]
+        self.assertEqual(self.stop(["rules"], pages=cov), [])
+        self.assertEqual(self.stop(["rules"], not_tested=[{"category": "heuristic", "text": "read-only"}]), [])
+        self.assertEqual(self.stop(["rules"], not_tested=["no time"]), [])
+
+    def test_only_a_completed_explore_run_with_open_items_is_checked(self):
+        self.assertEqual(self.stop(["states"], mode="ticket"), [])
+        self.assertEqual(self.stop([]), [])
+        self.assertEqual(self.stop(["states"], status="INCOMPLETE"), [])
+        self.assertEqual(self.stop(["states"], status="BLOCKED"), [])
+
+
 class Continuation(Rendering):
     """Leads an explorer leaves, and `qa-mem explore-next`: what an explore run left to do and what its bugs may reach."""
 
