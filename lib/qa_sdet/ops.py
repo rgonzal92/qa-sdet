@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -20,8 +21,6 @@ from . import core, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:  # NOSONAR
-    import sqlite3
-
     from .contracts import Marker
 
 
@@ -576,8 +575,26 @@ def _sign_in_state(cfg, env):
     return signed_in, None, status
 
 
+def _stored_build():
+    """The build the user last recorded with `qa-mem stale`, or None. Read-only: never creates the DB."""
+    p = core.db_path()
+    if not p.is_file():
+        return None
+    try:
+        con = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            row = con.execute("SELECT value FROM meta WHERE key='build'").fetchone()
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return None
+    build = core.norm_build(row[0]) if row else core.UNKNOWN
+    return None if build == core.UNKNOWN else build
+
+
 def _read_build(cfg, hosts, env):
-    """The build per config buildSource (selector, url or header), or core.UNKNOWN."""
+    """The build per config buildSource (selector, url or header), or core.UNKNOWN. With no buildSource, the build
+    recorded by `qa-mem stale`; with one, only the live read, so a broken buildSource isn't hidden by an old build."""
     bs = cfg.get("buildSource") if isinstance(cfg.get("buildSource"), dict) else {}
     btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
     bjs = None
@@ -588,7 +605,7 @@ def _read_build(cfg, hosts, env):
     elif btype == "header" and bval:
         bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
     if not bjs:
-        return core.UNKNOWN
+        return _stored_build() or core.UNKNOWN
     try:
         br = subprocess.run(
             ["playwright-cli", "-s=qa", "--raw", "eval", bjs],

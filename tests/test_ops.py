@@ -467,6 +467,31 @@ class PageStart(Base):
         )
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
 
+    def test_without_build_source_the_build_from_qa_mem_stale_is_used(self):  # no browser-readable build
+        cfg = {k: v for k, v in self.CFG.items() if k != "buildSource"}
+        self.config(**cfg)
+        signed_in = [done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}')]
+        db = Path(os.environ["QA_MEM_DB"])
+        code, out, _ = self.start(list(signed_in))
+        self.assertEqual((code, out["build"]), (0, "unknown"))
+        self.assertFalse(db.exists())  # reading the build never creates the DB
+        self.assertEqual(cli("stale", "2.14.0")[0], 0)
+        code, out, _ = self.start(list(signed_in))
+        self.assertEqual((code, out["build"]), (0, "2.14.0"))
+        with mock.patch.object(subprocess, "run", side_effect=[*signed_in, done(0)]):
+            code, out, _ = cli("session-check", "--build")
+        self.assertEqual(code, 0)
+        self.assertIn("build=2.14.0", out)
+
+    def test_a_configured_build_source_is_not_masked_by_the_stored_build(self):  # a broken buildSource stays visible
+        self.config(**self.CFG)
+        self.assertEqual(cli("stale", "2.14.0")[0], 0)
+        signed_in = [done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}')]
+        code, out, _ = self.start([*signed_in, done(0, out="1.43.0\n")])
+        self.assertEqual((code, out["build"]), (0, "1.43.0"))
+        code, out, _ = self.start([*signed_in, done(1, err="boom")])
+        self.assertEqual((code, out["build"]), (0, "unknown"))
+
     def test_sign_in_page_is_a_session_blocker_and_closes(self):
         self.config(**self.CFG)
         code, out, mrun = self.start(
