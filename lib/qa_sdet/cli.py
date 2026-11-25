@@ -62,7 +62,7 @@ def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
                    "annotate", "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
-                   "setup-permissions"):
+                   "setup-permissions", "spend"):
         return None
     from . import ops
     if cmd == "keys":
@@ -152,6 +152,13 @@ def wrapper_cmd(cmd, args):
             raise core.BadInput("usage: qa-mem next-action <run dir> <slug>")
         from . import report
         print(json.dumps(report.next_action(args[0], args[1])))
+    elif cmd == "spend":
+        o = _opts(args, valued=("--total-budget", "--total-minutes", "--budget", "--minutes", "--more-budget", "--more-minutes"))
+        if len(o["_"]) != 1:
+            raise core.BadInput("usage: qa-mem spend <run dir> [--total-budget N] [--total-minutes M] [--more-budget N] "
+                                "[--more-minutes M] [--budget N] [--minutes M]")
+        print(json.dumps(ops.spend(o["_"][0], *(_count(o, f"--{k}") for k in (
+            "total-budget", "total-minutes", "budget", "minutes", "more-budget", "more-minutes")))))
     elif cmd == "explore-next":
         o = _opts(args, valued=("--run",))
         if len(o["_"]) != 1:
@@ -239,7 +246,8 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
                 "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
                 "[--hypothesis '<why this page>'] [--max-turns N]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]", "signals-triage": "<run dir> --slug <slug>",
+    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]",
+    "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }

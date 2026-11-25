@@ -701,6 +701,78 @@ class Dispatch(Base):
         self.dispatch("/list?a=1", "--max-turns", "10")
         self.assertEqual(marker()["max_turns"], 10)
 
+    def spent(self, route, used, minutes_ago=0, budget=50):
+        """One explorer run to its teardown: dispatch (a marker with a budget), `used` commands, marker stop."""
+        out = self.dispatch(route, "--budget", str(budget))[1]
+        f = self.proj / "qa-out/.active"
+        m = json.loads(f.read_text())
+        f.write_text(json.dumps({**m, "used": used, "expires": m["expires"] - minutes_ago * 60}))
+        cli("marker", "stop", str(self.proj))
+        return out
+
+    def spend(self, *args):
+        code, out, err = cli("spend", str(self.run_dir), *args)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_a_marker_stop_keeps_what_the_explorer_spent_in_the_run_folder(self):
+        self.spent("/list?a=1", 37)
+        ledger = [json.loads(x) for x in (self.run_dir / ".data/spend.jsonl").read_text().splitlines()]
+        self.assertEqual([(x["slug"], x["used"]) for x in ledger], [("list", 37)])
+        self.assertFalse((self.proj / "qa-out/.active").exists())
+        cli("marker", "start", str(self.proj))  # a crawl has no run folder: nothing to record
+        cli("marker", "stop", str(self.proj))
+        (self.proj / "qa-out/.active").write_text("{oops")  # a broken marker is still removed
+        self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)
+        self.assertEqual(len((self.run_dir / ".data/spend.jsonl").read_text().splitlines()), 1)
+
+    def test_spend_reports_the_run_so_far_and_the_limits_for_the_next_page(self):
+        self.assertEqual({k: self.spend()[k] for k in ("pages", "commands_used", "exhausted", "budget", "minutes")},
+                         {"pages": 0, "commands_used": 0, "exhausted": False, "budget": 0, "minutes": 0})
+        self.spent("/list?a=1", 37)
+        self.spent("/list?a=2", 20)
+        got = self.spend()
+        self.assertEqual((got["pages"], got["commands_used"], got["commands_left"], got["exhausted"]), (2, 57, None, False))
+        got = self.spend("--total-budget", "100")
+        self.assertEqual((got["commands_left"], got["budget"], got["exhausted"]), (43, 43, False))  # the next page can't pass it
+        got = self.spend("--total-budget", "100", "--budget", "30")
+        self.assertEqual(got["budget"], 30)  # the per-page limit still applies when it is the smaller
+        got = self.spend("--total-budget", "60")
+        self.assertEqual((got["commands_left"], got["exhausted"]), (3, True))  # too few left for a page to do anything
+        self.assertIn("60", got["why"])
+        got = self.spend("--more-budget", "120")  # counted from now: what the extra pages may spend
+        self.assertEqual((got["commands_left"], got["budget"]), (120, 120))
+        got = self.spend("--total-budget", "500", "--more-budget", "120")
+        self.assertEqual(got["commands_left"], 120)  # the stricter of the two
+
+    def test_spend_counts_minutes_from_the_first_page_and_caps_them(self):
+        self.spent("/list?a=1", 10, minutes_ago=12)
+        got = self.spend("--total-minutes", "30", "--minutes", "20")
+        self.assertGreaterEqual(got["minutes_used"], 11)
+        self.assertLessEqual(got["minutes_used"], 13)
+        self.assertEqual((got["minutes"], got["exhausted"]), (min(20, got["minutes_left"]), False))
+        self.assertLessEqual(got["minutes"], 19)
+        got = self.spend("--total-minutes", "13")
+        self.assertTrue(got["exhausted"])
+        got = self.spend("--more-minutes", "20")
+        self.assertEqual(got["minutes_left"], 20)
+
+    def test_spend_input_is_checked(self):
+        for argv in (("spend",), ("spend", str(self.t / "nope")), ("spend", str(self.run_dir), "--total-budget", "-1"),
+                     ("spend", str(self.run_dir), "--total-budget", "x"), ("spend", str(self.run_dir), "--bogus", "1")):
+            self.assertEqual(cli(*argv)[0], 2, argv)
+
+    def test_a_ledger_line_with_a_wrong_type_or_a_planted_link_is_ignored(self):
+        self.spent("/list?a=1", 10)
+        ledger = self.run_dir / ".data/spend.jsonl"
+        ledger.write_text(ledger.read_text() + '{oops\n{"slug": "x", "used": "many", "started": "never"}\n[1]\n')
+        self.assertEqual(self.spend()["commands_used"], 10)
+        ledger.unlink()
+        (self.t / "victim").write_text("keep")
+        ledger.symlink_to(self.t / "victim")
+        self.spent("/list?a=2", 5)  # marker stop must not write through the link
+        self.assertEqual((self.t / "victim").read_text(), "keep")
+
     def test_routes_with_one_slug_get_their_own_and_a_route_keeps_its_slug(self):
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")
         self.assertEqual(self.dispatch("/list?a=2", "--focus", "ties")[1]["slug"], "list-2")

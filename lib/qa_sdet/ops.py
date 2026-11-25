@@ -242,8 +242,68 @@ def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults
     return {"slug": slug, "target": target, "brief": str(brief), "mode": mode, "case_count": len(cases)}
 
 
+SPEND_LEDGER = "spend.jsonl"
+MIN_PAGE_COMMANDS, MIN_PAGE_MINUTES = 10, 2  # a page with less than this left can't do its checks and its step 9
+
+
+def _note_spend(root):
+    """Append the stopping explorer's spend (browser commands used: kept only for a run with a budget; start and end
+    times) to <its run folder>/.data/spend.jsonl, which `qa-mem spend` totals. Best effort; never through a link."""
+    try:
+        m = json.loads((root / ".active").read_text())
+        data = Path(m["run_dir"]) / ".data"
+        line = {"slug": str(m["slug"]), "used": int(float(m.get("used") or 0)), "budget": int(float(m.get("budget") or 0)),
+                "started": int(float(m["expires"]) - MARKER_HOURS * 3600), "ended": int(time.time())}
+        if data.is_dir() and data.parent.parent == root:
+            fd = os.open(data / SPEND_LEDGER, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(line) + "\n")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        pass
+
+
+def spend(run_dir, total_budget=0, total_minutes=0, budget=0, minutes=0, more_budget=0, more_minutes=0, now=None):
+    """What the run's explorers spent so far (from marker stops) and what the next page may: {pages, commands_used,
+    minutes_used (from the first page's start), commands_left, minutes_left (None without a cap), budget, minutes (the
+    limits to dispatch the next page with: its own, or what is left of the caps, whichever is less; 0 = none), exhausted,
+    why}. total_*: caps on the whole run; more_*: caps on what is spent from now (the extra pages of --adaptive); both
+    given: the stricter. exhausted: less than MIN_PAGE_COMMANDS or MIN_PAGE_MINUTES left. Commands are counted only for
+    pages dispatched with a budget, so a run with a total budget gives every page one."""
+    data = Path(run_dir) / ".data"
+    if not data.is_dir():
+        raise core.BadInput(f"spend: not a run folder: {run_dir}")
+    rows = []
+    try:
+        fd = os.open(data / SPEND_LEDGER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as f:
+            lines = f.read(1 << 20).splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+            rows.append((max(int(r["used"]), 0), int(r["started"])))
+        except (ValueError, KeyError, TypeError, OverflowError):
+            continue
+    used = sum(u for u, _ in rows)
+    now = time.time() if now is None else now
+    mins = -(-max(int(now) - min(t for _, t in rows), 0) // 60) if rows else 0
+    caps = lambda total, more, so_far: min([c for c in (total, so_far + more if more else 0) if c] or [0])
+    cmd_cap, min_cap = caps(total_budget, more_budget, used), caps(total_minutes, more_minutes, mins)
+    cmd_left = cmd_cap - used if cmd_cap else None
+    min_left = min_cap - mins if min_cap else None
+    why = [f"{left} of {cap} {unit} left" for left, cap, unit, floor in (
+        (cmd_left, cmd_cap, "browser commands", MIN_PAGE_COMMANDS), (min_left, min_cap, "minutes", MIN_PAGE_MINUTES))
+        if left is not None and left < floor]
+    least = lambda own, left: min([x for x in (own, left) if x] or [0]) if left is None or left > 0 else 0
+    return {"pages": len(rows), "commands_used": used, "minutes_used": mins, "commands_left": cmd_left, "minutes_left": min_left,
+            "budget": least(budget, cmd_left), "minutes": least(minutes, min_left), "exhausted": bool(why),
+            "why": ("the run's total is nearly used up: " + "; ".join(why)) if why else ""}
+
+
 def marker_stop(project):
     root = _project(project) / "qa-out"
+    _note_spend(root)
     for name in (".active", ".active.lock", ".active.warned", ".active.progress"):
         (root / name).unlink(missing_ok=True)
 

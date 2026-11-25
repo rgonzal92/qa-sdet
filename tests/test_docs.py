@@ -460,6 +460,17 @@ class Docs(unittest.TestCase):
         self.assertIn("expand_recommended", text("README.md"))
         self.assertIn('"expand_recommended"', text("lib/qa_sdet/report.py"))
 
+    def test_run_wide_caps_reach_the_cli_the_skill_the_setup_and_the_readme(self):
+        for flag in ("--total-budget", "--total-minutes"):
+            for doc in ("README.md", "skills/qa-explore/SKILL.md", "references/run-setup.md"):
+                self.assertIn(flag, text(doc), f"{doc}: {flag}")
+            self.assertIn(flag, cli.COMMANDS["spend"])
+        self.assertIn("qa-mem spend", text("skills/qa-explore/SKILL.md"))
+        self.assertIn("--more-budget 120 --more-minutes 20", text("skills/qa-explore/SKILL.md"))
+        self.assertIn("--more-budget 120 --more-minutes 20", text("references/run-setup.md"))  # the ceiling the docs state
+        self.assertIn("spend.jsonl", text("references/run-setup.md"))
+        self.assertIn(ops.SPEND_LEDGER, text("README.md") + text("references/run-setup.md"))
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
