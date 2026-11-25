@@ -805,10 +805,39 @@ def triage_signals(run_dir, slug, run, hosts=None):
     return {"app": [(key, n, index) for key, (what, n, index) in found.items() if not explained(what)], "third_party": third}
 
 
-def _signals(run_dir, name, run, hosts=None):
-    """([(signal, count)], third-party count) of run file `name` (triage_signals)."""
+def _signal_baseline():
+    """{(page, kind, key): (status, runs seen, first run)} from the memory DB, opened read-only; {} without one (the
+    report renders without a DB too)."""
+    import sqlite3
+    p = core.db_path()
+    if not p.is_file():
+        return {}
+    try:
+        con = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            return {(r[0], r[1], r[2]): (r[3], r[4], r[5]) for r in
+                    con.execute("SELECT page, kind, sig_key, status, seen_runs, first_run FROM signals")}
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+
+
+def _signals(run_dir, name, run, hosts=None, baseline=None):
+    """([(signal, count)], third-party count) of run file `name` (triage_signals). With the memory's baseline: a signal
+    the user ignored is left out, one first seen in this run is marked [NEW], one seen before says in how many runs."""
+    from . import memory
     t = triage_signals(run_dir, name[len("run-"):-len(".json")], run, hosts)
-    return [(key, n) for key, n, _ in t["app"]], t["third_party"]
+    target = str(run.get("target") or "")
+    page = core.norm_route(target) if target.startswith(("/", "http", "#")) else "*"
+    out = []
+    for key, n, _ in t["app"]:
+        status, runs, first = (baseline or {}).get((page, *(memory.signal_key(key) or ("", ""))), (None, 0, None))
+        if status == "IGNORED":
+            continue
+        out.append(("[NEW] " + key if first is not None and first == str(run.get("run_id"))
+                    else key + (f" (seen in {runs} runs)" if runs >= 2 else ""), n))
+    return out, t["third_party"]
 
 
 # ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
@@ -1026,7 +1055,8 @@ def render_report_parts(run_dir, cfg=None):
             action += [f"### Test data left in the app ({len(left)})"] + [
                 f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left] + [""]
         hosts = core.allowed_hosts(cfg)
-        triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts)) for name, r in runs]
+        baseline = _signal_baseline()
+        triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
         signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
         third = sum(n for _, (_, n) in triaged)
         if signals:

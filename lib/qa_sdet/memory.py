@@ -256,6 +256,59 @@ def _store_questions(con, items, page, ts, ticket=None):
                     (page, tk, text, "resolved" if resolved else "open", answer, ts, ts))
 
 
+SIGNALS_PER_PAGE = 100
+
+
+def signal_key(key):
+    """(kind, key) of a triage signal as the baseline keeps it: request ids and console numbers made generic, so one error
+    seen on record 7 and record 12 is one row; None for a request loop (a per-visit count)."""
+    if key.startswith("console: "):
+        return "console", "console: " + re.sub(r"\d+", "N", key[len("console: "):])[:200]
+    m = re.fullmatch(r"([A-Z]+) (\S+) → (\S+).*", key)
+    return ("request", f"{m.group(1)} {core._ids(m.group(2)) or m.group(2)} {m.group(3)}") if m and "×" not in key else None
+
+
+def _store_signals(con, run, f, ts):
+    """Upsert the unexplained app signals of run file f (.data/run-<slug>.json) for its page."""
+    from . import report
+    slug = f.name[len("run-"):-len(".json")]
+    if not any((f.parent / f"{k}-{slug}.log").is_file() for k in ("requests", "console")):
+        return
+    target = str(run.get("target") or "")
+    page = core.norm_route(target) if target.startswith(("/", "http", "#")) else "*"
+    rid, build = str(run.get("run_id")), core.norm_build(core.txt(run.get("build"), "build"))
+    with con:
+        for key, _, _ in report.triage_signals(f.parent.parent, slug, run)["app"]:
+            ks = signal_key(key)
+            if ks:
+                con.execute("INSERT INTO signals(page,kind,sig_key,sample,first_build,last_build,first_seen,last_seen,"
+                            "first_run,last_run) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(page,kind,sig_key) DO UPDATE SET "
+                            "seen_runs=seen_runs + (last_run IS NOT excluded.last_run), last_run=excluded.last_run, "
+                            "last_build=excluded.last_build, last_seen=max(last_seen, excluded.last_seen), sample=excluded.sample",
+                            (page, ks[0], ks[1], core.cap(key)[:300], build, build, ts, ts, rid, rid))
+        con.execute("DELETE FROM signals WHERE page=? AND status='ACTIVE' AND id NOT IN (SELECT id FROM signals WHERE "
+                    "page=? ORDER BY last_seen DESC LIMIT ?)", (page, page, SIGNALS_PER_PAGE))  # IGNORED ones stay
+
+
+def signals(con, route=None, status="ACTIVE"):
+    where, args = [], []
+    if route:
+        where.append("page=?")
+        args.append(core.norm_route(route))
+    if status != "ALL":
+        where.append("status=?")
+        args.append(status)
+    rows = con.execute("SELECT * FROM signals" + (" WHERE " + " AND ".join(where) if where else "")
+                       + " ORDER BY seen_runs DESC, last_seen DESC LIMIT 50", args).fetchall()
+    return "\n".join(f"#{x['id']} [{x['status']}] {x['page']} {x['sig_key']} (seen in {x['seen_runs']} run(s), builds "
+                     f"{x['first_build']}..{x['last_build']})" for x in rows) or "no signals"
+
+
+def set_signal(con, sid, status):
+    with con:
+        return con.execute("UPDATE signals SET status=? WHERE id=?", (status, sid)).rowcount == 1
+
+
 def ingest_plan(con, plan, ts):
     """A plan.json's questions (plans hold no facts or bugs). App-wide ('*'), tagged with their ticket."""
     if isinstance(plan, dict):
@@ -430,7 +483,12 @@ def _ingest_files(con, pending):
                 dropped = codemap.apply_codemap(con, cm, codemap.load_scan(cm, f), ts)
                 note = f"dropped rows: {dropped}\n" if dropped else ""
             else:
-                ingest(con, scrub.redact_json(json.loads(data)), ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped
+                doc = scrub.redact_json(json.loads(data))
+                ingest(con, doc, ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped
+                try:  # the run's browser signals no bug explains: a baseline across runs (never parks the run)
+                    _store_signals(con, doc, f, ts)
+                except (OSError, ValueError, sqlite3.DatabaseError) as e:
+                    print(f"qa-mem: signals of {f.name} not kept: {e}", file=sys.stderr)
             core._write(done, f"{digest}\n{core.now()}\n{note}")
             err.unlink(missing_ok=True)
             n += 1
@@ -545,6 +603,11 @@ def card(con, q, focus=None, ids=False):
     if shared:
         out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
             + [_bug_line(x, True, 60) + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "") for x in shared]
+    noisy = con.execute("SELECT sig_key, seen_runs, first_build FROM signals WHERE page=? AND status='ACTIVE' AND "
+                        "seen_runs >= 2 ORDER BY seen_runs DESC, last_seen DESC LIMIT 3", (r,)).fetchall()
+    if noisy:
+        out += ["RECURRING UNEXPLAINED SIGNALS (no bug explains them; investigate or draft; the user can ignore noise):"] + [
+            f"- {x['sig_key']} (seen in {x['seen_runs']} runs since build {x['first_build']})" for x in noisy]
     recurring = _patterns(con)[:3]
     if recurring:
         out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [_pattern_line(g) for g in recurring]

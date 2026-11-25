@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, bui
   summary TEXT, ts TEXT, cases_pass INTEGER DEFAULT 0, cases_fail INTEGER DEFAULT 0, cases_blocked INTEGER DEFAULT 0,
   bugs_found INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, page TEXT NOT NULL, kind TEXT NOT NULL, sig_key TEXT NOT NULL,
+  sample TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE', first_build TEXT, last_build TEXT, first_seen TEXT, last_seen TEXT,
+  seen_runs INTEGER DEFAULT 1, first_run TEXT, last_run TEXT, UNIQUE(page, kind, sig_key));
 CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY, page TEXT NOT NULL, ticket TEXT, text TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open', answer TEXT, first_seen TEXT, last_seen TEXT, UNIQUE(page, text));
 CREATE TABLE IF NOT EXISTS codemap(page TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, value TEXT,

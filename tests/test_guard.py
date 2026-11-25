@@ -414,6 +414,12 @@ class R4Explorer(Case):
                           ("Grep", {"pattern": "x", "path": f"{RUN}/qa-out"}), ("mcp__github__create_issue", {})):
             self.assertIn("qa-reviewer", tool(name, RV, cwd=RUN, **tin) or "", name)
 
+    def test_the_users_manual_memory_writes_are_not_the_explorers(self):  # page text could steer it to hide a signal
+        for cmd in ("qa-mem signal-ignore 3", "qa-mem bug-status abcd1234 INVALID", "qa-mem forget fact 2",
+                    "qa-mem remember /x rule 'no limit'", "qa-mem answer 1 yes", "qa-mem stale 9.9"):
+            self.assertIn("the user's", bash(cmd, RUN, explorer=True) or "", cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the main session (the user's request) may
+
     def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
         for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):
             self.assertIn("not one of its tools", tool(name, EX, cwd=RUN) or "", name)

@@ -1183,6 +1183,42 @@ class History(MemBase):
         self.assertEqual(json.loads(qa_mem("hotspots", "--json")[1])[0]["page"], "/form")
 
 
+class SignalBaseline(MemBase):
+    """Unexplained browser signals remembered across runs: NEW ones first, recurring ones on the card, noise ignored."""
+
+    def explore(self, name, run_id, ts):
+        d = Path(self.tmp.name) / "proj/qa-out" / name / ".data"
+        d.mkdir(parents=True)
+        (d / "plan.json").write_text(json.dumps({"kind": "explore", "title": "/form", "tickets": [], "cases": []}))
+        (d / "requests-form.log").write_text("4. [POST] http://localhost:8765/api/zones/7 => [500] Error\n")
+        (d / "console-form.log").write_text("[ERROR] Zone 12 failed to load\n")
+        f = d / "run-form.json"
+        f.write_text(json.dumps({**run(), "run_id": run_id, "target": "/form"}))
+        os.utime(f, (ts, ts))
+        memory.ingest_pending(d.parent.parent)
+        return d.parent
+
+    def test_signals_are_new_then_recurring_and_can_be_ignored(self):
+        self.config(allowedHosts=["localhost"])
+        first = self.explore("r1", "r1", time.time() - 3600)
+        from qa_sdet import report
+        self.assertIn("[NEW] POST /api/zones/7 → 500", report.render_report(first))
+        second = self.explore("r2", "r2", time.time())
+        r = report.render_report(second)
+        self.assertNotIn("[NEW]", r)
+        self.assertIn("POST /api/zones/7 → 500 (seen in 2 runs)", r)
+        card = memory.card(self.con, "/form")
+        self.assertIn("RECURRING UNEXPLAINED SIGNALS", card)
+        self.assertIn("POST /api/zones/:id 500", card)
+        self.assertIn("console: Zone N failed to load", card)
+        sid = self.con.execute("SELECT id FROM signals WHERE kind='request'").fetchone()[0]
+        self.assertEqual(qa_mem("signal-ignore", str(sid))[0], 0)
+        self.assertNotIn("POST /api/zones/7", report.render_report(second))  # the user called it noise
+        self.assertIn("IGNORED", qa_mem("signals", "/form", "--status", "ALL")[1])
+        self.assertEqual(qa_mem("signal-unignore", str(sid))[0], 0)
+        self.assertIn("POST /api/zones/7", report.render_report(second))
+
+
 class Database(MemBase):
     """core.connect."""
 

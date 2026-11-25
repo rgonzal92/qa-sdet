@@ -171,7 +171,8 @@ def wrapper_cmd(cmd, args):
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
     "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
-    "patterns": "[--min-pages N] [--json]", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "patterns": "[--min-pages N] [--json]", "signals": "[route] [--status ACTIVE|IGNORED|ALL]",
+    "signal-ignore": "<id>", "signal-unignore": "<id>", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
@@ -383,6 +384,19 @@ def run_cmd(con, cmd, args):
         if o["_"]:
             return usage_error(cmd)
         print(memory.hotspots(con, _count(o, "--top") or 10, o.get("--json", False)))
+    elif cmd == "signals":
+        o = _opts(args, valued=("--status",))
+        status = str(o.get("--status") or "ACTIVE").upper()
+        if len(o["_"]) > 1 or status not in ("ACTIVE", "IGNORED", "ALL"):
+            return usage_error(cmd)
+        print(memory.signals(con, o["_"][0] if o["_"] else None, status))
+    elif cmd in ("signal-ignore", "signal-unignore"):
+        if len(args) != 1 or not args[0].lstrip("#").isdigit():
+            return usage_error(cmd)
+        if not memory.set_signal(con, int(args[0].lstrip("#")), "IGNORED" if cmd == "signal-ignore" else "ACTIVE"):
+            print(f"no signal #{args[0].lstrip('#')} (qa-mem signals lists them)")
+            return 1
+        print(f"signal #{args[0].lstrip('#')} " + ("ignored: reports leave it out" if cmd == "signal-ignore" else "active again"))
     elif cmd == "patterns":
         o = _opts(args, flags=("--json",), valued=("--min-pages",))
         if o["_"]:

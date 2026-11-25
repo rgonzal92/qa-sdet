@@ -45,6 +45,7 @@ PW_VALUE_OPTS = set("-s --session --browser --config --device --profile --idle-t
                     "--host --port --isolated-context --user-data-dir --type --filter --data --size --fps "
                     "--status --body --content-type --header --remove-header".split())  # route's: else they pass as the verb
 NAV_VERBS, FAULT_VERBS = {"goto", "open", "tab-new"}, {"route", "network-state-set"}
+MANUAL_WRITES = {"bug-status", "stale", "answer", "remember", "forget", "signal-ignore", "signal-unignore", "codemap-forget"}
 BUDGET_FREE = {"", "close", "close-all", "kill-all", "list", "state-save",  # always allowed so a run can finish
                "requests", "console"}  # read-only: the explorer saves the browser signals at its end (step 9)
 PW_SOURCE_OPTS = ("--config", "--extension", "--cdp", "--endpoint")  # a config file or someone else's browser
@@ -674,6 +675,8 @@ def check_acli(rest):
 def check_qamem(args, ctx):
     """qa-mem browser-open and page-start: allowedHosts only (only '--' words are browser-open's options), one command
     against the budget; qa-mem evidence: two (an eval and a screenshot)."""
+    if ctx.explorer and args[:1] and args[0] in MANUAL_WRITES:
+        return (f"qa-mem {args[0]} is the user's call (a manual memory write); put what you saw in the run JSON's notes")
     if args[:1] == ["evidence"]:
         ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 2, True, ctx.loop or ctx.loop_depth > 0
         return None
