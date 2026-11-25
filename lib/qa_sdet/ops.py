@@ -220,7 +220,7 @@ def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults
 
 def marker_stop(project):
     root = _project(project) / "qa-out"
-    for name in (".active", ".active.lock", ".active.warned"):
+    for name in (".active", ".active.lock", ".active.warned", ".active.stuck"):
         (root / name).unlink(missing_ok=True)
 
 

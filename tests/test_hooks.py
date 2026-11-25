@@ -157,6 +157,42 @@ class Hooks(Base):
         self.assertIn(f2.name, later.stderr)
         self.assertEqual(stop("Stop", "").returncode, 0)  # the main session isn't nagged on every turn
 
+    def written(self, rel, body, agent="qa-sdet:qa-explorer"):
+        f = self.proj / "qa-out/r" / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+        return self.post({"tool_name": "Write", "agent_type": agent, "cwd": str(self.proj),
+                          "tool_input": {"file_path": str(f), "content": body}},
+                         {"QA_MEM_DB": str(Path(self.tmp.name) / "hook.db")})
+
+    def test_a_broken_file_is_flagged_the_moment_it_is_written(self):
+        """While the browser and the context are still there, not after the explorer stopped."""
+        spec = "import { test } from '@playwright/test';\ntest.use({ baseURL: 'x', ...(process.env.STORAGE_STATE ? {} : {}) });\n"
+        self.assertIn("no expect(", self.written("repro/BUG-1.spec.ts", spec))
+        self.assertIn("## Steps", self.written("bugs/BUG-1.md", "# Title\n\n## Expected\nx — **Oracle:** AC-1\n"))
+        self.assertIn("facts", self.written(".data/run-form.json", json.dumps({"run_id": "r", "pages": [{"route": "/x", "facts": "oops"}]})))
+        self.assertIn("not valid JSON", self.written(".data/run-form.json", "{oops"))
+        plan = {"kind": "ticket", "tickets": [{"key": "P-1"}], "cases": [{"id": "TC-1", "title": "a"}, {"id": "TC-1", "title": "b"}]}
+        self.assertIn("repeats id TC-1", self.written(".data/plan.json", json.dumps(plan), agent=""))
+        good = dict(run(facts=[{"kind": "note", "text": "ok"}]))
+        self.assertEqual(self.written(".data/run-form.json", json.dumps(good)), "")
+
+    def test_a_stuck_explorer_is_told_once_to_change_approach(self):
+        import time
+        (self.proj / "qa-out").mkdir(exist_ok=True)
+        (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 3600}))
+        call = lambda cmd, failed=True: self.post({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
+                                                   "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
+                                                   "tool_input": {"command": cmd}, "error": "Exit code 1"})
+        click = "playwright-cli -s=qa click e5"
+        self.assertEqual((call(click), call(click)), ("", ""))
+        self.assertEqual(call("playwright-cli -s=qa snapshot", failed=False), "")  # a success in between: not stuck
+        self.assertEqual((call(click), call(click)), ("", ""))
+        note = call(click)
+        self.assertIn("click e5", note)
+        self.assertIn("find", note)
+        self.assertEqual(call(click), "")  # told once; it counts again from here
+
 
 if __name__ == "__main__":
     unittest.main()

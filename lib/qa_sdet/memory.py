@@ -37,6 +37,14 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
     """Upsert one run.json dict. ts = when the run finished (file mtime); run_dir = folder of the run.json;
     src = the file it came from (a rewrite of that file replaces its bugs).
     Raises ValueError on bad shape."""
+    rid, build, known, pages, bug_list = check_run(run)
+    ts = ts or core.now()
+    _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src)
+
+
+def check_run(run):
+    """(run id, build, build known, pages, bugs) of a run.json dict, routes normalised; ValueError on a bad shape. The
+    PostToolUse hook runs it when the explorer writes the file, ingest before storing it."""
     if not isinstance(run, dict):
         raise ValueError("run.json must be an object")
     rid = core.txt(run.get("run_id"), "run_id")
@@ -44,7 +52,7 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
         raise ValueError("run.json missing 'run_id'")
     # Same build text however the page laid it out ("Build:\n 1.42" == "Build: 1.42"); capped like all text.
     # An empty or missing build (empty version element) is unknown, not a broken run.
-    build, ts = core.norm_build(core.txt(run.get("build"), "build")), ts or core.now()
+    build = core.norm_build(core.txt(run.get("build"), "build"))
     known = build.lower() != core.UNKNOWN
     for f in ("mode", "target", "status", "summary"):
         core.txt(run.get(f), f)
@@ -68,6 +76,10 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
         b["route"] = core.norm_route(b.get("route"))
         if not core.cap(b.get("title")) or not b["route"]:
             raise ValueError("bug entry needs 'title' and 'route'")
+    return rid, build, known, pages, bug_list
+
+
+def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
     with con:
         con.execute("INSERT OR REPLACE INTO runs VALUES(?,?,?,?,?,?,?)",
                     (rid, core.cap(run.get("mode")) or None, core.cap(run.get("target")), build, core.cap(run.get("status")) or None,

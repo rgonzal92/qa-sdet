@@ -4,6 +4,9 @@
   only PostToolUseFailure.
 - A qa-mapper hears at once when the code map it just wrote can't be saved. At its stop it could be too late: a parallel
   mapper's stop hook may have read the file first.
+- A file written in a run folder is checked as it lands: a bug draft or repro spec (references/bug-draft.md), a run JSON
+  (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there.
+- An explorer whose same playwright-cli command failed 3 times in a row hears once to change approach.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
 import contextlib
 import io
@@ -15,6 +18,8 @@ import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CODE_MAP = re.compile(r"code-map-(frontend|backend|tests)(-\d+)?\.json")
+STUCK_AFTER = 3
+PW_CALL = re.compile(r"playwright-cli\s+(?:-s=\S+\s+)?(?:--raw\s+)?([\w-]+)(?:\s+(\S+))?")
 
 
 def role(data):
@@ -60,14 +65,94 @@ def code_map_feedback(data):
             "the whole file again; it is re-read automatically.")
 
 
+def _lib():
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
+
+
+def file_lint(data):
+    """Problems of a draft, spec, run JSON or plan.json just written into a run folder, as one note; else None."""
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    f = tin.get("file_path")
+    if not isinstance(f, str):
+        return None
+    from pathlib import Path
+    p = Path(str(data.get("cwd") or os.getcwd()), f)
+    where, name = p.parent.name, p.name
+    kind = ("draft" if where == "bugs" and re.fullmatch(r"BUG-\d+\.md", name) else
+            "spec" if where == "repro" and re.fullmatch(r"BUG-\d+\.spec\.ts", name) else
+            "run" if where == ".data" and re.fullmatch(r"run-.+\.json", name) else
+            "plan" if where == ".data" and name == "plan.json" else None)
+    if not kind or p.parent.parent.parent.name != "qa-out":
+        return None
+    try:
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return None
+    _lib()
+    from qa_sdet import memory, report
+    if kind in ("draft", "spec"):
+        problems = [t for _, t in (report.draft_issues(text) if kind == "draft" else report.spec_issues(text))]
+        rules = os.path.join(os.path.dirname(HERE), "references", "bug-draft.md")
+        return (f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
+                if problems else None)
+    try:
+        doc = json.loads(text)
+    except (ValueError, RecursionError) as e:
+        return f"qa-sdet: {name} is not valid JSON ({e}); Write the whole file again."
+    if kind == "run":
+        try:
+            memory.check_run(doc)
+        except ValueError as e:
+            rules = os.path.join(os.path.dirname(HERE), "references", "run-json.md")
+            return f"qa-sdet: memory can't save {name}: {e}. Fix that field (rules: {rules}) and Write the whole file again."
+        return None
+    warnings = []
+    report.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
+    return f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
+
+
+def stuck(data):
+    """A one-time hint when the explorer's same playwright-cli command failed STUCK_AFTER times in a row."""
+    sys.path.insert(0, HERE)
+    import guard
+    path, m = guard.read_marker(guard._cwd(data))
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    call = PW_CALL.search(str(tin.get("command") or ""))
+    if not path:
+        return None
+    state = path.with_name(".active.stuck")
+    try:
+        seen = json.loads(state.read_text())
+        fails = seen["fails"] if seen.get("expires") == m.get("expires") and isinstance(seen.get("fails"), list) else []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        fails = []
+    sig = " ".join(x for x in call.groups() if x) if call else None
+    failed = data.get("hook_event_name") == "PostToolUseFailure"
+    fails = (fails + [sig] if fails[-1:] in ([sig], []) else [sig]) if failed and sig else []
+    note = None
+    if len(fails) >= STUCK_AFTER:
+        note = (f"qa-sdet: `{sig}` failed {len(fails)} times in a row. Change approach: take a fresh `snapshot` or "
+                "`find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark the case BLOCKED "
+                "with why and go on.")
+        fails = []
+    try:  # not through a planted link
+        with os.fdopen(os.open(state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as f:
+            json.dump({"expires": m.get("expires"), "fails": fails}, f)
+    except OSError:
+        pass
+    return note
+
+
 def main():
     try:
         data = json.load(sys.stdin)
         note = None
         if isinstance(data, dict) and data.get("tool_name") == "Bash" and role(data) in ("qa-explorer", "qa-crawler"):
-            note = wind_down(data)
+            note = " ".join(x for x in (stuck(data), wind_down(data)) if x) or None
         elif isinstance(data, dict) and data.get("tool_name") == "Write" and role(data) == "qa-mapper":
             note = code_map_feedback(data)
+        elif isinstance(data, dict) and data.get("tool_name") == "Write":
+            note = file_lint(data)
         if note:
             event = "PostToolUseFailure" if data.get("hook_event_name") == "PostToolUseFailure" else "PostToolUse"
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": note}}))
