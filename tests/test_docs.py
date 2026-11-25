@@ -332,5 +332,11 @@ class Docs(unittest.TestCase):
         for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
             self.assertIn(marker, crawler)
 
+    def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
+        from qa_sdet import report
+        tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
+        body = tmpl + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
+        self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
+
 if __name__ == "__main__":
     unittest.main()

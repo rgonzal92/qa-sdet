@@ -33,10 +33,17 @@ Per CONFIRMED or SUSPECTED bug write `<out>/bugs/BUG-<n>.md`, `<out>/repro/BUG-<
 - Video: BUG-<n>.webm (../evidence/BUG-<n>.webm), the clean-state repro (SUSPECTED: the attempt that didn't show it)
 - Network: `<METHOD> <path>` → <status> (redacted)
 - Console: <message>
-- Repro spec: BUG-<n>.spec.ts (../repro/BUG-<n>.spec.ts); run it with `BASE_URL=<qaBaseUrl> npx playwright test BUG-<n>.spec.ts`
+- Repro spec: BUG-<n>.spec.ts (../repro/BUG-<n>.spec.ts); run it with `BASE_URL=<qaBaseUrl> STORAGE_STATE=<a signed-in storage state file> npx playwright test BUG-<n>.spec.ts` (STORAGE_STATE only when the app needs a sign-in)
+- API repro (only for a bug in an API call: a 4xx/5xx, or the server accepting what it must refuse): `curl -s -X <METHOD> '<qaBaseUrl><path>' -H 'Content-Type: application/json' -H 'Authorization: <TOKEN>' -d '<the request body, secrets and personal data replaced>'`, with `<TOKEN>` as written, never a real value
 
 ## Notes
 <possible cause, clearly a hypothesis; related pages>
 ```
 
-Repro spec: the recorded code with locators from the card or `generate-locator` (role, label, test id). First line after the import: `test.use({ baseURL: process.env.BASE_URL ?? '<qaBaseUrl>' });`. Use a relative `page.goto('<path>')` with the concrete path you visited (`/incidents/4521`, not `/incidents/:id`). End with an assertion of the **expected** behaviour, so the spec fails while the bug exists.
+Repro spec: the recorded code with locators from the card or `generate-locator` (role, label, test id). First lines:
+```ts
+import { test, expect } from '@playwright/test';
+test.use({ baseURL: process.env.BASE_URL ?? '<qaBaseUrl>',
+  ...(process.env.STORAGE_STATE ? { storageState: process.env.STORAGE_STATE } : {}) });
+```
+Use a relative `page.goto('<path>')` with the concrete path you visited (`/incidents/4521`, not `/incidents/:id`), and wait for elements, not `waitForTimeout`. A bug on a `qa-sdet-` record you created (step 9 deletes it): start on its create or list page and create a new `qa-sdet-` record in the spec, never `goto` the deleted record's path. End with an assertion (`expect(`) of the **expected** behaviour, so the spec fails while the bug exists. `qa-mem audit-bugs` checks drafts and specs against this file.

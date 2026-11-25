@@ -272,8 +272,8 @@ class Report(Base):
         self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | ✅ PASS | Saved | — |", r)
         self.assertIn("| TC-2 |  | AC-2 | Reject 131 | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) | — |", r)
         self.assertIn("| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | PROJ-1 | "
-                      "[image](evidence/BUG-1.png) |", r)
-        self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | PROJ-2 | — |", r)
+                      "[image](evidence/BUG-1.png) · ⚠", r)
+        self.assertIn("| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | PROJ-2 | ⚠ no repro spec", r)
         self.assertIn("### Open questions (2)\n- Is 0 a valid speed? _(from /form)_\n"
                       "- TC-4: Order of ties unspecified _(from /list)_", r)
         self.assertIn("<details><summary>Other (1)</summary>\n\n- Keyboard only: out of time", r)
@@ -327,7 +327,7 @@ class Report(Base):
         self.assertIn("## Summary\n**Status:** /form COMPLETED · 1 bug(s)", r)
         self.assertNotIn("Verdict", r)
         self.assertNotIn("| Ticket | Verdict", r)
-        self.assertIn("| BUG-1 | HIGH | CONFIRMED | Speed accepts 131 | /form |  | — |", r)  # no draft file: no link
+        self.assertIn("| BUG-1 | HIGH | CONFIRMED | Speed accepts 131 | /form |  | ⚠ no draft bugs/BUG-1.md", r)  # no link
         self.assertIn("## Exploration notes", r)
 
     def test_plan_kind(self):
@@ -631,9 +631,9 @@ class Layout(Rendering):
         (d / "evidence/BUG-2.webm").write_bytes(b"webm")
         (d / "evidence/BUG-3.webm").mkdir()
         r = report.render_report(d)
-        self.assertIn("| image and video | /f |  | [image](evidence/BUG-1.png) · [video](evidence/BUG-1.webm) |", r)
-        self.assertIn("| video only | /f |  | [video](evidence/BUG-2.webm) |", r)
-        self.assertIn("| folder named like a video | /f |  | — |", r)
+        self.assertIn("| image and video | /f |  | [image](evidence/BUG-1.png) · [video](evidence/BUG-1.webm) · ⚠", r)
+        self.assertIn("| video only | /f |  | [video](evidence/BUG-2.webm) · ⚠", r)
+        self.assertIn("| folder named like a video | /f |  | ⚠ no draft", r)  # no video link; the repro badge stays
 
     def test_odd_not_tested_shapes(self):  # a string listed its letters; a list category raised TypeError
         _, r = self.render_run([("form", {**RUN1, "not_tested": "keyboard"})])
@@ -1175,6 +1175,78 @@ class FilingBundle(Rendering):
         self.assertEqual(cli("ingest", str(d / ".data/run-form.json"))[:2], (0, "ingested\n"))  # what the hook stores
         code, out, _ = cli("bug-status", follow[0], "FILED", "PROJ-9")
         self.assertEqual((code, out.strip()), (0, f"updated {h} -> FILED (PROJ-9)"))
+
+
+GOOD_SPEC = """import { test, expect } from '@playwright/test';
+test.use({ baseURL: process.env.BASE_URL ?? 'https://qa.example',
+  ...(process.env.STORAGE_STATE ? { storageState: process.env.STORAGE_STATE } : {}) });
+test('speed above 130 is rejected', async ({ page }) => {
+  await page.goto('/form');
+  await page.getByLabel('Speed limit').fill('131');
+  await expect(page.getByRole('status')).toHaveText(/between 0 and 130/);
+});
+"""
+
+
+def good_draft(h, **change):
+    d = {"title": "# Speed accepts 131", "cls": "CONFIRMED", "repro": "2/2", "hash": h,
+         "step1": "1. Open https://qa.example/form", "oracle": " — **Oracle:** AC-2"}
+    d.update(change)
+    return (f"{d['title']}\n\n**Classification:** {d['cls']} · **Severity:** HIGH · **Route:** /form\n"
+            f"**Ticket:** PROJ-1 · **Repro:** {d['repro']} · **qa-mem hash:** {d['hash']}\n\n## Steps\n{d['step1']}\n2. Type 131\n\n"
+            f"## Expected\nAn error{d['oracle']}\n\n## Actual\nSaved\n\n## Impact\nWrong data.\n\n## Evidence\n- Screenshot\n")
+
+
+class AuditBugs(Rendering):
+    """`qa-mem audit-bugs <run>`: bug drafts and repro specs checked against references/bug-draft.md and the run JSON."""
+
+    H = core.bug_hash("/form", "131 saved")
+
+    def folder(self, draft, spec, png=True, name="2026-11-25-PROJ-1", **bug):
+        b = {"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved", "severity": "HIGH",
+             "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md", **bug}
+        d = self.rundir(name, plan=PLAN1_ANSWERED, runs=[("form", {**RUN1, "bugs": [b]})])
+        for path, body in (("bugs/BUG-1.md", draft), ("repro/BUG-1.spec.ts", spec)):
+            if body is not None:
+                (d / path).write_text(body)
+        if png:
+            (d / "evidence/BUG-1.png").write_bytes(b"png")
+        return d
+
+    def issues(self, d):
+        return [(crit, text) for crit, text in report.audit_bugs(d).get("BUG-1", [])]
+
+    def test_a_complete_draft_and_spec_pass_and_the_report_says_so(self):
+        d = self.folder(good_draft(self.H), GOOD_SPEC)
+        self.assertEqual(report.audit_bugs(d), {})
+        report.write_report(d)
+        self.assertIn("repro ✓", (d / "REPORT.md").read_text())
+
+    def test_what_makes_a_repro_useless_is_critical(self):
+        for n, (draft, spec, want) in enumerate(((good_draft(self.H), GOOD_SPEC.replace("await expect(", "await ("), "no expect("),
+                                                 (good_draft("0123456789ab"), GOOD_SPEC, "hash"),
+                                                 (good_draft(self.H), None, "no repro spec"),
+                                                 (None, GOOD_SPEC, "no draft"))):
+            d = self.folder(draft, spec, name=f"2026-11-25-case-{n}")
+            crit = [t for c, t in self.issues(d) if c]
+            self.assertTrue(any(want in t for t in crit), (want, self.issues(d)))
+            report.write_report(d)
+            self.assertIn("⚠", (d / "REPORT.md").read_text().split("### Bugs to file")[1].split("\n\n")[0])
+        code, out, _ = cli("audit-bugs", str(d))
+        self.assertEqual(code, 0)
+        self.assertIn("BUG-1", out)
+
+    def test_contract_warnings(self):
+        spec = GOOD_SPEC.replace("'/form'", "'/incidents/:id'").replace("...(process.env.STORAGE_STATE ? { storageState: "
+                                                                          "process.env.STORAGE_STATE } : {})", "") \
+            + "await page.waitForTimeout(500); await page.goto('https://qa.example/x');\n"
+        draft = good_draft(self.H, repro="1/2", step1="1. Open /form", oracle="", title="#")
+        warn = [t for c, t in self.issues(self.folder(draft, spec, png=False)) if not c]
+        for want in (":id", "waitForTimeout", "absolute URL", "STORAGE_STATE", "Step 1", "Oracle", "Repro 1/", "title",
+                     "evidence image"):
+            self.assertTrue(any(want in t for t in warn), (want, warn))
+        self.assertEqual(report.spec_issues(GOOD_SPEC), [])
+        self.assertEqual(report.draft_issues(good_draft(self.H)), [])
 
 
 if __name__ == "__main__":

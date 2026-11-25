@@ -536,6 +536,88 @@ def _draft_title(draft_path, fallback):
     return " ".join(str(fallback or "").split())
 
 
+def _stored_hash(b):
+    """The hash memory keeps the bug under: a re-sighting (a regression's draft) the hash it names, else one from its
+    route and symptom (as ingest: a blank symptom falls back to the title)."""
+    return core.given_hash(b.get("hash")) or core.bug_hash(
+        core.norm_route(b.get("route")),
+        core.cap(scrub.redact(core._s(b.get("symptom")))) or core.cap(scrub.redact(core._s(b.get("title")))))
+
+
+# references/bug-draft.md as checks: (critical, problem, test). Critical = the repro or the record is useless.
+SPEC_CHECKS = [
+    (True, "has no expect( assertion: it passes while the bug exists", lambda t: "expect(" not in t),
+    (False, "doesn't import @playwright/test", lambda t: "@playwright/test" not in t),
+    (False, "has no test.use({ baseURL", lambda t: not re.search(r"test\.use\(\s*\{[^;]*baseURL", t, re.S)),
+    (False, "has no STORAGE_STATE option (an app behind a sign-in needs one)", lambda t: "STORAGE_STATE" not in t),
+    (False, "opens a literal :id path (use the record's real path)", lambda t: re.search(r"goto\(\s*['\"`][^'\"`]*/:\w", t)),
+    (False, "opens an absolute URL (give the path: BASE_URL picks the host)", lambda t: re.search(r"goto\(\s*['\"`]https?://", t)),
+    (False, "waits with waitForTimeout (wait for the element instead)", lambda t: "waitForTimeout" in t),
+]
+DRAFT_SECTIONS = ("## Steps", "## Expected", "## Actual", "## Evidence")
+
+
+def spec_issues(text):
+    """[(critical, problem)] of a repro spec's text against references/bug-draft.md."""
+    return [(c, f"spec {p}") for c, p, f in SPEC_CHECKS if f(text)]
+
+
+def draft_issues(text):
+    """[(critical, problem)] of a bug draft's text against references/bug-draft.md (the hash is checked by audit_bugs)."""
+    out = [] if re.match(r"#[ \t]+\S", text) else [(False, "draft has no '# <title>' first line")]
+    out += [(False, f"draft has no {h} section") for h in DRAFT_SECTIONS if not re.search(rf"^{re.escape(h)}\b", text, re.M)]
+    if "**Oracle:**" not in text:
+        out.append((False, "draft names no **Oracle:** (AC, rule or invariant) for the expected result"))
+    step1 = re.search(r"^1\.\s+(.*)$", text.split("## Steps", 1)[1], re.M) if "## Steps" in text else None
+    if step1 and not re.search(r"https?://", step1.group(1)):
+        out.append((False, "draft Step 1 doesn't open the full URL"))
+    if re.search(r"\*\*Classification:\*\*\s*CONFIRMED", text) and re.search(r"\*\*Repro:\*\*\s*1/", text):
+        out.append((False, "draft says CONFIRMED with Repro 1/…: one hit is SUSPECTED"))
+    return out
+
+
+def audit_bugs(run_dir):
+    """{BUG-n: [(critical, problem)]} for the run's CONFIRMED and SUSPECTED bugs: draft and repro spec present and per
+    references/bug-draft.md, the draft's hash the one memory stores, an evidence image. Bugs with no problem are left out."""
+    run_dir = Path(run_dir)
+    out = {}
+    for b in run_bugs(load_run(run_dir)["runs"]):
+        bid = b.get("id")
+        if not bid or _first_word(b.get("classification")) not in ("confirmed", "suspected"):
+            continue
+        draft, spec, issues = run_dir / "bugs" / f"{bid}.md", run_dir / "repro" / f"{bid}.spec.ts", []
+        if not draft.is_file():
+            issues.append((True, f"no draft bugs/{bid}.md"))
+        else:
+            text = _text(draft)
+            issues += draft_issues(text)
+            m = re.search(r"\*\*qa-mem hash:\*\*\s*`?([0-9a-fA-F]{4,12})\b", text)
+            want = _stored_hash(b)
+            if not m:
+                issues.append((False, "draft has no **qa-mem hash:** line"))
+            elif not (want.startswith(m.group(1).lower()) or m.group(1).lower().startswith(want)):
+                issues.append((True, f"draft hash {m.group(1)} is not the bug's ({want}): `qa-mem bug-status` would miss it"))
+        if not spec.is_file():
+            issues.append((True, f"no repro spec repro/{bid}.spec.ts"))
+        else:
+            issues += spec_issues(_text(spec))
+        if not (run_dir / "evidence" / f"{bid}.png").is_file():
+            issues.append((False, f"no evidence image evidence/{bid}.png"))
+        if issues:
+            out[bid] = sorted(issues, key=lambda x: not x[0])
+    return out
+
+
+def _repro_badge(bid, b, audit):
+    """'repro ✓' or '⚠ <worst problem> (+n)' for a CONFIRMED or SUSPECTED draft; '' otherwise."""
+    if not bid or _first_word(b.get("classification")) not in ("confirmed", "suspected"):
+        return ""
+    issues = audit.get(bid, [])
+    if not issues:
+        return "repro ✓"
+    return f"⚠ {issues[0][1]}" + (f" (+{len(issues) - 1}: qa-mem audit-bugs)" if len(issues) > 1 else "")
+
+
 def _filing_block(bugs, cases, tickets, run_dir, cfg):
     """Folded shell-safe filing commands, existing attachments and bug-status follow-ups for CONFIRMED bug drafts."""
     run_dir = Path(run_dir).resolve()
@@ -553,10 +635,7 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
         title = _draft_title(draft, b.get("title") or bid)
         cmd = (f"acli jira workitem create --project {shlex.quote(proj)} --type Bug "
                f"--summary {shlex.quote(title)} --description-file {shlex.quote(str(draft))}")
-        # a re-sighting (a regression's draft) is stored under the hash it names, not one of its new wording
-        h = core.given_hash(b.get("hash")) or \
-            core.bug_hash(core.norm_route(b.get("route")),  # as ingest: a blank symptom falls back to the title
-                          core.cap(scrub.redact(core._s(b.get("symptom")))) or core.cap(scrub.redact(core._s(b.get("title")))))
+        h = _stored_hash(b)
         attachments = [p for p in (run_dir / "evidence" / f"{bid}.png", run_dir / "evidence" / f"{bid}.webm",
                                    run_dir / "repro" / f"{bid}.spec.ts") if p.is_file()]
         block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", "", "```sh", cmd,
@@ -571,7 +650,7 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
             *entries, "</details>"]
 
 
-def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None):
+def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None, audit=None):
     out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
@@ -584,7 +663,8 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
         image = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else ""
         webm = Path(run_dir) / "evidence" / f"{bid}.webm"  # the video of the clean-state repro
         video = f"[video](evidence/{quote(webm.name)})" if bid and webm.is_file() else ""
-        evidence = " · ".join(x for x in (image, video) if x) or "—"
+        badge = cell(_repro_badge(bid, b, audit or {}))
+        evidence = " · ".join(x for x in (image, video, badge) if x) or "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), core.short(b.get("title"), 120), b.get("route"),
                        ", ".join(owners), Raw(evidence)))
@@ -851,7 +931,8 @@ def render_report_parts(run_dir, cfg=None):
     if runs:
         action = []
         if bugs:
-            action += _bug_section(bugs, cases, keys, run_dir, heading=f"### Bugs to file ({len(bugs)})", cfg=cfg) + [""]
+            action += _bug_section(bugs, cases, keys, run_dir, heading=f"### Bugs to file ({len(bugs)})", cfg=cfg,
+                                   audit=audit_bugs(run_dir)) + [""]
         # a draft whose run file a later one replaced (--resume): still shown, but no verdict counts it
         listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
         orphans = sorted((p for p in (run_dir / "bugs").glob("BUG-*.md")

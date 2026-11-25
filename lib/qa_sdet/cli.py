@@ -60,7 +60,7 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
-                   "evidence", "report", "plan-find", "setup-permissions"):
+                   "evidence", "report", "audit-bugs", "plan-find", "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -120,6 +120,13 @@ def wrapper_cmd(cmd, args):
             raise core.BadInput("usage: qa-mem report <run dir>")
         from . import report
         print(report.write_report(args[0]))
+    elif cmd == "audit-bugs":
+        if len(args) != 1 or not Path(args[0]).is_dir():
+            raise core.BadInput("usage: qa-mem audit-bugs <run dir>")
+        from . import report
+        found = report.audit_bugs(args[0])
+        print("\n".join(f"{bid}: {'CRITICAL ' if crit else ''}{text}" for bid, issues in found.items() for crit, text in issues)
+              or "bug drafts and repro specs: nothing to fix")
     elif cmd == "plan-find":
         from . import report
         o = _opts(args, valued=("--keys", "--run"))
@@ -159,7 +166,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
+    "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }
