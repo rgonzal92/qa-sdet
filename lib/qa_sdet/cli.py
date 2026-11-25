@@ -14,6 +14,7 @@ import json
 import os
 import re
 import select
+import shlex
 import sqlite3
 import sys
 import time
@@ -153,15 +154,16 @@ def wrapper_cmd(cmd, args):
                   ("other", "OTHER (request loops, console errors)"))
         lines = [f"- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
         sev = [report.signal_severity(key) for key, _, _ in t["app"]]
-        print(("APP SIGNALS NO BUG EXPLAINS YET (while the browser is open: `playwright-cli -s=qa response-body <#>`; a "
-               "real failure is a bug, a known one goes in notes by method and path):\n"
+        print(("APP SIGNALS NO BUG EXPLAINS YET (while the browser is open, read a body with `playwright-cli -s=qa response-body "
+               f"<#> | qa-mem body-check {shlex.quote(o['_'][0])} --slug {o['--slug']} <#>`; a real failure is a bug, a known one goes in notes by "
+               "method and path):\n"
                + "\n".join(f"{title}:\n" + "\n".join(l for l, v in zip(lines, sev) if v == kind)
                            for kind, title in groups if kind in sev))
               if lines else "no unexplained app signals")
         if t["suspect_200"]:
             slug, d = o["--slug"], o["_"][0]
             print("SUSPECT 200 (a 200 can still be a failure the log can't show; read each body once, while the browser is "
-                  f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check '{d}' --slug {slug} <#>`):\n"
+                  f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check {shlex.quote(d)} --slug {slug} <#>`):\n"
                   + "\n".join(f"- #{i} {call}" for call, i in t["suspect_200"]))
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
