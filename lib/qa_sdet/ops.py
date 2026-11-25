@@ -301,9 +301,75 @@ def spend(run_dir, total_budget=0, total_minutes=0, budget=0, minutes=0, more_bu
             "why": ("the run's total is nearly used up: " + "; ".join(why)) if why else ""}
 
 
+def _log_run_summary(root):
+    """Emit a 1-line run_summary event to <root>/plugin-log.jsonl before marker_stop clears .active/.active.progress."""
+    try:
+        m = json.loads((root / ".active").read_text())
+        if not isinstance(m, dict) or not (m.get("run_dir") and m.get("slug")):
+            return
+        rdir = Path(m["run_dir"])
+        if rdir.parent != root:
+            return
+        slug = str(m["slug"])
+        turns = 0
+        try:
+            fd = os.open(root / ".active.progress", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as fh:
+                for raw in fh.read(1 << 20).decode("utf-8", "replace").splitlines():
+                    try:
+                        r = json.loads(raw)
+                        if isinstance(r, dict) and r.get("e") == m.get("expires") and r.get("t") != "n":
+                            turns += 1
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
+        started = float(m.get("expires") or 0) - MARKER_HOURS * 3600
+        fields = {
+            "run": rdir.name, "slug": slug,
+            "commands": int(float(m.get("used") or 0)), "budget": int(float(m.get("budget") or 0)),
+            "turns": turns, "duration_s": max(0, int(time.time() - started)) if started > 0 else 0,
+        }
+        run_file = rdir / ".data" / f"run-{slug}.json"
+        doc = None
+        try:
+            if run_file.is_file():
+                parsed = json.loads(run_file.read_text(encoding="utf-8-sig"))
+                if isinstance(parsed, dict):
+                    doc = parsed
+        except (OSError, ValueError):
+            pass
+        if doc is None:
+            fields |= {"status": "MISSING", "missing_run_file": True, "build_known": False, "bugs_found": 0, "audit_issues": 0}
+        else:
+            statuses = [core.case_status(c.get("status")) for c in (doc.get("cases") or []) if isinstance(c, dict)]
+            bugs = doc.get("bugs") if isinstance(doc.get("bugs"), list) else []
+            audit_n = 0
+            if (rdir / "bugs").is_dir() and any((rdir / "bugs").glob("BUG-*.md")):
+                from . import report
+                audit_n = sum(len(v) for v in report.audit_bugs(rdir).values())
+            fields |= {
+                "mode": doc.get("mode") or "",
+                "route": core.norm_route(doc.get("target") or ""),
+                "status": doc.get("status") or "UNKNOWN",
+                "stop_reason": doc.get("stop_reason") or "",
+                "block_scope": doc.get("block_scope") or "",
+                "build_known": core.norm_build(doc.get("build")) != core.UNKNOWN,
+                "bugs_found": len(bugs),
+                "audit_issues": audit_n,
+                "missing_run_file": False,
+                "cases": {k.lower(): statuses.count(k) for k in core.CASE_STATUSES},
+            }
+        from . import plugin_log
+        plugin_log.append_event(root, "run_summary", fields)
+    except Exception:  # noqa: BLE001 - summary logging is best effort
+        pass
+
+
 def marker_stop(project):
     root = _project(project) / "qa-out"
     _note_spend(root)
+    _log_run_summary(root)
     for name in (".active", ".active.lock", ".active.warned", ".active.progress"):
         (root / name).unlink(missing_ok=True)
 

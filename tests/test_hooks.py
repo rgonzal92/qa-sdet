@@ -384,6 +384,71 @@ class Hooks(Base):
         r = self.explorer_stop(d)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 
+    def _read_plugin_log(self, proj=None):
+        p = (proj or self.proj) / "qa-out/plugin-log.jsonl"
+        return [json.loads(line) for line in p.read_text().splitlines()] if p.is_file() else []
+
+    def test_hooks_and_marker_stop_record_nudges_tool_fails_bounces_and_run_summaries(self):
+        from qa_sdet import ops
+        from support import PLAN
+        d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
+        (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
+        ops.marker_start(self.proj, budget=20, run_dir=d, slug="form", max_turns=20)
+        # 3 failed playwright-cli calls -> tool_fail + stuck nudge
+        for _ in range(3):
+            self.pw("playwright-cli -s=qa click e5", failed=True)
+        # Unrelated main-session Bash failure is NOT logged; qa-mem failure IS logged
+        self.post({"tool_name": "Bash", "agent_type": "", "cwd": str(self.proj),
+                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "git status"}, "error": "Exit 1"})
+        self.post({"tool_name": "Bash", "agent_type": "", "cwd": str(self.proj),
+                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "qa-mem doctor"}, "error": "Exit 1"})
+        # Broken bug draft -> file_lint nudge
+        self.written("bugs/BUG-1.md", "# Title\n")
+        # Explorer stop bounce -> stop_bounce
+        self.assertEqual(self.explorer_stop(d).returncode, 2)
+        # Write a run file and stop marker -> run_summary
+        (d / ".data/run-form.json").write_text(json.dumps({
+            **run(build="unknown"), "run_id": "r1", "mode": "ticket", "status": "INCOMPLETE", "stop_reason": "turn_limit",
+            "cases": [{"id": "TC-1", "status": "PASS", "actual": "ok"}, {"id": "TC-2", "status": "NOT_RUN"}],
+        }))
+        ops.marker_stop(self.proj)
+
+        recs = self._read_plugin_log()
+        types = [r["type"] for r in recs]
+        self.assertIn("tool_fail", types)
+        self.assertIn("nudge", types)
+        self.assertIn("stop_bounce", types)
+        self.assertIn("run_summary", types)
+        cmds = [r["cmd"] for r in recs if r["type"] == "tool_fail"]
+        self.assertTrue(any("click e5" in c for c in cmds))
+        self.assertTrue(any("qa-mem doctor" in c for c in cmds))
+        self.assertFalse(any("git status" in c for c in cmds))
+        nudges = {(r["kind"], r.get("file_kind")) for r in recs if r["type"] == "nudge"}
+        self.assertIn(("stuck", None), nudges)
+        self.assertIn(("file_lint", "draft"), nudges)
+        summaries = [r for r in recs if r["type"] == "run_summary"]
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual((summaries[0]["status"], summaries[0]["stop_reason"], summaries[0]["build_known"], summaries[0]["missing_run_file"]),
+                         ("INCOMPLETE", "turn_limit", False, False))
+        self.assertGreaterEqual(summaries[0]["turns"], 3)
+
+        # Missing run file on marker_stop is explicitly flagged
+        ops.marker_start(self.proj, run_dir=d, slug="ghost")
+        ops.marker_stop(self.proj)
+        summaries = [r for r in self._read_plugin_log() if r["type"] == "run_summary"]
+        self.assertEqual((summaries[-1]["status"], summaries[-1]["missing_run_file"]), ("MISSING", True))
+
+    def test_plugin_log_off_switch_silences_hooks(self):
+        from qa_sdet import ops
+        self.config(pluginLog=False)
+        d = self.rundir("2026-11-25-PROJ-2")
+        ops.marker_start(self.proj, run_dir=d, slug="form")
+        self.post({"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
+                   "hook_event_name": "PostToolUseFailure", "tool_input": {"command": "playwright-cli -s=qa click e1"}, "error": "Exit 1"},
+                  env={"QA_SDET_CONFIG": str(self.t / "config/config.json")})
+        ops.marker_stop(self.proj)
+        self.assertFalse((self.proj / "qa-out/plugin-log.jsonl").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

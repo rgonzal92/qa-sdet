@@ -608,6 +608,14 @@ def _ingest_files(con, pending):
                 cm = scrub.redact_json(json.loads(data))
                 dropped = codemap.apply_codemap(con, cm, codemap.load_scan(cm, f), ts)
                 note = f"dropped rows: {dropped}\n" if dropped else ""
+                if f.parent.name == "init":
+                    from . import plugin_log
+                    rows_n = len(cm.get("rows")) if isinstance(cm.get("rows"), list) else 0
+                    plugin_log.append_event(f.parent.parent, "run_summary", {
+                        "run": "init", "slug": f.stem, "mode": "map", "status": "COMPLETED",
+                        "build_known": True, "bugs_found": 0, "rows": rows_n,
+                        "audit_issues": 1 if dropped else 0, "missing_run_file": False,
+                    })
             else:
                 doc = scrub.redact_json(json.loads(data))
                 ingest(con, doc, ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped

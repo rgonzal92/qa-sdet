@@ -52,7 +52,7 @@ class Docs(unittest.TestCase):
             for rel in re.findall(r"\$\{CLAUDE_SKILL_DIR\}/\.\./\.\./([\w./-]+)", body):
                 self.assertTrue((ROOT / rel).exists(), f"{f.name}: {rel}")
             for name in re.findall(r"`[^`\s]*?([\w-]+\.md)`", body):  # run outputs and the user's qa-rules.md are not plugin files
-                if name not in ("REPORT.md", "INBOX.md", "qa-rules.md"):
+                if name not in ("REPORT.md", "INBOX.md", "qa-rules.md", "plugin-digest-YYYY-MM-DD.md"):
                     self.assertTrue(any((ROOT / d / name).exists() for d in ("references", "agents", ".")), f"{f.name}: {name}")
             for link in re.findall(r"\]\(([^)#<>\s]+)\)", body):
                 self.assertTrue(link.startswith("http") or (f.parent / link).exists(), f"{f.name}: {link}")
@@ -507,6 +507,25 @@ class Docs(unittest.TestCase):
             self.assertIn("--verify", body.split("---\n")[1])  # in argument-hint
             self.assertIn("qa-sdet:qa-reviewer", body)
             self.assertIn(".data/review.json", body)
+
+    def test_plugin_log_and_feedback_skill_match_code(self):
+        self.assertIn("plugin-log", cli.COMMANDS)
+        self.assertTrue((ROOT / "skills/qa-feedback/SKILL.md").is_file())
+        for rel in ("README.md", "skills/qa-setup/SKILL.md", "hooks/guard.py", "hooks/denied.py"):
+            self.assertNotIn("guard-denials.log", text(rel), rel)
+            self.assertIn("plugin-log.jsonl", text(rel), rel)
+        self.assertIn("pluginLog", text("README.md"))
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            self.assertIn("plugin-log", g.MANUAL_WRITES)
+            proj = Path(os.path.realpath(d)) / "proj"
+            proj.mkdir()
+            with mock.patch.dict(os.environ, env):
+                cmd = f"qa-mem plugin-log note --project '{proj}' 'test note'"
+                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj)}),
+                                 (None, True))
+                self.assertIsNotNone(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
+                                                 "agent_type": "qa-sdet:qa-explorer"})[0])
 
 if __name__ == "__main__":
     unittest.main()

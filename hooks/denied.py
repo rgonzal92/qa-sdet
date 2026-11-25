@@ -1,5 +1,5 @@
 """PermissionDenied entry point (hooks.json): Claude Code's auto-mode classifier denied a call. It is logged next to the
-guard's own denials (<project>/qa-out/guard-denials.log, layer claude-code) when it concerns qa-sdet: its tools, its
+guard's own denials (<project>/qa-out/plugin-log.jsonl, layer claude-code) when it concerns qa-sdet: its tools, its
 agents, or a project that already has a qa-out folder, and the browser commands the guard counted for it are given back
 to the run's budget (the call never ran). The denial stands."""
 import json

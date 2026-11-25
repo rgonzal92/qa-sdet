@@ -30,6 +30,21 @@ AGENTS = ("qa-explorer", "qa-crawler")
 OBSERVE = {"snapshot", "find", "eval", "requests", "console", "screenshot", "tab-list", "network", "pdf"}
 PROGRESS_CAP = 1 << 20
 PW_CALL = re.compile(r"playwright-cli\s+(?:-s=\S+\s+)?(?:--raw\s+)?([\w-]+)(?:\s+(\S+))?")
+QA_TOOL_RE = re.compile(r"(?<![.\w])playwright-cli|\bacli\b|(?<![\w.-])qa-mem(?![\w-])")
+
+
+def _qa_out(data):
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or (data.get("cwd") if isinstance(data, dict) else None) or os.getcwd()
+    return os.path.join(str(proj), "qa-out")
+
+
+def _log_event(qa_out, event_type, fields):
+    try:
+        _lib()
+        from qa_sdet import plugin_log
+        plugin_log.append_event(qa_out, event_type, fields, create=False)
+    except Exception:  # noqa: BLE001 - logging is best effort
+        pass
 
 
 def role(data):
@@ -71,6 +86,11 @@ def wind_down(path, m, who, turns):
     if guard.warned(path, m):  # one warning per run marker (the guard may have given it by refusing a call)
         return None
     guard.mark_warned(path, m)
+    trigger = "+".join(k for k, cond in (("budget", budget and left <= guard.cleanup_reserve(budget)),
+                                         ("time", deadline and secs <= 120)) if cond) or "turn_limit"
+    _log_event(path.parent, "nudge", {"agent": who, "kind": "wind_down", "trigger": trigger, "turns": turns,
+                                      "run": os.path.basename(m["run_dir"]) if m.get("run_dir") else None,
+                                      "slug": m.get("slug")})
     if low:
         return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
     done = ("Stop crawling now and do step 4: save the requests and console logs, close the browser and write "
@@ -94,13 +114,17 @@ def code_map_feedback(data):
     err = memory.parked(p)  # whoever read it first: a sibling's hook may have parked it a moment ago
     if not err:
         return None
+    _log_event(p.parent.parent if p.parent.name == "init" else _qa_out(data), "nudge",
+               {"agent": "qa-mapper", "kind": "code_map_lint", "detail": f"{p.name}: {err}"})
     refs = os.path.join(os.path.dirname(HERE), "references", "code-map.md")
     return (f"qa-sdet memory could not save {p.name}: {err}. Fix the rows or fields it names (rules: {refs}), then Write "
             "the whole file again; it is re-read automatically.")
 
 
 def _lib():
-    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
+    lib = os.path.join(os.path.dirname(HERE), "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
 
 
 def file_lint(data):
@@ -124,25 +148,33 @@ def file_lint(data):
         return None
     _lib()
     from qa_sdet import memory, report
+    qa_out, run_name = p.parent.parent.parent, p.parent.parent.name
+    note = None
     if kind in ("draft", "spec"):
         problems = [t for _, t in (report.draft_issues(text) if kind == "draft" else report.spec_issues(text))]
         rules = os.path.join(os.path.dirname(HERE), "references", "bug-draft.md")
-        return (f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
+        note = (f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
                 if problems else None)
-    try:
-        doc = json.loads(text)
-    except (ValueError, RecursionError) as e:
-        return f"qa-sdet: {name} is not valid JSON ({e}); Write the whole file again."
-    if kind == "run":
+    else:
         try:
-            memory.check_run(doc)
-        except ValueError as e:
-            rules = os.path.join(os.path.dirname(HERE), "references", "run-json.md")
-            return f"qa-sdet: memory can't save {name}: {e}. Fix that field (rules: {rules}) and Write the whole file again."
-        return None
-    warnings = []
-    report.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
-    return f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
+            doc = json.loads(text)
+        except (ValueError, RecursionError) as e:
+            note = f"qa-sdet: {name} is not valid JSON ({e}); Write the whole file again."
+        else:
+            if kind == "run":
+                try:
+                    memory.check_run(doc)
+                except ValueError as e:
+                    rules = os.path.join(os.path.dirname(HERE), "references", "run-json.md")
+                    note = f"qa-sdet: memory can't save {name}: {e}. Fix that field (rules: {rules}) and Write the whole file again."
+            else:
+                warnings = []
+                report.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
+                note = f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
+    if note:
+        _log_event(qa_out, "nudge", {"agent": role(data) or "main", "kind": "file_lint", "file_kind": kind,
+                                     "run": run_name, "detail": note})
+    return note
 
 
 def read_progress(path, expires):
@@ -226,26 +258,45 @@ def run_feedback(data, who):
     append_progress(state, expires, rec)
     turns, spin, fails, given = replay(recs + [rec])
     notes, sig = [], rec.get("s")
+    run_name = os.path.basename(m["run_dir"]) if m.get("run_dir") else None
     if sig and fails.get(sig, 0) >= STUCK_AFTER:
         notes.append(f"qa-sdet: `{sig}` failed {fails[sig]} times since you last got anywhere. Change approach: take a fresh "
                      "`snapshot` or `find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark "
                      "the case BLOCKED with why and go on.")
         append_progress(state, expires, {"t": "n", "n": "stuck", "s": sig})  # it counts again from here
+        _log_event(path.parent, "nudge", {"agent": who, "kind": "stuck", "detail": sig, "count": fails[sig],
+                                          "run": run_name, "slug": m.get("slug")})
     elif spin >= SPIN_AFTER and "spin" not in given:
         notes.append(f"qa-sdet: your last {spin} browser calls opened no new page state, sent no new interaction and wrote no "
                      "file. If you are not in the middle of a check, change approach: another heuristic or element, or wrap up "
                      "and list what you did not test in not_tested.")
         append_progress(state, expires, {"t": "n", "n": "spin"})
+        _log_event(path.parent, "nudge", {"agent": who, "kind": "spin", "detail": f"{spin} calls without progress",
+                                          "count": spin, "run": run_name, "slug": m.get("slug")})
     notes.append(wind_down(path, m, who, turns))
     return " ".join(x for x in notes if x) or None
 
 
+def _log_tool_failure(data, who):
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    cmd = " ".join(str(tin.get("command") or "").split())
+    if who not in ("qa-explorer", "qa-crawler", "qa-mapper") and not QA_TOOL_RE.search(cmd):
+        return
+    err = data.get("error") or data.get("tool_response") or ""
+    if isinstance(err, (dict, list)):
+        err = json.dumps(err, ensure_ascii=False, default=str)
+    _log_event(_qa_out(data), "tool_fail", {"agent": who or "main", "cmd": cmd, "error": str(err)})
+
+
 def main():
+    data = None
     try:
         data = json.load(sys.stdin)
         note = None
         who = role(data) if isinstance(data, dict) else ""
         tool = data.get("tool_name") if isinstance(data, dict) else None
+        if isinstance(data, dict) and data.get("hook_event_name") == "PostToolUseFailure" and tool == "Bash":
+            _log_tool_failure(data, who)
         if tool in ("Bash", "Write") and who in AGENTS:
             note = " ".join(x for x in (run_feedback(data, who), file_lint(data) if tool == "Write" else None) if x) or None
         elif tool == "Write" and who == "qa-mapper":
@@ -255,8 +306,14 @@ def main():
         if note:
             event = "PostToolUseFailure" if data.get("hook_event_name") == "PostToolUseFailure" else "PostToolUse"
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": note}}))
-    except Exception:  # noqa: BLE001 - feedback is best effort
-        pass
+    except Exception as e:  # noqa: BLE001 - feedback is best effort
+        try:
+            _log_event(_qa_out(data), "hook_error", {
+                "hook": "posttooluse", "agent": role(data) if isinstance(data, dict) else "main",
+                "error_type": type(e).__name__, "detail": str(e),
+            })
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 

@@ -13,7 +13,7 @@ commands; faults need `faults: true`; the explorer neither writes nor removes it
 call fully checked in one parse is approved; every denial is logged. It doesn't emulate the shell: a call that names a
 guarded tool or path and hides something in an odd form ($VAR program or verb, eval of a variable, a script fed to a
 shell, inline code, xargs, a command string handed to another program, a computed path) is denied: run it directly."""
-import fcntl, glob, json, math, os, re, shlex, sys, time  # noqa: E401
+import fcntl, glob, json, math, os, re, shlex, stat, sys, tempfile, time  # noqa: E401
 from fnmatch import fnmatch
 from itertools import islice, takewhile
 from pathlib import Path
@@ -47,7 +47,7 @@ PW_VALUE_OPTS = set("-s --session --browser --config --device --profile --idle-t
                     "--status --body --content-type --header --remove-header --cursor --position --duration".split())  # route's and
 # video-show-actions': else their values pass as the verb
 NAV_VERBS, FAULT_VERBS = {"goto", "open", "tab-new"}, {"route", "network-state-set"}
-MANUAL_WRITES = {"bug-status", "stale", "answer", "remember", "forget", "signal-ignore", "signal-unignore", "codemap-forget"}
+MANUAL_WRITES = {"bug-status", "stale", "answer", "remember", "forget", "signal-ignore", "signal-unignore", "codemap-forget", "plugin-log"}
 BUDGET_FREE = {"", "close", "close-all", "kill-all", "list", "state-save",  # always allowed so a run can finish
                "requests", "console"}  # read-only: the explorer saves the browser signals at its end (step 9)
 PW_SOURCE_OPTS = ("--config", "--extension", "--cdp", "--endpoint")  # a config file or someone else's browser
@@ -1352,35 +1352,81 @@ _MASKS = [(re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+\s+)?[^\s'\"]+"), r"\1[
           (re.compile(r"(?i)(\s--?[\w-]*(?:token|password|passwd|secret|api[_-]?key)\s+['\"]?)[^\s'\"]+"), r"\1[masked]"),  # --password x
           (re.compile(r"(\s(?:-u|--user)\s*['\"]?[^\s:'\"]+:)[^\s'\"]+"), r"\1[masked]"),  # curl -u user:password
           (re.compile(r"://[^\s/?#:@'\"]+:[^\s/?#@'\"]+@"), "://[masked]@")]
-DENIAL_LOG_LINES = 1000
+DENIAL_LOG_LINES = 2000
+PLUGIN_LOG_NAME = "plugin-log.jsonl"
+_PLUGIN_VERSION = None
 def mask(text):
     for rx, rep in _MASKS:
         text = rx.sub(rep, text)
     return text
-def log_denial(data, reason, layer="guard"):
-    """One line per denial in <project>/qa-out/guard-denials.log: time, layer (guard / claude-code), agent, reason and
-    the call, secrets masked, the newest 1000 lines kept. Never raises: a log it can't write changes no decision."""
+def _plugin_version():
+    global _PLUGIN_VERSION
+    if _PLUGIN_VERSION is None:
+        try:
+            v = json.loads((Path(PLUGIN_QA_MEM).parent.parent / ".claude-plugin" / "plugin.json").read_text()).get("version")
+            _PLUGIN_VERSION = str(v).strip() if v else "unknown"
+        except (OSError, ValueError, AttributeError):
+            _PLUGIN_VERSION = "unknown"
+    return _PLUGIN_VERSION
+def _plugin_log_enabled():
     try:
-        tin = data.get("tool_input")
-        what = (str(tin.get("command")) if data.get("tool_name") == "Bash" and isinstance(tin, dict) and "command" in tin
-                else f"{data.get('tool_name')} {json.dumps(tin, ensure_ascii=False, default=str)[:600]}")
-        line = "\t".join([time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), layer, agent_role(data) or "main",
-                          " ".join(mask(str(reason)).split()), " ".join(mask(what).split())[:300]]) + "\n"
+        cfg = json.loads(CONFIG.read_text())
+        return not (isinstance(cfg, dict) and cfg.get("pluginLog") is False)
+    except (OSError, ValueError):
+        return True
+def log_event(data, event_type, fields):
+    """Append one masked JSONL record to <project>/qa-out/plugin-log.jsonl (newest DENIAL_LOG_LINES kept). Best effort."""
+    try:
+        if not _plugin_log_enabled():
+            return
         project = os.environ.get("CLAUDE_PROJECT_DIR")  # Claude Code names the project: its qa-out is made if missing
         folder = Path(project or str(data.get("cwd") or os.getcwd()), "qa-out")
         if project:
             folder.mkdir(exist_ok=True)
         elif not folder.is_dir():
             return  # no project named: never a new qa-out in whatever folder this ran from (/tmp, a test run)
-        log = folder / "guard-denials.log"
-        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)  # not through a planted link
-        with os.fdopen(fd, "a", encoding="utf-8", errors="replace") as f:
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "v": _plugin_version(), "type": event_type, **fields}
+        line = json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n"
+        log = folder / PLUGIN_LOG_NAME
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        size = 0
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return
             f.write(line)
-        if log.stat().st_size > 200_000:
-            keep = log.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[-DENIAL_LOG_LINES:]
-            tmp = log.with_name(f".{log.name}.{os.getpid()}")
-            tmp.write_text("".join(keep), encoding="utf-8")
-            os.replace(tmp, log)
+            f.flush()
+            size = os.fstat(f.fileno()).st_size
+        if size > 150_000:
+            rfd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(rfd, "rb") as rf:
+                if not stat.S_ISREG(os.fstat(rf.fileno()).st_mode):
+                    return
+                lines = rf.read(8 << 20).decode("utf-8", "replace").splitlines(keepends=True)
+            if len(lines) > DENIAL_LOG_LINES:
+                tfd, tmp = tempfile.mkstemp(dir=folder, prefix=".plugin-log.", suffix=".tmp")
+                try:
+                    with os.fdopen(tfd, "w", encoding="utf-8", errors="replace") as tf:
+                        tf.writelines(lines[-DENIAL_LOG_LINES:])
+                    os.chmod(tmp, 0o600)
+                    os.replace(tmp, log)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+    except Exception:  # noqa: BLE001 - logging is best effort
+        pass
+def log_denial(data, reason, layer="guard"):
+    """One JSONL denial record in <project>/qa-out/plugin-log.jsonl, secrets masked, newest DENIAL_LOG_LINES kept."""
+    try:
+        tin = data.get("tool_input")
+        what = (str(tin.get("command")) if data.get("tool_name") == "Bash" and isinstance(tin, dict) and "command" in tin
+                else f"{data.get('tool_name')} {json.dumps(tin, ensure_ascii=False, default=str)[:600]}")
+        log_event(data, "denial", {
+            "layer": layer,
+            "agent": agent_role(data) or "main",
+            "tool": clean(data.get("tool_name") or ""),
+            "reason": " ".join(mask(str(reason)).split())[:400],
+            "call": " ".join(mask(what).split())[:300],
+        })
     except Exception:  # noqa: BLE001 - logging is best effort
         pass
 def main():
@@ -1395,6 +1441,8 @@ def main():
     except Exception as e:  # noqa: BLE001 - a crashing guard must not mean "allowed" for anything guarded (or the mapper)
         role, text = agent_role(data), json.dumps(data.get("tool_input"), ensure_ascii=False, default=str)
         guarded = mentions_guarded(text, role in EXPLORERS) or role == "qa-mapper"
+        log_event(data, "hook_error", {"hook": "pretooluse", "agent": role or "main",
+                                       "error_type": type(e).__name__, "detail": " ".join(mask(str(e)).split())[:300]})
         reason, approve = f"guard error ({type(e).__name__}) on a call that names a guarded tool or path" if guarded else None, False
     if reason or approve:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" if reason else "allow",

@@ -62,7 +62,7 @@ def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
                    "annotate", "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
-                   "setup-permissions", "spend"):
+                   "setup-permissions", "spend", "plugin-log"):
         return None
     from . import ops
     if cmd == "keys":
@@ -219,6 +219,47 @@ def wrapper_cmd(cmd, args):
             raise core.BadOption("--settings needs a path")  # an empty shell variable must not fall back to the real file
         added = doctor.merge_permissions(o.get("--settings") or "~/.claude/settings.json")
         print("added to permissions.allow:\n" + "\n".join(added) if added else "all rules already present; nothing changed")
+    elif cmd == "plugin-log":
+        from . import plugin_log
+        if not args or args[0] not in ("note", "export", "show", "clear"):
+            raise core.BadInput(f"usage: qa-mem plugin-log {COMMANDS['plugin-log']}")
+        sub, rest = args[0], args[1:]
+        if sub == "note":
+            o = _opts(rest, valued=("--kind", "--severity", "--project"))
+            proj = plugin_log.resolve_project(o.get("--project"))
+            rec = plugin_log.add_note(proj, " ".join(o["_"]), kind=o.get("--kind") or "nuisance",
+                                      severity=o.get("--severity"))
+            tag = rec["kind"] + (f"/{rec['severity']}" if rec.get("severity") else "")
+            ctx = f" ({rec['run']})" if rec.get("run") else ""
+            print(f"logged [{tag}]{ctx} to {proj / 'qa-out' / plugin_log.LOG_NAME}")
+        elif sub == "export":
+            o = _opts(rest, flags=("--all", "--preview", "--stdout"), valued=("--since", "--project"))
+            if o["_"]:
+                raise core.BadOption("plugin-log export takes no positional arguments")
+            if o.get("--all") and "--since" in o:
+                raise core.BadOption("give either --all or --since, not both")
+            proj = plugin_log.resolve_project(o.get("--project"))
+            res = plugin_log.export_digest(proj, all_events=o.get("--all", False), since=o.get("--since"),
+                                           preview=o.get("--preview", False), stdout=o.get("--stdout", False))
+            if (o.get("--preview") or o.get("--stdout")) and res["markdown"]:
+                print(res["markdown"], end="")
+            else:
+                print(res["summary"])
+        elif sub == "show":
+            o = _opts(rest, valued=("--limit", "--type", "--project"))
+            if o["_"]:
+                raise core.BadOption("plugin-log show takes no positional arguments")
+            limit = _count(o, "--limit", 2000) if "--limit" in o else 30
+            if "--limit" in o and limit < 1:
+                raise core.BadInput("--limit must be a whole number >= 1")
+            proj = plugin_log.resolve_project(o.get("--project"))
+            print(plugin_log.show_log(proj, limit=limit, event_type=o.get("--type")))
+        else:  # clear
+            o = _opts(rest, valued=("--project",))
+            if o["_"]:
+                raise core.BadOption("plugin-log clear takes no positional arguments")
+            proj = plugin_log.resolve_project(o.get("--project"))
+            print(plugin_log.clear_log(proj))
     else:
         return None
     return 0
@@ -251,11 +292,28 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "spend": "<run dir> [--total-budget N] [--total-minutes M] [--more-budget N] [--more-minutes M] [--budget N] [--minutes M]", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
+    "plugin-log": "note [--kind bug|nuisance|idea] [--severity low|med|high] [--project DIR] <text> | "
+                  "export [--all] [--since <ISO|Nd>] [--preview] [--stdout] [--project DIR] | "
+                  "show [--limit N] [--type TYPE] [--project DIR] | clear [--project DIR]",
 }
 USAGE = "usage: qa-mem <command> [args]; commands:\n" + "\n".join(f"  qa-mem {c} {a}".rstrip() for c, a in COMMANDS.items())
 
 
+def _log_cli_error(cmd, code, reason):
+    """Log a qa-mem exit 1/2 failure to <project>/qa-out/plugin-log.jsonl when qa-out already exists."""
+    if not cmd or cmd in ("plugin-log", "-h", "--help", "help"):
+        return
+    try:
+        from . import plugin_log
+        plugin_log.append_event(plugin_log.resolve_project() / "qa-out", "cli_error",
+                                {"cmd": cmd, "exit_code": code, "reason": str(reason)}, create=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def usage_error(cmd, why=""):
+    if why:
+        _log_cli_error(cmd, 2, why)
     print(f"qa-mem: {why + '; ' if why else ''}usage: qa-mem {cmd} {COMMANDS.get(cmd, '')}".rstrip(), file=sys.stderr)
     return 2
 
@@ -287,12 +345,15 @@ def hook_input():
 
 
 def main(argv):
+    cmd = argv[0] if argv else ""
     try:
         return _main(argv)
     except core.BadInput as e:  # also the refusal of a pre-0.4 DB, from core.connect()
+        _log_cli_error(cmd, 2, e)
         print(f"qa-mem: {e}", file=sys.stderr)
         return 2
     except sqlite3.DatabaseError as e:
+        _log_cli_error(cmd, 1, e)
         if "locked" not in str(e) and "busy" not in str(e):
             print(f"qa-mem: the memory DB {core.db_path()} failed: {e}", file=sys.stderr)
             return 1
@@ -335,12 +396,16 @@ def _main(argv):
             return usage_error(cmd, f"unknown option {a}")
         skip = a in valued
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
+        from . import plugin_log
         memory.PARKED.clear()
         roots = list(dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a))  # cwd + project dir
         for root in roots:
             try:
                 memory.ingest_pending(root)
             except Exception as e:  # noqa: BLE001
+                plugin_log.append_event(root, "hook_error",
+                                        {"hook": "ingest-pending", "error_type": type(e).__name__, "detail": str(e)},
+                                        create=False)
                 print(f"qa-mem: {e}", file=sys.stderr)
         # parallel mappers: the first to stop parks every bad code map, so each mapper hears about all still parked
         stale = [x for root in roots for x in memory.parked_codemaps(root)
@@ -356,11 +421,20 @@ def _main(argv):
             from . import ops, report  # the marker was started MARKER_HOURS before it expires
             todo = report.verify_run(marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600)
         if todo:
+            plugin_log.append_event(Path(marker["run_dir"]).parent, "stop_bounce", {
+                "agent": role, "kind": "verify_run", "run": Path(marker["run_dir"]).name,
+                "slug": marker.get("slug"), "items": todo,
+            }, create=False)
             print("qa-sdet: before you stop, finish these (then stop again):\n" + "\n".join(f"- {t}" for t in todo),
                   file=sys.stderr)
             if not memory.PARKED:
                 return 2
         if memory.PARKED and not hin.get("stop_hook_active"):
+            qa_out = next((Path(r) for r in roots if Path(r).is_dir()), None)
+            if qa_out:
+                plugin_log.append_event(qa_out, "stop_bounce", {
+                    "agent": role or "main", "kind": "parked", "items": memory.PARKED[:5],
+                }, create=False)
             # Exit 2 from a Stop/SubagentStop hook shows this to the agent that just wrote the file, once.
             refs = Path(__file__).resolve().parent.parent.parent / "references"
             print(f"qa-sdet memory could not save this (file(s) below). For each one YOU wrote this run: fix the field the "
@@ -376,10 +450,15 @@ def _main(argv):
         return 0
     if cmd == "doctor":
         from . import doctor
-        return 1 if doctor.doctor() else 0
+        problems = doctor.doctor()
+        if problems:
+            _log_cli_error("doctor", 1, f"{problems} doctor gap(s)")
+        return 1 if problems else 0
     try:
         code_ = wrapper_cmd(cmd, args)
         if code_ is not None:
+            if code_ != 0:
+                _log_cli_error(cmd, code_, f"{cmd} exited {code_}")
             return code_
         if cmd == "inbox":
             from . import report
@@ -400,6 +479,7 @@ def _main(argv):
     except core.BadOption as e:
         return usage_error(cmd, str(e))
     except core.BadInput as e:
+        _log_cli_error(cmd, 2, e)
         print(f"qa-mem: {e}", file=sys.stderr)
         return 2
     if cmd == "browsers":  # what C1 offers when it asks which browser to use
@@ -416,7 +496,10 @@ def _main(argv):
         return 0
     con = core.connect()
     try:
-        return run_cmd(con, cmd, args)
+        rc = run_cmd(con, cmd, args)
+        if rc != 0 and cmd != "ingest":
+            _log_cli_error(cmd, rc, f"{cmd} exited {rc}")
+        return rc
     except core.BadOption as e:
         return usage_error(cmd, str(e))
     finally:
@@ -614,6 +697,7 @@ def run_cmd(con, cmd, args):
             memory.ingest(con, scrub.redact_json(json.loads(Path(args[0]).read_text(encoding="utf-8-sig"))),
                           run_dir=Path(args[0]).resolve().parent, src=Path(args[0]).resolve())
         except (OSError, ValueError, RecursionError) as e:  # ValueError: not JSON, or a field ingest rejects
+            _log_cli_error("ingest", 2, f"{type(e).__name__}: {core.short(e, 200)}")
             print(f"qa-mem: ingest: can't save {args[0]} ({type(e).__name__}: {core.short(e, 200)})", file=sys.stderr)
             return 2
         print("ingested")
