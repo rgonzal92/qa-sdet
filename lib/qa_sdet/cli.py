@@ -60,8 +60,8 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
-    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
-                   "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
+    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
+                   "annotate", "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
                    "setup-permissions"):
         return None
     from . import ops
@@ -95,6 +95,11 @@ def wrapper_cmd(cmd, args):
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem page-start <url>")
         return ops.page_start(args[0])
+    elif cmd == "api-probe":
+        o = _opts(args, valued=("--json", "--content-type"), multi=("--header",))
+        if len(o["_"]) != 2:
+            raise core.BadInput("usage: qa-mem api-probe <METHOD> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]")
+        return ops.api_probe(o["_"][0], o["_"][1], o.get("--json"), o.get("--content-type"), o.get("--header", []))
     elif cmd == "evidence":
         o = _opts(args, valued=("--selector", "--ref", "--label"))
         if len(o["_"]) != 1 or ("--selector" in o) == ("--ref" in o) or not o.get("--label"):
@@ -225,6 +230,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
     "page-start": "<url>",
+    "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
