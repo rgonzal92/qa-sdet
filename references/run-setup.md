@@ -9,7 +9,7 @@ Read `~/.config/qa-sdet/config.json`. Missing: ask once for app, qaBaseUrl, allo
 After any config write run `qa-mem doctor` (no other time here, except when a tool fails) and fix its `FIX` lines about the config: the text after `->` is the fix; save it only on the user's yes, then run doctor again. A declined fix stops the run: say which line is open.
 
 ## Run folder and slug
-`qa-mem rundir '<project>' --keys K1,K2` (qa-ticket), `--route '<route>'` (qa-explore) or `--label '<text>'` prints `<run>`. Slug = the route without its leading `/` and extension, other `/` as `-`, numeric or UUID segments as `id`, no `#`, `!` or `?…` (`/form.html` is `form`, `/incidents/4521` is `incidents-id`, `/#/zones` is `zones`, `/` is `home`).
+`qa-mem rundir '<project>' --keys K1,K2` (qa-ticket), `--route '<route>'` (qa-explore) or `--label '<text>'` prints `<run>`. Slug = the route without its leading `/` and extension, other `/` as `-`, numeric or UUID segments as `id`, no `#`, `!` or `?…` (`/form.html` is `form`, `/incidents/4521` is `incidents-id`, `/#/zones` is `zones`, `/` is `home`). Routes of one run that give the same slug (`/list?status=open` and `/list?status=closed`, `/form` and `/form.html`) would share one run file, the later explorer overwriting the earlier one's results: add `-2`, `-3`, … to the later routes' slugs.
 
 ## Setup: one Bash call per explorer
 ```

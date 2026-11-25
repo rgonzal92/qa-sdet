@@ -110,6 +110,28 @@ class Verdict(unittest.TestCase):
         keys = ["S-1", "S-2", "S-3"]
         self.assertEqual([report.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
 
+    def test_a_run_that_ended_blocked_blocks_its_tickets(self):  # its PASS results can't be trusted
+        cases = [self.case("TC-1", "PASS")]
+        blocked = {"target": "/form", "status": "Blocked", "summary": "session expired, run /qa-sdet:qa-login",
+                   "cases": [{"id": "TC-1", "status": "PASS"}]}
+        self.assertEqual(report.verdict("T-1", cases, [], runs=[("form", blocked)]),
+                         ("BLOCKED", "the run on /form ended BLOCKED: session expired, run /qa-sdet:qa-login"))
+        by_id = {**blocked, "target": "https://qa.example/elsewhere"}  # it reported the ticket's case
+        self.assertEqual(report.verdict("T-1", cases, [], runs=[("x", by_id)])[0], "BLOCKED")
+        other = {"target": "/list", "status": "BLOCKED", "cases": []}  # another ticket's page
+        self.assertEqual(report.verdict("T-1", cases, [], runs=[("list", other)])[0], "PASS")
+        incomplete = {**blocked, "status": "INCOMPLETE"}  # budget ran out after the cases: they stand
+        self.assertEqual(report.verdict("T-1", cases, [], runs=[("form", incomplete)])[0], "PASS")
+
+    def test_severity_and_classification_read_by_their_first_word(self):  # "Confirmed (2/2)" was no CONFIRMED
+        cases = [self.case("TC-1", "PASS")]
+        bug = {"id": "BUG-1", "route": "/form", "severity": "High ", "classification": "Confirmed (2/2)"}
+        self.assertEqual(report.verdict("T-1", cases, [bug]), ("FAIL", "BUG-1 HIGH"))  # no second class in the reason
+        self.assertEqual(report.verdict("T-1", cases, [{**bug, "severity": "critical - data loss"}])[0], "FAIL")
+        for weak in ({**bug, "classification": "Not confirmed"}, {**bug, "classification": "SUSPECTED"},
+                     {**bug, "severity": "MEDIUM (high impact later)"}):
+            self.assertEqual(report.verdict("T-1", cases, [weak])[0], "PASS WITH NOTES", weak)
+
 
 class MergedCases(Base):
     """Several runs' results for one case become one."""
@@ -131,6 +153,20 @@ class MergedCases(Base):
         tie = report.merged_cases(plan, [("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
                                      ("b", {"cases": [{"id": "TC-1", "status": "pass", "actual": "new"}]})])
         self.assertEqual(tie[0]["actual"], "new")
+
+    def test_a_case_belongs_to_its_ticket_however_the_key_is_written(self):  # a FAIL outside the ticket hid it
+        plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1"}], "cases": [
+            {"id": "TC-1", "ticket": "PROJ-1", "route": "/form"}, {"id": "TC-2", "route": "/form"},
+            {"id": "TC-3", "ticket": " proj-1", "route": "/form"}]}
+        runs = [("form", {"target": "/form", "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"},
+                                                       {"id": "TC-3", "status": "PASS"}]})]
+        cases = report.merged_cases(plan, runs)
+        self.assertEqual([c["ticket"] for c in cases], ["PROJ-1", "PROJ-1", "PROJ-1"])
+        self.assertEqual(report.verdict("PROJ-1", cases, [])[0], "FAIL")
+        two = {**plan, "tickets": [{"key": "PROJ-1"}, {"key": "PROJ-2"}]}  # two tickets: no guess for TC-2
+        self.assertEqual([c.get("ticket") for c in report.merged_cases(two, runs)], ["PROJ-1", None, "PROJ-1"])
+        only_run = report.merged_cases(plan, [("form", {"cases": [{"id": "TC-9", "status": "FAIL"}]})])
+        self.assertIsNone(only_run[-1].get("ticket"))  # an explorer's own case is never assigned
 
     def test_a_float_case_id_ingest_accepts_is_reported(self):  # core.txt takes 1.0; the report dropped it silently
         cases = report.merged_cases({}, [("a", {"cases": [{"id": 1.0, "status": "FAIL", "actual": "x"}]})])
@@ -563,6 +599,12 @@ class JiraDraft(Rendering):
         r = (d / "REPORT.md").read_text()
         self.assertIn("**Verdict: ❌ FAIL**", r)
         self.assertNotIn("Jira comment draft", r)
+
+    def test_a_blocked_run_gets_no_pass_draft(self):  # its cases said PASS; the run said BLOCKED
+        d, r = self.render_run([("form", {**RUN1, "status": "BLOCKED", "summary": "session expired"})])
+        self.assertIn("**Verdict: ⛔ BLOCKED** — the run on /form ended BLOCKED: session expired", r)
+        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
+        self.assertIn("⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
 
     def test_build_check_uses_the_builds_of_the_tickets_own_runs(self):  # another ticket's build hid it
         plan = {**PLAN1, "tickets": PLAN1["tickets"] + [{"key": "PROJ-2", "summary": "List", "fix_version": "3.4",

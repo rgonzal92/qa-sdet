@@ -118,8 +118,11 @@ def merged_cases(plan, runs, warnings=None):
                 if cid not in results or rank(c) >= rank(results[cid]):
                     results[cid] = c
     out, seen = [], set()
-    plan_ids = {str(p["id"]) for p in _list(plan, "cases") if valid_id(p.get("id"))}
-    for c in _list(plan, "cases") + [c for c in results.values() if str(c["id"]) not in plan_ids]:
+    plan_cases = _list(plan, "cases")
+    plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
+    keys = [t["key"] for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    canon = {k.strip().upper(): k for k in keys}
+    for n, c in enumerate(plan_cases + [c for c in results.values() if str(c["id"]) not in plan_ids]):
         cid = str(c["id"]) if valid_id(c.get("id")) else ""  # a numeric id 0 is still an id; bool/list is not
         if not cid or cid in seen:
             what = one_line(core.short(c.get("title") or c.get("expected") or "untitled", 60))
@@ -130,7 +133,12 @@ def merged_cases(plan, runs, warnings=None):
         res = results.get(cid, {})
         ac = c.get("ac")  # a case may cover several AC: "AC-1, AC-2" or a list
         ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int)) and not isinstance(a, bool)) if isinstance(ac, list) else ac
-        merged = {**c, "id": cid, "ac": ac, "status": core.case_status(res.get("status")) or "NOT_RUN",
+        tk = c.get("ticket")  # its plan ticket, however the key is written; every verdict matches on the exact key
+        if isinstance(tk, str) and tk.strip():
+            tk = canon.get(tk.strip().upper(), tk)
+        elif n < len(plan_cases) and len(keys) == 1 and not str(tk or "").strip():
+            tk = keys[0]  # a one-ticket plan: a case naming no ticket is that ticket's (an explorer's own case isn't)
+        merged = {**c, "id": cid, "ac": ac, "ticket": tk, "status": core.case_status(res.get("status")) or "NOT_RUN",
                   "actual": core._s(res.get("actual")), "notes": core._s(res.get("notes")),
                   "bug": core._s(res.get("bug"))}
         if "annotated" in res:
@@ -181,14 +189,18 @@ def ticket_bugs(key, cases, bugs, known=()):
                 and not (_bug_refs(b) & named))]
 
 
+def _first_word(v):
+    """'confirmed' from 'Confirmed (2/2)', 'high' from 'High ': agents add words to the value."""
+    return (core.norm(v).split() or [""])[0]
+
+
 def _serious(b):
-    return str(b.get("classification") or "").upper() == "CONFIRMED" and \
-        str(b.get("severity") or "").upper() in ("CRITICAL", "HIGH")
+    return _first_word(b.get("classification")) == "confirmed" and _first_word(b.get("severity")) in ("critical", "high")
 
 
 def _bug_word(b):
-    sev = str(b.get("severity") or "").upper() or "unrated"
-    extra = "" if str(b.get("classification") or "").upper() in ("CONFIRMED", "") else \
+    sev = " ".join(str(b.get("severity") or "").split()).upper() or "unrated"
+    extra = "" if _first_word(b.get("classification")) in ("confirmed", "") else \
         f" {str(b['classification']).lower()}"
     name = b.get("id") or ("known bug " if b.get("hash") else "") + core.short(b.get("title"), 40)  # known: re-sighted
     return f"{name} {sev}{extra}"
@@ -217,9 +229,9 @@ def _case_acs(c):
     return {a.strip() for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
 
 
-def verdict(ticket, cases, bugs, started=True, known=()):
+def verdict(ticket, cases, bugs, started=True, known=(), runs=()):
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
-    NOT STARTED while no test run has reported yet."""
+    NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED."""
     if not started:
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
@@ -248,9 +260,15 @@ def verdict(ticket, cases, bugs, started=True, known=()):
     for c in mine:
         if st(c) in ("BLOCKED", "NOT_RUN"):
             stuck.setdefault(f"{'blocked' if st(c) == 'BLOCKED' else 'not run'}{why(c)}", []).append(c["id"])
-    if stuck:
+    # a run on one of its pages (or reporting one of its cases) ended BLOCKED: its PASS results can't be trusted
+    case_ids, routes = {c["id"] for c in mine}, {core.norm_route(c.get("route")) for c in mine if c.get("route")}
+    ended = [f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
+             + (f": {_clip(r.get('summary'), 60)}" if r.get("summary") else "")
+             for name, r in runs if _first_word(r.get("status")) == "blocked"
+             and (core.norm_route(r.get("target")) in routes or any(str(x.get("id")) in case_ids for x in _list(r, "cases")))]
+    if stuck or ended:
         return "BLOCKED", _some([(f"{ids[0]}" if len(ids) == 1 else f"{len(ids)} cases ({ids[0]}–{ids[-1]})") + f" {r}"
-                                 for r, ids in stuck.items()], 2)
+                                 for r, ids in stuck.items()] + ended, 2)
     covered = {a for c in mine for a in _case_acs(c)}
     notes = [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"] + \
             [_bug_word(b) for b in its_bugs] + \
@@ -569,7 +587,7 @@ def render_report_parts(run_dir, cfg=None):
     drafts, vmap = {}, {}
     if tickets and with_status:
         for t in tickets:
-            v, why = verdict(t, cases, bugs, bool(runs), keys)
+            v, why = verdict(t, cases, bugs, bool(runs), keys, runs)
             vmap[t["key"]] = (v, why)
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
@@ -687,7 +705,7 @@ def run_summary(run_dir):
     if kind == "plan":
         verdicts = f"plan only ({len(cases)} cases)"
     elif tickets:
-        verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[verdict(t, cases, bugs, bool(runs), [x['key'] for x in tickets])[0]]}" for t in tickets)
+        verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[verdict(t, cases, bugs, bool(runs), [x['key'] for x in tickets], runs)[0]]}" for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
     m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)

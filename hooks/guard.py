@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """PreToolUse guard for qa-sdet (runs on every tool; most pass straight through). It stops mistakes; it isn't a sandbox.
 Every agent, unless noted: R1 Jira stays read-only (acli reads, never from inline code; Jira MCP reads). R2 The browser
-goes only to config allowedHosts (goto/open/tab-new, qa-mem browser-open, URLs in eval); no other browser, config file or
+goes only to config allowedHosts (goto/open/tab-new, qa-mem browser-open, URLs in eval); no other browser, config file, install or
 PLAYWRIGHT_MCP_*/PWTEST_* variable; --profile only on `open`, only the main profile. R3 Session secrets stay out:
 cookie/storage/header reads, traces, state-save, run-code, the browser profile folder, uploads of secret files or globs.
 R4 The qa-explorer leaves the qa-sdet config and .playwright/cli.config.json alone, fetches only from allowedHosts and
-runs no script file (a page it read could have steered it to write one). R5 Nobody changes the qa-sdet data folder
+runs no script file or package (a page it read could have steered it to write or name one). R5 Nobody changes the qa-sdet data folder
 (memory DB); sqlite3 on it only -readonly. R6 A run marker (qa-out/.active) with a budget or deadline limits browser
 commands; faults need `faults: true`. R7 The qa-mapper reads source (no secrets) and writes only its code map. R8 A Bash
 call fully checked in one parse is approved; every denial is logged. It doesn't emulate the shell: a call that names a
@@ -32,6 +32,7 @@ WRAPPERS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-U", "-D", "-r", "-t", "-T"}
 SHELLS, LOOP_KEYWORDS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "source", "."}, {"for", "while", "until", "select"}
 SHELL_KEYWORDS = set("if then elif else do while until ! { } fi done esac coproc".split())
 INTERP_RE, GUARDED = re.compile(r"python[\d.]*|node|perl|ruby|php|deno|bun|[gmn]?awk"), {"playwright-cli", "acli", "qa-mem"}
+PKG_RE = re.compile(r"npm|npx|pnpm|pnpx|yarn|bunx|pipx?[\d.]*|uvx?|gem|cargo|go")  # they download code and run it
 TEXT_TOOLS = set("echo printf cat tee head tail less wc sort uniq cut tr grep egrep fgrep rg ag sed jq diff ls stat file du "
                  "realpath readlink basename dirname which type whereis man git gh test [ [[ true false : cp mv ln rm mkdir "
                  "touch chmod install".split())
@@ -51,6 +52,8 @@ PW_DENY = {"attach": "attach connects to an unverified browser",
            "delete-data": "it deletes the browser profile and with it the QA sign-in; to sign out for good see README Privacy",
            "tracing-start": "a trace records every request with its headers and cookies into a file; use requests / response-body",
            "state-save": "it writes the session's cookies to a file; the login lives in the main profile (qa-mem browser-open)",
+           "install": "it writes a workspace config that picks the browser (.playwright/cli.config.json) or skills into .claude; "
+                      "run it yourself (`! playwright-cli install`), or install a browser: playwright-cli install-browser <name>",
            **dict.fromkeys(("cookie-list cookie-get localstorage-list localstorage-get sessionstorage-list sessionstorage-get "
                             "request request-headers response-headers").split(), _SECRET_HINT)}  # response: Set-Cookie
 SECRET_JS = re.compile(
@@ -919,6 +922,10 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
                                                      or re.match(r"/(usr|bin|sbin|opt|snap)/", words[i]))
     if ctx.explorer and (kind == "file" or kind == "stdin" and ins or by_path):  # ./x.sh: may not exist yet
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
+    if ctx.explorer and (PKG_RE.fullmatch(name) or "npx" in wrappers or re.fullmatch(r"python[\d.]*", name)  # npx is a wrapper
+                         and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(rest))):
+        return ("the explorer installs and runs no packages (npm, npx, pip, ...: they download code from other hosts and run "
+                "it); test through the browser, or curl to an allowed host")
     if not ctx.guarded:
         return None
     pos = pw_args(rest)

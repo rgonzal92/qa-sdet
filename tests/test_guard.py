@@ -158,6 +158,7 @@ class R2Hosts(Case):
             "playwright-cli -s=qa open --config /tmp/c.json", "playwright-cli -s=qa open --config=/tmp/c.json",
             "playwright-cli -s=qa open --extension", "playwright-cli -s=qa open --cdp=http://localhost:9222",
             "playwright-cli -s=qa open --endpoint ws://localhost:1234", "npx @playwright/cli open --extension", "playwright-cli attach x",
+            "playwright-cli install", "playwright-cli -s=qa install --skills --global",  # a workspace config, or skills in .claude
             "playwright-cli show --port 9000 --host 0.0.0.0", "playwright-cli show --host=192.168.1.5", "playwright-cli show --host 0.0.0.0 -s -h",
             "playwright-cli -s=qa open https://evil.example -- --help", "playwright-cli -s=qa goto https://evil.com --help false",
             "playwright-cli -s=qa --raw true goto https://evil.com", "playwright-cli -s -h goto https://evil.com",
@@ -336,7 +337,10 @@ class R4Explorer(Case):
             f"wget -P {CFG.parent} https://qa.traffic.example/config.json", f"cd {CFG.parent} && curl -O https://qa.traffic.example/config.json",
             f"curl -O --output-dir {CFG.parent} https://qa.traffic.example/config.json",
             # script files (a page could steer it to write one)
-            "bash /tmp/x.sh", "sh x", "source ./x", ". ./x", "python3 /tmp/x.py", "node x.js", "bash < /tmp/x.sh"]
+            "bash /tmp/x.sh", "sh x", "source ./x", ". ./x", "python3 /tmp/x.py", "node x.js", "bash < /tmp/x.sh",
+            # packages: downloaded from another host and run
+            "npx cowsay hi", "timeout 60 npx x", "npm install left-pad", "npm i -g x", "pip install requests",
+            "pip3 install --user x", "python3 -m pip install x", "pnpm dlx x", "yarn add x", "uvx ruff"]
     ALLOW = [f"cat {cfg}", f"sed -n 1,5p {cfg}", f"cp {cfg} {RUN}/qa-out/r/.data/cfg-copy.json", "cat .playwright/cli.config.json",
              "ls -l ~/.playwright/cli.config.json", "jq . .playwright/cli.config.json", "timeout 5 wget -qO- http://localhost:1/api",
              "echo $(curl -s qa.traffic.example)", "curl -s -o /tmp/r.json -H 'Accept: application/json' https://qa.traffic.example/api/x | jq .",
@@ -351,7 +355,8 @@ class R4Explorer(Case):
 
     def test_main_session_edits_config_fetches_and_runs_scripts(self):
         self.table([f"printf x > {self.cfg}", "curl -s https://example.com", "ssh host uptime", "bash /tmp/x.sh", "python3 /tmp/x.py",
-                    "source ./x", "printf x > .playwright/cli.config.json"], False, RUN, agents=(False,))
+                    "source ./x", "printf x > .playwright/cli.config.json", "npx cowsay hi", "pip install requests"],
+                   False, RUN, agents=(False,))
 
     def test_write_tools(self):
         for at in (EX, "qa-sdet:qa-explorer ", "QA-SDET:QA-EXPLORER", " qa-explorer"):
