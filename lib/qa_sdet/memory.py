@@ -1271,10 +1271,9 @@ MATCH_ADVICE = {"INVALID": "the user marked it NOT A BUG: don't report it",
                 "FIXED": "fixed before: if this is it, it's a regression: report its hash with a short draft"}
 
 
-def bug_match(con, route, symptom, endpoint=None, limit=3):
-    """Likely duplicates of a bug about to be drafted: bugs on this page, on pages sharing its calls, sighted here, or
-    recorded on the same endpoint, whose title and symptom share words with this symptom (any status, so a NOT A BUG
-    and a fixed one are named too). Candidates for the explorer to judge, never merged by themselves."""
+def bug_matches(con, route, symptom, endpoint=None):
+    """[(score, bug row)] best first: bugs on this page, on pages sharing its calls, sighted here, or recorded on the same
+    endpoint, whose title and symptom share words with this symptom (any status). Reads only."""
     page, words = core.norm_route(route), _stems(symptom)
     ep = codemap._api_ref(endpoint) if endpoint else ("", "")
     near = {page} | set(_near_pages(con, page))
@@ -1290,6 +1289,13 @@ def bug_match(con, route, symptom, endpoint=None, limit=3):
         if score >= 0.5 or shared >= 2:
             scored.append((score, x))
     scored.sort(key=lambda t: -t[0])
+    return scored
+
+
+def bug_match(con, route, symptom, endpoint=None, limit=3):
+    """Likely duplicates of a bug about to be drafted (bug_matches, any status, so a NOT A BUG and a fixed one are named
+    too). Candidates for the explorer to judge, never merged by themselves."""
+    scored = bug_matches(con, route, symptom, endpoint)
     if not scored:
         return "no likely duplicate on this page, the pages sharing its calls, or that endpoint: draft it as new"
     return "\n".join(["LIKELY DUPLICATES (judge each; the same bug = report a sighting with its hash, no new draft):"] + [

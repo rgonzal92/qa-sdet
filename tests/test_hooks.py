@@ -256,6 +256,60 @@ class Hooks(Base):
         good = dict(run(facts=[{"kind": "note", "text": "ok"}]))
         self.assertEqual(self.written(".data/run-form.json", json.dumps(good)), "")
 
+    GOOD_DRAFT = ("# {title}\n\n**Classification:** CONFIRMED · **Severity:** LOW · **Env:** http://localhost:8765 · "
+                  "**Route:** {route} · **Build:** 1 · **Browser:** x\n\n## Steps\n1. Open http://localhost:8765{route}\n\n"
+                  "## Expected\nx — **Oracle:** AC-1\n\n## Actual\n{actual}\n\n## Impact\nx\n\n"
+                  "## Evidence\n- Network: `{net}` → 500\n\n## Notes\nx\n")
+
+    def stored(self, status, route="/zones/new", title="Speed label typo", symptom="speed field label typo", **extra):
+        os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "hook.db")  # the DB the hook subprocess opens
+        con = memory.core.connect()
+        memory.ingest(con, {"run_id": f"r-{symptom}", "build": "1", "pages": [{"route": route}],
+                            "bugs": [{"route": route, "title": title, "symptom": symptom, "severity": "LOW", **extra}]})
+        con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, memory.core.bug_hash(route, symptom)))
+        con.commit()
+        con.close()
+        return memory.core.bug_hash(route, symptom)
+
+    def draft(self, **kw):
+        return self.written("bugs/BUG-3.md", self.GOOD_DRAFT.format(**{"title": "Typo in the speed field label",
+                            "route": "/zones/new", "actual": "The speed field label says speeed", "net": "GET /api/x", **kw}))
+
+    def test_a_draft_matching_a_not_a_bug_or_a_fixed_bug_is_flagged_as_it_is_written(self):
+        invalid = self.stored("INVALID")
+        note = self.draft()
+        self.assertIn("BUG-3", note)
+        self.assertIn(invalid, note)
+        self.assertIn("NOT A BUG", note)
+        self.assertIn("bug-match", note)
+        fixed = self.stored("FIXED", title="Speed 131 saved", symptom="speed 131 saved without error")
+        note = self.draft(title="Speed 131 is saved again", actual="speed 131 saved without error again")
+        self.assertIn(fixed, note)
+        self.assertIn("regression", note)
+        self.assertNotIn(invalid, note)
+
+    def test_a_draft_with_no_stored_match_or_only_open_ones_hears_nothing(self):
+        self.assertEqual(self.draft(), "")  # no DB at all: nothing to say, nothing created
+        self.assertFalse((Path(self.tmp.name) / "hook.db").exists())
+        self.stored("OPEN")
+        self.assertEqual(self.draft(), "")  # an OPEN duplicate is the explorer's bug-match step, not this hook's
+        self.assertEqual(self.draft(title="Unrelated crash", actual="the save button throws"), "")
+
+    def test_the_match_never_writes_the_db_or_breaks_the_write(self):
+        self.stored("INVALID")
+        db = Path(self.tmp.name) / "hook.db"
+        before = db.read_bytes()
+        self.draft()
+        self.assertEqual(db.read_bytes(), before)  # read-only
+        db.write_bytes(b"not a database")
+        self.assertEqual(self.draft(), "")  # a broken or busy DB: silence, exit 0 (post() asserts both)
+
+    def test_a_draft_with_problems_still_hears_them_and_the_match_too(self):
+        invalid = self.stored("INVALID")
+        note = self.written("bugs/BUG-3.md", "# Typo in the speed field label\n\n**Route:** /zones/new\n\nspeed field label typo\n")
+        self.assertIn("## Steps", note)
+        self.assertIn(invalid, note)
+
     def test_a_stuck_explorer_is_told_once_to_change_approach(self):
         import time
         (self.proj / "qa-out").mkdir(exist_ok=True)

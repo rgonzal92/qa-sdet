@@ -5,7 +5,8 @@
 - A qa-mapper hears at once when the code map it just wrote can't be saved. At its stop it could be too late: a parallel
   mapper's stop hook may have read the file first.
 - A file written in a run folder is checked as it lands: a bug draft or repro spec (references/bug-draft.md), a run JSON
-  (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there.
+  (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there. A bug draft
+  that looks like a NOT A BUG or an already fixed bug in memory says so (a read-only lookup; it never blocks the write).
 - An explorer near its maxTurns hears once, even in a run with no budget or deadline (a default run), so it reaches
   step 9 before Claude Code ends it. Its calls are counted in qa-out/.active.progress
   (Bash and Write calls only: a Read or Grep is not seen here, so the line is drawn early).
@@ -125,6 +126,37 @@ def _lib():
         sys.path.insert(0, lib)
 
 
+def draft_match(name, text):
+    """Advice when the bug draft just written looks like a bug the user marked NOT A BUG, or one fixed before: a read-only
+    look at the memory DB (qa-mem bug-match's lookup), never a block. None for no match, no DB, a busy or broken one."""
+    title, route = re.match(r"#[ \t]+(.+)", text), re.search(r"\*\*Route:\*\*\s*(\S+)", text)
+    if not title or not route:
+        return None
+    actual = re.search(r"^## Actual[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    net = re.search(r"Network:\s*`?([A-Z]+ /[^\s`]+)", text)
+    try:
+        import sqlite3
+        from qa_sdet import core, memory
+        db = core.db_path()
+        if not db.is_file():
+            return None
+        con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        con.row_factory = sqlite3.Row
+        try:
+            hits = [x for _, x in memory.bug_matches(con, route.group(1), f"{title.group(1)} {(actual.group(1) if actual else '')[:300]}",
+                                                     net.group(1) if net else None) if x["status"] in memory.MATCH_ADVICE][:2]
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 - a lookup that fails is no advice
+        return None
+    if not hits:
+        return None
+    cmd = f"`qa-mem bug-match '{route.group(1)}' '<symptom>'`"
+    return f"qa-sdet: {name[:-3]} looks like " + "; ".join(
+        f"{x['hash']} ({x['page']} {memory.core.short(x['title'], 60)}): {memory.MATCH_ADVICE[x['status']]}" for x in hits
+    ) + f". Check it with {cmd}; if it is the same bug, leave this draft out of the run JSON's bugs and say so in notes."
+
+
 def file_lint(data):
     """Problems of a draft, spec, run JSON or plan.json just written into a run folder, as one note; else None."""
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -151,8 +183,9 @@ def file_lint(data):
     if kind in ("draft", "spec"):
         problems = [t for _, t in (report.draft_issues(text) if kind == "draft" else report.spec_issues(text))]
         rules = os.path.join(os.path.dirname(HERE), "references", "bug-draft.md")
-        note = (f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
-                if problems else None)
+        notes = [f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again." if problems else None,
+                 draft_match(name, text) if kind == "draft" else None]
+        note = " ".join(x for x in notes if x) or None
     else:
         try:
             doc = json.loads(text)
