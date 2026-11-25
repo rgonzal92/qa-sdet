@@ -8,7 +8,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # as pretooluse.py: also with PYTHONSAFEPATH set
-import guard  # noqa: E402
+import guard
 
 try:
     data = json.load(sys.stdin)

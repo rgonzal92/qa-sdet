@@ -1,11 +1,18 @@
 """qa-mem operations: keys, rundir, the run marker, browser-open and prune."""
 
-import json, os, stat, subprocess, time, unittest
-from importlib.machinery import SourceFileLoader
+import importlib.util
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import Base, cli, cli_mod, done, core, ROOT
+from support import ROOT, Base, cli, cli_mod, core, done, load_hook
+
 from qa_sdet import ops
 
 
@@ -157,7 +164,7 @@ class Marker(Base):
         self.assertFalse((self.proj / "qa-out/.active").exists())
 
     def test_marker_the_guard_accepts(self):  # --minutes 5000 wrote a deadline the guard reads as malformed
-        guard = SourceFileLoader("guard_r7", str(ROOT / "hooks/guard.py")).load_module()
+        guard = load_hook("guard_r7")
         cli("marker", "start", str(self.proj), "--minutes", "480", "--budget", "0")
         with mock.patch.dict(os.environ, CLAUDE_PROJECT_DIR=""):
             path, marker = guard.read_marker(str(self.proj))
@@ -377,15 +384,19 @@ class Prune(Base):
         self.assertEqual(ops.prune(self.proj, run=empty_run), 1)
         self.assertTrue(old_snap.exists())
         self.assertFalse((cli_dir / "after.yml").exists())
-        # L6: Pillow ValueError (e.g. huge zTXt chunk) becomes BadInput, not uncaught traceback
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")  # optional at run time
+    def test_a_pillow_value_error_is_bad_input_not_a_traceback(self):  # L6: e.g. a huge zTXt chunk
         from PIL import Image
 
-        png = empty_run / "evidence/BUG-1.png"
+        png = self.t / "run/evidence/BUG-1.png"
         png.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (20, 20)).save(png)
-        with mock.patch.object(Image, "open", side_effect=ValueError("Decompressed data too large")):
-            with self.assertRaises(core.BadInput):
-                ops.annotate(png, [(0, 0, 10, 10)], "x")
+        with (
+            mock.patch.object(Image, "open", side_effect=ValueError("Decompressed data too large")),
+            self.assertRaises(core.BadInput),
+        ):
+            ops.annotate(png, [(0, 0, 10, 10)], "x")
 
 
 class SessionCheck(Base):
@@ -736,6 +747,15 @@ class ApiProbe(Base):
                 self.assertIn("qa-sdet-", err)
                 self.assertEqual(mrun.call_count, 1, "the write itself never ran")
 
+    def test_a_write_whose_record_check_fails_is_never_sent(self):  # no proof the record is the run's: no write
+        self.marker(api_writes=True)
+        for m in ("PUT", "PATCH", "DELETE"):
+            args = (m, self.URL + "/7") + (("--json", '{"speed": 5}') if m != "DELETE" else ())
+            code, out, err, mrun = self.probe(*args, seq=[done(1, err="Error: the browser 'qa' is not open")])
+            self.assertEqual((code, out), (1, None), m)
+            self.assertIn("api-probe", err)
+            self.assertEqual(mrun.call_count, 1, "only the record check ran")
+
     def test_browser_trouble_is_exit_1_without_a_stack_trace(self):
         for seq in (
             [done(1, err="Error: the browser 'qa' is not open")],
@@ -850,6 +870,19 @@ class Dispatch(Base):
     def dispatch(self, route, *extra):
         code, out, err = cli("dispatch", str(self.run_dir), "--route", route, *extra)
         return code, (json.loads(out) if code == 0 else None), err
+
+    def test_a_plan_that_is_not_an_object_is_refused_even_with_asserts_off(self):  # python -O drops an assert
+        (self.run_dir / ".data/plan.json").write_text("[]")
+        for flags in ([], ["-O"]):
+            r = subprocess.run(
+                [sys.executable, *flags, str(ROOT / "bin/qa-mem"), "dispatch", str(self.run_dir), "--route", "/list"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={**os.environ, "QA_SDET_CONFIG": str(core.CONFIG), "QA_SDET_DATA": str(core.DATA_DIR)},
+            )
+            self.assertEqual(r.returncode, 2, (flags, r.stderr))
+            self.assertIn("not a JSON object", r.stderr)
 
     def test_brief_holds_this_routes_cases_its_tickets_acs_rules_and_card(self):
         code, out, _ = self.dispatch("/list?a=1", "--budget", "20", "--known-bugs", "PROJ-77 Sort breaks on ties")

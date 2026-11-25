@@ -1,10 +1,16 @@
 """The qa-mem command line: usage, error messages, and the bin/qa-mem launcher."""
 
-import json, os, sqlite3, subprocess, sys, tempfile, unittest
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import Base, cli, cli_mod, core, ROOT
+from support import ROOT, Base, cli, cli_mod, core
 
 
 class Cli(Base):

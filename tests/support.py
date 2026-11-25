@@ -1,15 +1,35 @@
 """Shared test helpers: a sandbox (config, data folder, HOME and memory DB in a temp folder), the qa-mem runner, the
 sample plan and run files, and the git helpers of the code-map tests. Not a test module."""
 
-import contextlib, io, json, os, subprocess, sys, tempfile, time, unittest
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
-from qa_sdet import cli as cli_mod, core, memory
+from qa_sdet import cli as cli_mod
+from qa_sdet import core, memory
 
 FIX = ROOT / "tests/fixture-src"
+
+
+def load_hook(name, path=ROOT / "hooks/guard.py"):
+    """A hook script (the guard by default) as a fresh module named `name`, registered in sys.modules as an import
+    would. SourceFileLoader.load_module, which this replaces, is gone in Python 3.15."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def cli(*argv, stdin=None):

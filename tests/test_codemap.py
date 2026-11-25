@@ -1,9 +1,13 @@
 """Code map (qa_sdet.codemap): applying a mapper's rows, the card block, `qa-mem code`, forget and the app shell's menu.
 Hints from source, never requirements."""
 
-import json, os, shutil, unittest
+import json
+import os
+import shutil
+import unittest
 
-from support import CodeMapCase, FIX, git, git_repo, core, memory
+from support import FIX, CodeMapCase, core, git, git_repo, memory
+
 from qa_sdet import codemap
 
 
@@ -252,7 +256,6 @@ class Apply(CodeMapCase):
         self.write_map("frontend", rows)  # no repo: the only repo with frontend files
         self.ingest_all()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 2)
-        commit = self.con.execute("SELECT value FROM meta WHERE key LIKE 'codemap_commit:frontend:%'").fetchone()
         self.scan(repo, other, full=True, stamp="s2")
         self.write_map(
             "frontend",
@@ -883,7 +886,7 @@ class Code(CodeMapCase):
         self.assertNotIn("admin", z)
 
     def test_api_path_shapes(self):
-        p = codemap._api_path
+        p = lambda text: codemap._api_ref(text)[1]
         self.assertEqual(p("GET /api/incidents?x=1"), "api/incidents")
         self.assertEqual(p("fetch('api/incidents.json')"), "api/incidents")
         self.assertEqual(p("PUT /api/zones/{id}"), "api/zones/:id")
@@ -1221,14 +1224,13 @@ class ShellMenu(CodeMapCase):
         self.assertEqual(self.routes(), [])
 
     def test_deeply_nested_shell_menu_never_breaks_the_scan(self):  # RecursionError escaped "never raises"
-        deep = {"key": "a", "title": "A", "module": {"id": "m", "url": "/m/a"}}
-        for _ in range(3000):
-            deep = {"key": "a", "children": [deep]}
+        leaf = json.dumps({"key": "a", "title": "A", "module": {"id": "m", "url": "/m/a"}})
+        deep = '{"key": "a", "children": [' * 3000 + leaf + "]}" * 3000  # as text: json.dumps recurses too on 3.9
         ui = git_repo(
             self.dir / "ui",
             {
                 "src/routes.js": "const r = [{ path: '/m/a', element: <A/> }]\n",
-                "public/config.json": json.dumps({"nav": [deep]}),
+                "public/config.json": '{"nav": [' + deep + "]}",
             },
         )
         s = self.scan(ui)

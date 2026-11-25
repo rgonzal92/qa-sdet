@@ -46,7 +46,7 @@ def _log_event(qa_out, event_type, fields):
         from qa_sdet import plugin_log
 
         plugin_log.append_event(qa_out, event_type, fields, create=False)
-    except Exception:  # noqa: BLE001 - logging is best effort
+    except Exception:  # noqa: BLE001, S110 - logging is best effort
         pass
 
 
@@ -63,8 +63,9 @@ def max_turns(m, who):
     except (TypeError, ValueError, OverflowError):
         pass
     try:
-        text = open(os.path.join(os.path.dirname(HERE), "agents", f"{who}.md"), encoding="utf-8").read(2000)
-        return int(re.search(r"^maxTurns:\s*(\d+)", text, re.M).group(1))
+        with open(os.path.join(os.path.dirname(HERE), "agents", f"{who}.md"), encoding="utf-8") as fh:
+            text = fh.read(2000)
+        return int(re.search(r"^maxTurns:\s*(\d+)", text, re.M).group(1))  # type: ignore[union-attr]  # no match: AttributeError, caught below
     except (OSError, AttributeError):
         return 0
 
@@ -133,6 +134,7 @@ def code_map_feedback(data):
         return None
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
     from pathlib import Path
+
     from qa_sdet import memory
 
     p = Path(str(data.get("cwd") or os.getcwd()), f)
@@ -171,6 +173,7 @@ def draft_match(name, text):
     net = re.search(r"Network:\s*`?([A-Z]+ /[^\s`]+)", text)
     try:
         import sqlite3
+
         from qa_sdet import core, memory
 
         db = core.db_path()
@@ -313,7 +316,9 @@ def classify(data, recs):
     calls = PW_CALL.findall(cmd)
     if not calls:  # qa-mem and the rest: a turn, but not a browser call; an evidence image is a new file
         return {"t": "o", "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd)))}
-    key = hashlib.sha1(cmd.encode("utf-8", "replace")).hexdigest()[:12]  # never the text: it can hold a typed value
+    key = hashlib.sha1(cmd.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[
+        :12
+    ]  # never the text: it can hold a typed value
     seen = {r.get("k") for r in [r for r in recs if r.get("t") == "pw"][-NOVELTY_WINDOW:]}
     interacts = any(verb not in OBSERVE for verb, _ in calls)
     return {
@@ -441,7 +446,7 @@ def main():
                     "detail": str(e),
                 },
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
     return 0
 

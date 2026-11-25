@@ -1,5 +1,7 @@
 """Run folders, markers, `browser-open`, `session-check`, prune and annotate."""
 
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -13,7 +15,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
 from . import core, scrub
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    import sqlite3
+    from typing import Any
+
+    from .contracts import Marker
 
 
 # ---------- v0.4 wrappers: ticket keys, run folders, run marker, browser, prune ----------
@@ -106,7 +116,7 @@ def make_rundir(project, label, day=None):
     project = _project(project)
     root = project / "qa-out"
     root.mkdir(exist_ok=True)
-    base = f"{day or datetime.now().strftime('%Y-%m-%d')}-{label}"
+    base = f"{day or datetime.now().strftime('%Y-%m-%d')}-{label}"  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
     for n in range(1, 1000):
         run = root / (base if n == 1 else f"{base}-{n}")
         try:
@@ -126,8 +136,16 @@ MARKER_HOURS = 8  # the guard ignores a marker after this (a crashed run); also 
 
 
 def marker_start(
-    project, budget=0, minutes=0, faults=False, t=None, run_dir=None, slug=None, api_writes=False, max_turns=0
-):
+    project: str | Path,
+    budget: int = 0,
+    minutes: int = 0,
+    faults: bool = False,
+    t: float | None = None,
+    run_dir: str | Path | None = None,
+    slug: str | None = None,
+    api_writes: bool = False,
+    max_turns: int = 0,
+) -> Marker:
     """qa-out/.active for the guard: 0 = unlimited budget / no deadline. Written atomically. run_dir and slug (from
     dispatch) name the explorer's run for the hooks. faults and api_writes are the run's opt-in flags (route / network-state-set;
     POST, PUT, PATCH, DELETE through api-probe). max_turns: the turn count the wind-down hook warns before (default: the
@@ -135,7 +153,7 @@ def marker_start(
     t = time.time() if t is None else t
     root = _project(project) / "qa-out"
     root.mkdir(exist_ok=True)
-    data = {
+    data: Marker = {
         "expires": int(t + MARKER_HOURS * 3600),
         "deadline": int(t + minutes * 60) if minutes else 0,
         "budget": int(budget or 0),
@@ -164,7 +182,7 @@ def _brief_slug(data, route, tag=""):
         brief, run_file = data / f"brief-{slug}.md", data / f"run-{slug}.json"
         try:
             owner = (
-                re.search(r"^route: (.*)$", brief.read_text(encoding="utf-8"), re.M).group(1)
+                re.search(r"^route: (.*)$", brief.read_text(encoding="utf-8"), re.M).group(1)  # type: ignore[union-attr]  # no match: AttributeError, caught below
                 if brief.is_file()
                 else None
             )
@@ -179,21 +197,21 @@ HYPOTHESIS_CAP = 400
 
 
 def dispatch(
-    con,
-    run,
-    route,
-    mode=None,
-    focus=None,
-    budget=0,
-    minutes=0,
-    faults=False,
-    known_bugs="",
-    open_record=False,
-    api_writes=False,
-    hypothesis=None,
-    target_route=None,
-    max_turns=0,
-):
+    con: sqlite3.Connection,
+    run: str | Path,
+    route: str,
+    mode: str | None = None,
+    focus: str | None = None,
+    budget: int = 0,
+    minutes: int = 0,
+    faults: bool = False,
+    known_bugs: str = "",
+    open_record: bool = False,
+    api_writes: bool = False,
+    hypothesis: str | None = None,
+    target_route: str | None = None,
+    max_turns: int = 0,
+) -> dict[str, object]:
     """One explorer's setup: starts the run marker, picks the route's slug, writes <run>/.data/brief-<slug>.md (target,
     limits, config, card, this route's cases and its tickets' AC, the project's qa-rules.md, the charter, known Jira bugs;
     scrubbed) and returns {slug, target, brief, mode, case_count}. open_record: the explorer starts on the list page
@@ -209,9 +227,11 @@ def dispatch(
         raise core.BadInput(f"dispatch: not a run folder (qa-out/<run>/): {run}")
     try:
         plan = json.loads((data / "plan.json").read_text(encoding="utf-8-sig"))
-        assert isinstance(plan, dict)
-    except (OSError, ValueError, AssertionError) as e:
-        raise core.BadInput(f"dispatch: {data / 'plan.json'} is missing or not a JSON object ({type(e).__name__})")
+        why = type(plan).__name__
+    except (OSError, ValueError) as e:  # not an assert: python -O would drop the check
+        plan, why = None, type(e).__name__
+    if not isinstance(plan, dict):
+        raise core.BadInput(f"dispatch: {data / 'plan.json'} is missing or not a JSON object ({why})")
     cfg, hosts = _qa_config("dispatch")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     target = route if "://" in route else base + ("" if route.startswith("/") else "/") + route
@@ -342,7 +362,16 @@ def _note_spend(root):
         pass
 
 
-def spend(run_dir, total_budget=0, total_minutes=0, budget=0, minutes=0, more_budget=0, more_minutes=0, now=None):
+def spend(
+    run_dir: str | Path,
+    total_budget: int = 0,
+    total_minutes: int = 0,
+    budget: int = 0,
+    minutes: int = 0,
+    more_budget: int = 0,
+    more_minutes: int = 0,
+    now: float | None = None,
+) -> dict[str, Any]:
     """What the run's explorers spent so far (from marker stops) and what the next page may: {pages, commands_used,
     minutes_used (from the first page's start), commands_left, minutes_left (None without a cap), budget, minutes (the
     limits to dispatch the next page with: its own, or what is left of the caps, whichever is less; 0 = none), exhausted,
@@ -445,7 +474,7 @@ def _log_run_summary(root):
             }
         else:
             statuses = [core.case_status(c.get("status")) for c in (doc.get("cases") or []) if isinstance(c, dict)]
-            bugs = doc.get("bugs") if isinstance(doc.get("bugs"), list) else []
+            bugs = b if isinstance(b := doc.get("bugs"), list) else []
             audit_n = 0
             if (rdir / "bugs").is_dir() and any((rdir / "bugs").glob("BUG-*.md")):
                 from . import report
@@ -466,11 +495,11 @@ def _log_run_summary(root):
         from . import plugin_log
 
         plugin_log.append_event(root, "run_summary", fields)
-    except Exception:  # noqa: BLE001 - summary logging is best effort
+    except Exception:  # noqa: BLE001, S110 - summary logging is best effort
         pass
 
 
-def marker_stop(project):
+def marker_stop(project: str | Path) -> None:
     root = _project(project) / "qa-out"
     _note_spend(root)
     _log_run_summary(root)
@@ -690,7 +719,7 @@ def _qa_config(what):
     try:
         cfg = core.config(strict=True)
     except (OSError, ValueError) as e:
-        raise core.BadInput(f"{what}: unreadable {core.CONFIG} ({e})")
+        raise core.BadInput(f"{what}: unreadable {core.CONFIG} ({e})") from e
     return cfg, core.allowed_hosts(cfg)
 
 
@@ -719,7 +748,7 @@ def session_check(record=False, read_build=False):
         build = _read_build(cfg, hosts, env) if read_build else None
         if record:
             ensure_profile_dir()
-            core._write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
+            core._write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
         print(f"ok  build={build}" if read_build else "ok")
         return 0
     finally:
@@ -929,7 +958,7 @@ def api_probe(method, url, body=None, content_type=None, headers=()):
     method = str(method).upper()
     if method not in API_READS + API_WRITES:
         raise core.BadInput(f"api-probe: method must be one of {', '.join(API_READS + API_WRITES)} (got {method!r})")
-    cfg, hosts = _qa_config("api-probe")
+    _, hosts = _qa_config("api-probe")
     if not core.url_allowed(url, hosts):
         raise core.BadInput(f"api-probe: {url!r} must be a full http(s) URL in allowedHosts ({sorted(hosts)})")
     if word := _auth_segment(url):
@@ -1110,9 +1139,9 @@ def evidence(path, label, selector=None, ref=None):
 
 def parse_box(text):
     try:
-        x, y, w, h = (int(round(float(v))) for v in text.split(","))
+        x, y, w, h = (round(float(v)) for v in text.split(","))
     except (ValueError, OverflowError):  # OverflowError: inf / 1e400
-        raise core.BadInput(f"annotate: --box must be x,y,w,h (got {text!r})")
+        raise core.BadInput(f"annotate: --box must be x,y,w,h (got {text!r})") from None
     if w <= 0 or h <= 0:
         raise core.BadInput(f"annotate: --box width and height must be > 0 ({text!r})")
     return x, y, w, h
@@ -1163,7 +1192,7 @@ def annotate(path, boxes, label):
         ValueError,
         Image.DecompressionBombError,
     ) as e:  # not a PNG, truncated, huge text chunk, or bomb: left as is
-        raise core.BadInput(f"annotate: can't read {path.name} as an image ({e}); image left as is")
+        raise core.BadInput(f"annotate: can't read {path.name} as an image ({e}); image left as is") from e
     W, H = img.size
     for x, y, w, h in boxes:
         if x >= W or y >= H or x + w <= 0 or y + h <= 0:

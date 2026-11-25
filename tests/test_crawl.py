@@ -1,10 +1,15 @@
 """`qa-mem crawl` and `qa-mem discover`: the read-only map passes, run by the coordinator in one call (no agent, no turn
 limit). A fake playwright-cli stands in for the browser: pages by URL, each with the locators it holds."""
 
-import json, os, subprocess, time, unittest
+import json
+import os
+import subprocess
+import time
+import unittest
 from unittest import mock
 
 from support import Base, cli, done
+
 from qa_sdet import core, crawl, memory, ops
 
 CFG = dict(

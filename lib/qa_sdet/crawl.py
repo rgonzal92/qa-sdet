@@ -13,6 +13,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
 from . import codemap, core, ops
 
 HOOKS = Path(__file__).resolve().parents[2] / "hooks"
@@ -292,7 +293,7 @@ def _check(marker, idx, specs, target=None):
         if r is None:
             return None, out
         state = state or r
-        pick = lambda key: {part[j] for j in r.get(key) or [] if isinstance(j, int) and 0 <= j < len(part)}
+        pick = lambda key: {part[j] for j in r.get(key) or [] if isinstance(j, int) and 0 <= j < len(part)}  # noqa: B023 - called in this loop pass
         found, invalid = found | pick("found"), invalid | pick("invalid")
     return (found, invalid, state), None
 

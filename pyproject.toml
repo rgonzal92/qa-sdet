@@ -1,0 +1,114 @@
+# Developer tooling only. The plugin itself runs on the system python3 (3.9+) with the standard library alone:
+# nothing here is installed for users, and hooks, skills and bin/qa-mem never use .venv.
+[project]
+name = "qa-sdet"
+version = "0.4.0"
+description = "Claude Code plugin for SDET work (this file configures its developer tools)"
+requires-python = ">=3.9"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.6",  # same version as the pre-commit hook
+    "mypy>=1.20,<2",  # 2.x can't check against Python 3.9, the runtime floor
+    "coverage>=7.10",
+    "hypothesis",
+    "pre-commit",
+    "pip-audit",
+]
+analysis = ["vulture"]
+mutation = ["mutmut", "pytest"]  # pytest only runs the unittest suite for mutmut
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.uv.dependency-groups]  # current tool releases need 3.11+; the runtime floor stays 3.9
+dev = { requires-python = ">=3.11" }
+analysis = { requires-python = ">=3.11" }
+mutation = { requires-python = ">=3.11" }
+
+[tool.ruff]
+target-version = "py39"  # the runtime floor (README)
+line-length = 120
+extend-include = ["bin/qa-mem"]
+extend-exclude = ["*.md"]  # skills, agents and references are agent instructions: never auto-rewritten
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "S", "BLE", "RUF", "PLE", "PLW", "DTZ", "RET", "TRY"]
+ignore = [
+    "E501",     # the formatter owns layout; long messages and regexes stay whole
+    "E731",     # small named lambdas are this codebase's local-helper idiom
+    "TRY003",   # messages are written where raised and shown to the user as is
+    "TRY004",   # ValueError is the contract for a bad shape: ingest and the hooks catch it
+    "TRY300", "TRY301", "RET503", "RET504", "SIM105", "C408", "RUF005",  # style preferences, no defect
+    "SIM905",   # set("a b c".split()) keeps long word lists readable
+    "RUF001",   # deliberate typographic characters in output (×, —, …)
+    "PLW1510",  # every caller reads returncode itself
+    "PLW2901",  # loop variables are rebound to their normalised form on purpose
+    "S603", "S607",  # argument lists only (S602 still flags shell=True) to git, playwright-cli, acli found on PATH
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qa_sdet", "guard"]
+section-order = ["future", "standard-library", "third-party", "test-support", "first-party", "local-folder"]
+
+[tool.ruff.lint.isort.sections]
+"test-support" = ["support"]  # tests/support.py puts lib/ on sys.path: it must be imported before qa_sdet
+
+[tool.ruff.lint.per-file-ignores]
+# reviewed 2026-11-25: only module constants and generated "?" placeholders are interpolated into SQL here
+"lib/qa_sdet/{core,codemap,memory}.py" = ["S608"]
+# synthetic secrets, temp paths, asserts and subprocess calls are what the tests are made of
+"tests/**" = ["S101", "S103", "S105", "S106", "S108", "S608", "RUF012", "RUF059", "E402", "UP031"]  # UP031: % keeps JSON braces readable
+
+[tool.mypy]
+python_version = "3.9"
+mypy_path = "lib:hooks"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+always_true = ["TYPE_CHECKING"]
+# locals like `out = []` in untyped functions: element types there add churn, not contracts (strict modules keep it)
+disable_error_code = ["var-annotated"]  # modules set TYPE_CHECKING = False: importing typing costs every qa-mem call ~5 ms
+
+[[tool.mypy.overrides]]
+module = ["qa_sdet.core", "qa_sdet.scrub", "qa_sdet.contracts"]
+disallow_untyped_defs = true
+enable_error_code = ["var-annotated"]
+
+[[tool.mypy.overrides]]
+module = ["PIL", "PIL.*"]  # optional at run time (evidence labels); not a dev dependency
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["lib", "hooks", "bin"]
+patch = ["subprocess"]  # hooks and bin/qa-mem run as subprocesses in the tests
+relative_files = true  # SonarQube Cloud reads the XML from another checkout
+
+[tool.coverage.report]
+skip_empty = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.paths]  # subprocesses run from temp project folders: map their paths back into the repo
+lib = ["lib/", "*/lib/"]
+hooks = ["hooks/", "*/hooks/"]
+bin = ["bin/", "*/bin/"]
+
+[tool.mutmut]
+# `make mutation` runs mutmut in a temporary copy where lib/ is renamed src/: mutmut only knows ./, src/ and source/.
+# A bounded trial: name the mutants to run (MUTANTS=...), for the redactor, the host rules and the verdict.
+source_paths = ["src/qa_sdet"]
+also_copy = ["hooks", "bin", "references", "agents", "skills", ".claude-plugin", "README.md", "CHANGELOG.md", "pyproject.toml"]
+# in-process tests only: mutmut tracks mutants inside the test process, so code run by a subprocess (hooks,
+# bin/qa-mem) can't be attributed
+pytest_add_cli_args_test_selection = [
+    "tests/test_guard.py::LibMirrorsGuard",
+    "tests/test_scrub.py",
+    "tests/test_properties.py",
+    "tests/test_report.py",
+    "tests/test_inbox.py",
+]

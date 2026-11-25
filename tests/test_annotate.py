@@ -1,9 +1,16 @@
 """`qa-mem annotate`: red boxes and a label drawn on a bug's evidence image."""
 
-import builtins, importlib.util, os, stat, struct, unittest, zlib
+import builtins
+import importlib.util
+import os
+import stat
+import struct
+import unittest
+import zlib
 from unittest import mock
 
 from support import Base, cli, core
+
 from qa_sdet import ops
 
 

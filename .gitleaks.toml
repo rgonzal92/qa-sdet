@@ -1,0 +1,23 @@
+# Secret scanning (make security, pre-commit, CI): gitleaks' default rules plus two narrow exceptions.
+# Reviewed 2026-11-25: every finding in these files is a synthetic value a test plants to check that it is redacted
+# or refused (one shared test JWT whose payload is {"sub": ...}, SYNTH placeholders, fake tokens). Real code, hooks,
+# skills, docs and any other test file stay scanned; a new file of planted secrets needs a reviewed entry here.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic secrets in the tests of the redactor, the guard, the plugin log and the code map"
+paths = [
+    '''^tests/test_(scrub|guard|plugin_log|codemap|report|scan|inbox|memory)\.py$''',
+    '''^tests/test_qa_mem\.py$''',  # deleted; still in history
+    '''^tests/fixture-src/frontend/src/api/client\.js$''',  # "fake, planted: must never reach the memory DB in clear"
+]
+
+[[allowlists]]
+description = "Local build output and the dev environment (never committed): the working-tree scan walks them"
+paths = ['''(^|/)__pycache__/''', '''^\.venv/''', '''^mutants/''', '''^\.(mypy|ruff)_cache/''', '''^\.hypothesis/''']
+
+[[allowlists]]
+description = "sonar.projectKey is SonarQube Cloud's public project id, not a credential (a .properties value can't carry a comment)"
+targetRules = ["generic-api-key"]
+paths = ['''^sonar-project\.properties$''']

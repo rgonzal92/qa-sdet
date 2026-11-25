@@ -1,6 +1,7 @@
 """Config, the DB connection and schema, constants, and helpers the other modules share."""
 
-import fcntl
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -13,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true); importing typing costs every call ~5 ms
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
+    from .contracts import JsonObj
 
 CONFIG = Path(os.environ.get("QA_SDET_CONFIG") or "~/.config/qa-sdet/config.json").expanduser()
 DATA_DIR = Path(os.environ.get("QA_SDET_DATA") or "~/.local/share/qa-sdet").expanduser()
@@ -113,11 +119,11 @@ STALE_META = (
 )
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def config(strict=False):
+def config(strict: bool = False) -> JsonObj:
     """The config file as a dict. strict=False: {} when it is missing or broken. strict=True: raises OSError (missing,
     unreadable) or ValueError (not JSON, or not one JSON object) so the caller can say what is wrong."""
     try:
@@ -131,7 +137,7 @@ def config(strict=False):
     return cfg
 
 
-def db_path():
+def db_path() -> Path:
     if os.environ.get("QA_MEM_DB"):
         return Path(os.environ["QA_MEM_DB"]).expanduser()
     app = "default"
@@ -144,7 +150,7 @@ def db_path():
     return DATA_DIR / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', app)}.db"
 
 
-def connect():
+def connect() -> sqlite3.Connection:
     p = db_path()
     try:
         p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # app facts and bugs: owner only
@@ -174,7 +180,7 @@ def connect():
         "explored": "UPDATE pages SET explored=coalesce(last_verified, '') WHERE build IS NOT NULL",
     }
     todo = []  # run after the search index is rebuilt: an UPDATE of bugs fires its triggers
-    for table, cols in (
+    for table, added in (
         (
             "bugs",
             (
@@ -204,7 +210,7 @@ def connect():
         ),
     ):
         have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}  # columns added within 0.4: added in place
-        for col in cols:
+        for col in added:
             name, _, kind = col.partition(":")
             if name not in have and _add_column(con, table, name, kind or "TEXT") and name in backfill:
                 todo.append(backfill[name])
@@ -227,7 +233,7 @@ def connect():
     return con
 
 
-def _add_column(con, table, name, kind):
+def _add_column(con: sqlite3.Connection, table: str, name: str, kind: str) -> bool:
     """ALTER TABLE ... ADD COLUMN; False when another process added it first (two qa-mem upgrading one database)."""
     try:
         with con:
@@ -239,7 +245,7 @@ def _add_column(con, table, name, kind):
         return False
 
 
-def txt(v, field):
+def txt(v: object, field: str) -> str | None:
     """Scalar field as str (or None). Lists/dicts are a bad run.json, not a transient error."""
     if v is None:
         return None
@@ -248,7 +254,7 @@ def txt(v, field):
     return str(v)
 
 
-def norm_route(r):
+def norm_route(r: object) -> str:
     """'/form.html', 'http://host/form.html?x=1', '/form.html/' -> '/form.html'. Keeps SPA hash routes (#/..., #!/...)."""
     r = str(r or "").strip()
     if not r:
@@ -264,7 +270,7 @@ def norm_route(r):
     return path + (f"#{bang}{frag}" if frag else "")
 
 
-def route_key(r):
+def route_key(r: object) -> tuple[str, str]:
     """(norm_route, query): /list?a=1 and /list?a=2 are two routes of one card (two explorers, two run files)."""
     r = str(r or "").strip()
     try:
@@ -281,24 +287,24 @@ ID_SEGMENT = re.compile(
 )  # route params: :id, {id}, [id], <id>
 
 
-def _ids(path):
+def _ids(path: str) -> str:
     """'/incidents/4521//' -> '/incidents/:id': one card and one bug hash for every record's detail page."""
     segs = [":id" if ID_SEGMENT.fullmatch(x) else x for x in (y.strip() for y in path.split("/")) if x]
     return ("/" + "/".join(segs)) if segs else ""
 
 
-def _s(v):
+def _s(v: object) -> str:
     return "" if v is None or isinstance(v, bool) else str(v)
 
 
-def cap(s):
+def cap(s: object) -> str:
     return " ".join(_s(s).split())[:MAX_TEXT]
 
 
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 
-def allowed_hosts(cfg):
+def allowed_hosts(cfg: object) -> set[str]:
     """The config's allowedHosts as the guard reads them (hooks/guard.py allowed_hosts, which imports nothing from here):
     lower case, no trailing dot or '*.'; one loopback name allows all three. tests/test_guard.py pins the two together."""
     listed = cfg.get("allowedHosts") if isinstance(cfg, dict) else None
@@ -310,7 +316,7 @@ def allowed_hosts(cfg):
     return hosts | LOOPBACK if hosts & LOOPBACK else hosts
 
 
-def url_allowed(url, hosts):
+def url_allowed(url: object, hosts: Iterable[str]) -> bool:
     """An http(s) URL on one of `hosts` (or under one), refused wherever the guard's host_ok refuses: a backslash,
     user@host or a %-escaped host, which browsers resolve to another host than urlsplit reads."""
     url = _s(url).strip()
@@ -329,7 +335,7 @@ def url_allowed(url, hosts):
     )
 
 
-def norm_build(v):
+def norm_build(v: object) -> str:
     """Same build text however the page laid it out; empty, N/A, undefined or unknown* -> UNKNOWN."""
     build = cap(v)
     b = build.lower().strip(" .:()[]'\"")
@@ -338,15 +344,15 @@ def norm_build(v):
     return build
 
 
-def norm(s):
+def norm(s: object) -> str:
     return " ".join(re.sub(r"[\W_]+", " ", _s(s).lower()).split())
 
 
-def bug_hash(route, symptom):
-    return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode()).hexdigest()[:12]
+def bug_hash(route: object, symptom: object) -> str:
+    return hashlib.sha1(f"{norm(route)}|{norm(symptom)}".encode(), usedforsecurity=False).hexdigest()[:12]
 
 
-def given_hash(raw):
+def given_hash(raw: object) -> str:
     """The hash (or 4-12 char prefix) a run's bug names, as ingest looks it up: '<hash>', '#<hash>', '<hash> (known)';
     '' for none, 'n/a' or a Jira key ('CAFE-12' is no prefix 'cafe')."""
     raw = _s(raw).strip()
@@ -356,16 +362,16 @@ def given_hash(raw):
     return m.group(1).lower() if m else ""
 
 
-def meta(con, key):
+def meta(con: sqlite3.Connection, key: str) -> str | None:
     row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
 
 
-def set_meta(con, key, value):
+def set_meta(con: sqlite3.Connection, key: str, value: object) -> None:
     con.execute("INSERT OR REPLACE INTO meta VALUES(?, ?)", (key, value))
 
 
-def dicts(obj, key):
+def dicts(obj: Mapping[str, object], key: str) -> list[JsonObj]:
     items = obj.get(key)
     if items is None:
         return []
@@ -374,12 +380,12 @@ def dicts(obj, key):
     return items
 
 
-def heuristic_id(h):
+def heuristic_id(h: object) -> str:
     h = norm(h).replace(" ", "-")
     return h if h in HEURISTICS else f"other:{h}"
 
 
-def coverage_result(r):
+def coverage_result(r: object) -> str:
     """pass / fail / blocked, whatever the agent wrote: 'BLOCKED (needs --faults)', NOT_RUN and skipped
     mean not done, so the heuristic stays UNTRIED; anything else is kept short as written."""
     w = norm(r).split()
@@ -395,7 +401,7 @@ def coverage_result(r):
 CASE_STATUSES = ("PASS", "FAIL", "BLOCKED", "NOT_RUN", "QUESTION")
 
 
-def case_status(v):
+def case_status(v: object) -> str | None:
     """'pass', 'Not run', 'not-run' -> PASS / NOT_RUN; None when it isn't one of CASE_STATUSES."""
     s = re.sub(r"[\s-]+", "_", str(v or "").strip().upper())
     return s if s in CASE_STATUSES else None
@@ -404,10 +410,10 @@ def case_status(v):
 COMMIT_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 
 
-GIT_SLOW = []
+GIT_SLOW: list[str | Path] = []
 
 
-def _git(repo, *args, timeout=30):
+def _git(repo: str | Path, *args: str, timeout: float = 30) -> str | None:
     """git output (text) or None. Paths stay unquoted (core.quotePath=false) so non-ASCII names round-trip."""
     try:
         r = subprocess.run(
@@ -425,7 +431,7 @@ def _git(repo, *args, timeout=30):
     return r.stdout if r.returncode == 0 else None
 
 
-def short(s, n):
+def short(s: object, n: int) -> str:
     s = _s(s)
     return s if len(s) <= n else s[: n - 1] + "…"
 
@@ -438,12 +444,12 @@ class BadOption(BadInput):
     """An unknown, repeated or empty --option: printed with the command's usage."""
 
 
-def _strs(obj, key):
+def _strs(obj: object, key: str) -> list[str]:
     v = obj.get(key) if isinstance(obj, dict) else None
     return [str(x) for x in v if isinstance(x, (str, int, float))] if isinstance(v, list) else []
 
 
-def _write(path, text):
+def _write(path: str | Path, text: str) -> None:
     """Atomic write via a fresh temp file (O_EXCL): a planted `.<name>.tmp` link can't redirect it outside qa-out."""
     path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")

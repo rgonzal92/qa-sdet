@@ -6,6 +6,9 @@ bounces, CLI errors, and 1-line run summaries). Users add manual notes via `qa-m
 `/qa-sdet:qa-feedback`. Setting `"pluginLog": false` in ~/.config/qa-sdet/config.json disables all writes.
 """
 
+from __future__ import annotations
+
+import functools
 import hashlib
 import json
 import os
@@ -17,8 +20,15 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
 from . import core, scrub
 
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
+
+    from .contracts import JsonObj
 
 LOG_NAME = "plugin-log.jsonl"
 CURSOR_NAME = ".plugin-log.cursor"
@@ -29,7 +39,6 @@ NOTE_KINDS = ("bug", "nuisance", "idea")
 SEVERITIES = ("low", "med", "high")
 EVENT_TYPES = ("denial", "hook_error", "nudge", "tool_fail", "stop_bounce", "cli_error", "run_summary", "user_note")
 _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
-_VERSION_CACHE = None
 
 # The secret forms hooks/guard.py mask() covers and scrub.py doesn't, so tool_fail and cli_error calls stay as clean as
 # denials; credential-shaped values only, so notes stay readable (tests/test_guard.py LibMirrorsGuard pins the two).
@@ -44,16 +53,14 @@ _CLI_MASKS = (
 )
 
 
-def plugin_version():
+@functools.cache
+def plugin_version() -> str:
     """Version from .claude-plugin/plugin.json, cached per process."""
-    global _VERSION_CACHE
-    if _VERSION_CACHE is None:
-        try:
-            v = json.loads((_PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")).get("version")
-            _VERSION_CACHE = str(v).strip() if v else core.UNKNOWN
-        except (OSError, ValueError, AttributeError):
-            _VERSION_CACHE = core.UNKNOWN
-    return _VERSION_CACHE
+    try:
+        v = json.loads((_PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")).get("version")
+        return str(v).strip() if v else core.UNKNOWN
+    except (OSError, ValueError, AttributeError):
+        return core.UNKNOWN
 
 
 def _read_config(config_path=None):
@@ -65,12 +72,12 @@ def _read_config(config_path=None):
         return {}
 
 
-def enabled(config_path=None):
+def enabled(config_path: str | Path | None = None) -> bool:
     """On by default; disabled only when config explicitly sets `"pluginLog": false`."""
     return _read_config(config_path).get("pluginLog") is not False
 
 
-def scrub_text(text, cap_len=400):
+def scrub_text(text: object, cap_len: int = 400) -> str:
     """Single-line secret-scrubbed text safe for local JSONL storage."""
     s = str(text or "").encode("utf-8", "replace").decode("utf-8")
     s = re.sub(r"[\x00-\x1f\x7f]+", " ", s).strip()
@@ -123,7 +130,15 @@ def _trim_log(log_path, cap=MAX_EVENTS):
         pass
 
 
-def append_event(qa_out, event_type, fields=None, *, create=False, ts=None, config_path=None):
+def append_event(
+    qa_out: str | Path,
+    event_type: str,
+    fields: Mapping[str, object] | None = None,
+    *,
+    create: bool = False,
+    ts: str | None = None,
+    config_path: str | Path | None = None,
+) -> bool:
     """Append one scrubbed JSONL event to <qa_out>/plugin-log.jsonl. Best effort: never raises."""
     try:
         if not enabled(config_path):
@@ -154,7 +169,7 @@ def append_event(qa_out, event_type, fields=None, *, create=False, ts=None, conf
         return False
 
 
-def resolve_project(project=None, cwd=None):
+def resolve_project(project: str | None = None, cwd: str | None = None) -> Path:
     """Resolve the project folder from explicit --project, CLAUDE_PROJECT_DIR, cwd, or os.getcwd()."""
     raw = project or os.environ.get("CLAUDE_PROJECT_DIR") or cwd or os.getcwd()
     return Path(raw).resolve()
@@ -220,7 +235,7 @@ def _fill_run_meta(run_dir, ctx):
         pass
 
 
-def add_note(project, text, kind="nuisance", severity=None):
+def add_note(project: Path, text: str, kind: str = "nuisance", severity: str | None = None) -> JsonObj:
     """Record a manual user note in <project>/qa-out/plugin-log.jsonl and return the stored record."""
     if not enabled():
         raise core.BadInput(f"pluginLog is disabled in {core.CONFIG}; remove it or set it to true to log notes")
@@ -323,14 +338,12 @@ class Anonymizer:
         self._host_n = 0
         self._tickets = {}
         self._ticket_n = 0
-        self._sso_host = ""
         self._app = ""
         self._paths = []
 
         # Configured hosts (stable ordering: ssoHost -> <sso-host>, qaBaseUrl + allowedHosts -> <host-1>..)
         sso = self._bare_host(cfg.get("ssoHost"))
         if sso and sso not in core.LOOPBACK:
-            self._sso_host = sso
             self._hosts[sso] = "<sso-host>"
         base_host = self._bare_host(cfg.get("qaBaseUrl"))
         if base_host:
@@ -403,7 +416,7 @@ class Anonymizer:
         net = f"{alias}{colon}{port}" if alias in core.LOOPBACK else alias
         if not tail:
             return f"{scheme}{net}"
-        path_part, q_sep, rest = tail.partition("?")
+        path_part, q_sep, _query = tail.partition("?")
         frag_part = ""
         if "#" in path_part:
             path_part, _, frag_part = path_part.partition("#")
@@ -472,7 +485,7 @@ def _read_events(qa_out):
         try:
             doc = json.loads(line)
             if isinstance(doc, dict) and doc.get("type"):
-                h = hashlib.sha1(line.encode("utf-8", "replace")).hexdigest()[:12]
+                h = hashlib.sha1(line.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
                 items.append((h, doc))
             else:
                 bad += 1
@@ -718,7 +731,15 @@ def render_digest(events, anon, bad_lines=0):
     return scrub.redact_json_text(scrub.redact(md))
 
 
-def export_digest(project, *, all_events=False, since=None, preview=False, stdout=False, day=None):
+def export_digest(
+    project: Path,
+    *,
+    all_events: bool = False,
+    since: str | None = None,
+    preview: bool = False,
+    stdout: bool = False,
+    day: str | None = None,
+) -> dict[str, Any]:
     """Export anonymized Markdown digest. Returns {events, path, markdown, summary}."""
     proj = Path(project).resolve()
     qa_out = proj / "qa-out"
@@ -743,7 +764,7 @@ def export_digest(project, *, all_events=False, since=None, preview=False, stdou
     path = None
     if not preview and not stdout:
         qa_out.mkdir(exist_ok=True)
-        path = _next_digest_path(qa_out, day or datetime.now().strftime("%Y-%m-%d"))
+        path = _next_digest_path(qa_out, day or datetime.now().strftime("%Y-%m-%d"))  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
         core._write(path, md)
     if not preview:
         last_hash, last_ev = selected[-1]
@@ -754,7 +775,7 @@ def export_digest(project, *, all_events=False, since=None, preview=False, stdou
     return {"events": len(events), "path": path, "markdown": md, "summary": summary}
 
 
-def show_log(project, *, limit=30, event_type=None):
+def show_log(project: Path, *, limit: int = 30, event_type: str | None = None) -> str:
     """Compact local terminal view of recent events (raw local, secrets already scrubbed on write)."""
     qa_out = Path(project).resolve() / "qa-out"
     items, _ = _read_events(qa_out)
@@ -789,7 +810,7 @@ def show_log(project, *, limit=30, event_type=None):
     return "\n".join(lines)
 
 
-def clear_log(project):
+def clear_log(project: Path) -> str:
     """Remove plugin-log.jsonl and .plugin-log.cursor (exported digests stay)."""
     qa_out = Path(project).resolve() / "qa-out"
     removed = []

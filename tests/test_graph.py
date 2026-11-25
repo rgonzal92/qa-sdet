@@ -1,9 +1,11 @@
 """The cross-app graph: shell menu bindings, resource roots and shared components, built from the code map's rows and
 the stored transitions; and what cards, gaps, `prep` and `qa-mem impact` show from it. Hints, never oracles."""
 
-import json, unittest
+import json
+import unittest
 
 from support import MemBase, cli, core, memory
+
 from qa_sdet import codemap
 
 

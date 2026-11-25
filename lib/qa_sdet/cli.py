@@ -11,6 +11,8 @@ like run.json), and `report` renders REPORT.md + qa-out/README.md from .data/pla
 Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) keep skill commands to one shape.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -20,13 +22,24 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+
 from . import codemap, core, memory, scrub  # the rest load in the commands that use them (start-up time)
 
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
+    from typing import Any
 
-def _opts(args, flags=(), valued=(), multi=()):
+    from .contracts import JsonObj
+
+
+def _opts(
+    args: Sequence[str], flags: Collection[str] = (), valued: Collection[str] = (), multi: Collection[str] = ()
+) -> dict[str, Any]:
     """{'--x': value or True, '--m': [values], '_': [positionals]} from --x v / --x=v / --flag; unknown options are
     BadInput."""
-    out, it = {"_": []}, iter(args)
+    out: dict[str, Any] = {"_": []}
+    it = iter(args)
     for a in it:
         name, eq, val = a.partition("=")
         if name in valued or name in multi:
@@ -48,7 +61,7 @@ def _opts(args, flags=(), valued=(), multi=()):
     return out
 
 
-def _count(o, name, most=None):
+def _count(o: Mapping[str, Any], name: str, most: int | None = None) -> int:
     try:
         n = int(o[name]) if name in o else 0  # `--budget ""` is a mistake, not "unlimited"
     except (ValueError, TypeError):
@@ -60,7 +73,7 @@ def _count(o, name, most=None):
     return n
 
 
-def wrapper_cmd(cmd, args):
+def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in (
         "keys",
@@ -202,7 +215,7 @@ def wrapper_cmd(cmd, args):
             ("client", "CLIENT 4xx"),
             ("other", "OTHER (request loops, console errors)"),
         )
-        lines = [f"- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
+        lines = ["- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
         sev = [report.signal_severity(key) for key, _, _ in t["app"]]
         print(
             (
@@ -210,7 +223,7 @@ def wrapper_cmd(cmd, args):
                 f"<#> | qa-mem body-check {shlex.quote(o['_'][0])} --slug {o['--slug']} <#>`; a real failure is a bug, a known one goes in notes by "
                 "method and path):\n"
                 + "\n".join(
-                    f"{title}:\n" + "\n".join(l for l, v in zip(lines, sev) if v == kind)
+                    f"{title}:\n" + "\n".join(line for line, v in zip(lines, sev) if v == kind)
                     for kind, title in groups
                     if kind in sev
                 )
@@ -301,7 +314,7 @@ def wrapper_cmd(cmd, args):
         try:
             data = json.loads(sys.stdin.read() or "[]")
         except ValueError as e:
-            raise core.BadInput(f"dup-check: stdin is not the acli search JSON ({e})")
+            raise core.BadInput(f"dup-check: stdin is not the acli search JSON ({e})") from e
         items = (
             data
             if isinstance(data, list)
@@ -318,9 +331,7 @@ def wrapper_cmd(cmd, args):
             {
                 "key": str(x.get("key")),
                 "summary": scrub.redact(
-                    " ".join(
-                        str((x.get("fields") if isinstance(x.get("fields"), dict) else x).get("summary") or "").split()
-                    )
+                    " ".join(str((f if isinstance(f := x.get("fields"), dict) else x).get("summary") or "").split())
                 )[:200],
             }
             for x in items[:10]
@@ -508,11 +519,11 @@ def _log_cli_error(cmd, code, reason):
             {"cmd": cmd, "exit_code": code, "reason": str(reason)},
             create=False,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
-def usage_error(cmd, why=""):
+def usage_error(cmd: str, why: str = "") -> int:
     if why:
         _log_cli_error(cmd, 2, why)
     print(f"qa-mem: {why + '; ' if why else ''}usage: qa-mem {cmd} {COMMANDS.get(cmd, '')}".rstrip(), file=sys.stderr)
@@ -538,7 +549,7 @@ def _run_marker(roots):
     return None
 
 
-def hook_input():
+def hook_input() -> JsonObj:
     """The hook's JSON on stdin (Claude Code sends it and closes stdin); {} when run by hand."""
     try:
         # 2 s: on a loaded machine the payload can come late, and missing stop_hook_active forces an extra round
@@ -550,7 +561,7 @@ def hook_input():
         return {}
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else ""
     try:
         return _main(argv)
@@ -571,10 +582,10 @@ def main(argv):
         return 1
 
 
-def _main(argv):
+def _main(argv: list[str]) -> int:
     for stream in (sys.stdout, sys.stderr):  # a non-UTF-8 argument echoed back must not crash the print
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]  # a replaced stream: AttributeError, caught below
         except (AttributeError, ValueError):
             pass
     # bytes that aren't UTF-8 arrive as surrogates, which sqlite3 and print() refuse: make them U+FFFD
@@ -714,7 +725,7 @@ def _main(argv):
             try:
                 data = json.loads(sys.stdin.read())
             except (OSError, ValueError, RecursionError) as e:  # RecursionError: garbage nested too deep
-                raise core.BadInput(f"inbox: can't read Jira JSON ({e})")
+                raise core.BadInput(f"inbox: can't read Jira JSON ({e})") from e
             items = report.inbox_items(data)  # bad input fails before the DB is opened
             con = core.connect()
             try:
@@ -753,7 +764,7 @@ def _main(argv):
         con.close()
 
 
-def run_cmd(con, cmd, args):
+def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
     if cmd == "card" and args:
         o = _opts(args, flags=("--ids",), valued=("--focus",))
         if not o["_"]:
@@ -975,7 +986,7 @@ def run_cmd(con, cmd, args):
         try:
             data = json.loads(sys.stdin.read())
         except (OSError, ValueError, RecursionError) as e:
-            raise core.BadInput(f"bug-sync: can't read Jira JSON ({e})")
+            raise core.BadInput(f"bug-sync: can't read Jira JSON ({e})") from e
         print(memory.bug_sync(con, data))
     elif cmd == "prep":
         if len(args) < 2:

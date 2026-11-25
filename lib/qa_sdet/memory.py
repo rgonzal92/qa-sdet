@@ -1,5 +1,7 @@
 """Ingest of run JSON, and the `card`, `search` and `bugs` readers."""
 
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import itertools
@@ -12,7 +14,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
-from . import core, scrub, codemap
+
+from . import codemap, core, scrub
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from typing import Any
+
+    from .contracts import JsonObj
 
 
 def resolve_draft(path, run_dir):
@@ -48,7 +57,9 @@ STOP_REASONS = (
 BLOCK_SCOPES = ("page", "session", "browser")  # what a BLOCKED run blocks: this page, the sign-in, the browser
 
 
-def ingest(con, run, ts=None, run_dir=None, src=""):
+def ingest(
+    con: sqlite3.Connection, run: JsonObj, ts: str | None = None, run_dir: Path | None = None, src: str | Path = ""
+) -> None:
     """Upsert one run.json dict. ts = when the run finished (file mtime); run_dir = folder of the run.json;
     src = the file it came from (a rewrite of that file replaces its bugs).
     Raises ValueError on bad shape."""
@@ -57,7 +68,7 @@ def ingest(con, run, ts=None, run_dir=None, src=""):
     _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src)
 
 
-def check_run(run):
+def check_run(run: object) -> tuple[str, str, bool, list[JsonObj], list[JsonObj]]:
     """(run id, build, build known, pages, bugs) of a run.json dict, routes normalised; ValueError on a bad shape. The
     PostToolUse hook runs it when the explorer writes the file, ingest before storing it."""
     if not isinstance(run, dict):
@@ -474,13 +485,13 @@ def _store_questions(con, items, page, ts, ticket=None):
     """Upsert questions (strings, or {text, status, answer, ticket}) asked on `page` ('*': app-wide). A resolved one
     with its answer stays resolved when a later run asks it again: answered questions become DECISIONS on cards."""
     for x in items if isinstance(items, list) else []:
-        q = x if isinstance(x, dict) else {"text": x} if isinstance(x, str) else None
+        q = x if isinstance(x, dict) else {"text": x} if isinstance(x, str) else {}
         text = core.cap(q.get("text")) if q and isinstance(q.get("text"), str) else ""
         if not text:
             continue
         resolved = str(q.get("status") or "").strip().lower() == "resolved"
         answer = core.cap(q.get("answer")) if isinstance(q.get("answer"), str) else ""
-        tk = q.get("ticket") if isinstance(q.get("ticket"), str) and q.get("ticket").strip() else ticket
+        tk = t if isinstance(t := q.get("ticket"), str) and t.strip() else ticket
         con.execute(
             "INSERT INTO questions(page,ticket,text,status,answer,first_seen,last_seen) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(page,text) DO UPDATE SET last_seen=max(coalesce(last_seen,''), excluded.last_seen), "
@@ -568,9 +579,7 @@ def _store_observed(con, run, f, ts):
             or STATIC_FILE.search(shape)
             or method not in codemap.HTTP_METHODS.split("|")
             or klass[0] == "1"
-            or hosts
-            and url.lower().startswith(("http://", "https://"))
-            and not core.url_allowed(url, hosts)
+            or (hosts and url.lower().startswith(("http://", "https://")) and not core.url_allowed(url, hosts))
         ):
             continue
         rows.add((method, shape, klass))
@@ -710,7 +719,7 @@ def _pending(root):
             data, mtime = f.read_bytes(), f.stat().st_mtime
         except OSError:
             continue
-        digest = hashlib.sha1(data).hexdigest()
+        digest = hashlib.sha1(data, usedforsecurity=False).hexdigest()
         if (
             _first_line(f.with_name(f.name + ".ingested"))
             != digest  # (.error is read only when this one doesn't match)
@@ -727,7 +736,7 @@ def parked(f):
     """The error ingest parked run file or code map `f` with, while the file is unchanged since; else None."""
     f = Path(f)
     try:
-        digest = hashlib.sha1(f.read_bytes()).hexdigest()
+        digest = hashlib.sha1(f.read_bytes(), usedforsecurity=False).hexdigest()
         lines = f.with_name(f.name + ".error").read_text().split("\n")
     except OSError:
         return None
@@ -749,18 +758,18 @@ def init_status(init_dir):
             repos = [r for r in data.get("repos") or [] if isinstance(r, dict)]
         except (OSError, ValueError, AttributeError, TypeError):
             continue
-        stamp = re.search(r"(\d{8}-\d{6})$", sid)
-        if stamp and any(r.get("files") for r in repos):  # nothing to read: settled, no mapper
-            scans.append((stamp.group(1), f, data))
+        m = re.search(r"(\d{8}-\d{6})$", sid)
+        if m and any(r.get("files") for r in repos):  # nothing to read: settled, no mapper
+            scans.append((m.group(1), f, data))
     newest = max((x[0] for x in scans), default="")
-    out = {"total": 0, "ingested": 0, "dropped_rows": {}, "retry": []}
+    out: dict[str, Any] = {"total": 0, "ingested": 0, "dropped_rows": {}, "retry": []}
     for stamp, f, data in scans:
         if stamp != newest:
             continue  # a scan file left from an earlier scan
         cm = f.with_name("code-map-" + f.name[len("scan-") :])
         out["total"] += 1
         retry = lambda why: out["retry"].append(
-            {"area": data.get("area"), "scan": str(f), "out": str(cm), "reason": why}
+            {"area": data.get("area"), "scan": str(f), "out": str(cm), "reason": why}  # noqa: B023 - called in this loop pass
         )
         try:
             body = cm.read_bytes()
@@ -775,7 +784,9 @@ def init_status(init_dir):
             retry(f"the code map was written for an older scan ({written_for})")
         elif err := parked(cm):
             retry(err)
-        elif (_first_line(cm.with_name(cm.name + ".ingested")) or "") == hashlib.sha1(body).hexdigest():
+        elif (_first_line(cm.with_name(cm.name + ".ingested")) or "") == hashlib.sha1(
+            body, usedforsecurity=False
+        ).hexdigest():
             out["ingested"] += 1
             note = next(
                 (
@@ -1203,7 +1214,7 @@ def _only(mine, other):
     `min 1` beside a client `required` (or the reverse) and a lone `min 0` say the same as nothing."""
     out = sorted(mine["flags"] - other["flags"])
     for k, n in mine["bounds"].items():
-        if k in other["bounds"] or (k == "min" and (n == 0 or n == 1 and "required" in other["flags"])):
+        if k in other["bounds"] or (k == "min" and (n == 0 or (n == 1 and "required" in other["flags"]))):
             continue
         out.append(f"{k} {int(n) if n == int(n) else n}")
     return out + (["one of " + ", ".join(mine["enum"])] if mine["enum"] and not other["enum"] else [])
@@ -1442,7 +1453,7 @@ def _untested_rules(con, route, targets):
     for label, server in sorted(labels, key=lambda t: (t[1], t[0])):
         words = core.norm(label)
 
-        def covers(t):
+        def covers(t, server=server, words=words):
             if server:
                 return f" {words} " in f" {t} "
             rest = f" {t} "
@@ -1905,7 +1916,8 @@ def _jira_str(v):
 def _view_resolution(key):
     """A single Done item's resolution via read-only `acli jira workitem view` (acli rejects `resolution` on `search`):
     '' when it has none, None when it couldn't be read (no acli, auth, timeout, odd output)."""
-    import shutil, subprocess
+    import shutil
+    import subprocess
 
     acli = shutil.which("acli")
     if not acli:
@@ -1923,13 +1935,13 @@ def _view_resolution(key):
         data = json.loads(r.stdout)
         if not isinstance(data, dict):
             return None
-        fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+        fields = f if isinstance(f := data.get("fields"), dict) else {}
         return _jira_str(fields.get("resolution")).strip()
     except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
         return None
 
 
-def set_bug_status(con, prefix, status, jira_key=None):
+def set_bug_status(con: sqlite3.Connection, prefix: str, status: str, jira_key: str | None = None) -> tuple[bool, str]:
     """(done, message): the one bug whose hash starts with `prefix` gets `status` (and `jira_key`). FIXED stamps the fix
     time and build, so a run that finished before it, ingested later, is no regression (bug_sync stamps the same)."""
     hits = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE substr(hash, 1, ?)=?", (len(prefix), prefix))]
@@ -1958,7 +1970,7 @@ def set_bug_status(con, prefix, status, jira_key=None):
     return True, f"updated {h} -> {status}" + (f" ({jira_key})" if jira_key else "")
 
 
-def set_build(con, build):
+def set_build(con: sqlite3.Connection, build: str) -> None:
     """`build` is the deployed build: what pages of other builds verified is stale (the user's pinned facts stay), and
     what this build verified is current again (a corrected build: stale 1.44 then stale 1.43). _store does the same per
     page when a run reports a new build."""
@@ -1998,7 +2010,7 @@ def bug_sync(con, data):
             key = str(it.get("key") or "").strip().upper()
             if key not in filed:
                 continue
-            fields = it.get("fields") if isinstance(it.get("fields"), dict) else {}
+            fields = f if isinstance(f := it.get("fields"), dict) else {}
             st_obj = fields.get("status") if fields.get("status") is not None else it.get("status")
             st_name = _jira_str(st_obj).strip()
             cat = st_obj.get("statusCategory") if isinstance(st_obj, dict) else None
@@ -2405,7 +2417,7 @@ def history(con, route=None, builds=5, as_json=False):
         rs = con.execute(
             "SELECT target, cases_pass, cases_fail, cases_blocked FROM runs WHERE build=?", (b,)
         ).fetchall()
-        n = lambda sql: con.execute(sql, (b,)).fetchone()[0]
+        n = lambda sql: con.execute(sql, (b,)).fetchone()[0]  # noqa: B023 - called in this loop pass
         out.append(
             {
                 "build": b,

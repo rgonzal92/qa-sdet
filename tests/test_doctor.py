@@ -1,10 +1,19 @@
 """`qa-mem doctor`, browser detection and `qa-mem setup-permissions`."""
 
-import builtins, contextlib, io, json, os, stat, subprocess, tempfile, unittest
+import builtins
+import contextlib
+import io
+import json
+import os
+import stat
+import subprocess
+import tempfile
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import Base, cli, cli_mod, done, core
+from support import Base, cli, cli_mod, core, done
+
 from qa_sdet import doctor, ops
 
 
@@ -18,7 +27,8 @@ class Doctor(Base):
         return out.getvalue()
 
     def test_doctor_reports_config_problems(self):
-        import io, contextlib
+        import contextlib
+        import io
 
         cfg = Path(self.tmp.name) / "config.json"
         cfg.write_text(
@@ -38,7 +48,9 @@ class Doctor(Base):
         self.assertIn("FIX  config has app", out)
 
     def test_doctor_empty_config_and_source_folders(self):
-        import io, contextlib, shutil
+        import contextlib
+        import io
+        import shutil
 
         cfg = Path(self.tmp.name) / "config.json"
         real, real_which = core.CONFIG, shutil.which
@@ -62,7 +74,10 @@ class Doctor(Base):
         self.assertTrue(doctor.pillow_fix())
 
     def test_doctor_acli_signed_in_or_out(self):
-        import io, contextlib, shutil, subprocess
+        import contextlib
+        import io
+        import shutil
+        import subprocess
 
         real_which, real_run = shutil.which, subprocess.run
         shutil.which = lambda name, *a, **k: "/x/acli" if name == "acli" else None
@@ -80,7 +95,8 @@ class Doctor(Base):
             shutil.which, subprocess.run = real_which, real_run
 
     def test_odd_config_types_still_name_the_db_and_pass_the_host_check(self):
-        import io, contextlib
+        import contextlib
+        import io
 
         cfg = Path(self.tmp.name) / "config.json"
         cfg.write_text(
@@ -278,7 +294,10 @@ class Browsers(Base):
 
     def test_browser_choice_detection_and_doctor(self):
         """Runs use the browser the user chose from what's installed (config `browser`), never an assumed Firefox."""
-        import io, contextlib, shutil, subprocess
+        import contextlib
+        import io
+        import shutil
+        import subprocess
 
         tmp = Path(self.tmp.name)
         chrome = tmp / "chrome"
@@ -333,7 +352,10 @@ class Browsers(Base):
 
     def test_browser_detection_edge_cases(self):
         """Review findings: interrupted downloads, failed lookups, the browsers command."""
-        import io, contextlib, shutil, subprocess
+        import contextlib
+        import io
+        import shutil
+        import subprocess
 
         tmp = Path(self.tmp.name)
         half = tmp / "firefox-9"

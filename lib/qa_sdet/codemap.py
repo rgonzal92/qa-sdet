@@ -4,8 +4,8 @@ import json
 import os
 import re
 from pathlib import Path
-from . import core, scrub
 
+from . import core, scrub
 
 # ---------- code map: routes, locators, rules and endpoints read from the app's source ----------
 CODEMAP_AREAS = ("frontend", "backend", "tests")  # one qa-mapper agent per area
@@ -66,7 +66,7 @@ def load_scan(cm, f):
     try:
         scan = json.loads(scan_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise ValueError(f"{scan_path.name} is missing or unreadable ({e}); run qa-mem codemap-scan first")
+        raise ValueError(f"{scan_path.name} is missing or unreadable ({e}); run qa-mem codemap-scan first") from e
     if not isinstance(scan, dict) or (scan.get("repos") is not None and not isinstance(scan.get("repos"), list)):
         raise ValueError(f"{scan_path.name} is not a scan file; run qa-mem codemap-scan again")
     if cm.get("scan_id") != scan.get("scan_id"):
@@ -187,7 +187,7 @@ def apply_codemap(con, cm, scan, ts=None):
         for path, r in repos.items():
             files, gone = set(r.get("files") or []), set(r.get("deleted") or [])
             hashes = {} if r.get("full") else {k: v for k, v in _hashes(con, area, path).items() if k not in gone}
-            given = r.get("hashes") if isinstance(r.get("hashes"), dict) else {}
+            given = g if isinstance(g := r.get("hashes"), dict) else {}
             hashes.update({rel: str(given.get(rel) or "") for rel in files})
             _set_hashes(con, area, path, hashes)
             if core.COMMIT_RE.fullmatch(str(r.get("commit") or "")):
@@ -202,7 +202,7 @@ def _codemap_behind(con, rows):
     notes, counted = {}, {}  # counted: areas of one repo mapped at one commit share a single git call
     for repo, area in sorted({(x["repo"], x["area"]) for x in rows}):
         commit = core.meta(con, f"codemap_commit:{area}:{repo}")
-        if not core.COMMIT_RE.fullmatch(commit or ""):
+        if commit is None or not core.COMMIT_RE.fullmatch(commit):
             continue
         if (repo, commit) not in counted:
             # a card is read on every page: a slow or hung git (network share) costs 2 s once, then counts are left out
@@ -266,10 +266,6 @@ def _api_ref(text):
     return method, "/".join(segs).lower()
 
 
-def _api_path(text):
-    return _api_ref(text)[1]
-
-
 API_BASE_SEG_RE = re.compile(r"api|rest|v\d+(\.\d+)?|[\w-]+-api|api-[\w-]+")
 
 
@@ -278,12 +274,13 @@ def _same_endpoint(a, b):
     api/v1/zones = v1/zones); never a router-relative tail (:id/status) or another resource (api/admin/zones)."""
     if a == b:
         return True
-    s, l = sorted((a.split("/"), b.split("/")), key=len)
+    short, long = sorted((a.split("/"), b.split("/")), key=len)
+    extra = len(long) - len(short)
     return (
-        len(s) < len(l)
-        and s[0] != ":id"
-        and l[len(l) - len(s) :] == s
-        and all(API_BASE_SEG_RE.fullmatch(x) for x in l[: len(l) - len(s)])
+        extra > 0
+        and short[0] != ":id"
+        and long[extra:] == short
+        and all(API_BASE_SEG_RE.fullmatch(x) for x in long[:extra])
     )
 
 
@@ -317,7 +314,7 @@ def module_bindings(con):
     ):
         m = MODULE_RE.fullmatch(x["value"])
         target = core.norm_route(m.group(2)) if m else ""
-        if target and target != x["page"]:
+        if m and target and target != x["page"]:
             out.setdefault(x["page"], (m.group(1), target))
     return out
 
@@ -594,7 +591,7 @@ def code(con, q=""):
         rows = con.execute(
             "SELECT page,label,file FROM codemap WHERE kind='route' AND area='frontend' AND page!='*' ORDER BY page"
         ).fetchall()
-        n = {k: c for k, c in con.execute("SELECT kind, count(*) FROM codemap GROUP BY kind")}
+        n = dict(con.execute("SELECT kind, count(*) FROM codemap GROUP BY kind"))
         n_star = con.execute("SELECT count(*) FROM codemap WHERE page='*' AND kind='api'").fetchone()[0]
         return (
             "ROUTES FROM CODE:\n"

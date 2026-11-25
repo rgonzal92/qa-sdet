@@ -1,5 +1,7 @@
 """REPORT.md, the Jira draft, the run index and `inbox`."""
 
+from __future__ import annotations
+
 import fcntl
 import html
 import json
@@ -12,7 +14,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
-from . import core, scrub, ops
+
+from . import core, ops, scrub
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+    from typing import Any
+
+    from .contracts import JsonObj, Verdict
 
 
 # ---------- REPORT.md: one human report per run folder, rendered from .data/plan.json + .data/run-*.json ----------
@@ -51,7 +61,7 @@ def _mtime(path):
         return 0.0
 
 
-def load_run(run_dir):
+def load_run(run_dir: str | Path) -> dict[str, Any]:
     """{'plan': {...}, 'runs': [(file name, run dict)], 'warnings': [...]}; missing pieces are simply absent."""
     data, warnings = Path(run_dir) / ".data", []
     plan = _load_json(data / "plan.json", warnings)
@@ -123,7 +133,9 @@ def bug_id(b):
 MERGE_RANK = ("NOT_RUN", "BLOCKED", "PASS", "QUESTION", "FAIL")  # weakest first: what a run actually saw beats a skip
 
 
-def merged_cases(plan, runs, warnings=None):
+def merged_cases(
+    plan: JsonObj, runs: Sequence[tuple[str, JsonObj]], warnings: list[str] | None = None
+) -> list[JsonObj]:
     """Plan cases with their result from the run JSONs (missing -> NOT_RUN); cases only a run knows are appended.
     Each gets status, actual, notes, bug. When several runs report one case, the most decisive result wins (FAIL over
     QUESTION over PASS over BLOCKED over NOT_RUN; the newest run on a tie), so another route listing a case as
@@ -190,7 +202,7 @@ def merged_cases(plan, runs, warnings=None):
     return out
 
 
-def run_bugs(runs, warnings=None):
+def run_bugs(runs: Sequence[tuple[str, JsonObj]], warnings: list[str] | None = None) -> list[JsonObj]:
     """Every bug of every run, once, with id (BUG-n from its draft) and route. Two different bugs under one BUG-n
     (two explorers numbered alike) are both kept and named in `warnings`."""
     out, seen = [], {}
@@ -317,7 +329,16 @@ def _blocked_runs(cases, runs):
     ]
 
 
-def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(), questions=()):
+def verdict(
+    ticket: str | JsonObj,
+    cases: list[JsonObj],
+    bugs: list[JsonObj],
+    started: bool = True,
+    known: Iterable[str] = (),
+    runs: Sequence[tuple[str, JsonObj]] = (),
+    prior_passed: Sequence[JsonObj] = (),
+    questions: Sequence[JsonObj] = (),
+) -> tuple[Verdict, str]:
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
     prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as _q_items gives
@@ -389,11 +410,13 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     plan_keys = {str(k).strip().upper() for k in known} | {me}
     owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
     qid = lambda q: re.match(r"\s*(Q\d+)\b", q["text"])
-    drift = ticket.get("drift") if isinstance(ticket, dict) and isinstance(ticket.get("drift"), str) else ""
+    drift = d if isinstance(ticket, dict) and isinstance(d := ticket.get("drift"), str) else ""
     notes = (
         ([f"requirements changed: {_clip(drift, 80)}"] if drift.strip() else [])
         + [
-            f"{qid(q).group(1)} open blocking question" if qid(q) else f"open blocking question: {_clip(q['text'], 40)}"
+            f"{m.group(1)} open blocking question"
+            if (m := qid(q))
+            else f"open blocking question: {_clip(q['text'], 40)}"
             for q in questions
             if not q["resolved"] and "[BLOCKING]" in q["text"].upper() and (owner(q) == me or owner(q) not in plan_keys)
         ]
@@ -415,7 +438,9 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     return "PASS", f"all {len(mine)} cases passed"
 
 
-def _verdicts(plan, runs, cases, bugs):
+def _verdicts(
+    plan: JsonObj, runs: Sequence[tuple[str, JsonObj]], cases: list[JsonObj], bugs: list[JsonObj]
+) -> dict[str, tuple[Verdict, str]]:
     """{ticket key: (verdict, reason)} for every plan ticket: the one place verdict() gets its inputs, so REPORT.md,
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
     tickets = _plan_tickets(plan)
@@ -1597,7 +1622,7 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
     return "\n".join(lines) + "\n"
 
 
-def render_report_parts(run_dir, cfg=None):
+def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tuple[str, dict[str, str]]:
     """(REPORT.md text, {draft file name: text}). A ticket with a verdict gets a Jira comment draft (.md, with what to
     check) and its clean body (.txt, what acli posts): a pass comment, or a rejection for FAIL and BLOCKED."""
     run_dir = Path(run_dir)
@@ -1631,10 +1656,10 @@ def render_report_parts(run_dir, cfg=None):
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
             tested = [k for k, (_, r) in enumerate(runs) if any(str(x.get("id")) in ids for x in _list(r, "cases"))]
             builds = sorted({core.norm_build(runs[k][1].get("build")) for k in tested})
-            signals = [(triaged[k][0], key) for k in tested for key, _ in triaged[k][1][0]]
+            seen = [(triaged[k][0], key) for k in tested for key, _ in triaged[k][1][0]]
             if v in ("PASS", "PASS WITH NOTES") and (mine or prior_mine) and _safe_key(t["key"]):
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(
-                    t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine, signals
+                    t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine, seen
                 )
             elif v in ("FAIL", "BLOCKED") and _safe_key(t["key"]):  # the rejection the user would type by hand
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_fail_draft(
@@ -1863,11 +1888,11 @@ def render_report_parts(run_dir, cfg=None):
     return "\n".join(out).rstrip() + "\n", drafts
 
 
-def render_report(run_dir):
+def render_report(run_dir: str | Path) -> str:
     return render_report_parts(run_dir)[0]
 
 
-def run_summary(run_dir):
+def run_summary(run_dir: str | Path) -> tuple[str, str, str, int]:
     """(date, kind, verdict text, bug count) for the qa-out/README.md index."""
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
@@ -1898,10 +1923,11 @@ def render_index(qa_out):
     )
     rows = []
     for p in runs:
+        n: int | str  # the bug count, or "?" for a folder that can't be read
         try:
             date, kind, verdicts, n = run_summary(p)
             ts = when(p)
-        except Exception as e:  # one odd folder must not break the index
+        except Exception as e:  # one odd folder must not break the index  # noqa: BLE001 - the error is shown, not swallowed
             m = re.match(r"\d{4}-\d{2}-\d{2}", p.name)
             date, kind, verdicts, n, ts = (m.group(0) if m else ""), "?", f"unreadable ({type(e).__name__})", "?", 0.0
         name = one_line(p.name).replace("[", "\\[").replace("]", "\\]")
@@ -1934,14 +1960,14 @@ def _scrub_run(run_dir):
                     pass  # a file it can't read or parse stays as it is; the hook's pass will try again
 
 
-def write_report(run_dir):
+def write_report(run_dir: str | Path) -> Path:
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
         raise core.BadInput(f"report: not a run folder (qa-out/<run>/): {run_dir}")
     _scrub_run(run_dir)
     try:
         text, drafts = render_report_parts(run_dir)
-    except Exception as e:  # never fail: say what went wrong in the report itself
+    except Exception as e:  # never fail: say what went wrong in the report itself  # noqa: BLE001 - the error is shown, not swallowed
         text, drafts = (
             (
                 f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
@@ -2038,7 +2064,8 @@ def _run_state(run_dir):
             c["status"] == "PASS"
             and not _blocked_runs([c], runs)
             and not any(
-                rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c) for b in serious[tkey(c)]
+                (rt and rt in (b.get("route"), b.get("target"))) or _bug_refs(b) & _case_bugs(c)
+                for b in serious[tkey(c)]
             )
         )
 
@@ -2183,7 +2210,7 @@ def next_action(run_dir, slug):
     streak = streak if isinstance(streak, int) and not isinstance(streak, bool) else 0
     at = prev.get("at") if isinstance(prev.get("at"), (int, float)) else None
     others = at is not None and any(_mtime(b) > at for b in data.glob("brief-*.md") if b.name != f"brief-{slug}.md")
-    if not again and (others or prev.get("slug") == slug and prev.get("action") != "recover_sso"):
+    if not again and (others or (prev.get("slug") == slug and prev.get("action") != "recover_sso")):
         streak = 0  # another route was dispatched and never answered, or this one runs again: a session stopped
 
     def answer(out, new_streak):
@@ -2258,7 +2285,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
 
     def add(route, source, score, hypothesis, terms_from, endpoint=None, pattern=None):
         route = core.norm_route(route)
-        if not SAFE_ROUTE_RE.fullmatch(route) or route in explored and source != "incomplete":
+        if not SAFE_ROUTE_RE.fullmatch(route) or (route in explored and source != "incomplete"):
             return
         if route not in found or score > found[route]["score"]:
             found[route] = {
@@ -2492,8 +2519,8 @@ def inbox_items(data):
     for it in data:
         if not isinstance(it, dict) or not ops.KEY_RE.fullmatch(str(it.get("key") or "").upper()):
             continue
-        f = it.get("fields") if isinstance(it.get("fields"), dict) else {}
-        get = lambda k: f.get(k) if f.get(k) is not None else it.get(k)
+        f = fd if isinstance(fd := it.get("fields"), dict) else {}
+        get = lambda k: f.get(k) if f.get(k) is not None else it.get(k)  # noqa: B023 - called in this loop pass
         out.append(
             {
                 "key": str(it["key"]).upper(),
@@ -2566,7 +2593,7 @@ def inbox(con, project, data, prefix=None, today=None):
     qa_map = _qa_verdicts_by_key(out, {x["key"] for x in items})
     show_updated = any(x["updated"] for x in items)
     show_qa = bool(qa_map)
-    counts = f"{today or datetime.now().strftime('%Y-%m-%d')} · {len(items)} open, {len(new)} new" + (
+    counts = f"{today or datetime.now().strftime('%Y-%m-%d')} · {len(items)} open, {len(new)} new" + (  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
         f", {len(changed)} changed" if changed else ""
     )
     lines = ["# Jira inbox", counts, ""]
@@ -2656,7 +2683,7 @@ def _adf_text(node, depth=0):
         if isinstance(node.get("text"), str):
             return node["text"]
         if isinstance(node.get("content"), list):
-            text = ADF_JOIN.get(node.get("type"), "").join(
+            text = ADF_JOIN.get(str(node.get("type")), "").join(
                 t for t in (_adf_text(c, depth + 1) for c in node["content"]) if t
             )
             return f"- {text}" if node.get("type") == "listItem" and text else text
@@ -2707,7 +2734,7 @@ def _ticket_fingerprint(fields, ac_field=""):
         text(fields.get("description")),
         text(fields.get(ac_field)) if ac_field else "",
     ]
-    return hashlib.sha1("\n".join(core.norm(x) for x in parts + fixes).encode()).hexdigest()
+    return hashlib.sha1("\n".join(core.norm(x) for x in parts + fixes).encode(), usedforsecurity=False).hexdigest()
 
 
 def _with_drift(state, tickets):
@@ -2796,15 +2823,15 @@ def trace(project, keys=None, fix_version=None):
                 str(plan.get("retest_of") or ""),
                 why,
             )
-    rows = [r for k, r in rows.items() if not fix_version or fix_version in versions[k]]
-    if not rows:
+    shown = [r for k, r in rows.items() if not fix_version or fix_version in versions[k]]
+    if not shown:
         return "no ticket runs match"
     return "\n".join(
         [
             row("Ticket", "Verdict", "ACs covered", "Build", "Bugs", "Latest run", "Retest of", "Why"),
             "|---|---|---|---|---|---|---|---|",
         ]
-        + rows
+        + shown
     )
 
 
@@ -2866,14 +2893,14 @@ def prep(con, project, key_args):
             rules = ""
     said = []  # the tickets' own words: what memory should look up for this plan
     for t in tickets:
-        f = t.get("fields") if isinstance(t.get("fields"), dict) else {}
+        tfields = fd if isinstance(fd := t.get("fields"), dict) else {}
         for k in ("summary", "description", ac_field):
-            if k and isinstance(f.get(k), str):
-                said.append(f[k])
+            if k and isinstance(tfields.get(k), str):
+                said.append(tfields[k])
         said += [
             str(x.get("name") if isinstance(x, dict) else x)
             for k in ("components", "labels")
-            for x in (f.get(k) if isinstance(f.get(k), list) else [])
+            for x in (tfields[k] if isinstance(tfields.get(k), list) else [])
         ]
     open_bugs = [memory.bugs(con, st) for st in core.VISIBLE]
     open_bugs = [b for b in open_bugs if not b.startswith("no ")]

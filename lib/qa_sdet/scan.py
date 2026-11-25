@@ -1,5 +1,7 @@
 """Source classifier, `codemap-scan` and the shell menu."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -8,7 +10,12 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from . import core, scrub, codemap
+
+from . import codemap, core, scrub
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from typing import Any
 
 
 SCAN_SKIP_DIRS = {
@@ -241,8 +248,7 @@ def _tests_path(path):
             or words & TEST_WORDS
             or {"page", "objects"} <= words
             or {"page", "object"} <= words
-            or "automation" in words
-            and (words & {"qa", "ui"} or seg.lower() == "automation")
+            or ("automation" in words and (words & {"qa", "ui"} or seg.lower() == "automation"))
         ):
             return True
     return False
@@ -271,7 +277,7 @@ def _shell_nav_routes(nav, parent, lines, rel):
         path = f"{parent}/{key}" if parent else f"/{key}"
         mod = it.get("module")
         if isinstance(mod, dict) and isinstance(mod.get("url"), str):
-            ln = next((i + 1 for i, l in enumerate(lines) if f'"url": "{mod["url"]}"' in l), 1)
+            ln = next((i + 1 for i, line in enumerate(lines) if f'"url": "{mod["url"]}"' in line), 1)
             out.append((path, str(it.get("title") or key)[:120], str(mod.get("id") or "")[:60], mod["url"], ln))
         out += _shell_nav_routes(it.get("children"), path, lines, rel)
     return out
@@ -280,7 +286,7 @@ def _shell_nav_routes(nav, parent, lines, rel):
 def _apply_shell_menu(con, repos):
     """The app shell's menu maps shell page paths to module page paths. Code writes its route rows, in memory and
     straight into the DB, not a mapper: a mapper can fail to write them, and a full re-map deletes its rows. Never raises."""
-    for repo, head, candidates, _routers in repos:
+    for repo, _head, candidates, _routers in repos:
         for rel, (area, _size, h) in candidates.items():
             if area != "shell":
                 continue
@@ -429,7 +435,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             old.unlink(
                 missing_ok=True
             )  # a new scan: maps of older scans are stale (and the Write tool won't overwrite them)
-    summary = {"incremental": False, "total_files": 0, "tokens": 0, "areas": {}, "skipped": []}
+    summary: dict[str, Any] = {"incremental": False, "total_files": 0, "tokens": 0, "areas": {}, "skipped": []}
     repos = []
     for raw in paths:
         repo = os.path.realpath(os.path.expanduser(str(raw)))
@@ -444,7 +450,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             continue  # the same folder given twice (. and ./): listed once
         head = (core._git(repo, "rev-parse", "HEAD") or "").strip()
         head = head if core.COMMIT_RE.fullmatch(head) else ""
-        candidates = {}  # rel -> [area, bytes, text]
+        scanned = {}  # rel -> [area, bytes, text]
         for rel in _rel_files(repo):
             full_path = os.path.join(repo, rel)
             try:
@@ -466,15 +472,15 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             if area == "frontend" and _shell_menu(rel, text):
                 area = "shell"  # written by code (_write_shell_menu), not by a mapper
             if area:
-                candidates[rel] = [area, size, text, hashlib.sha1(raw_bytes).hexdigest()]
+                scanned[rel] = [area, size, text, hashlib.sha1(raw_bytes, usedforsecurity=False).hexdigest()]
         # a server folder (a real route or server import, not a stray word): its schema files are request rules
         # (in a repo with UI components too, only schemas in the server's own top folder: client/ form schemas stay)
-        be_pkgs = {_pkg(rel) for rel, c in candidates.items() if c[0] == "backend" and _strong_backend(c[2])}
+        be_pkgs = {_pkg(rel) for rel, c in scanned.items() if c[0] == "backend" and _strong_backend(c[2])}
         if be_pkgs:
             ui_pkgs = {
-                _pkg(rel) for rel, c in candidates.items() if c[0] == "frontend" and _ui_file(rel.rsplit("/", 1)[-1])
+                _pkg(rel) for rel, c in scanned.items() if c[0] == "frontend" and _ui_file(rel.rsplit("/", 1)[-1])
             }
-            for rel, c in candidates.items():
+            for rel, c in scanned.items():
                 if (
                     c[0] == "frontend"
                     and SCHEMA_RE.search(c[2])
@@ -483,14 +489,12 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                 ):
                     c[0] = "backend"
         # hashed by bytes: an edit to a non-UTF-8 character is still an edit
-        routers = {
-            rel for rel, c in candidates.items() if c[0] == "frontend" and len(ROUTER_ENTRY_RE.findall(c[2])) > 1
-        }
-        repos.append((repo, head, {rel: (c[0], c[1], c[3]) for rel, c in candidates.items()}, routers))
+        routers = {rel for rel, c in scanned.items() if c[0] == "frontend" and len(ROUTER_ENTRY_RE.findall(c[2])) > 1}
+        repos.append((repo, head, {rel: (c[0], c[1], c[3]) for rel, c in scanned.items()}, routers))
     routes_moved = False
     for (
         repo,
-        head,
+        _head,
         candidates,
         routers,
     ) in repos:  # did a router change, or a route file go, since frontend last mapped?
@@ -520,7 +524,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             } | set(stored)
             if full or not had or (routes_moved and a in ("frontend", "tests")):
                 # with a shell menu, replaced file by file (files + deleted cover the rest): its code-written rows stay
-                entry = {
+                entry: dict[str, Any] = {
                     "path": repo,
                     "commit": head,
                     "full": keep == set(mine),

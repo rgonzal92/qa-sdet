@@ -1,6 +1,8 @@
 """Redaction of secrets from text, JSON and files: tokens with a recognisable format, credentials in URLs, auth
 headers, and the values of secret-named JSON keys. Nothing here guesses from prose."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -9,15 +11,19 @@ import tempfile
 import time
 from pathlib import Path
 
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
 
 # ---------- redaction: secrets must not reach drafts the user files, or the DB ----------
 SECRET_HEADERS = (
-    "authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"
+    "authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|"  # noqa: S105 - a pattern of secret names, not a secret
     "x-xsrf-token|x-amz-security-token"
 )
 # Any name ending in one of these (PRIVATE_TOKEN, secret_key, bearerToken); not 'sid': site/segment IDs.
 SECRET_KEYS = (
-    "[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"
+    "[A-Za-z0-9_-]{0,40}?(?:password|passwd|pwd|secret|token|api[ _-]?key|private[ _-]?key|secret[ _-]?key|"  # noqa: S105 - a pattern of secret names, not a secret
     "access[ _-]?key|account[ _-]?key|subscription[ _-]?key|session[ _-]?id)"
 )  # also 'API key', 'Session ID'
 SECRET_NAME_RE = re.compile(
@@ -25,7 +31,7 @@ SECRET_NAME_RE = re.compile(
     rf"bearer)$"
 )  # as a JSON key or header name only; in prose these are ordinary words
 # Literal tokens: safe to replace anywhere, including inside code and JSON strings.
-LITERAL_REDACTIONS = [
+LITERAL_REDACTIONS: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = [
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "[REDACTED-JWT]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY]"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "[REDACTED-GITHUB-TOKEN]"),
@@ -69,13 +75,13 @@ LITERAL_REDACTIONS = [
 HEADER_RE = re.compile(rf"(?im)\b((?:{SECRET_HEADERS}))\b([\"']?[ \t]*:[ \t]*[\"']?)(?!\[REDACTED)([^\s\"'][^\n\"']*)")
 
 
-def redact_literals(text):
+def redact_literals(text: str) -> str:
     for pattern, repl in LITERAL_REDACTIONS:
         text = pattern.sub(repl, text)
     return text
 
 
-def redact(text):
+def redact(text: str) -> str:
     """Prose and log text: literal tokens, then the value of an Authorization / Cookie / X-Api-Key style header."""
     return HEADER_RE.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", redact_literals(text))
 
@@ -84,11 +90,11 @@ def redact(text):
 JSON_PAIR_RE = re.compile(r'("([^"\\\n]{1,60})"[ \t]*:[ \t]*)("(?:[^"\\\n]|\\.)*"?|-?\d[\w.+-]*)')
 
 
-def redact_json_text(text):
+def redact_json_text(text: str) -> str:
     """Text that embeds JSON (`requests` output plus request/response bodies): values of secret-named keys, as
     redact_json does for parsed JSON. An object or array under a secret key is left; its own keys are still checked."""
 
-    def mask(m):
+    def mask(m: re.Match[str]) -> str:
         v = m.group(3)
         if not SECRET_NAME_RE.match(m.group(2)) or v in ('""', '"[REDACTED]"'):
             return m.group(0)
@@ -97,16 +103,16 @@ def redact_json_text(text):
     return JSON_PAIR_RE.sub(mask, text)
 
 
-def _redactable(v):
+def _redactable(v: object) -> bool:
     return not (v is None or isinstance(v, bool) or v == "")
 
 
-def redact_json(obj):
+def redact_json(obj: Any) -> Any:  # any parsed JSON in, the same shape out
     """Structured: values of secret-named keys (and HAR-style {name, value} headers) become "[REDACTED]"."""
     if isinstance(obj, dict):
         label = obj.get("name") if isinstance(obj.get("name"), str) else obj.get("key")  # {name|key: …, value: …}
         named = isinstance(label, str) and "value" in obj and SECRET_NAME_RE.match(label)
-        out = {}
+        out: dict[Any, Any] = {}
         for k, v in obj.items():
             if (
                 isinstance(k, str) and k.lower() == "cookies" and isinstance(v, (list, dict))
@@ -144,7 +150,7 @@ JSON_SUFFIXES = {".json", ".har"}
 CODE_SUFFIXES = {".ts", ".js", ".mjs", ".cjs", ".py"}
 
 
-def scrub_file(f):
+def scrub_file(f: Path) -> None:
     try:
         before = f.stat()
         text = f.read_text(encoding="utf-8-sig")
@@ -184,7 +190,7 @@ def scrub_file(f):
             raise
 
 
-def scrub_tree(root, budget=4.0):
+def scrub_tree(root: Path, budget: float = 4.0) -> None:
     """Scrub text files under qa-out changed since the last scrub (also folders without a run file), oldest first,
     for at most `budget` seconds per call: a large backlog (an upgrade, weeks of runs) must not push the Stop hook
     past its timeout, which would leave the stamp unwritten and stall every turn. The stamp is the start time of the
@@ -192,12 +198,13 @@ def scrub_tree(root, budget=4.0):
     qa-out has thousands of files with one mtime)."""
     stamp = root / ".scrubbed"
     try:
-        since, _, cursor = stamp.read_text(encoding="utf-8").partition(" ")
-        since = float(since)
+        stamped, _, cursor = stamp.read_text(encoding="utf-8").partition(" ")
+        since = float(stamped)
     except (OSError, ValueError):
         since, cursor = 0.0, ""
     started = time.time()
-    todo, suffixes = [], PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES
+    todo: list[tuple[float, str]] = []
+    suffixes = PROSE_SUFFIXES | JSON_SUFFIXES | CODE_SUFFIXES
     for folder, _, names in os.walk(
         root
     ):  # no stat for folders, images or other files this never scrubs (sorted below)
@@ -217,7 +224,7 @@ def scrub_tree(root, budget=4.0):
                 if (key > (since, cursor) if cursor else key[0] >= since - 2) and st.st_size < 20_000_000:
                     todo.append(key)
     todo.sort()
-    done = None
+    done: tuple[float, str] | None = None
     for mtime, name in todo:
         if done is not None and time.time() - started > budget:
             break

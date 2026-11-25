@@ -12,6 +12,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+
 from . import core, ops
 
 
@@ -30,7 +31,7 @@ def installed_browsers(names=core.BROWSERS):
             out[name] = (ok, path if ok else f"install {label} the usual way for this system")
             continue
         loc, why = (
-            None,
+            "",
             "can't check: playwright-cli isn't working (npm i -g @playwright/cli), then install-browser " + name,
         )
         if pw:
@@ -44,7 +45,7 @@ def installed_browsers(names=core.BROWSERS):
                     timeout=30,
                 ).stdout
                 m = re.search(r"Install location:\s*(.+)", dry)
-                loc = m.group(1).strip() if m else None
+                loc = m.group(1).strip() if m else ""
             except (subprocess.TimeoutExpired, OSError):
                 pass
         # Playwright writes INSTALLATION_COMPLETE last: a folder without it is an interrupted download
@@ -340,12 +341,12 @@ def merge_permissions(path, stamp=None):
         raise core.BadInput(
             f"setup-permissions: {path} isn't valid JSON with a permissions.allow list "
             f"({type(e).__name__}: {core.short(str(e), 120)}); fix it first, nothing changed"
-        )
+        ) from e
     tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if old is not None:
-            bak = path.with_name(f"{path.name}.bak-{stamp or datetime.now().strftime('%Y%m%d%H%M%S')}")
+            bak = path.with_name(f"{path.name}.bak-{stamp or datetime.now().strftime('%Y%m%d%H%M%S')}")  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
             while os.path.lexists(bak):  # two applies in one second, or a planted dangling symlink: never write through
                 bak = bak.with_name(bak.name + "x")
             bak_fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, path.stat().st_mode & 0o7777)
@@ -359,5 +360,5 @@ def merge_permissions(path, stamp=None):
     except OSError as e:
         if tmp:
             Path(tmp).unlink(missing_ok=True)
-        raise core.BadInput(f"setup-permissions: can't write {path} ({e}); nothing changed")
+        raise core.BadInput(f"setup-permissions: can't write {path} ({e}); nothing changed") from e
     return added

@@ -2,9 +2,20 @@
 (denied when the call names a guarded tool or path), the run marker, the qa-mapper, approval, the denial log and the
 hook plumbing. Everything runs in temp folders: HOME, the config and the data folder."""
 
-import atexit, contextlib, io, json, os, shlex, shutil, subprocess, sys, tempfile, time, unittest
+import ast
+import atexit
+import contextlib
+import io
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
 from concurrent.futures import ThreadPoolExecutor
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +31,8 @@ CFG = HOME / ".config/qa-sdet/config.json"
 PROJ, RUN = TMP / "proj", TMP / "run"  # a project without a run marker; one with a marker and no budget
 Q = ROOT / "bin/qa-mem"
 sys.path.insert(0, str(ROOT / "lib"))
+from support import load_hook
+
 from qa_sdet import scan
 
 EVIL, ACLI_W = "playwright-cli -s=qa goto https://evil.com", "acli jira workitem create --summary x"
@@ -54,7 +67,7 @@ DB.write_text("")
 CFG.write_text(json.dumps({"allowedHosts": ["qa.traffic.example", "localhost"]}))
 (RUN / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 86400}))
 _use_env()
-g = SourceFileLoader("guard_under_test", str(GUARD)).load_module()
+g = load_hook("guard_under_test", GUARD)
 _restore_env()
 
 
@@ -455,7 +468,7 @@ class R3Secrets(Case):
         f"mv {MAIN} /tmp/m",
         f"mkdir -p {MAIN}/x",
         f"cat {rel}/Default/Cookies",
-        f"cat $HOME/.local/share/qa-sdet/profiles/main/Default/Cookies",
+        "cat $HOME/.local/share/qa-sdet/profiles/main/Default/Cookies",
         'cat "${HOME}/.local/share/qa-sdet/profiles/main/Default/Cookies"',
         "tar c ~/.local/share/qa-sdet",
         "grep -r sid ~/.local/share",
@@ -1910,6 +1923,9 @@ class R8ApproveAndLog(Case):
         deep = "[" * 3000 + "]" * 3000
         self.assertEqual(hook(deep, "guard.py"), "")
         self.assertEqual(hook(deep, "denied.py"), "")
+        for garbage in ("not json {", ""):  # Claude Code sends JSON; anything else is no decision and no crash
+            self.assertEqual(hook(garbage, "guard.py"), "")
+            self.assertEqual(hook(garbage, "denied.py"), "")
         # 10. pretooluse.py and denied.py work via symlink under PYTHONSAFEPATH=1
         link_dir = TMP / "symlink-hooks"
         link_dir.mkdir(exist_ok=True)
@@ -2301,6 +2317,8 @@ class LibMirrorsGuard(Case):
             "http://[::1]:8765/",
             "https://api.example.com/v1",
             "http://[bad/",
+            "https://qa.example.com./x",  # a trailing-dot host is the same host
+            "https://qa.example.com/x?email=qa@example.com&next=https://other@x",  # @ and :// after the host
             "not a url",
             "",
         ]
@@ -2316,6 +2334,44 @@ class LibMirrorsGuard(Case):
                 with self.subTest(listed=listed, url=url):
                     want = g.host_ok(url, hosts) and url.lower().startswith(("http://", "https://"))
                     self.assertEqual(core.url_allowed(url, hosts), want)
+
+
+def runtime_imports(path):
+    """Module names a file imports when it runs: imports under `if TYPE_CHECKING:` are for the type checker only."""
+    names, todo = [], list(ast.parse(Path(path).read_text(encoding="utf-8")).body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            todo += node.orelse
+            continue
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names += ["." * node.level + (node.module or a.name) for a in node.names]
+        todo += [c for c in ast.iter_child_nodes(node) if isinstance(c, ast.stmt)]
+    return names
+
+
+class ImportBoundaries(unittest.TestCase):
+    """make architecture: the guard is the trust root and imports nothing from lib; core and scrub, which every
+    module uses, import no other qa_sdet module (no cycle can start there)."""
+
+    def test_the_guard_imports_nothing_from_lib(self):
+        self.assertEqual([n for n in runtime_imports(GUARD) if n.split(".")[0] == "qa_sdet" or n.startswith(".")], [])
+
+    def test_core_and_scrub_import_no_other_qa_sdet_module(self):
+        for name in ("core", "scrub"):
+            with self.subTest(module=name):
+                found = runtime_imports(ROOT / f"lib/qa_sdet/{name}.py")
+                self.assertEqual([n for n in found if n.startswith(".") or n.startswith("qa_sdet")], [])
+
+    def test_the_check_sees_imports_in_functions_and_skips_type_checking_blocks(self):
+        src = TMP / "boundary_probe.py"
+        src.write_text(
+            "from . import ops\nTYPE_CHECKING = False\nif TYPE_CHECKING:\n    from . import contracts\n\n"
+            "def f():\n    from qa_sdet import core\n"
+        )
+        self.assertEqual(sorted(runtime_imports(src)), [".ops", "qa_sdet"])
 
 
 class KnownLimits(Case):

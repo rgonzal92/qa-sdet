@@ -1,11 +1,19 @@
 """Memory (qa_sdet.memory, core): ingest of run files, bug records, build staleness, the page card and search, the
 bug-status and hash commands, and the DB itself."""
 
-import contextlib, io, json, os, sqlite3, time, unittest
+import contextlib
+import io
+import json
+import os
+import sqlite3
+import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemBase, runfile, run, PLAN, RUN_FORM, RUN_LIST, core, memory, cli as qa_mem, git, git_repo
+from support import PLAN, RUN_FORM, RUN_LIST, MemBase, core, git, git_repo, memory, run, runfile
+from support import cli as qa_mem
+
 from qa_sdet import cli, scrub
 
 
@@ -325,6 +333,7 @@ class BugSync(MemBase):
 
     def test_bug_sync_fetches_resolution_via_view_when_search_omits_it(self):
         import subprocess
+
         from support import done
 
         h_dup = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
@@ -348,6 +357,7 @@ class BugSync(MemBase):
     def test_a_resolution_that_cannot_be_read_leaves_the_bug_filed(self):
         """A failed lookup is no 'Fixed' resolution: a Won't Do / Duplicate must not become FIXED because acli failed."""
         import subprocess
+
         from support import done
 
         h = self.add_bug("/form", "dup bug", "FILED", "PROJ-20")
@@ -1863,7 +1873,7 @@ class ObservedEndpoints(MemBase):
     def calls(self, page, *values):
         with self.con:
             self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
-            for i, v in enumerate(values):
+            for v in values:
                 self.con.execute(
                     "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
                     (page, "api", v, v, f"a{page}.js:1", "/repo", "frontend", core.now(), f"a{page}.js"),
@@ -1877,8 +1887,8 @@ class ObservedEndpoints(MemBase):
         (d / "plan.json").write_text(json.dumps({"kind": "explore", "title": target, "tickets": [], "cases": []}))
         (d / "requests-x.log").write_text(
             "".join(
-                f"{i}. [{l.split()[0]}] http://localhost:8765{l.split()[1]} => {l.split('=> ')[1]} OK\n"
-                for i, l in enumerate(lines, 1)
+                f"{i}. [{line.split()[0]}] http://localhost:8765{line.split()[1]} => {line.split('=> ')[1]} OK\n"
+                for i, line in enumerate(lines, 1)
             )
         )
         f = d / "run-x.json"
@@ -2049,7 +2059,6 @@ class BlindSpots(ObservedEndpoints):
         self.assertEqual(
             self.rows(), [("needs_setup", "error-handling needs --faults", 1, 0), ("other", "no second account", 1, 0)]
         )
-        f = d / ".data/run-x.json"
         (d / ".data/run-x.json.ingested").unlink()
         memory.ingest_pending(d.parent)  # the same run again: not a second sighting
         self.assertEqual(self.rows()[0][2], 1)
@@ -2404,7 +2413,9 @@ class IngestPending(MemBase):
         self.assertEqual(len(memory.PARKED), 1)
 
     def test_concurrent_ingest_pending_rereads_under_lock(self):
-        import fcntl, hashlib, threading
+        import fcntl
+        import hashlib
+        import threading
 
         out = Path(self.tmp.name) / "qa-out"
         d = out / "2026-11-24-race"
@@ -2416,7 +2427,7 @@ class IngestPending(MemBase):
         entered_lock = threading.Event()
         real_flock = fcntl.flock
         # Hold the lock so worker B snapshots _pending before lock, while worker A ingests an updated file first.
-        lock_fd = open(db.with_suffix(".lock"), "a")
+        lock_fd = open(db.with_suffix(".lock"), "a")  # noqa: SIM115 - held across the threads, closed below
         real_flock(lock_fd, fcntl.LOCK_EX)
 
         def waiting_flock(fh, op):
@@ -2443,7 +2454,8 @@ class IngestPending(MemBase):
         self.con = core.connect()
         self.assertEqual([r[0] for r in self.con.execute("SELECT text FROM facts")], ["NEW_FIXED_FACT"])
         self.assertEqual(
-            (d / ".data/run-x.json.ingested").read_text().splitlines()[0], hashlib.sha1(rf.read_bytes()).hexdigest()
+            (d / ".data/run-x.json.ingested").read_text().splitlines()[0],
+            hashlib.sha1(rf.read_bytes(), usedforsecurity=False).hexdigest(),
         )
 
 
@@ -2466,7 +2478,7 @@ class InitStatus(MemBase):
             f.write_text(json.dumps({"scan_id": sid, "area": name.split("-")[0], "rows": []}))
             if sentinel:
                 (d / f"{f.name}.{sentinel}").write_text(
-                    f"{hashlib.sha1(f.read_bytes()).hexdigest()}\n2026-11-25T10:00:00Z {note}\n"
+                    f"{hashlib.sha1(f.read_bytes(), usedforsecurity=False).hexdigest()}\n2026-11-25T10:00:00Z {note}\n"
                 )
 
         new = "20261125-100000"

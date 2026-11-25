@@ -1,9 +1,12 @@
 """`qa-mem inbox`: the open Jira tickets, newest first, new ones marked."""
 
-import json, stat, unittest
+import json
+import stat
+import unittest
 from unittest import mock
 
 from support import Base, cli, core
+
 from qa_sdet import report
 
 
@@ -131,7 +134,6 @@ class Inbox(Base):
         self.assertEqual(sorted(json.loads(core.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
 
     def test_status_change_last_qa_column_and_empty_updated_omitted(self):
-        from support import PLAN, RUN_FORM
 
         self.config(jiraKeyPrefix="PROJ")
         # Legacy list in inbox_seen migrates cleanly without marking PROJ-5 NEW
@@ -197,7 +199,8 @@ class Prep(Base):
 
     def test_prep_bundles_acli_ac_field_comments_rules_plan_and_scrubs(self):
         import subprocess
-        from support import done, PLAN
+
+        from support import PLAN, done
 
         self.config(
             jiraProject="PROJ", jiraKeyPrefix="PROJ", jiraAcField="customfield_10042", qaBaseUrl="https://qa.example"
@@ -254,6 +257,7 @@ class Prep(Base):
 
     def test_prep_fallback_without_acli_and_custom_field_retry(self):
         import subprocess
+
         from support import done
 
         self.config(jiraKeyPrefix="PROJ", jiraAcField="customfield_99999")
@@ -281,6 +285,7 @@ class Prep(Base):
     def test_prep_flattens_adf_description_and_ac_field(self):
         """Jira Cloud returns description and custom fields as ADF trees: prep gives them as text, words not glued."""
         import subprocess
+
         from support import done
 
         self.config(jiraKeyPrefix="PROJ", jiraAcField="customfield_10042")
@@ -344,7 +349,9 @@ class Prep(Base):
     def test_prep_context_matches_the_ticket_text(self):
         """Not 70 routes and every bug: the routes, facts and bugs the ticket's words point at, status kept."""
         import subprocess
+
         from support import done, run
+
         from qa_sdet import core, memory
 
         self.config(jiraKeyPrefix="PROJ")
@@ -396,7 +403,8 @@ class Prep(Base):
     def test_prep_fingerprints_tickets_and_a_changed_ticket_is_fully_retested(self):
         """Its requirements changed in Jira since the run: its earlier passes were checked against the old ones."""
         import subprocess
-        from support import done, PLAN
+
+        from support import PLAN, done
 
         self.config(jiraKeyPrefix="PROJ")
         plan = {
@@ -444,8 +452,11 @@ class Prep(Base):
 
     def test_a_drifted_tickets_carried_pass_comes_back_with_its_case(self):
         """A pass carried by an earlier partial retest has no case object in that plan: the original plan has it."""
-        import subprocess, time, os
-        from support import done, PLAN
+        import os
+        import subprocess
+        import time
+
+        from support import PLAN, done
 
         self.config(jiraKeyPrefix="PROJ")
         one = {

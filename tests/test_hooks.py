@@ -1,9 +1,14 @@
 """The Stop and SubagentStop hooks (`qa-mem ingest-pending`) and the hooks.json wiring."""
 
-import json, os, re, subprocess, sys, unittest
+import json
+import os
+import re
+import subprocess
+import sys
+import unittest
 from pathlib import Path
 
-from support import Base, runfile, run, ROOT, memory
+from support import ROOT, Base, memory, run, runfile
 
 
 class Hooks(Base):
@@ -201,7 +206,7 @@ class Hooks(Base):
         self.default_run(max_turns=20)
         for n in range(1, 6):
             self.pw(f"playwright-cli -s=qa click e{n}", failed=True)  # a failed Bash call fires only PostToolUseFailure
-        for n in range(6):
+        for _ in range(6):
             self.pw(tool="Write", cmd="")  # an explorer's Write is a turn as well
         self.assertIn(
             "12 of the 20 turns", self.pw("qa-mem signals-triage qa-out/r --slug x")
@@ -498,6 +503,7 @@ class Hooks(Base):
 
     def test_an_explorer_that_stops_unfinished_gets_one_turn_to_finish(self):
         import time
+
         from support import PLAN
 
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
@@ -539,6 +545,7 @@ class Hooks(Base):
 
     def test_a_pass_or_fail_without_what_was_seen_and_a_fail_without_a_bug_are_sent_back(self):
         import time
+
         from support import PLAN
 
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:3]})
@@ -573,8 +580,9 @@ class Hooks(Base):
         return [json.loads(line) for line in p.read_text().splitlines()] if p.is_file() else []
 
     def test_hooks_and_marker_stop_record_nudges_tool_fails_bounces_and_run_summaries(self):
-        from qa_sdet import ops
         from support import PLAN
+
+        from qa_sdet import ops
 
         d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
         (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")

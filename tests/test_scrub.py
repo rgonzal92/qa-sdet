@@ -1,10 +1,15 @@
 """Redaction (qa_sdet.scrub): secrets never reach the memory DB, the drafts or the reports."""
 
-import json, os, time, unittest
+import json
+import os
+import stat
+import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemBase, runfile, run, core, memory
+from support import MemBase, core, memory, run, runfile
+
 from qa_sdet import scrub
 
 
@@ -133,6 +138,36 @@ class Redact(unittest.TestCase):
         ):
             self.assertEqual(scrub.redact_json(obj), obj)
 
+    def test_redact_json_keeps_the_shape_and_marks_each_secret(self):  # exact output: mutation testing showed gaps
+        sec, R = "s3cr3tV4lue9x", "[REDACTED]"
+        for obj, want in (
+            (  # a cookie jar as an object, then more keys: every one still read, the empty value kept
+                {"cookies": {"session": sec, "empty": ""}, "token": sec, "n": 1},
+                {"cookies": {"session": R, "empty": ""}, "token": R, "n": 1},
+            ),
+            (
+                {"cookies": [{"name": "session", "value": sec}, {"name": "x"}]},
+                {"cookies": [{"name": "session", "value": R}, {"name": "x"}]},
+            ),
+            (  # HAR headers: {name, value}, the name says what the value is
+                {
+                    "headers": [
+                        {"name": "Authorization", "value": f"Bearer {sec}"},
+                        {"name": "Accept", "value": "text/html"},
+                    ]
+                },
+                {"headers": [{"name": "Authorization", "value": R}, {"name": "Accept", "value": "text/html"}]},
+            ),
+            ({"headers": [["Cookie", sec], ["Accept", "x"]]}, {"headers": [["Cookie", R], ["Accept", "x"]]}),
+            ({"password": "", "apiKey": None, "secret": False}, {"password": "", "apiKey": None, "secret": False}),
+        ):
+            with self.subTest(obj=obj):
+                self.assertEqual(scrub.redact_json(obj), want)
+        self.assertEqual(
+            scrub.redact_json_text('{"password": "", "token": "abc", "n": 1}'),
+            '{"password": "", "token": "[REDACTED]", "n": 1}',
+        )
+
     def test_secret_named_json_keys(self):
         S = "Zk9sLmQ3cXR5UzRmVjJh"
         obj = {
@@ -168,6 +203,15 @@ class ScrubFiles(MemBase):
         )
         scrub.scrub_file(f)
         self.assertEqual(f.read_text(), "const password = 'hunter2secret';\nconst t = '[REDACTED-JWT]';\n")
+
+    def test_a_scrubbed_file_keeps_its_mode_and_leaves_no_temp_file(self):  # mutation testing: mode was unchecked
+        f = Path(self.tmp.name) / "BUG-2.md"
+        f.write_text("Authorization: Bearer abcdefghijklmnop1234\n")
+        os.chmod(f, 0o640)
+        scrub.scrub_file(f)
+        self.assertEqual(f.read_text(), "Authorization: [REDACTED]\n")
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o640)  # never wider (world-writable, setuid) than it was
+        self.assertEqual(sorted(p.name for p in f.parent.iterdir() if p.name.startswith(".BUG-2")), [])
 
     def test_network_evidence_text_loses_json_secret_values(self):
         out = Path(self.tmp.name) / "evidence"

@@ -1,10 +1,17 @@
 """REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira pass-comment draft."""
 
-import fcntl, json, os, re, threading, time, unittest
+import fcntl
+import json
+import os
+import re
+import threading
+import time
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import Base, cli, PLAN, RUN_FORM, RUN_LIST
+from support import PLAN, RUN_FORM, RUN_LIST, Base, cli
+
 from qa_sdet import core, memory, report
 
 PLAN1 = {
@@ -75,6 +82,8 @@ class Verdict(unittest.TestCase):
         self.assertEqual(
             v("T-1", [self.case("TC-1", "PASS"), self.case("TC-2", "PASS")], []), ("PASS", "all 2 cases passed")
         )
+        for missing in (None, ""):  # a case with no status was not run: BLOCKED, never a pass (mutation testing)
+            self.assertEqual(v("T-1", [self.case("TC-1", "PASS"), self.case("TC-2", missing)], [])[0], "BLOCKED")
         self.assertEqual(
             v(
                 {"key": "T-1"},
@@ -801,7 +810,6 @@ class Report(Base):
         self.assertTrue(report._header("/x/qa-out/2026-11-23-T", "ticket", plan, [])[1].endswith("browser chrome"))
 
     def test_index_write_waits_for_another_report(self):
-        import threading
 
         d = self.rundir(runs=[("x", {"target": "/x"})])
         fd = os.open(d.parent, os.O_RDONLY)

@@ -5,3 +5,13 @@ __pycache__/
 .playwright-mcp/
 *.db-wal
 *.db-shm
+# developer tooling (pyproject.toml)
+.venv/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+mutants/

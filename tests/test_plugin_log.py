@@ -1,9 +1,10 @@
 """Tests for lib/qa_sdet/plugin_log.py: JSONL capture, scrubbing, anonymization, digest export, cursor, show and clear."""
 
-import json, os, time, unittest
-from pathlib import Path
+import json
+import os
+import unittest
 
-from support import Base, ROOT, core
+from support import ROOT, Base, core
 
 
 class PluginLogCore(Base):
@@ -357,6 +358,7 @@ class PluginLogAnonymizerAndExport(Base):
 class PluginLogCli(Base):
     def test_cli_note_show_export_clear_and_cli_error_capture(self):
         from unittest import mock
+
         from support import cli
 
         with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.proj)}):

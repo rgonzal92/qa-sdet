@@ -206,14 +206,46 @@ The guard prevents mistakes; it is not a sandbox. It inspects command text in a 
 - **Redaction:** ingest scrubs auth/cookie headers, known token formats (JWT, GitHub, Slack, AWS, GitLab, Atlassian, `sk-` keys, private keys, `Bearer` tokens), URL credentials, and token query parameters from Markdown/text files, plus secret-named keys and cookie objects in JSON. Repro specs lose literal tokens only so they remain runnable. Plain-prose passwords are not recognized — keep real passwords out of notes — and screenshots and videos cannot be scrubbed, so inspect them before attaching to Jira.
 - **Source code:** `/qa-sdet:qa-init` runs locally; secret files are skipped and mappers write `[secret]` instead of literal values.
 
-## Self-test
+## Development
+
+The plugin itself needs only `python3` (3.9+) and the standard library. Developer tools are separate: they live in a repo-local `.venv` (Python 3.14, from `.python-version`) that the plugin never uses.
+
+**Needs:** [uv](https://docs.astral.sh/uv/), `make`, `curl`, Linux x64. Optional: `claude` on `PATH` for `make validate`, Go for the pre-commit hooks that build `gitleaks` and `actionlint`.
 
 ```sh
-python3 -m unittest discover -s tests -v                  # qa-mem, code map, guard, report, docs
-python3 -m http.server 8765 -d tests/fixture &            # fixture app with planted bugs
-# needs a config with "qaBaseUrl": "http://localhost:8765" and "localhost" in allowedHosts
+make setup          # .venv from uv.lock, plus checksum-verified gitleaks and actionlint in .venv/bin
+make hooks          # Git pre-commit checks: ruff, JSON/YAML, merge markers, large files, secrets, workflows, docs contracts
+make check          # the routine gate: lint, typecheck, test, test-runtime, validate, security
+```
+
+| Target | What it runs |
+|---|---|
+| `make format` | `ruff format` and safe `ruff check --fix` |
+| `make lint` | `ruff check`, `ruff format --check`, `actionlint` on `.github/workflows/` |
+| `make typecheck` | `mypy` against the Python 3.9 floor (`lib/qa_sdet/contracts.py` holds the typed JSON shapes) |
+| `make test` | the unittest suite in `.venv`, property tests (Hypothesis) included |
+| `make test-runtime` | the same suite on Python 3.9 with the standard library only: the runtime contract |
+| `make coverage` | line and branch coverage, hook and `bin/qa-mem` subprocesses included; writes `coverage.xml` |
+| `make security` | `gitleaks` over the full history and the working tree (`.gitleaks.toml` lists the reviewed exceptions), `pip-audit` of the dev dependencies |
+| `make validate` | `claude plugin validate` (manifests, skills, agents, hooks) and `tests/test_docs.py` (docs and code agree) |
+| `make architecture` | import boundaries (the guard imports nothing from `lib/`) and lib's copy of the guard's host rules |
+| `make mutation` | a bounded mutmut trial on the redactor, the host rules and the verdict (`MUTANTS=...` to choose); a few minutes |
+
+Dead-code check (by hand, not a gate): `uv run --group analysis vulture lib/qa_sdet hooks bin/qa-mem --min-confidence 60`. A long property run: `HYPOTHESIS_PROFILE=extended make test`.
+
+Without `make` or uv, the suite still runs as before: `python3 -m unittest discover -s tests` (property tests skip).
+
+The fixture app with planted bugs, for a live run:
+```sh
+python3 -m http.server 8765 -d tests/fixture &            # needs a config with "qaBaseUrl": "http://localhost:8765" and "localhost" in allowedHosts
 claude --plugin-dir . -p "/qa-sdet:qa-explore http://localhost:8765/form.html"
 ```
+
+**CI** (`.github/workflows/`): `ci.yml` runs the same targets on every push to `main` and every pull request: lint and types, tests with coverage (3.14), the 3.9 runtime contract, plugin validation, and secrets plus dependency audit. `codeql.yml` runs CodeQL on the Python code and the workflows (push, pull request, weekly); keep the repository's CodeQL *default setup* off. Dependabot (`.github/dependabot.yml`) proposes weekly updates for `uv.lock` and the action pins; the pre-commit revs (`uv run pre-commit autoupdate`) and the gitleaks and actionlint pins in the `Makefile` are updated by hand.
+
+**SonarQube Cloud** (optional, free for public repositories): the `test` job sends coverage and code to SonarQube Cloud only when the `SONAR_TOKEN` secret exists (never for pull requests from forks). To turn it on: sign in at sonarcloud.io with GitHub, import this repository, turn off *Automatic Analysis* in the project's settings, create a token and add it as the repository secret `SONAR_TOKEN`, and check that `sonar.organization` and `sonar.projectKey` in `sonar-project.properties` match the project. The default *Sonar way* quality gate (new code: no new bugs or vulnerabilities, A ratings, 80% coverage, at most 3% duplication, every hotspot reviewed) fits this repository.
+
+**Troubleshooting:** `make` reporting a stale lock means `pyproject.toml` changed: run `uv lock`. Python 3.9 for `make test-runtime` is downloaded by uv when it isn't installed. Python 3.9 has been end-of-life since October 2025 and current dev tools no longer run on it, which is why it is tested with the standard library only.
 
 ## Known limits
 

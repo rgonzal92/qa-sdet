@@ -1,11 +1,16 @@
 """Code-map scan (qa_sdet.scan): which source files go to which mapper, what a re-scan reads again."""
 
-import json, os, shutil, unittest
+import json
+import os
+import shutil
+import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import CodeMapCase, FIX, git, git_repo
-from qa_sdet import codemap, core, scan as scan_mod, cli
+from support import FIX, CodeMapCase, git, git_repo
+
+from qa_sdet import cli, codemap, core
+from qa_sdet import scan as scan_mod
 
 
 class Classify(unittest.TestCase):
@@ -383,7 +388,7 @@ class Scan(CodeMapCase):
                 "src/gen/Gen.jsx": "<b data-testid='gen'/>",
             },
         )
-        first = self.scan(repo)
+        self.scan(repo)
         files = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]["files"]
         self.assertNotIn("src/gen/Gen.jsx", files)  # ignored: generated code
         self.assertIn("src/Zoné café.jsx", files)
@@ -490,7 +495,7 @@ class Scan(CodeMapCase):
                 "src/ZoneForm.tsx": "export const F = () => <form/>",
             },
         )
-        s = self.scan(repo)
+        self.scan(repo)
         frontend = json.loads((self.out / "scan-frontend.json").read_text())["repos"][0]["files"]
         self.assertIn("src/ZoneForm.tsx", frontend)
         self.assertIn("src/schemas/zone.ts", frontend)  # the form's schema: its limits belong on the page
@@ -577,7 +582,8 @@ class Scan(CodeMapCase):
         self.assertEqual(files, ["src/Login.jsx"])
 
     def test_out_option_with_equals_and_repos_listing(self):
-        import contextlib, io
+        import contextlib
+        import io
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -821,7 +827,7 @@ class Remap(CodeMapCase):
         s = scan_mod.codemap_scan(self.con, [str(repo)], self.out, False, "s2", chunk_files=2, chunk_tokens=10**9)
         mappers = self.map_chunks(s, lambda f: route_rows(f) + comp(f))
         self.assertGreater(len(mappers), 1)
-        for m in mappers:  # the chunk without the router first: the route seems gone until the other chunk lands
+        for _ in mappers:  # the chunk without the router first: the route seems gone until the other chunk lands
             self.ingest_all()
         self.assertEqual(
             sorted(r[0] for r in self.con.execute("SELECT label FROM codemap WHERE kind='locator'")),

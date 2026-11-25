@@ -8,12 +8,13 @@ import sys
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+from support import load_hook
+
 from qa_sdet import cli, core, doctor, ops, report
 
 AGENTS = sorted(ROOT.glob("agents/*.md"))
@@ -43,7 +44,7 @@ def load_guard(tmp):
     env = {"HOME": tmp, "QA_SDET_DATA": f"{tmp}/data", "QA_SDET_CONFIG": str(cfg)}
     with mock.patch.dict(os.environ, env):
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
-        return SourceFileLoader("guard_docs", str(ROOT / "hooks/guard.py")).load_module(), env
+        return load_hook("guard_docs"), env
 
 
 class Docs(unittest.TestCase):
@@ -68,6 +69,17 @@ class Docs(unittest.TestCase):
                 self.assertTrue(link.startswith("http") or (f.parent / link).exists(), f"{f.name}: {link}")
         self.assertIn("## Reading REPORT.md", text("README.md"))
         self.assertIn("## Config", text("references/run-setup.md"))
+
+    def test_every_script_hooks_json_runs_exists_and_compiles(self):
+        hooks = json.loads(text("hooks/hooks.json"))["hooks"]
+        cmds = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
+        scripts = {rel for c in cmds for rel in re.findall(r"\$\{CLAUDE_PLUGIN_ROOT\}/([\w./-]+)", c)}
+        self.assertIn("hooks/pretooluse.py", scripts)
+        for rel in sorted(scripts):
+            with self.subTest(script=rel):
+                path = ROOT / rel
+                self.assertTrue(path.is_file(), rel)
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")  # a syntax error would break every call
 
     def test_step_labels_referenced_exist(self):
         for f in SKILLS + AGENTS:
@@ -192,7 +204,7 @@ class Docs(unittest.TestCase):
                 with mock.patch.dict(os.environ, env):
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
                     ev = lambda agent: g.evaluate(
-                        {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj), "agent_type": agent}
+                        {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj), "agent_type": agent}  # noqa: B023 - called in this loop pass
                     )
                     self.assertEqual(ev(""), (None, True), cmd)
                     self.assertIn("coordinator", ev("qa-sdet:qa-explorer")[0] or "", cmd)  # they set the run marker
@@ -204,7 +216,8 @@ class Docs(unittest.TestCase):
                     )  # also with no run
 
     def test_inbox_command_passes_a_custom_jql_whole(self):  # doctor's own example broke the double-quoted --jql
-        import ast, shlex
+        import ast
+        import shlex
 
         hint = next(
             n.value

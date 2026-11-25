@@ -14,7 +14,18 @@ call fully checked in one parse is approved; every denial is logged. It doesn't 
 guarded tool or path and hides something in an odd form ($VAR program or verb, eval of a variable, a script fed to a
 shell, inline code, xargs, a command string handed to another program, a computed path) is denied: run it directly."""
 
-import fcntl, glob, json, math, os, re, shlex, stat, sys, tempfile, time  # noqa: E401
+import fcntl
+import functools
+import glob
+import json
+import math
+import os
+import re
+import shlex
+import stat
+import sys
+import tempfile
+import time
 from fnmatch import fnmatch
 from itertools import islice, takewhile
 from pathlib import Path
@@ -87,7 +98,7 @@ BUDGET_FREE = {
     "console",
 }  # read-only: the explorer saves the browser signals at its end (step 9)
 PW_SOURCE_OPTS = ("--config", "--extension", "--cdp", "--endpoint")  # a config file or someone else's browser
-_SECRET_HINT = "it prints session secrets; use requests / response-body, or one header: --raw eval \"fetch(url).then(r => r.headers.get('n'))\""
+_SECRET_HINT = "it prints session secrets; use requests / response-body, or one header: --raw eval \"fetch(url).then(r => r.headers.get('n'))\""  # noqa: S105 - a pattern of secret names, not a secret
 PW_DENY = {
     "attach": "attach connects to an unverified browser",
     "run-code": "run-code runs Node with the page object and can reach the host; use eval (page sandbox)",
@@ -265,8 +276,7 @@ def host_ok(url, hosts):
     if url.strip().lower() == "about:blank":
         return True  # reaches no host
     if (
-        "://" in url
-        and url.split("://", 1)[0].strip().lower() not in ("http", "https", "ws", "wss")
+        ("://" in url and url.split("://", 1)[0].strip().lower() not in ("http", "https", "ws", "wss"))
         or "\\" in url
         or "@" in re.split(r"[/?#]", url.split("://", 1)[-1])[0]
     ):
@@ -328,7 +338,7 @@ def in_profile(p):
 def in_area(p):
     """The data or a profile folder, a path in one, or a folder between one and HOME (~/.local/share)."""
     roots = profiles() | {DATA_DIR}
-    return any(under(p, r) for r in roots) or p.startswith(home() + os.sep) and any(ancestor(p, r) for r in roots)
+    return any(under(p, r) for r in roots) or (p.startswith(home() + os.sep) and any(ancestor(p, r) for r in roots))
 
 
 def path_hits(word, cwd):
@@ -368,8 +378,8 @@ def paths(words, cwds):
 
 
 def mentions(text, path):  # absolute, or as ~/…, $HOME/…, ${HOME}/…
-    rel = path[len(home()) :] if path.startswith(home() + os.sep) else None
-    return path in text or bool(rel) and any(f + rel in text for f in ("~", "$HOME", "${HOME}"))
+    rel = path[len(home()) :] if path.startswith(home() + os.sep) else ""
+    return path in text or (bool(rel) and any(f + rel in text for f in ("~", "$HOME", "${HOME}")))
 
 
 def mentions_data_dir(text):
@@ -394,8 +404,7 @@ def mentions_guarded(text, explorer=False):
         GUARDED_TOOL_RE.search(text)
         or mentions_data_dir(text)
         or mentions_profile(text)
-        or explorer
-        and mentions_config(text)
+        or (explorer and mentions_config(text))
     )
 
 
@@ -580,7 +589,7 @@ def normalize(cmd):
             c = ";"
         elif c in "<>" and nxt == "&":
             c, i = c + FD_DUP, i + 1
-        elif c == ">" and nxt == "|" or c == "&" and nxt == ">" and (i == 0 or cmd[i - 1] != "&"):
+        elif (c == ">" and nxt == "|") or (c == "&" and nxt == ">" and (i == 0 or cmd[i - 1] != "&")):
             c, i = (">", i + 1) if c == ">" else ("", i)
         out.append(c)
         i += 1
@@ -751,7 +760,7 @@ def command_word(words):
     i, wrappers, env_dir, duration, lookup = 0, [], None, False, False
     while i < len(words):
         tok, w = words[i], wrappers[-1] if wrappers else None
-        if re.match(r"[A-Za-z_]\w*\+?=", tok) or tok in SHELL_KEYWORDS and not w:
+        if re.match(r"[A-Za-z_]\w*\+?=", tok) or (tok in SHELL_KEYWORDS and not w):
             i += 1
         elif tok == "function" and not w:  # `function name { body`
             i += 2
@@ -788,11 +797,8 @@ def qamem_args(name, rest, cwds=None, allow_var=True):
     if k >= len(rest):
         return None
     script = rest[k]
-    if (
-        any(real(script, c) == PLUGIN_QA_MEM for c in (cwds or (os.getcwd(),)))
-        or allow_var
-        and _PLUGIN_QAMEM_VAR_RE.fullmatch(script)
-        and "$" in expand(script)
+    if any(real(script, c) == PLUGIN_QA_MEM for c in (cwds or (os.getcwd(),))) or (
+        allow_var and _PLUGIN_QAMEM_VAR_RE.fullmatch(script) and "$" in expand(script)
     ):
         return rest[k + 1 :]
     return None
@@ -831,12 +837,11 @@ def how_run(name, rest):
             continue
         if awk and a == "-f":
             return "file", (rest[k + 1 :] or [""])[0]
-        if a in ("-", "/dev/stdin") or shell and a == "-s":
+        if a in ("-", "/dev/stdin") or (shell and a == "-s"):
             return "stdin", None
         if not shell and (
             a in ("--version", "-V", "--help", "-h")
-            or not awk
-            and re.fullmatch(r"-[A-Za-z]*[cemEpr]|--eval|--print", a)
+            or (not awk and re.fullmatch(r"-[A-Za-z]*[cemEpr]|--eval|--print", a))
         ):
             return "code", None
         if not a.startswith(("-", "+")):
@@ -912,7 +917,7 @@ def check_pw(rest, ctx, cwds, outs):
     if (
         verb == "eval"
         and (js := " ".join(rest))
-        and (EVAL_WRITE_RE.search(js) or EVAL_FETCH_RE.search(js) and EVAL_METHOD_RE.search(js))
+        and (EVAL_WRITE_RE.search(js) or (EVAL_FETCH_RE.search(js) and EVAL_METHOD_RE.search(js)))
     ):
         return EVAL_WRITE_REASON
     if any(
@@ -1153,7 +1158,7 @@ def explorer_net(name, rest, raw):
     for a in takewhile(lambda x: x != "--", rest):
         if a.startswith("--"):
             opt = a.split("=", 1)[0]
-            if opt in opts or name != "curl" and len(opt) > 3 and any(o.startswith(opt) for o in opts):
+            if opt in opts or (name != "curl" and len(opt) > 3 and any(o.startswith(opt) for o in opts)):
                 reroute = True
         elif a.startswith("-") and len(a) > 1:
             for c in a[1:]:
@@ -1340,10 +1345,11 @@ def unpack_dirs(name, rest):
     if not (
         name == "unzip"
         or old_tar
-        or name in ("tar", "bsdtar")
-        and any(re.match(r"-[A-Za-z]*x", a) or _long_is(a, "--extract", 5) or a == "--get" for a in rest)
-        or name in ("7z", "7za")
-        and pos0 in ("x", "e")
+        or (
+            name in ("tar", "bsdtar")
+            and any(re.match(r"-[A-Za-z]*x", a) or _long_is(a, "--extract", 5) or a == "--get" for a in rest)
+        )
+        or (name in ("7z", "7za") and pos0 in ("x", "e"))
     ):
         return None
     if name == "unzip":
@@ -1374,16 +1380,16 @@ def check_profile(name, rest, outs, ins, cwds, skip=()):
     udirs = unpack_dirs(name, rest)
     flags = RECURSIVE.get(name)
     walks = (
-        name in TREE_READERS
-        and udirs is None
+        (name in TREE_READERS and udirs is None)
         or grep_rec
-        or name == "find"
-        and bool(FIND_ACTIONS & set(rest))
-        or flags
-        and any(
-            re.match(rf"-[a-zA-Z]*[{flags}]", a)
-            or any(_long_is(a, full, n) for full, n in _RECURSIVE_LONG.get(name, ()))
-            for a in rest
+        or (name == "find" and bool(FIND_ACTIONS & set(rest)))
+        or (
+            flags
+            and any(
+                re.match(rf"-[a-zA-Z]*[{flags}]", a)
+                or any(_long_is(a, full, n) for full, n in _RECURSIVE_LONG.get(name, ()))
+                for a in rest
+            )
         )
     )
     dest = name in ("cp", "scp", "rsync", "ln") and not _target_dirs(rest)
@@ -1394,8 +1400,7 @@ def check_profile(name, rest, outs, ins, cwds, skip=()):
     if (
         any(map(in_profile, cwds))
         or any(map(in_profile, paths(args + (udirs or []) + outs + ins, cwds)))
-        or walks
-        and any(map(in_area, paths(srcs, src_cwds)))
+        or (walks and any(map(in_area, paths(srcs, src_cwds))))
     ):  # `tar c ~/.local/share/qa-sdet`, `grep -r x ~/.local`
         return PROFILE_REASON
 
@@ -1428,7 +1433,7 @@ def changes(name, rest, outs, cwds, root):
     """R5/R4: does it change root (the data folder, a config file) or remove a folder above it? Reads and copies don't."""
 
     def hit(w, up=False):
-        return any(under(p, root) or up and ancestor(p, root) for c in cwds for p in path_hits(w, c))
+        return any(under(p, root) or (up and ancestor(p, root)) for c in cwds for p in path_hits(w, c))
 
     opts, pos = [a for a in rest if a.startswith("-")], [a for a in rest if not a.startswith("-")]
     if any(hit(o) for o in outs):
@@ -1453,22 +1458,27 @@ def changes(name, rest, outs, cwds, root):
     cpos = _pos_args(rest, _COPY_VAL_OPTS) if name in WRITERS | {"mv"} else pos
     srcs, dests = (cpos, tdir) if tdir else (cpos[:-1], cpos[-1:])
     dests += [os.path.join(t, os.path.basename(s.rstrip("/"))) for t in dests for s in srcs]  # `mv x <folder>/`
-    moves = name == "mv" or name == "rsync" and any(a.startswith("--remove-source") for a in rest)
+    moves = name == "mv" or (name == "rsync" and any(a.startswith("--remove-source") for a in rest))
     mirror = name == "rsync" and any(a.startswith("--delete") for a in rest)  # deletes what the source lacks
     rec = name != "rm" or any(re.match(r"-[a-zA-Z]*[rR]", o) or _long_is(o, "--recursive", 5) for o in opts)
     return (
-        name in WRITERS | {"mv"}
-        and (
-            any(hit(t, mirror) for t in (pos if name == "tee" else dests)) or moves and any(hit(s, True) for s in srcs)
+        (
+            name in WRITERS | {"mv"}
+            and (
+                any(hit(t, mirror) for t in (pos if name == "tee" else dests))
+                or (moves and any(hit(s, True) for s in srcs))
+            )
         )
-        or name in REMOVERS - {"mv"}
-        and any(hit(a, rec) for a in ([a[3:] for a in pos if a.startswith("of=")] if name == "dd" else pos))
-        or name in INPLACE
-        and any(re.match(r"-[a-zA-Z]*i", o) or o.startswith("--in-place") for o in opts)
-        and any(hit(a) for a in pos)  # sed -i / perl -pi rewrite the file in place
-        or name == "sqlite3"
-        and "-readonly" not in takewhile(lambda a: a != "--", rest)
-        and any(hit(a) for a in pos)
+        or (
+            name in REMOVERS - {"mv"}
+            and any(hit(a, rec) for a in ([a[3:] for a in pos if a.startswith("of=")] if name == "dd" else pos))
+        )
+        or (
+            name in INPLACE
+            and any(re.match(r"-[a-zA-Z]*i", o) or o.startswith("--in-place") for o in opts)
+            and any(hit(a) for a in pos)
+        )  # sed -i / perl -pi rewrite the file in place
+        or (name == "sqlite3" and "-readonly" not in takewhile(lambda a: a != "--", rest) and any(hit(a) for a in pos))
     )
 
 
@@ -1522,7 +1532,7 @@ def inline_code(name, rest, kind):
     if not INTERP_RE.fullmatch(name) or "awk" in name or kind not in ("code", "stdin"):
         return False
     for a in rest:
-        if a in ("--version", "-V", "--help", "-h") or name.startswith("python") and re.fullmatch(r"-[A-Za-z]*m", a):
+        if a in ("--version", "-V", "--help", "-h") or (name.startswith("python") and re.fullmatch(r"-[A-Za-z]*m", a)):
             return False
         if not a.startswith("-"):
             break
@@ -1539,15 +1549,17 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             any(real(words[i], c) == PLUGIN_QA_MEM for c in cwds) or re.match(r"/(usr|bin|sbin|opt|snap)/", words[i])
         )
     )
-    if ctx.explorer and (kind == "file" or kind == "stdin" and ins or by_path):  # ./x.sh: may not exist yet
+    if ctx.explorer and (kind == "file" or (kind == "stdin" and ins) or by_path):  # ./x.sh: may not exist yet
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
     if ctx.explorer and inline_code(name, rest, kind):
         return INLINE_REASON
     if ctx.explorer and (
         PKG_RE.fullmatch(name)
         or "npx" in wrappers
-        or re.fullmatch(r"python[\d.]*", name)  # npx is a wrapper
-        and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(rest))
+        or (
+            re.fullmatch(r"python[\d.]*", name)  # npx is a wrapper
+            and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(rest))
+        )
     ):
         return (
             "the explorer installs and runs no packages (npm, npx, pip, ...: they download code from other hosts and run "
@@ -1557,18 +1569,16 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
         return None
     pos = pw_args(rest)
     runs_pkg = name in ("bunx", "pnpx") or bool({"exec", "x", "dlx"} & set(rest))  # `npm i @playwright/cli` installs it
-    hidden = lambda t: mentions_guarded(t, ctx.explorer) or ctx.area and dynamic(t)  # noqa: E731 - names it, or computed near it
+    hidden = lambda t: mentions_guarded(t, ctx.explorer) or (ctx.area and dynamic(t))
     forms = [
         (i is not None and dynamic(words[i]), "a program name from $VAR or $(...)"),  # O1
         (
             name == "playwright-cli"
             and not pw_help(rest)
             and (
-                pos
-                and dynamic(pos[0])
+                (pos and dynamic(pos[0]))
                 or any(map(POS_PARAM_RE.match, rest))  # O2
-                or pos[:1] == ["eval"]
-                and any(ONLY_VARS_RE.fullmatch(a) for a in pos[1:])
+                or (pos[:1] == ["eval"] and any(ONLY_VARS_RE.fullmatch(a) for a in pos[1:]))
             ),
             'a playwright-cli verb, eval text or arguments from $VAR, $(...) or "$@"',
         ),
@@ -1577,10 +1587,8 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
         (name == "alias" and GUARDED_TOOL_RE.search(" ".join(rest)), "an alias for a guarded tool"),
         (name == "eval" and any(map(dynamic, rest)), "eval of $VAR or $(...)"),  # O3
         (
-            "env" in wrappers
-            and any(re.match(r"-[A-Za-z0-9]*S|--split-string", w) for w in words[:i])
-            or "npx" in wrappers
-            and any(w.split("=", 1)[0] in ("-c", "--call") for w in words[:i]),
+            ("env" in wrappers and any(re.match(r"-[A-Za-z0-9]*S|--split-string", w) for w in words[:i]))
+            or ("npx" in wrappers and any(w.split("=", 1)[0] in ("-c", "--call") for w in words[:i])),
             "a command string given to env -S or npx -c",
         ),  # O4
         (name in SHELLS and kind in ("file", "stdin"), f"{name} running a script file, a pipe, a heredoc or stdin"),
@@ -1602,12 +1610,13 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             and name not in TEXT_TOOLS | SHELLS | GUARDED | {"eval", "alias"}
             and not INTERP_RE.fullmatch(name)
             and any(  # O7
-                prog_name(a.split("=", 1)[-1]) in GUARDED
-                and (a[:1] != "@" or runs_pkg)
-                and k + 1 < len(rest)
-                and (rest[k + 1].startswith("-") or "/" not in rest[k + 1])
-                or re.search(r"\s", a)
-                and hidden(a)
+                (
+                    prog_name(a.split("=", 1)[-1]) in GUARDED
+                    and (a[:1] != "@" or runs_pkg)
+                    and k + 1 < len(rest)
+                    and (rest[k + 1].startswith("-") or "/" not in rest[k + 1])
+                )
+                or (re.search(r"\s", a) and hidden(a))
                 or prog_name(a) in SHELLS - {".", "source"}
                 for k, a in enumerate(rest)
             ),
@@ -1631,7 +1640,7 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
                             a
                             for k, a in enumerate(rest)
                             if not (
-                                NOT_A_PATH_RE.search(a) or MSG_OPT_RE.match(a) or k and MSG_OPT_RE.match(rest[k - 1])
+                                NOT_A_PATH_RE.search(a) or MSG_OPT_RE.match(a) or (k and MSG_OPT_RE.match(rest[k - 1]))
                             )
                         ]
                     ),
@@ -1700,13 +1709,10 @@ def _check(cmd, cwd, ctx, depth, carried=()):
         if not tok or not set(tok) <= set(PUNCT):
             seg.append(tok)
             continue
-        if tok not in (";", "&&", "||", "|") or not seg and tok != ";":
+        if tok not in (";", "&&", "||", "|") or (not seg and tok != ";"):
             ctx.approve = False  # subshells, background jobs, a pipe with nothing before it
-        if (
-            seg[:1] == ["function"]
-            or len(seg) == 1
-            and "=" not in seg[0]
-            and (tok[:2] == "()" or tok == "(" and toks[k + 1 : k + 2] == [")"])
+        if seg[:1] == ["function"] or (
+            len(seg) == 1 and "=" not in seg[0] and (tok[:2] == "()" or (tok == "(" and toks[k + 1 : k + 2] == [")"]))
         ):
             ctx.loop_depth += 1  # `f() {` / `function f {`: its body runs once per call, so count it as a loop (for the rest of the call)
         if seg:
@@ -1811,7 +1817,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     name, rest = (prog_name(words[i]), words[i + 1 :]) if i is not None else ("", [])
     local = {real(env_dir, c) for c in cwds} if env_dir else cwds
     q = qamem_args(name, rest, local)
-    run = how_run(name, rest) if name in SHELLS or INTERP_RE.fullmatch(name) and q is None else (None, None)
+    run = how_run(name, rest) if name in SHELLS or (INTERP_RE.fullmatch(name) and q is None) else (None, None)
     if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q, local)) or lookup:
         ctx.approve = False
         return r  # `command -v x` runs nothing
@@ -1874,10 +1880,8 @@ def pw_written(rest):
 def explorer_out_ok(out, cwds):
     """A redirection or playwright-cli file of the explorer: a /dev stream or one of its run files."""
     o = unmark(out)
-    return (
-        o in ("/dev/null", "/dev/stdout", "/dev/stderr")
-        or "$" not in o
-        and all(run_file(real(o, c), cwds) for c in cwds)
+    return o in ("/dev/null", "/dev/stdout", "/dev/stderr") or (
+        "$" not in o and all(run_file(real(o, c), cwds) for c in cwds)
     )
 
 
@@ -1966,14 +1970,13 @@ def check_files(tool, tin, cwd, explorer):
     """R3, R4, R5 for the file tools: the profile stays closed, the data folder unwritten, the config the explorer's."""
     for raw in tool_paths(tin):
         p = real(raw or ".", cwd)
-        if (
-            any(
-                map(
-                    in_profile,
-                    path_hits(os.path.join(raw or ".", str(tin.get("pattern") or "")), cwd) if tool == "Glob" else [p],
-                )
+        if any(
+            map(
+                in_profile,
+                path_hits(os.path.join(raw or ".", str(tin.get("pattern") or "")), cwd) if tool == "Glob" else [p],
             )
-            or tool == "Grep"
+        ) or (
+            tool == "Grep"
             and str(tin.get("output_mode")).lower() == "content"
             and (in_area(p) or any(ancestor(p, r) for r in profiles()))
         ):
@@ -2052,7 +2055,6 @@ _MASKS = [
 ]
 DENIAL_LOG_LINES = 2000
 PLUGIN_LOG_NAME = "plugin-log.jsonl"
-_PLUGIN_VERSION = None
 
 
 def mask(text):
@@ -2061,17 +2063,15 @@ def mask(text):
     return text
 
 
+@functools.cache
 def _plugin_version():
-    global _PLUGIN_VERSION
-    if _PLUGIN_VERSION is None:
-        try:
-            v = json.loads((Path(PLUGIN_QA_MEM).parent.parent / ".claude-plugin" / "plugin.json").read_text()).get(
-                "version"
-            )
-            _PLUGIN_VERSION = str(v).strip() if v else "unknown"
-        except (OSError, ValueError, AttributeError):
-            _PLUGIN_VERSION = "unknown"
-    return _PLUGIN_VERSION
+    try:
+        v = json.loads((Path(PLUGIN_QA_MEM).parent.parent / ".claude-plugin" / "plugin.json").read_text()).get(
+            "version"
+        )
+        return str(v).strip() if v else "unknown"
+    except (OSError, ValueError, AttributeError):
+        return "unknown"
 
 
 def _plugin_log_enabled():
@@ -2125,7 +2125,7 @@ def log_event(data, event_type, fields):
                 except BaseException:
                     Path(tmp).unlink(missing_ok=True)
                     raise
-    except Exception:  # noqa: BLE001 - logging is best effort
+    except Exception:  # noqa: BLE001, S110 - logging is best effort
         pass
 
 
@@ -2149,7 +2149,7 @@ def log_denial(data, reason, layer="guard"):
                 "call": " ".join(mask(what).split())[:300],
             },
         )
-    except Exception:  # noqa: BLE001 - logging is best effort
+    except Exception:  # noqa: BLE001, S110 - logging is best effort
         pass
 
 
