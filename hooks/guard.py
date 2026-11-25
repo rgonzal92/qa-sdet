@@ -180,7 +180,7 @@ def in_area(p):
     roots = profiles() | {DATA_DIR}
     return any(under(p, r) for r in roots) or p.startswith(home() + os.sep) and any(ancestor(p, r) for r in roots)
 def path_hits(word, cwd):
-    """Real paths a word names: itself, and if a glob near the data or a profile folder, its matches (<= 500)."""
+    """Real paths a word names: itself, and if a glob near the data or a profile folder or in a qa-out folder, its matches (<= 500)."""
     t = re.sub(r"^file:([^?]*).*", r"\1", expand(word), flags=re.S)
     if not t or "\n" in t or len(t) > 4096:
         return []
@@ -188,7 +188,7 @@ def path_hits(word, cwd):
     hits, roots = [os.path.realpath(full)], profiles() | {DATA_DIR}
     if GLOB_RE.search(t):
         fixed = os.path.realpath(os.path.dirname(GLOB_RE.split(full, 1)[0]) or "/")
-        if any(under(fixed, r) or ancestor(fixed, r) for r in roots):
+        if any(under(fixed, r) or ancestor(fixed, r) for r in roots) or os.path.basename(fixed) == "qa-out":  # the run marker
             hits += map(os.path.realpath, islice(glob.iglob(full, recursive=any(under(fixed, r) for r in roots)), 500))
             if "**" in t:  # recursive glob rooted above a profile: match inside profiles without walking all of HOME
                 pat = os.path.normpath(full)
@@ -1034,9 +1034,9 @@ def http_writes(rest, cwds):
     return words + [os.path.join(d, n) for d in dirs for n in names]
 def marker_files(cwds):
     """R6: the run marker the explorer runs under, as read_marker finds it (cwd or project, then qa-out/.active), and the
-    progress file beside it (the hook's count of its turns: the wind-down warning reads it)."""
+    files beside it: the hook's count of its turns (the wind-down warning reads it), the warned flag and the lock."""
     bases = {b for b in (*cwds, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
-    names = (".active", ".active.progress")
+    names = (".active", ".active.progress", ".active.warned", ".active.lock")  # the warning and its lock: re-armed or raced
     return {real(os.path.join(b, "qa-out", n), "/") for b in bases for n in names} | {
         real(os.path.join(b, n), "/") for b in bases for n in names if os.path.basename(os.path.normpath(b)) == "qa-out"}
 def config_files(cwds):

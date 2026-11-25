@@ -486,6 +486,18 @@ class R4Explorer(Case):
             self.assertIsNone(bash(cmd, RUN), cmd)  # the skill's main session runs setup and teardown
         self.assertIsNone(bash("cat qa-out/.active", RUN, explorer=True))  # reading it is fine
 
+    def test_the_marker_files_by_glob_and_the_warning_and_lock_files(self):  # found in review: a glob passed, .warned re-armed it
+        (RUN / "qa-out/.active.progress").touch()
+        try:
+            for cmd in ("rm qa-out/.active*", "rm -f qa-out/.act?ve", "rm qa-out/.[a]ctive", f"rm -f {RUN}/qa-out/.active*",
+                        "rm -f qa-out/.active.warned", "rm -f qa-out/.active.lock", "printf x > qa-out/.active.warned"):
+                self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
+                self.assertIsNone(bash(cmd, RUN), cmd)
+            for cmd in ("cat qa-out/.active*", "ls -la qa-out/.active*", "rm -rf qa-out/r/.data/x*"):
+                self.assertIsNone(bash(cmd, RUN, explorer=True), cmd)
+        finally:
+            (RUN / "qa-out/.active.progress").unlink(missing_ok=True)
+
     def test_the_progress_file_beside_the_marker_is_the_coordinators_too(self):  # deleting it would reset the turn count
         for cmd in ("rm -f qa-out/.active.progress", "printf x>qa-out/.active.progress", "mv qa-out/.active.progress /tmp/m",
                     "cp /tmp/m qa-out/.active.progress", f"rm -f {RUN}/qa-out/.active.progress", "truncate -s0 qa-out/.active.progress",
