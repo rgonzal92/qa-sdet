@@ -86,10 +86,12 @@ jobs:
         with:
           node-version: "22"
       # pinned: a validator change must be a decision. --ignore-scripts: no install script runs; the native binary
-      # ships in the platform package, so its folder goes on PATH (2.1.330's layout)
+      # ships in the platform package, nested under the main one in a global install, so its folder goes on PATH
       - run: |
           npm install --global --ignore-scripts @anthropic-ai/claude-code@2.1.330
-          echo "$(npm root --global)/@anthropic-ai/claude-code-linux-x64" >> "$GITHUB_PATH"
+          bin="$(npm root --global)/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64"
+          test -x "$bin/claude" # the package layout moved: fail here, not later with a confusing message
+          echo "$bin" >> "$GITHUB_PATH"
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: ${{ env.UV_VERSION }}
