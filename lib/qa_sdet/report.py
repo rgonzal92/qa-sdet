@@ -667,10 +667,31 @@ def _repro_badge(bid, b, audit, reviews=None):
     return badge
 
 
+def _db_bug_states():
+    """{hash: (status, jira_key)} from the memory DB, opened read-only; {} without one (the report renders without it)."""
+    import sqlite3
+    p = core.db_path()
+    if not p.is_file():
+        return {}
+    try:
+        con = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            return {r[0]: (r[1], r[2]) for r in con.execute("SELECT hash, status, jira_key FROM bugs")}
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+
+
 def _filing_block(bugs, cases, tickets, run_dir, cfg):
-    """Folded shell-safe filing commands, existing attachments and bug-status follow-ups for CONFIRMED bug drafts."""
+    """Folded shell-safe filing commands, existing attachments and bug-status follow-ups for CONFIRMED bug drafts. A bug
+    memory already links to a Jira key (filed before, now seen again) gets a comment on that key instead of a new bug;
+    a new one tied to a ticket gets a link command when jiraBugLinkType is set; persisted duplicate hits show above it."""
     run_dir = Path(run_dir).resolve()
-    entries = []
+    entries, states = [], _db_bug_states()
+    link_type = str(cfg.get("jiraBugLinkType") or "").strip()
+    dups = _load_json(run_dir / ".data" / "jira-dups.json", [])
+    dups = dups if isinstance(dups, dict) else {}
     default_proj = str(cfg.get("jiraProject") or "").strip() or "<PROJ>"
     for b in bugs:
         bid = b.get("id") or ""
@@ -688,8 +709,20 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
         attachments = [p for p in (run_dir / "evidence" / f"{bid}.png", run_dir / "evidence" / f"{bid}.webm",
                                    run_dir / "evidence" / f"{bid}-network.txt", run_dir / "repro" / f"{bid}.spec.ts")
                        if p.is_file()]
-        block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", "", "```sh", cmd,
-                 f"qa-mem bug-status {h} FILED <JIRA-KEY>", "```"]
+        status, known = next(((st, k) for full, (st, k) in states.items() if k and full.startswith(h)), (None, None))
+        if known and ops.KEY_RE.fullmatch(known):  # filed before: the news goes on that issue, not on a duplicate
+            block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}: already in Jira as {known} ({status}): "
+                     "add this draft there as a comment", "", "```sh",
+                     f"acli jira workitem comment create --key {known} --body-file {shlex.quote(str(draft))}", "```"]
+        else:
+            ticket = next((o.upper() for o in owners if ops.KEY_RE.fullmatch(o.upper())), None)
+            hits = [x for x in dups.get(bid, []) if isinstance(x, dict) and x.get("key")]
+            block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", ""]
+            block += [f"possible duplicate: {one_line(x['key'])} {one_line(core.short(x.get('summary'), 100))} "
+                      "(check it before filing)" for x in hits] + ([""] if hits else [])
+            block += ["```sh", cmd] + ([f"acli jira workitem link create --out <JIRA-KEY> --in {ticket} --type "
+                                        f"{shlex.quote(link_type)} --yes"] if link_type and ticket else []) \
+                + [f"qa-mem bug-status {h} FILED <JIRA-KEY>", "```"]
         if attachments:
             block.append("Attach (inspect images/videos first): " + ", ".join(f"`{p}`" for p in attachments))
         block.append("")
@@ -914,6 +947,35 @@ def _release_names(templates, fix):
     return [t.replace("{version}", v) for t in temps], ""
 
 
+PASTE_BELOW = "---------- paste below ----------"
+
+
+def _jira_fail_draft(t, verdict_v, why, mine, cases, bugs, keys, builds, plan):
+    """A FAIL or BLOCKED comment draft: build, why, the failed or blocked cases with what happened, the bugs and the open
+    blocking questions. Plain text; never posted (Jira writes are the user's)."""
+    word = lambda c: CASE_RESULT_WORD.get(c["status"], c["status"])
+    flat = lambda v: " ".join(str(v or "").split())
+    bad = [c for c in mine if c["status"] in (("FAIL", "QUESTION") if verdict_v == "FAIL" else ("BLOCKED", "NOT_RUN"))]
+    bug_names = [f"{b.get('id') or 'known bug'} ({flat(core.short(b.get('title'), 80))})"
+                 for b in ticket_bugs(t["key"], cases, bugs, keys)]
+    jira_keys = sorted({k for c in mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())} - {t["key"]})
+    qs = [q["text"] for q in _q_items(plan, "test plan") if not q["resolved"] and "[BLOCKING]" in q["text"].upper()
+          and str(q.get("ticket") or t["key"]).strip().upper() == t["key"].upper()]
+    lines = ["CHECK BEFORE POSTING (not part of the comment)", "- Not posted for you: post the .txt next to this file "
+             "with the command REPORT.md shows, after reading it."]
+    if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):
+        lines.append("- Build: unknown in this run. Name the build you tested before you post.")
+    lines += ["", PASTE_BELOW, "", f"QA: {verdict_v} on build {', '.join(builds) or '<build>'}", "", f"Why: {flat(why)}", ""]
+    lines += [f"{c['id']} - {word(c)}" + (f" ({flat(c['ac'])})" if c.get("ac") else "")
+              + (f": {flat(core.short(c.get('actual') or c.get('notes'), 200))}" if c.get("actual") or c.get("notes") else "")
+              for c in bad]
+    if bug_names or jira_keys:
+        lines += ["", "Bugs: " + ", ".join(bug_names + jira_keys)]
+    if qs:
+        lines += ["", "Open questions:"] + [f"- {flat(q)}" for q in qs]
+    return "\n".join(lines) + "\n"
+
+
 def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", prior_passed=()):
     fix = t.get("fix_version")
     # one line each in the draft: newlines collapsed; JSON true is no version
@@ -957,7 +1019,7 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
     if placeholders:
         lines.append("- Placeholders to fill: " + "; ".join(placeholders))
     passed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-    lines += ["", "---------- paste below ----------", "", f"Passed on {passed}", "",
+    lines += ["", PASTE_BELOW, "", f"Passed on {passed}", "",
               f"Fixed: {fixed or '<write one sentence: what was fixed>'}", ""]
     lines += [f"{c.get('id')} - PASS (prior build {c.get('build') or core.UNKNOWN}): {' '.join(str(c.get('title') or '').split())}"
               for c in prior_passed]
@@ -968,7 +1030,8 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
 
 
 def render_report_parts(run_dir, cfg=None):
-    """(REPORT.md text, {draft file name: text}). Drafts exist for PASS and PASS WITH NOTES tickets only."""
+    """(REPORT.md text, {draft file name: text}). A ticket with a verdict gets a Jira comment draft (.md, with what to
+    check) and its clean body (.txt, what acli posts): a pass comment, or a rejection for FAIL and BLOCKED."""
     run_dir = Path(run_dir)
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
@@ -996,7 +1059,15 @@ def render_report_parts(run_dir, cfg=None):
                              if any(str(x.get("id")) in ids for x in _list(r, "cases"))})
             if v in ("PASS", "PASS WITH NOTES") and (mine or prior_mine) and _safe_key(t["key"]):
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine)
+            elif v in ("FAIL", "BLOCKED") and _safe_key(t["key"]):  # the rejection the user would type by hand
+                drafts[f"jira-comment-{t['key']}.md"] = _jira_fail_draft(t, v, why, mine, cases, bugs, keys, builds, plan)
+        for name in list(drafts):  # the clean body acli posts as is: no check list, plain text
+            drafts[name[:-3] + ".txt"] = drafts[name].split(PASTE_BELOW, 1)[-1].lstrip("\n")
     draft_of = lambda key: f"jira-comment-{key}.md" if f"jira-comment-{key}.md" in drafts else ""
+    run_abs = Path(run_dir).resolve()
+    post = lambda key: (f" · post it (never posted for you): `acli jira workitem comment create --key {key} --body-file "
+                        f"{shlex.quote(str(run_abs / f'jira-comment-{key}.txt'))}`"
+                        + (" after filling its `<…>` placeholders" if "<" in drafts.get(f"jira-comment-{key}.txt", "") else ""))
 
     out = _header(run_dir, kind, plan, runs) + [""]
     if not plan and not runs:
@@ -1037,7 +1108,7 @@ def render_report_parts(run_dir, cfg=None):
                 f"{len([c for c in cases if c['status'] in ('FAIL', 'BLOCKED', 'NOT_RUN', 'QUESTION')])} "
                 f"case(s) need attention · {n_img} evidence image(s)"]
     if len(tickets) == 1 and draft_of(tickets[0]["key"]):
-        out += [f"Jira comment draft: [{draft_of(tickets[0]['key'])}]({draft_of(tickets[0]['key'])})"]
+        out += [f"Jira comment draft: [{draft_of(tickets[0]['key'])}]({draft_of(tickets[0]['key'])})" + post(tickets[0]["key"])]
     out.append("")
 
     if not runs and open_qs:  # plan only: no run to act on, so the questions are the list (resolved: folded below)
@@ -1097,7 +1168,7 @@ def render_report_parts(run_dir, cfg=None):
             v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
             out.append(f"**Verdict: {VERDICT_ICON[v]}** — {one_line(why)}")
         if len(tickets) > 1 and draft_of(t["key"]):  # one ticket: the link is in the top block
-            out.append(f"**Jira comment draft:** [{draft_of(t['key'])}]({draft_of(t['key'])})")
+            out.append(f"**Jira comment draft:** [{draft_of(t['key'])}]({draft_of(t['key'])})" + post(t["key"]))
         if _list(t, "acs"):
             out += ["### Acceptance criteria"] + _ac_lines(t, mine, with_status, prior_mine)
         if mine:
@@ -1199,7 +1270,7 @@ def write_report(run_dir):
     if drafts is not None:  # Jira drafts: written with the report; a draft no longer due is removed (a failed render keeps them)
         for name, body in drafts.items():
             core._write(run_dir / name, body)
-        for old in run_dir.glob("jira-comment-*.md"):
+        for old in [*run_dir.glob("jira-comment-*.md"), *run_dir.glob("jira-comment-*.txt")]:
             if old.name not in drafts and (old.is_symlink() or old.is_file()):
                 old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one

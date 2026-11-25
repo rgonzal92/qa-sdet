@@ -151,6 +151,13 @@ def doctor():
         if jql not in (None, ""):
             line(isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
                  "inboxJql is a single-line JQL query", 'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"')
+        link = cfg.get("jiraBugLinkType")
+        if link in (None, ""):  # optional, and team-specific: never guessed
+            print('note jiraBugLinkType not set: filing commands print no command linking a new bug to its story '
+                  '(set your Jira\'s link type, e.g. "jiraBugLinkType": "Blocks"; `acli jira workitem link type` lists them)')
+        else:
+            line(isinstance(link, str) and bool(link.strip()) and "\n" not in link and "'" not in link,
+                 "jiraBugLinkType names a Jira link type", 'e.g. "jiraBugLinkType": "Blocks" (acli jira workitem link type)')
     try:
         import PIL
         line(True, f"Pillow {PIL.__version__}")

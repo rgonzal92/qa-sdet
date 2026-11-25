@@ -230,7 +230,8 @@ class MergedCases(Base):
         self.assertIn(f"| A-1 | ⛔ BLOCKED | {why} |", r)
         self.assertIn(f"| B-1 | ⛔ BLOCKED | {why} |", r)
         self.assertIn("| C-1 | ✅ PASS |", r)  # a ticket with ids of its own is untouched
-        self.assertEqual(sorted(p.name for p in d.glob("jira-comment-*.md")), ["jira-comment-C-1.md"])
+        passes = sorted(p.name for p in d.glob("jira-comment-*.md") if "Passed on" in p.read_text())
+        self.assertEqual(passes, ["jira-comment-C-1.md"])  # the others get a BLOCKED note, never a pass
         self.assertIn("A-1 ⛔ BLOCKED, B-1 ⛔ BLOCKED, C-1 ✅ PASS", (d.parent / "README.md").read_text())  # index agrees
         # a real FAIL of the ticket still wins
         d2 = self.rundir("2026-11-24-A-1+B-1", plan={**plan, "cases": plan["cases"] + [case("TC-4", "B-1", "/b")]},
@@ -848,16 +849,19 @@ class JiraDraft(Rendering):
                                                                                   "actual": "131 saved"}]})]
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=runs)
         (d / "jira-comment-PROJ-1.md").write_text("old draft")
+        (d / "jira-comment-PROJ-9.md").write_text("a ticket no longer in the plan")
         report.write_report(d)
-        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
+        draft = (d / "jira-comment-PROJ-1.md").read_text()  # a rejection now, never the old or a pass draft
+        self.assertIn("QA: FAIL", draft)
+        self.assertNotIn("Passed on", draft)
+        self.assertFalse((d / "jira-comment-PROJ-9.md").exists())  # stale: removed
         r = (d / "REPORT.md").read_text()
         self.assertIn("**Verdict: ❌ FAIL**", r)
-        self.assertNotIn("Jira comment draft", r)
 
     def test_a_blocked_run_gets_no_pass_draft(self):  # its cases said PASS; the run said BLOCKED
         d, r = self.render_run([("form", {**RUN1, "status": "BLOCKED", "summary": "session expired"})])
         self.assertIn("**Verdict: ⛔ BLOCKED** — the run on /form ended BLOCKED: session expired", r)
-        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
+        self.assertNotIn("Passed on", (d / "jira-comment-PROJ-1.md").read_text())  # a BLOCKED note, never a pass
         self.assertIn("⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
 
     def test_build_check_uses_the_builds_of_the_tickets_own_runs(self):  # another ticket's build hid it
@@ -1037,7 +1041,7 @@ class PlanFindAndRetest(Rendering):
         d = self.rundir("2026-11-21-PROJ-1+PROJ-2", plan=retest, runs=[("fail", ran("/fail", "COMPLETED", ("TC-5", "PASS")))])
         report.write_report(d)
         self.assertIn("| PROJ-1 | ⛔ BLOCKED |", (d / "REPORT.md").read_text())
-        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
+        self.assertIn("QA: BLOCKED", (d / "jira-comment-PROJ-1.md").read_text())
 
     def test_retest_trusts_a_pass_exactly_when_the_verdict_does(self):  # one rule for "a run that ended BLOCKED"
         blocked = lambda **kw: {"status": "BLOCKED", "summary": "session expired", "cases": [], **kw}
@@ -1127,7 +1131,64 @@ class PlanFindAndRetest(Rendering):
         run_fail = {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "FAIL", "actual": "Still saves 131"}]}
         d2, r2 = self.render_run([("form", run_fail)], plan=plan)
         self.assertIn("**Verdict: ❌ FAIL**", r2)
-        self.assertFalse((d2 / "jira-comment-PROJ-1.md").exists())
+        self.assertIn("QA: FAIL", (d2 / "jira-comment-PROJ-1.md").read_text())
+
+
+class JiraBundles(Rendering):
+    """Jira comment drafts for every verdict, with a clean body file; filed bugs get a comment, not a new bug."""
+
+    def test_a_fail_gets_a_rejection_draft_with_a_clean_body_and_a_printed_command(self):
+        run = {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL", "actual": "131 saved",
+                                                                       "bug": "BUG-1"}],
+               "bugs": [{"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved", "severity": "HIGH",
+                         "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md"}]}
+        d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        md, txt = (d / "jira-comment-PROJ-1.md").read_text(), (d / "jira-comment-PROJ-1.txt").read_text()
+        self.assertIn("CHECK BEFORE POSTING", md)
+        self.assertNotIn("CHECK BEFORE POSTING", txt)
+        self.assertIn("QA: FAIL on build 1.42", txt)
+        self.assertIn("TC-2 - FAIL (AC-2): 131 saved", txt)
+        self.assertIn("BUG-1", txt)
+        self.assertIn(f"acli jira workitem comment create --key PROJ-1 --body-file {d / 'jira-comment-PROJ-1.txt'}", r)
+        run_ok = {**RUN1}
+        d2, _ = self.render_run([("form", run_ok)], plan=PLAN1_ANSWERED)
+        self.assertIn("Passed on", (d2 / "jira-comment-PROJ-1.txt").read_text())  # pass drafts get the clean body too
+
+    def test_a_bug_already_filed_gets_a_comment_and_a_new_one_a_link_when_configured(self):
+        from qa_sdet import memory
+        con = core.connect()
+        memory.ingest(con, {**RUN1, "run_id": "old", "bugs": [{"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved"}]})
+        h = core.bug_hash("/form", "131 saved")
+        con.execute("UPDATE bugs SET status='REGRESSED', jira_key='PROJ-55' WHERE hash=?", (h,))
+        con.commit()
+        con.close()
+        bugs = [{"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved", "hash": h, "severity": "HIGH",
+                 "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md"},
+                {"route": "/form", "title": "Name accepts 300 chars", "symptom": "300 chars", "severity": "LOW",
+                 "classification": "CONFIRMED", "draft_path": "bugs/BUG-2.md", "ticket": "PROJ-1"}]
+        self.config(releaseTemplates=TEMPLATES, jiraBugLinkType="Blocks")
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", {**RUN1, "bugs": bugs})])
+        for i in (1, 2):
+            (d / f"bugs/BUG-{i}.md").write_text(f"# t{i}\n")
+        (d / ".data/jira-dups.json").write_text(json.dumps({"BUG-2": [{"key": "PROJ-77", "summary": "Name too long saved"}]}))
+        report.write_report(d)
+        block = (d / "REPORT.md").read_text().split("Filing commands")[1]
+        one, two = block.split("**BUG-2**")
+        self.assertIn("already in Jira as PROJ-55 (REGRESSED)", one)
+        self.assertIn(f"acli jira workitem comment create --key PROJ-55 --body-file {d / 'bugs/BUG-1.md'}", one)
+        self.assertNotIn("workitem create --project", one)
+        self.assertIn("acli jira workitem link create --out <JIRA-KEY> --in PROJ-1 --type Blocks --yes", two)
+        self.assertIn("possible duplicate: PROJ-77 Name too long saved", two)
+        self.config(releaseTemplates=TEMPLATES)  # no jiraBugLinkType: no link command
+        report.write_report(d)
+        self.assertNotIn("link create", (d / "REPORT.md").read_text())
+
+    def test_dup_check_saves_the_search_hits_for_the_report(self):
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", RUN1)])
+        hits = json.dumps([{"key": "PROJ-77", "fields": {"summary": "Name too long saved"}}])
+        self.assertEqual(cli("dup-check", str(d), "BUG-2", stdin=hits)[0], 0)
+        self.assertEqual(json.loads((d / ".data/jira-dups.json").read_text()),
+                         {"BUG-2": [{"key": "PROJ-77", "summary": "Name too long saved"}]})
 
 
 class FilingBundle(Rendering):

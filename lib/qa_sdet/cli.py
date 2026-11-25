@@ -61,7 +61,7 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
-                   "evidence", "report", "audit-bugs", "signals-triage", "plan-find", "setup-permissions"):
+                   "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "plan-find", "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -138,6 +138,27 @@ def wrapper_cmd(cmd, args):
               if lines else "no unexplained app signals")
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
+    elif cmd == "dup-check":
+        if len(args) != 2 or not (Path(args[0]) / ".data").is_dir() or not re.fullmatch(r"BUG-\d+", args[1]):
+            raise core.BadInput("usage: <acli jira workitem search ... --json> | qa-mem dup-check <run dir> <BUG-n>")
+        try:
+            data = json.loads(sys.stdin.read() or "[]")
+        except ValueError as e:
+            raise core.BadInput(f"dup-check: stdin is not the acli search JSON ({e})")
+        items = data if isinstance(data, list) else next((data[k] for k in ("issues", "workItems", "values")
+                                                          if isinstance(data, dict) and isinstance(data.get(k), list)), [])
+        hits = [{"key": str(x.get("key")), "summary": scrub.redact(" ".join(str(
+                    (x.get("fields") if isinstance(x.get("fields"), dict) else x).get("summary") or "").split()))[:200]}
+                for x in items[:10] if isinstance(x, dict) and x.get("key")]
+        f = Path(args[0]) / ".data" / "jira-dups.json"
+        try:
+            saved = json.loads(f.read_text(encoding="utf-8"))
+            saved = saved if isinstance(saved, dict) else {}
+        except (OSError, ValueError):
+            saved = {}
+        saved[args[1]] = hits
+        core._write(f, json.dumps(saved, indent=1) + "\n")
+        print(f"{args[1]}: {len(hits)} possible duplicate(s) saved; REPORT.md shows them above its filing command")
     elif cmd == "audit-bugs":
         if len(args) != 1 or not Path(args[0]).is_dir():
             raise core.BadInput("usage: qa-mem audit-bugs <run dir>")
@@ -188,7 +209,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "signals-triage": "<run dir> --slug <slug>",
+    "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }
