@@ -76,7 +76,7 @@ def wind_down(path, m, who, turns):
     done = ("Stop crawling now and do step 4: save the requests and console logs, close the browser and write "
             "run-<slug>.json with status INCOMPLETE and the pages and locators so far" if who == "qa-crawler" else
             "Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
-            "browser and write run-<slug>.json")
+            "browser and write run-<slug>.json with stop_reason turn_limit")
     return f"qa-sdet: {turns} of the {limit} turns you have are used, and the run ends at {limit} however much budget is left. {done}."
 
 

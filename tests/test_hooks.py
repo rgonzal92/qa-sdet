@@ -256,6 +256,7 @@ class Hooks(Base):
         self.assertIn("## Steps", self.written("bugs/BUG-1.md", "# Title\n\n## Expected\nx — **Oracle:** AC-1\n"))
         self.assertIn("facts", self.written(".data/run-form.json", json.dumps({"run_id": "r", "pages": [{"route": "/x", "facts": "oops"}]})))
         self.assertIn("not valid JSON", self.written(".data/run-form.json", "{oops"))
+        self.assertIn("stop_reason", self.written(".data/run-form.json", json.dumps({**run(), "stop_reason": "bored"})))
         plan = {"kind": "ticket", "tickets": [{"key": "P-1"}], "cases": [{"id": "TC-1", "title": "a"}, {"id": "TC-1", "title": "b"}]}
         self.assertIn("repeats id TC-1", self.written(".data/plan.json", json.dumps(plan), agent=""))
         good = dict(run(facts=[{"kind": "note", "text": "ok"}]))

@@ -9,6 +9,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
   "target": "/form",
   "build": "1.42.0",
   "status": "COMPLETED | INCOMPLETE | BLOCKED", "block_scope": "page | session | browser (BLOCKED only)",
+  "stop_reason": "saturated | charter_complete | diminishing_returns | turn_limit | budget_limit | time_limit | blocked",
   "leads": [{"route": "/zones/:id", "kind": "shared-endpoint|sibling-field|child-route|signal|state", "target": "…",
              "reason": "…", "priority": "HIGH|MEDIUM"}],
   "summary": "one line",
@@ -38,6 +39,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
 - `not_tested.category`: `safety` held back by the run's rules; `out_of_scope` outside this ticket; `not_reached` budget, time or route ran out; `needs_setup` needs a fault, account or data this run lacks; `heuristic` an UNTRIED heuristic you skipped; `other`.
 - Facts are verified (seen, or stated in a ticket); guesses are `questions`. Locators: only ones that worked, in role, label or test-id form.
 - `states` and `transitions` are optional: the page's in-page states the harvester (tips file) found, `visited` once you opened and checked one, and the app pages it links to (a detail page's `sample_path`: a record you opened, ideally a `qa-sdet-` one). Cards then list UNVISITED STATES and how to reach a detail page, and batch runs open `:id` pages from their entry page.
+- `stop_reason` (optional; any other value parks the file): why you stopped. `saturated`: every UNTRIED heuristic and UNTESTED TARGET is covered or in `not_tested`; `charter_complete`: the `FOCUS:` charter is done; `diminishing_returns`: you stopped early (agents/qa-explorer.md, "The loop is done when"); `turn_limit`: a qa-sdet note said your turns were nearly used; `budget_limit` / `time_limit`: the guard said the budget or time is used up; `blocked`: status `BLOCKED`. REPORT.md shows it in the Exploration notes, and the coordinator reads it to decide whether to run more pages.
 - `leads` (optional, at most 10): pages worth exploring next because of what you found here; REPORT.md lists them and `qa-explore --continue` picks them up.
 - `block_scope` (with `BLOCKED`): `session` when the sign-in expired, `browser` when the browser can't start or is in use (page-start's `block_scope`), else `page` (this page only: a 403, a 500, missing test data). The coordinator goes on with the other pages after a `page` blocker.
 - `coverage[].heuristic`: an ID from the card's UNTRIED or COVERED lists (`heuristics.md` in explore mode); anything else is stored as `other:<text>` and covers nothing, except `regression` (target = a PREVIOUSLY FIXED bug's hash): the card then marks that bug re-checked on this build. `coverage[].target`: a check on a field the card names under UNTESTED TARGETS or FROM CODE rules uses that label as written (the card matches it to the code rule).

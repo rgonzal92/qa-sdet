@@ -448,6 +448,18 @@ class Docs(unittest.TestCase):
         for agent in ("qa-explorer", "qa-crawler"):  # the hook warns before this file's maxTurns: they must say what to do
             self.assertRegex(text(f"agents/{agent}.md"), r"turns are (nearly used|left)")
 
+    def test_stop_reason_and_the_expansion_gate_are_documented(self):
+        from qa_sdet import memory
+        for reason in memory.STOP_REASONS:
+            self.assertIn(reason, text("references/run-json.md"), reason)
+        self.assertIn("stop_reason", text("agents/qa-explorer.md"))
+        self.assertIn("turn_limit", text("hooks/posttooluse.py"))  # the wind-down note names the value to write
+        skill = text("skills/qa-explore/SKILL.md")
+        for word in ("expand_recommended", "stop_reason"):
+            self.assertIn(word, skill)
+        self.assertIn("expand_recommended", text("README.md"))
+        self.assertIn('"expand_recommended"', text("lib/qa_sdet/report.py"))
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)

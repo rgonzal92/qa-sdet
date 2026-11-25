@@ -35,6 +35,7 @@ def resolve_draft(path, run_dir):
     return str(next((t for t in tries if t.exists()), tries[0]))
 
 
+STOP_REASONS = ("saturated", "charter_complete", "diminishing_returns", "turn_limit", "budget_limit", "time_limit", "blocked")
 BLOCK_SCOPES = ("page", "session", "browser")  # what a BLOCKED run blocks: this page, the sign-in, the browser
 
 
@@ -63,6 +64,9 @@ def check_run(run):
         core.txt(run.get(f), f)
     if run.get("block_scope") not in (None, "", *BLOCK_SCOPES):
         raise ValueError(f"'block_scope' must be one of {', '.join(BLOCK_SCOPES)}")
+    core.txt(run.get("stop_reason"), "stop_reason")
+    if run.get("stop_reason") not in (None, "", *STOP_REASONS):
+        raise ValueError(f"'stop_reason' must be one of {', '.join(STOP_REASONS)}")
     pages, bug_list = core.dicts(run, "pages"), core.dicts(run, "bugs")
     for pg in pages:
         pg["route"] = core.norm_route(core.txt(pg.get("route"), "route"))

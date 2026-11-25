@@ -1,5 +1,5 @@
 """REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira pass-comment draft."""
-import fcntl, json, os, re, threading, unittest
+import fcntl, json, os, re, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -1391,6 +1391,7 @@ class NextAction(Rendering):
         memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
 
 
+
 class Continuation(Rendering):
     """Leads an explorer leaves, and `qa-mem explore-next`: what an explore run left to do and what its bugs may reach."""
 
@@ -1423,6 +1424,24 @@ class Continuation(Rendering):
         self.assertEqual([x["route"] for x in nxt["leads"]], ["/zones/:id/history"])
         self.assertEqual(nxt["blast_radius_routes"], ["/zones/:id"])  # shares POST /api/zones with the bug's page
 
+
+    def test_stop_reason_is_checked_at_ingest_and_shown_in_the_exploration_notes(self):
+        from qa_sdet import memory
+        for ok in memory.STOP_REASONS:
+            memory.check_run({"run_id": "r", "stop_reason": ok})
+        self.assertEqual(memory.STOP_REASONS, ("saturated", "charter_complete", "diminishing_returns", "turn_limit",
+                                               "budget_limit", "time_limit", "blocked"))
+        memory.check_run({"run_id": "r"})  # a run file from before the field
+        memory.check_run({"run_id": "r", "stop_reason": ""})
+        for bad in ("bored", "Turn_Limit", 5, ["turn_limit"]):
+            with self.assertRaises(ValueError, msg=bad):
+                memory.check_run({"run_id": "r", "stop_reason": bad})
+        d, r = self.render_run([("form", {**RUN_FORM, "stop_reason": "turn_limit", "notes": "tried the form"})])
+        notes = r.split("## Exploration notes")[1]
+        self.assertIn("Stopped: turn_limit", notes)
+        self.assertIn("tried the form", notes)
+        d, r = self.render_run([("form", {**RUN_FORM, "notes": "tried the form"})])
+        self.assertNotIn("Stopped:", r)  # without the field the notes read as before
 
 class Frontier(Rendering):
     """`explore-next`'s ranked frontier: pages a bug's exact endpoint reaches, readers of what it writes, leads and
@@ -1550,6 +1569,50 @@ class Frontier(Rendering):
         self.assertNotIn("'", h)
         self.assertNotIn("\n", h)
         self.assertLessEqual(len(h), 400)
+
+    def test_expansion_is_recommended_only_for_a_high_lead_a_bug_that_may_spread_or_a_new_5xx(self):
+        """--adaptive and --continue must not spend turns on pages when the run found nothing to chase (X1's marginal-yield gate)."""
+        medium = {"route": "/audit", "target": "Export", "reason": "csv", "priority": "MEDIUM"}
+        high = {"route": "/zones/:id/history", "target": "History tab", "reason": "log", "priority": "HIGH"}
+        out = self.nxt(self.bugrun(bugs=[], leads=[medium]))
+        self.assertIs(out["expand_recommended"], False)
+        self.assertIn("none HIGH", out["expand_reason"])
+        self.assertIs(self.nxt(self.bugrun(bugs=[], leads=[high, medium]))["expand_recommended"], True)
+        self.assertIn("/zones/:id/history", self.nxt(self.bugrun(bugs=[], leads=[high]))["expand_reason"])
+        self.assertIs(self.nxt(self.bugrun(bugs=[]))["expand_recommended"], False)  # nothing at all
+
+    def test_a_confirmed_bug_that_reaches_other_pages_recommends_expansion_a_suspected_one_does_not(self):
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones/:id", "POST /api/zones")
+        out = self.nxt(self.bugrun(endpoint="POST /api/zones"))
+        self.assertIs(out["expand_recommended"], True)
+        self.assertIn("CONFIRMED bug", out["expand_reason"])
+        self.assertIs(self.nxt(self.bugrun(endpoint="POST /api/zones", classification="SUSPECTED"))["expand_recommended"], False)
+
+    def test_an_unfinished_route_is_not_an_expansion(self):
+        out = self.nxt(self.bugrun(bugs=[]), ("closures", {"target": "/closures", "status": "INCOMPLETE"}), title="/zones/new, /closures")
+        self.assertEqual(out["incomplete_routes"], ["/closures"])  # --continue still does it
+        self.assertIs(out["expand_recommended"], False)
+
+    def test_a_5xx_first_seen_in_this_run_recommends_expansion_a_known_one_does_not(self):
+        from qa_sdet import memory
+        self.config(allowedHosts=["localhost"])
+        plan = {"kind": "explore", "title": "/form", "tickets": [], "cases": []}
+
+        def explore(name, run_id, ts, code):
+            d = self.rundir(name, plan=plan, runs=[("form", {"run_id": run_id, "build": "1", "mode": "explore", "target": "/form",
+                                                            "status": "COMPLETED", "summary": "x"})])
+            (d / ".data/requests-form.log").write_text(f"4. [POST] http://localhost:8765/api/zones/7 => [{code}] Error\n")
+            os.utime(d / ".data/run-form.json", (ts, ts))
+            memory.ingest_pending(d.parent)
+            return report.explore_next(self.proj, d)
+        first = explore("2026-11-25-a", "r1", time.time() - 3600, 500)
+        self.assertIs(first["expand_recommended"], True)
+        self.assertIn("POST /api/zones/7", first["expand_reason"])
+        again = explore("2026-11-25-b", "r2", time.time(), 500)  # seen before: no longer new
+        self.assertIs(again["expand_recommended"], False)
+        client = explore("2026-11-25-c", "r3", time.time() + 5, 404)  # a client error is not a server fault
+        self.assertIs(client["expand_recommended"], False)
 
     def test_a_module_page_is_named_by_its_shell_route(self):
         self.calls("/zones/new", "POST /api/zones")

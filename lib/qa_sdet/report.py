@@ -814,6 +814,8 @@ def _notes_section(runs):
         title = summary_text(f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})" +
                              (f" — {icons}" if icons else ""))
         out += [f"<details><summary>{title}</summary>", ""]
+        if r.get("stop_reason"):
+            out += [f"Stopped: {cell(r['stop_reason'])}", ""]
         if r.get("notes") or r.get("summary"):
             out += [paragraph(core.short(r.get("notes") or r.get("summary"), 1500)), ""]
         out += ["</details>", ""]
@@ -1597,12 +1599,35 @@ def _run_patterns(runs):
     return list(out.values())[:5]
 
 
+def _expand_gate(runs, run_dir, frontier, leads):
+    """(recommended, reason): whether pages beyond the unfinished ones are worth running (X1's marginal-yield gate): a HIGH
+    lead, a CONFIRMED bug that may reach other pages, or an unexplained 5xx first seen in this run. Else the run found
+    nothing to chase and `--adaptive` / `--continue` stop at the pages asked for."""
+    why = []
+    high = [x["route"] for x in frontier if x["source"] == "lead" and x["priority"] == "HIGH"]
+    if high:
+        why.append(f"a HIGH lead ({', '.join(high[:3])})")
+    spread = [x["route"] for x in frontier if x["source"] in ("endpoint", "downstream", "shared")]
+    if spread:
+        why.append(f"a CONFIRMED bug may reach {', '.join(spread[:3])}")
+    baseline = _signal_baseline()
+    new5xx = [key[len("[NEW] "):] for name, r in runs for key, _ in _signals(run_dir, name, r, baseline=baseline)[0]
+              if key.startswith("[NEW] ") and re.search(r"→ 5\d\d\b", key)]
+    if new5xx:
+        why.append(f"a new server error ({new5xx[0]})")
+    if why:
+        return True, "; ".join(why)
+    seen = f"{len(leads)} lead(s), none HIGH" if leads else "no leads"
+    return False, f"no HIGH lead, no CONFIRMED bug reaching other pages and no new 5xx ({seen}): more pages would add little"
+
+
 def explore_next(project, run_dir=None):
     """What an explore run (the newest, or `run_dir`) left to do: planned routes with no run file, or INCOMPLETE, or
     blocked by the sign-in or browser; the leads its explorers left on routes it didn't explore; and pages a CONFIRMED
     bug it found may reach (`blast_radius_routes`: the pages calling the bug's exact endpoint, else those sharing a call
     or component). `frontier` ranks them all with why (a `hypothesis` to hand the explorer) and the chain of pages that
-    opens a detail route; `run_patterns` are the bug patterns this run has found, to try first on the pages still to do."""
+    opens a detail route; `run_patterns` are the bug patterns this run has found, to try first on the pages still to do.
+    `expand_recommended` (with `expand_reason`) says whether pages beyond the unfinished routes are worth running."""
     proj = ops._project(project)
     qa_out = proj / "qa-out"
     if run_dir is not None:
@@ -1636,8 +1661,10 @@ def explore_next(project, run_dir=None):
     else:
         frontier = _frontier(None, d["runs"], explored, done, incomplete, leads)
     radius = sorted(x["route"] for x in frontier if x["source"] in ("endpoint", "shared"))
+    expand, reason = _expand_gate(d["runs"], folders[0], frontier, leads)
     return {"run": str(folders[0]), "incomplete_routes": incomplete, "leads": leads[:5], "blast_radius_routes": radius[:5],
-            "frontier": frontier, "run_patterns": _run_patterns(d["runs"])}
+            "frontier": frontier, "run_patterns": _run_patterns(d["runs"]), "expand_recommended": expand,
+            "expand_reason": reason}
 
 
 def _slice(st, want):
