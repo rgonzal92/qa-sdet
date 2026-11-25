@@ -111,7 +111,8 @@ class ScrubFiles(MemBase):
     def test_redaction_keeps_the_run_files_mtime_and_plain_prose(self):
         out = Path(self.tmp.name) / "qa-out" / "old"
         (out / "bugs").mkdir(parents=True)
-        memory.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "new"}]), "2026-11-22T10:00:00Z")
+        newer = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 86400))  # newer than the file, whatever today is
+        memory.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "new"}]), newer)
         runfile(out).write_text(json.dumps(run("1.0", facts=[{"kind": "rule", "text": "cookie: sid=abc123"}])))
         old = time.time() - 3 * 86400
         os.utime(runfile(out), (old, old))
