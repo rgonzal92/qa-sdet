@@ -731,6 +731,40 @@ class Signals(Rendering):
         self.assertIn("- /form: GET /api/zones/7 → 404", r)
         self.assertNotIn("PUT /api/zones", r)
 
+    def test_passing_facts_and_locators_explain_no_failed_request(self):
+        """A passing fact that mentions POST /form (or a locator for it) must not hide POST /form → 500."""
+        requests = ("1. [POST] http://localhost:8765/form => [500] Internal Server Error\n"
+                    "2. [GET] http://localhost:8765/api/closures.json => [404] Not Found\n"
+                    "3. [GET] http://localhost:8765/api/old.json => [404] Not Found\n")
+        run = {**RUN1, "facts": [{"kind": "api", "text": "POST /form saves the zone"}],
+               "locators": [{"label": "GET /api/closures.json", "locator": "getByText('GET /api/closures.json')"}],
+               "cases": [{"id": "TC-1", "status": "PASS", "actual": "POST /form returned 200 earlier"},
+                         {"id": "TC-2", "status": "FAIL", "actual": "GET /api/old.json gives 404, as the case saw"}],
+               "bugs": [{"id": "BUG-1", "title": "x"}]}
+        r = self.signals_run(run=run, requests=requests, console=None)
+        self.assertIn("- /form: POST /form → 500", r)
+        self.assertIn("- /form: GET /api/closures.json → 404", r)
+        self.assertNotIn("→ 404 (\u00d71)", r)
+        self.assertNotIn("/form: GET /api/old.json", r)  # a failed case names it: explained
+        run["notes"] = "GET /api/closures.json is known to 404."
+        self.assertNotIn("/form: GET /api/closures.json", self.signals_run(run=run, requests=requests, console=None))
+
+    def test_a_draft_naming_an_id_placeholder_explains_the_records_request(self):
+        requests = ("1. [GET] http://localhost:8765/api/zones/42 => [404] Not Found\n"
+                    "2. [DELETE] http://localhost:8765/api/zones/42 => [500] Error\n")
+        r = self.signals_run(requests=requests, console=None, drafts=["## Evidence\n- Network: GET /api/zones/:id → 404"])
+        self.assertIn("- /form: DELETE /api/zones/42 → 500", r)
+        self.assertNotIn("GET /api/zones", r)
+
+    def test_only_a_repeated_get_is_a_request_loop(self):
+        self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])
+        posts = "".join(f"{i}. [POST] http://localhost:8765/api/zones => [201] Created\n" for i in range(1, 8))
+        gets = "".join(f"{i}. [GET] http://localhost:8765/api/zones/{i} => [200] OK\n" for i in range(8, 14))
+        (d / ".data/requests-form.log").write_text(posts + gets)
+        keys = [k for k, _, _ in report.triage_signals(d, "form", RUN1)["app"]]
+        self.assertEqual(keys, ["GET /api/zones/:id ×6 (the same call 6 times: a request loop?)"])
+
     def test_third_party_failures_fold_into_one_line_and_request_loops_show(self):
         self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
         d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])

@@ -834,9 +834,11 @@ def _text(path):
 
 def _names_request(named, method, path):
     """Whether lower-cased text names a call by method and path: 'POST /api/zones' or 'POST http://host/api/zones'.
-    A path alone (the run's own target, a passing note's 'GET /api/zones') explains no other call failing there."""
-    return re.search(rf"\b{re.escape(method.lower())}\s+(?:https?://[^/\s]+)?{re.escape(path.lower())}(?![\w/.-])",
-                     named) is not None
+    A path alone (the run's own target, a passing note's 'GET /api/zones') explains no other call failing there.
+    A draft naming the record placeholder ('GET /api/zones/:id') names the call on a record ('/api/zones/42')."""
+    paths = {path.lower(), core._ids(path).lower() or path.lower()}
+    return any(re.search(rf"\b{re.escape(method.lower())}\s+(?:https?://[^/\s]+)?{re.escape(p)}(?![\w/.-])", named)
+               for p in paths)
 
 
 STORM_CALLS = 5  # the same call this often in one page visit: a fetch loop, likely
@@ -864,7 +866,8 @@ def triage_signals(run_dir, slug, run, hosts=None):
             third += code == "FAILED" or int(code) >= 400
             continue
         shape = core._ids(path) or path
-        calls.setdefault((method, shape), [0, index])[0] += 1
+        if method == "GET":  # a POST many times is a user (or a test) saving records, not a fetch loop
+            calls.setdefault((method, shape), [0, index])[0] += 1
         if code == "FAILED" or int(code) >= 400:
             status = code if code != "FAILED" else f"FAILED {text}".strip()
             found.setdefault(f"{method} {path} → {status}", [(method, path), 0, index])[1] += 1
@@ -878,8 +881,13 @@ def triage_signals(run_dir, slug, run, hosts=None):
         msg = re.sub(r"\s+@\s+\S*$", "", line[level.end():] if level else line).strip()  # " @ <source>:1"
         if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
             found.setdefault(f"console: {msg}", [msg[:60], 0, None])[1] += 1
-    named = (json.dumps(run, ensure_ascii=False) + "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))).lower()
-    explained = lambda w: _names_request(named, *w) if isinstance(w, tuple) else w.lower() in named
+    drafts = "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))
+    named = (json.dumps(run, ensure_ascii=False) + drafts).lower()  # a console message: any mention in the run
+    # a failed request: bugs, notes, non-PASS cases and drafts only; a passing fact or locator that mentions the path
+    # (`POST /form saves the zone`) must not hide `POST /form → 500`
+    cases = [c for c in _list(run, "cases") if core.case_status(c.get("status")) != "PASS"]
+    explains = (json.dumps([_list(run, "bugs"), run.get("notes"), cases], ensure_ascii=False) + drafts).lower()
+    explained = lambda w: _names_request(explains, *w) if isinstance(w, tuple) else w.lower() in named
     return {"app": [(key, n, index) for key, (what, n, index) in found.items() if not explained(what)], "third_party": third}
 
 
