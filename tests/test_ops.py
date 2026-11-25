@@ -379,21 +379,23 @@ class PageStart(Base):
         self.config(**self.CFG)
         code, out, mrun = self.start([done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}'),
                                       done(0, out="1.43.0\n")])
-        self.assertEqual((code, out), (0, {"status": "ok", "build": "1.43.0", "url": "https://qa.example.com/app/form"}))
+        self.assertEqual((code, out), (0, {"status": "ok", "build": "1.43.0", "url": "https://qa.example.com/app/form",
+                                           "browser": "chrome"}))
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
 
     def test_sign_in_page_is_a_session_blocker_and_closes(self):
         self.config(**self.CFG)
         code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"login.microsoftonline.com","hasPassword":false}'),
                                       done(0)])
-        self.assertEqual((code, out["status"], out["block_scope"]), (1, "blocked", "session"))
+        self.assertEqual((code, out["status"], out["block_scope"], out["browser"]), (1, "blocked", "session", "chrome"))
         self.assertIn("/qa-sdet:qa-login", out["reason"])
         self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
     def test_an_error_status_is_a_page_blocker_that_leaves_the_browser_open(self):  # the explorer's step 9 closes it
         self.config(**self.CFG)
         code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":404}')])
-        self.assertEqual((code, out), (1, {"status": "blocked", "block_scope": "page", "reason": "the page returned HTTP 404"}))
+        self.assertEqual((code, out), (1, {"status": "blocked", "block_scope": "page", "reason": "the page returned HTTP 404",
+                                           "browser": "chrome"}))  # the crawler's run file names the browser from here
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
         code, out, _ = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":0}'),
                                    done(0, out="1.43.0\n")])  # 0: the browser doesn't expose it, so no blocker

@@ -308,6 +308,22 @@ class R3Secrets(Case):
         self.table(cmds[:4], False, cwd=RUN, agents=(False,))  # the main session keeps them (the user's own call)
         self.table(["playwright-cli -s=qa webmcp-list", "playwright-cli -s=qa cookie-set a b"], False, cwd=RUN, agents=(True,))
 
+    def test_a_module_frame_is_read_by_eval_on_a_frame_target_not_run_code(self):
+        """An app shell loads its pages in a cross-origin iframe `document` can't reach: the crawler's way in is eval with
+        a frame-piercing target, in one call per route; the frame's own cookie stays closed and run-code stays denied."""
+        frame = "'iframe >> internal:control=enter-frame >> :root'"
+        check = "\"el => { const document = el.ownerDocument; return !!document.querySelector('[data-testid=x]'); }\""
+        allow = [f"playwright-cli -s=qa --raw eval {check} {frame}",
+                 f"playwright-cli -s=qa goto 'https://qa.traffic.example/zones'; playwright-cli -s=qa --raw eval "
+                 f"\"!!document.querySelector('#menu')\"; playwright-cli -s=qa --raw eval {check} {frame}"]
+        deny = [f"playwright-cli -s=qa --raw eval \"el => el.ownerDocument.cookie\" {frame}",
+                "playwright-cli -s=qa run-code \"async page => page.frames()[1].content()\""]
+        for agent in ("qa-sdet:qa-crawler", "qa-sdet:qa-explorer"):
+            for cmd in allow:
+                self.assertIsNone(tool("Bash", agent, RUN, command=cmd), (agent, cmd))
+            for cmd in deny:
+                self.assertIsNotNone(tool("Bash", agent, RUN, command=cmd), (agent, cmd))
+
     def test_profile_folder_stays_closed(self):
         self.table(self.PATH_DENY, True)
         self.table(self.PATH_ALLOW, False, cwd=ROOT)

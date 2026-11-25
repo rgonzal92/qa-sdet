@@ -437,7 +437,7 @@ def page_start(url):
     cfg, hosts = _qa_config("page-start")
     if not core.url_allowed(url, hosts):
         raise core.BadInput(f"page-start: {url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
-    out = lambda d: print(json.dumps(d))
+    out = lambda d: print(json.dumps(d | {"browser": cfg.get("browser")}))  # the one it opens: the crawler records it
     err = io.StringIO()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
         rc = browser_open([url])

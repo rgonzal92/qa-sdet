@@ -353,6 +353,13 @@ class Docs(unittest.TestCase):
         self.assertIn("qa-sdet:qa-crawler", hooks["SubagentStop"][0]["matcher"].split("|"))
         for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
             self.assertIn(marker, crawler)
+        self.assertIn("page-start's browser", crawler)  # found live: never given the config, it wrote a made-up browser
+        self.assertNotIn("the config's browser", crawler)
+        # found live: an app shell's pages sit in a cross-origin iframe, so the document-only check confirmed 0 of ~1,280
+        # module locators and the crawler reached for run-code (denied); eval on a frame target reads inside it
+        self.assertIn("'iframe >> internal:control=enter-frame >> :root'", crawler)
+        self.assertIn("const document = el.ownerDocument", crawler)
+        self.assertIn("strict mode violation", crawler)  # 2+ iframes: name the module's, from the error
 
     def test_the_explorer_stops_on_every_page_start_blocker(self):  # found live: it reached a 404 target via goto
         step1 = re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0)
