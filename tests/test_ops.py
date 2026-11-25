@@ -365,5 +365,91 @@ class SessionCheck(Base):
         self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
 
+class PageStart(Base):
+    """`qa-mem page-start <url>`: the explorer's steps 1-3 in one call (open, sign-in check, build); the browser stays open."""
+
+    CFG = SessionCheck.CFG
+
+    def start(self, seq, url="https://qa.example.com/app/form"):
+        with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
+            code, out, err = cli("page-start", url)
+        return code, (json.loads(out) if out.strip() else None), mrun
+
+    def test_open_signed_in_page_reads_the_build_and_stays_open(self):
+        self.config(**self.CFG)
+        code, out, mrun = self.start([done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}'),
+                                      done(0, out="1.43.0\n")])
+        self.assertEqual((code, out), (0, {"status": "ok", "build": "1.43.0", "url": "https://qa.example.com/app/form"}))
+        self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
+
+    def test_sign_in_page_is_a_session_blocker_and_closes(self):
+        self.config(**self.CFG)
+        code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"login.microsoftonline.com","hasPassword":false}'),
+                                      done(0)])
+        self.assertEqual((code, out["status"], out["block_scope"]), (1, "blocked", "session"))
+        self.assertIn("/qa-sdet:qa-login", out["reason"])
+        self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
+
+    def test_browser_trouble_is_a_browser_blocker_and_bad_hosts_are_refused(self):
+        self.config(**self.CFG)
+        code, out, _ = self.start([done(0), done(0, out="Error: Browser is already in use for /x/profiles/main")])
+        self.assertEqual((code, out["block_scope"]), (1, "browser"))
+        self.assertTrue(out["reason"].startswith("browser profile in use"), out)
+        code, out, mrun = self.start([], url="https://evil.example.com/")
+        self.assertEqual((code, out), (2, None))
+        mrun.assert_not_called()
+
+
+class Evidence(Base):
+    """`qa-mem evidence <png> (--selector <css> | --ref <ref>) --label <text>`: the evidence image in one call."""
+
+    def setUp(self):
+        super().setUp()
+        self.png = self.proj / "qa-out/r/evidence/TC-1.png"
+        self.png.parent.mkdir(parents=True)
+
+    def run_evidence(self, *args, outputs=(), annotate=True):
+        calls, outs = [], list(outputs)
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            if "screenshot" in cmd:
+                self.png.write_bytes(b"png")
+            return outs.pop(0) if outs else done(0)
+        with mock.patch.object(subprocess, "run", side_effect=fake), \
+                mock.patch.object(ops, "annotate", return_value=annotate) as ann:
+            code, out, err = cli("evidence", str(self.png), *args)
+        return code, (json.loads(out) if out.strip() else None), calls, ann, err
+
+    def test_selector_box_is_drawn_with_pillow(self):
+        sel = 'a[title="it\'s"]'
+        code, out, calls, ann, _ = self.run_evidence("--selector", sel, "--label", "TC-1 PASS: 130 saved",
+                                                     outputs=[done(0, out='"10,20,30,40"\n')])
+        self.assertEqual((code, out), (0, {"path": str(self.png), "annotated": True, "method": "pillow"}))
+        self.assertIn(json.dumps(sel), calls[0][-1])  # the selector reaches the page as a JS string, never as code
+        self.assertEqual(calls[1], ["playwright-cli", "-s=qa", "screenshot", f"--filename={self.png}"])
+        self.assertEqual(ann.call_args[0][1:], ([(10, 20, 30, 40)], "TC-1 PASS: 130 saved"))
+
+    def test_without_pillow_or_with_a_ref_the_browser_draws_the_box_and_always_hides_it(self):
+        code, out, calls, _, _ = self.run_evidence("--selector", "#msg", "--label", "x", outputs=[done(0, out="1,2,3,4")],
+                                                   annotate=False)
+        self.assertEqual((code, out["method"], out["annotated"]), (0, "highlight", True))
+        self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])
+        self.assertIn(["playwright-cli", "-s=qa", "highlight", "#msg", "--style", "outline: 3px solid red"], calls)
+        code, out, calls, _, err = self.run_evidence("--ref", "f1e15", "--label", "x",
+                                                     outputs=[done(0), done(0), done(1, err="screenshot failed")])
+        self.assertEqual(code, 1)
+        self.assertIn("screenshot failed", err)
+        self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])  # no red box left for the next image
+
+    def test_refusals(self):
+        code, _, calls, _, err = self.run_evidence("--selector", "#none", "--label", "x", outputs=[done(0, out='""')])
+        self.assertEqual(code, 1)
+        self.assertIn("no element matches", err)
+        outside = self.proj / "qa-out/r/bugs/x.png"
+        for args in (["--selector", "#a"], ["--selector", "#a", "--ref", "e1", "--label", "x"]):
+            self.assertEqual(cli("evidence", str(self.png), *args)[0], 2, args)
+        self.assertEqual(cli("evidence", str(outside), "--selector", "#a", "--label", "x")[0], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

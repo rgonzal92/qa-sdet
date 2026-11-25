@@ -59,8 +59,8 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
-    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "prune", "annotate", "report",
-                   "plan-find", "setup-permissions"):
+    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
+                   "evidence", "report", "plan-find", "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -89,6 +89,15 @@ def wrapper_cmd(cmd, args):
         if o["_"]:
             raise core.BadOption("session-check takes no positional arguments")
         return ops.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
+    elif cmd == "page-start":
+        if len(args) != 1:
+            raise core.BadInput("usage: qa-mem page-start <url>")
+        return ops.page_start(args[0])
+    elif cmd == "evidence":
+        o = _opts(args, valued=("--selector", "--ref", "--label"))
+        if len(o["_"]) != 1 or ("--selector" in o) == ("--ref" in o) or not o.get("--label"):
+            raise core.BadInput("usage: qa-mem evidence <png> (--selector <css> | --ref <ref>) --label <text>")
+        return ops.evidence(o["_"][0], o["--label"], selector=o.get("--selector"), ref=o.get("--ref"))
     elif cmd == "prune":
         if len(args) not in (1, 2):
             raise core.BadInput("usage: qa-mem prune <project> [<run dir>]")
@@ -146,6 +155,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
+    "page-start": "<url>", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",

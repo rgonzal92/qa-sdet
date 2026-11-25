@@ -32,23 +32,13 @@ playwright-cli -s=qa video-stop && playwright-cli -s=qa recording-stop
 - No `--cursor` (it slows every action by 800 ms). No videos for cases.
 
 ## Evidence image (bug or case)
-A bug: after `recording-stop` (its toolbar shows in screenshots). A case: before you cancel any dialog. Run nothing between the eval and the screenshot.
+A bug: after `recording-stop` (its toolbar shows in screenshots). A case: before you cancel any dialog. One call, nothing else before it:
 ```
-playwright-cli -s=qa --raw eval "(() => { const el = document.querySelector('<css>'); el.scrollIntoView({block: 'center'});
-  const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })()"
-playwright-cli -s=qa screenshot --filename='<out>/evidence/<BUG-n or TC-n>.png'
-qa-mem annotate '<out>/evidence/<BUG-n or TC-n>.png' --box <x,y,w,h> --label '<at most 80 chars>'
+qa-mem evidence '<out>/evidence/<BUG-n or TC-n>.png' --selector '<css>' --label '<at most 80 chars>'
 ```
-- `screenshot` saves the viewport in CSS pixels, the unit of `getBoundingClientRect()`: no `devicePixelRatio` factor, never `--hires` or `--full-page`. Always pass `--filename`.
-- The box is the element that shows the problem (the wrong value, the error text, the bad row). A second `--box` is allowed. The label sits by the first box, so that is the element it describes. Bug label: actual vs expected (`Saved at 131 km/h; max is 130`). Case label: `TC-<n> <STATUS>: <value you read>`.
-- `annotate` says Pillow is missing: take the image again now with the highlight steps below (same file), and use them for the rest of the run.
+- It scrolls to the element, takes the viewport screenshot and draws a red box and the label next to it; it prints `{"path", "annotated", "method"}`. The element is the one that shows the problem (the wrong value, the error text, the bad row). Bug label: actual vs expected (`Saved at 131 km/h; max is 130`). Case label: `TC-<n> <STATUS>: <value you read>`.
+- `method` `highlight`: Pillow is missing, so the browser drew the box without a label: put the label text in the draft's Actual or the case's `actual`.
+- An element in a frame (the app shell loads pages in an iframe; a CSS selector can't reach inside): `find '<text on the element>'` shows its ref (`status [ref=f1e15]: Saved …`), then `qa-mem evidence '<png>' --ref f1e15 --label '<text>'`.
+- `no element matches`: fix the selector, or use `--ref`. Never `--hires` or `--full-page`.
 
-**Highlight variant:** for an element in a frame (the app shell loads pages in an iframe; the eval above and card locators can't reach inside), or when Pillow is missing. playwright-cli draws the box itself, also in frames from another origin. `find '<text on the element>'` shows its ref (`status [ref=f1e15]: Saved …`); then, with nothing else between the highlight and the screenshot:
-```
-playwright-cli -s=qa eval "el => el.scrollIntoView({block: 'center'})" <ref>
-playwright-cli -s=qa highlight <ref> --style 'outline: 3px solid red'
-playwright-cli -s=qa screenshot --filename='<out>/evidence/<BUG-n or TC-n>.png'
-playwright-cli -s=qa highlight --hide
-```
-- The box has no label, only a small tag naming the ref: put the label text (actual vs expected) in the draft's Actual or the case's `actual`. `annotated: true`.
-- `--hide` before the next screenshot, or the old box shows up in it.
+**When `qa-mem evidence` fails** (exit 1 on a browser command): take the image plain, `playwright-cli -s=qa screenshot --filename='<out>/evidence/<BUG-n or TC-n>.png'`, set `annotated: false` and name the element in the draft's Actual or the case's `actual`.

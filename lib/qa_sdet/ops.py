@@ -242,78 +242,127 @@ def _unwrap_raw(text):
         return t
 
 
-def session_check(record=False, read_build=False):
-    """Headless check that the `main` browser profile is signed in at qaBaseUrl (not redirected to ssoHost or a login
-    form). Exit 0 = signed in, 1 = session expired, 2 = config/browser/tool error."""
+def _pw_env():
+    """The environment playwright-cli runs with: no PLAYWRIGHT_MCP_* / PWTEST_* (they would override the profile)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(("PLAYWRIGHT_MCP_", "PWTEST_"))}
+
+
+def _close_qa(env):
+    try:
+        subprocess.run(["playwright-cli", "-s=qa", "close"], env=env, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _sign_in_state(cfg, env):
+    """(signed_in, problem) of the page the `qa` session shows: problem is a 'browser tool failed: …' line when the check
+    itself failed; signed_in is False on ssoHost or a page with a password field."""
+    js = "JSON.stringify({host: location.host, hasPassword: Boolean(document.querySelector('input[type=\"password\"]'))})"
+    try:
+        r = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", js], env=env, capture_output=True, text=True,
+                           errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"browser tool failed: session-check eval failed ({e})"
+    if r.returncode != 0:
+        detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
+        return None, f"browser tool failed: session-check eval failed ({detail})"
+    parsed = _unwrap_raw(r.stdout)
+    if isinstance(parsed, str):
+        parsed = _unwrap_raw(parsed)
+    if not isinstance(parsed, dict) or "host" not in parsed:
+        return None, f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})"
+    sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
+    cur_netloc, cur_host = _norm_host(parsed.get("host"))
+    is_sso = bool(sso_host) and ((":" in sso_netloc and cur_netloc == sso_netloc) or (":" not in sso_netloc and cur_host == sso_host))
+    return not (is_sso or parsed.get("hasPassword")), None
+
+
+def _read_build(cfg, hosts, env):
+    """The build per config buildSource (selector, url or header), or core.UNKNOWN."""
+    bs = cfg.get("buildSource") if isinstance(cfg.get("buildSource"), dict) else {}
+    btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
+    bjs = None
+    if btype == "selector" and bval:
+        bjs = f"document.querySelector({json.dumps(bval)})?.textContent || ''"
+    elif btype == "url" and bval and (bval.startswith("/") or core.url_allowed(bval, hosts)):
+        bjs = f"fetch({json.dumps(bval)}).then(r => r.text())"
+    elif btype == "header" and bval:
+        bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
+    if not bjs:
+        return core.UNKNOWN
+    try:
+        br = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", bjs], env=env, capture_output=True,
+                            text=True, errors="replace", timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return core.UNKNOWN
+    if br.returncode != 0:
+        return None
+    raw_b = _unwrap_raw(br.stdout)
+    return core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout)
+
+
+def _qa_config(what):
     try:
         cfg = core.config(strict=True)
     except (OSError, ValueError) as e:
-        raise core.BadInput(f"session-check: unreadable {core.CONFIG} ({e})")
+        raise core.BadInput(f"{what}: unreadable {core.CONFIG} ({e})")
+    return cfg, core.allowed_hosts(cfg)
+
+
+def session_check(record=False, read_build=False):
+    """Headless check that the `main` browser profile is signed in at qaBaseUrl (not redirected to ssoHost or a login
+    form). Exit 0 = signed in, 1 = session expired, 2 = config/browser/tool error."""
+    cfg, hosts = _qa_config("session-check")
     base_url = str(cfg.get("qaBaseUrl") or "").strip()
-    hosts = core.allowed_hosts(cfg)
     if not core.url_allowed(base_url, hosts):
         raise core.BadInput(f"session-check: qaBaseUrl {base_url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
-    sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
     with contextlib.redirect_stdout(io.StringIO()):
         rc = browser_open([base_url])
     if rc:
         return 2
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("PLAYWRIGHT_MCP_", "PWTEST_"))}
+    env = _pw_env()
     try:
-        js = "JSON.stringify({host: location.host, hasPassword: Boolean(document.querySelector('input[type=\"password\"]'))})"
-        try:
-            r = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", js], env=env, capture_output=True, text=True,
-                               errors="replace", timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            print(f"browser tool failed: session-check eval failed ({e})", file=sys.stderr)
+        signed_in, problem = _sign_in_state(cfg, env)
+        if problem:
+            print(problem, file=sys.stderr)
             return 2
-        if r.returncode != 0:
-            detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
-            print(f"browser tool failed: session-check eval failed ({detail})", file=sys.stderr)
-            return 2
-        parsed = _unwrap_raw(r.stdout)
-        if isinstance(parsed, str):
-            parsed = _unwrap_raw(parsed)
-        if not isinstance(parsed, dict) or "host" not in parsed:
-            print(f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})", file=sys.stderr)
-            return 2
-        cur_netloc, cur_host = _norm_host(parsed.get("host"))
-        is_sso = bool(sso_host) and ((":" in sso_netloc and cur_netloc == sso_netloc) or (":" not in sso_netloc and cur_host == sso_host))
-        if is_sso or parsed.get("hasPassword"):
+        if not signed_in:
             print("session expired, run /qa-sdet:qa-login", file=sys.stderr)
             return 1
-        build = None
-        if read_build:
-            bs = cfg.get("buildSource") if isinstance(cfg.get("buildSource"), dict) else {}
-            btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
-            bjs = None
-            if btype == "selector" and bval:
-                bjs = f"document.querySelector({json.dumps(bval)})?.textContent || ''"
-            elif btype == "url" and bval and (bval.startswith("/") or core.url_allowed(bval, hosts)):
-                bjs = f"fetch({json.dumps(bval)}).then(r => r.text())"
-            elif btype == "header" and bval:
-                bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
-            if bjs:
-                try:
-                    br = subprocess.run(["playwright-cli", "-s=qa", "--raw", "eval", bjs], env=env, capture_output=True,
-                                        text=True, errors="replace", timeout=20)
-                    if br.returncode == 0:
-                        raw_b = _unwrap_raw(br.stdout)
-                        build = core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout)
-                except (OSError, subprocess.TimeoutExpired):
-                    build = core.UNKNOWN
-            else:
-                build = core.UNKNOWN
+        build = _read_build(cfg, hosts, env) if read_build else None
         if record:
             ensure_profile_dir()
             core._write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
         print(f"ok  build={build}" if read_build else "ok")
         return 0
     finally:
-        try:
-            subprocess.run(["playwright-cli", "-s=qa", "close"], env=env, capture_output=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        _close_qa(env)
+
+
+def page_start(url):
+    """The explorer's start in one call: open the `qa` session at `url` in the signed-in profile, check the sign-in, read
+    the build. Prints one JSON line: {status: ok, build, url} with the browser left open (exit 0), or {status: blocked,
+    block_scope: browser|session, reason} (exit 1; a sign-in page closes the browser)."""
+    cfg, hosts = _qa_config("page-start")
+    if not core.url_allowed(url, hosts):
+        raise core.BadInput(f"page-start: {url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
+    out = lambda d: print(json.dumps(d))
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        rc = browser_open([url])
+    if rc:
+        first = next((x.strip() for x in err.getvalue().splitlines() if x.strip()), f"browser-open exited {rc}")
+        out({"status": "blocked", "block_scope": "browser", "reason": core.short(first, 300)})
+        return 1
+    env = _pw_env()
+    signed_in, problem = _sign_in_state(cfg, env)
+    if problem or not signed_in:
+        _close_qa(env)
+        out({"status": "blocked", "block_scope": "browser" if problem else "session",
+             "reason": problem or "session expired, run /qa-sdet:qa-login"})
+        return 1
+    out({"status": "ok", "build": _read_build(cfg, hosts, env) or core.UNKNOWN, "url": url})
+    return 0
 
 
 def prune(project, days=7, t=None, run=None):
@@ -363,19 +412,70 @@ RED, WHITE = (224, 0, 0), (255, 255, 255)
 NO_PILLOW = "annotate: Pillow not installed (python3 -m pip install --user pillow); image left as is"
 
 
-def evidence_png(path):
+def evidence_png(path, must_exist=True):
     """The real path of a .png inside qa-out/<run>/evidence/, or BadInput. The project is the folder holding the
     qa-out named in the path; the png's real path must stay inside that project (a link to another project's
-    evidence, or a qa-out/<run> linked elsewhere, is refused)."""
+    evidence, or a qa-out/<run> linked elsewhere, is refused). must_exist=False: an image about to be taken."""
     shape = lambda q: q.suffix.lower() == ".png" and q.parent.name == "evidence" and q.parent.parent.parent.name == "qa-out"
     given = Path(os.path.abspath(os.path.expanduser(str(path))))  # lexical: links not followed yet
     p = Path(os.path.realpath(given))
     project = Path(os.path.realpath(given.parents[3])) if len(given.parents) > 3 else None
     if not (shape(given) and shape(p) and project and p.is_relative_to(project)):
         raise core.BadInput(f"annotate: only .png files inside qa-out/<run>/evidence/ of this project ({path})")
-    if not p.is_file():
+    if must_exist and not p.is_file():
         raise core.BadInput(f"annotate: no such image {path}")
     return p
+
+
+HIGHLIGHT_STYLE = "outline: 3px solid red"
+
+
+def evidence(path, label, selector=None, ref=None):
+    """The evidence image in one call (references/playwright-cli-tips.md, "Evidence image"): with a CSS selector, scroll
+    to the element, take the screenshot and draw the box and label (Pillow); without Pillow, or for a snapshot ref (an
+    element in a frame), the browser draws the box and `highlight --hide` always runs after, so no box leaks into the
+    next image. Prints {path, annotated, method}; exit 1 when the element or a browser command fails."""
+    png = evidence_png(path, must_exist=False)
+    env = _pw_env()
+    pw = lambda *a: subprocess.run(["playwright-cli", "-s=qa", *a], env=env, capture_output=True, text=True,
+                                   errors="replace", timeout=60)
+    def fail(what, r=None):
+        detail = core.short((r.stderr or r.stdout or "").strip(), 200) if r is not None else ""
+        print(f"evidence: {what}" + (f": {detail}" if detail else ""), file=sys.stderr)
+        return 1
+    if selector is not None:  # the selector reaches the page as a JSON string, never as code
+        js = (f"(() => {{ const el = document.querySelector({json.dumps(selector)}); if (!el) return ''; "
+              "el.scrollIntoView({block: 'center'}); const r = el.getBoundingClientRect(); "
+              "return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })()")
+        r = pw("--raw", "eval", js)
+        box = _unwrap_raw(r.stdout) if r.returncode == 0 else None
+        if r.returncode:
+            return fail("the element lookup failed", r)
+        if not isinstance(box, str) or not box.strip():
+            return fail(f"no element matches {selector!r} (in a frame? use --ref from `find`)")
+        r = pw("screenshot", f"--filename={png}")
+        if r.returncode:
+            return fail("screenshot failed", r)
+        if annotate(png, [parse_box(box)], label):
+            print(json.dumps({"path": str(png), "annotated": True, "method": "pillow"}))
+            return 0
+        target = selector  # no Pillow: take it again with the browser's own box
+    else:
+        r = pw("eval", "el => el.scrollIntoView({block: 'center'})", ref)
+        if r.returncode:
+            return fail(f"no element {ref!r} (take a fresh `find`)", r)
+        target = ref
+    try:
+        r = pw("highlight", target, "--style", HIGHLIGHT_STYLE)
+        if r.returncode:
+            return fail("highlight failed", r)
+        r = pw("screenshot", f"--filename={png}")
+        if r.returncode:
+            return fail("screenshot failed", r)
+    finally:
+        pw("highlight", "--hide")
+    print(json.dumps({"path": str(png), "annotated": True, "method": "highlight"}))
+    return 0
 
 
 def parse_box(text):

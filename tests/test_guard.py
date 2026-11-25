@@ -637,6 +637,15 @@ class R6Marker(Case):
         self.assertIsNone(bash("playwright-cli -s=qa click e1", warned, True))  # the hook already warned: no refusal
         self.assertEqual((g.cleanup_reserve(2), g.cleanup_reserve(12), g.cleanup_reserve(100)), (3, 3, 15))
 
+    def test_page_start_and_evidence_are_hosts_checked_and_counted(self):
+        cwd = project(budget=20)
+        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+        self.assertIn("non-allowlisted host", bash("qa-mem page-start https://evil.com/", cwd, True))
+        self.assertIsNone(bash("qa-mem page-start https://qa.traffic.example/form", cwd, True))
+        self.assertEqual(used(), 1)
+        self.assertIsNone(bash(f"qa-mem evidence '{cwd}/qa-out/r/evidence/TC-1.png' --selector '#msg' --label 'ok'", cwd, True))
+        self.assertEqual(used(), 3)  # an eval and a screenshot
+
     def test_used_is_untouched_without_a_budget(self):
         for m in ({}, {"deadline": time.time() + 600}, {"budget": 0, "deadline": time.time() + 600}):
             cwd = project()

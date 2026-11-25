@@ -671,12 +671,16 @@ def check_acli(rest):
             return None
     return "acli write command blocked: qa-sdet only reads Jira and drafts content; the user files it"
 def check_qamem(args, ctx):
-    """qa-mem browser-open: allowedHosts only (only '--' words are its options), and one command against the budget."""
-    if args[:1] != ["browser-open"]:
+    """qa-mem browser-open and page-start: allowedHosts only (only '--' words are browser-open's options), one command
+    against the budget; qa-mem evidence: two (an eval and a screenshot)."""
+    if args[:1] == ["evidence"]:
+        ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 2, True, ctx.loop or ctx.loop_depth > 0
+        return None
+    if args[:1] not in (["browser-open"], ["page-start"]):
         return None
     hosts, pos = allowed_hosts(), [a for k, a in enumerate(args[1:]) if not a.startswith("--") and args[k] != "--session"]
     if bad := next((u for u in pos if not host_ok(u, hosts)), None):
-        return f"qa-mem browser-open to non-allowlisted host: {bad} (allowed: {sorted(hosts)})"
+        return f"qa-mem {args[0]} to non-allowlisted host: {bad} (allowed: {sorted(hosts)})"
     ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 1, True, ctx.loop or ctx.loop_depth > 0  # one budgeted command
 _HTTP_SHORT_VAL = {o[1] for o in HTTP_VALUE_OPTS if len(o) == 2 and o[0] == "-"}
 def explorer_net(name, rest, raw):
