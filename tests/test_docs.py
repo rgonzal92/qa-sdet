@@ -270,6 +270,20 @@ class Docs(unittest.TestCase):
                 self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": "qa-mem session-check --record"},
                                              "cwd": os.path.realpath(d)}), (None, True))
 
+    def test_retest_cases_come_from_the_prior_plan_with_their_steps(self):
+        """plan-find's retest_cases name the cases (no steps or expected result); prior_passed entries are complete. The
+        skill must copy the prior plan's case objects for those ids, or the explorer gets cases it can't run."""
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"QA_SDET_CONFIG": f"{d}/c.json"}):
+            run = Path(d) / "qa-out/2026-11-24-PROJ-1"
+            (run / ".data").mkdir(parents=True)
+            case = {"id": "TC-1", "ticket": "PROJ-1", "ac": "AC-1", "title": "t", "route": "/f", "steps": ["s"], "expected": "e"}
+            (run / ".data/plan.json").write_text(json.dumps({"kind": "ticket", "tickets": [{"key": "PROJ-1"}], "cases": [case]}))
+            (run / ".data/run-f.json").write_text(json.dumps({"target": "/f", "cases": [{"id": "TC-1", "status": "FAIL"}]}))
+            entry = report._run_state(run)["retest_cases"][0]
+        self.assertFalse({"steps", "expected"} & set(entry))  # copying these verbatim would drop what the explorer checks
+        retest = next(x for x in text("skills/qa-ticket/SKILL.md").splitlines() if x.startswith("- **`--retest"))
+        self.assertIn("the prior plan's case objects (steps and expected included) whose ids are in `retest_cases`", retest)
+
 
 if __name__ == "__main__":
     unittest.main()
