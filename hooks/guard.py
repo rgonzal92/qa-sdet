@@ -70,8 +70,8 @@ WRITERS, INPLACE = {"cp", "tee", "install", "ln", "rsync"}, {"sed", "perl", "rub
 NET_CLIS = set("curl wget http https xh httpie nc ncat netcat telnet socat aria2c ssh scp sftp ftp lynx w3m links elinks".split())
 HTTP_CLIENTS = {"curl", "wget", "http", "https", "xh", "httpie", "aria2c"}  # the explorer may fetch from allowedHosts
 HTTP_REROUTE_OPTS = set("-x --proxy --proxy1.0 --preproxy --socks4 --socks4a --socks5 --socks5-hostname "
-                        "--resolve --connect-to --doh-url -K --config --unix-socket "  # elsewhere,
-                        "--abstract-unix-socket".split())  # or URLs / options from a file the guard doesn't see
+                        "--resolve --connect-to --doh-url --alt-svc -K --config --unix-socket "  # elsewhere,
+                        "--abstract-unix-socket --variable".split())  # or URLs / options from a file or variable the guard doesn't see
 WGET_FILE_OPTS = {"-i", "--input-file", "-e", "--execute"}  # wget only (curl -i/-e: headers, referer)
 HTTP_VALUE_OPTS = set("-o -O -d -H -X -u -A -e -b -c -F -T -w -m -r -C -D -E -P -U -t -a --output --data --data-raw "
                       "--data-binary --data-urlencode --header --request --user --user-agent --referer --cookie --cookie-jar "
@@ -999,12 +999,14 @@ def _check(cmd, cwd, ctx, depth, carried=()):
         ctx.approve = False
         return ODD.format("text the shell can't parse (an unclosed quote)") if ctx.guarded else None
     cwds, stack, seg = {cwd}, [], []
-    for tok in toks + [";"]:  # sentinel flushes the last segment
+    for k, tok in enumerate(toks + [";"]):  # sentinel flushes the last segment
         if not tok or not set(tok) <= set(PUNCT):
             seg.append(tok)
             continue
         if tok not in (";", "&&", "||", "|") or not seg and tok != ";":
             ctx.approve = False  # subshells, background jobs, a pipe with nothing before it
+        if seg[:1] == ["function"] or len(seg) == 1 and "=" not in seg[0] and (tok[:2] == "()" or tok == "(" and toks[k + 1:k + 2] == [")"]):
+            ctx.loop_depth += 1  # `f() {` / `function f {`: its body runs once per call, so count it as a loop (for the rest of the call)
         if seg:
             ctx.segments += 1
             if r := check_segment(seg, cwds, cwd, ctx, depth, docs):
@@ -1144,8 +1146,12 @@ def evaluate(data):
 def decide(data):
     return evaluate(data)[0]
 _MASKS = [(re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+\s+)?[^\s'\"]+"), r"\1[masked]"),
+          (re.compile(r"(?i)\b((?:set-)?cookie|x-api-key|x-auth-token)(\s*:\s*)[^'\"\n]+"), r"\1\2[masked]"),  # header values
           (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 [masked]"),
-          (re.compile(r"(?i)\b(token|password|passwd|pwd|secret|api[_-]?key|access[_-]?token)(\s*[=:]\s*)[^\s'\"&]+"), r"\1\2[masked]"),
+          # anywhere in a name (JIRA_API_TOKEN=, accessToken:), also as a JSON key ("password": "…", escaped in a dumped string)
+          (re.compile(r"(?i)(token|password|passwd|pwd|secret|api[_-]?key)(\\?['\"]?\s*[=:]\s*\\?['\"]?)[^\s'\"&\\]+"), r"\1\2[masked]"),
+          (re.compile(r"(?i)(\s--?[\w-]*(?:token|password|passwd|secret|api[_-]?key)\s+['\"]?)[^\s'\"]+"), r"\1[masked]"),  # --password x
+          (re.compile(r"(\s(?:-u|--user)\s*['\"]?[^\s:'\"]+:)[^\s'\"]+"), r"\1[masked]"),  # curl -u user:password
           (re.compile(r"://[^\s/?#:@'\"]+:[^\s/?#@'\"]+@"), "://[masked]@")]
 DENIAL_LOG_LINES = 1000
 def mask(text):
