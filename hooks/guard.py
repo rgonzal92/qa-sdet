@@ -44,7 +44,8 @@ RECURSIVE = {"cp": "rRa", "scp": "r", "ls": "R", "du": "a", "grep": "rR", "egrep
 FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
 PW_VALUE_OPTS = set("-s --session --browser --config --device --profile --idle-timeout --filename --depth --domain --path "
                     "--host --port --isolated-context --user-data-dir --type --filter --data --size --fps "
-                    "--status --body --content-type --header --remove-header".split())  # route's: else they pass as the verb
+                    "--status --body --content-type --header --remove-header --cursor --position --duration".split())  # route's and
+# video-show-actions': else their values pass as the verb
 NAV_VERBS, FAULT_VERBS = {"goto", "open", "tab-new"}, {"route", "network-state-set"}
 MANUAL_WRITES = {"bug-status", "stale", "answer", "remember", "forget", "signal-ignore", "signal-unignore", "codemap-forget"}
 BUDGET_FREE = {"", "close", "close-all", "kill-all", "list", "state-save",  # always allowed so a run can finish
@@ -60,6 +61,11 @@ PW_DENY = {"attach": "attach connects to an unverified browser",
                       "run it yourself (`! playwright-cli install`), or install a browser: playwright-cli install-browser <name>",
            **dict.fromkeys(("cookie-list cookie-get localstorage-list localstorage-get sessionstorage-list sessionstorage-get "
                             "request request-headers response-headers").split(), _SECRET_HINT)}  # response: Set-Cookie
+# denied to the explorer and crawler only (pages steer them); the user's own session may still run these
+PW_DENY_EXPLORER = {"webmcp-call": "webmcp-call runs a tool the page registered; untrusted page text must not act in the QA session",
+                    "cookie-clear": "cookie-clear would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
+                    "cookie-delete": "cookie-delete would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
+                    "state-load": "state-load replaces the QA session's cookies and storage with a file's"}
 SECRET_JS = re.compile(
     r"[dD]ocument\s*(\.\s*cookie|\[\s*['\"`]cookie)|cookieStore|"  # also el.ownerDocument.cookie
     r"\.\s*cookie\b(?![-\w'\"`])|['\"`]cookie['\"`]|[{,]\s*cookie\s*[,}:]|"  # d=document; d.cookie / Reflect.get(document,'cookie') / ({cookie}) =>
@@ -594,6 +600,8 @@ def check_pw(rest, ctx, cwds, outs):
         return f"playwright-cli {opt} picks another browser, profile or config file; open the browser with qa-mem browser-open [<url>]"
     if verb in PW_DENY:
         return f"playwright-cli {verb} blocked: {PW_DENY[verb]}"
+    if verb in PW_DENY_EXPLORER and ctx.explorer:
+        return f"playwright-cli {verb} blocked for the explorer and crawler: {PW_DENY_EXPLORER[verb]}"
     if verb == "open" and ctx.explorer and not pw_profile_values(rest):
         return OPEN_REASON
     if verb == "show" and any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in opt_values(rest, "--host")):

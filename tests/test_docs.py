@@ -18,15 +18,17 @@ SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
 DOCS = SKILLS + AGENTS + sorted(ROOT.glob("references/*.md"))
 ALL = DOCS + [ROOT / "README.md"]
 text = lambda rel: (ROOT / rel).read_text()
-# every playwright-cli verb the docs may name (`playwright-cli --help`, 0.1.24)
-PW_VERBS = set("""attach check click close close-all config-print console cookie-clear cookie-delete cookie-get cookie-list cookie-set
-dblclick delete-data detach dialog-accept dialog-dismiss drag drop eval fill find generate-locator go-back go-forward goto
-highlight hover install install-browser keydown keyup kill-all list localstorage-clear localstorage-delete localstorage-get
-localstorage-list localstorage-set mousedown mousemove mouseup mousewheel network-state-set open pause-at pdf press
-recording-start recording-stop reload request request-body request-headers requests resize response-body response-headers
-resume route route-list run-code screenshot select sessionstorage-clear sessionstorage-delete sessionstorage-get
-sessionstorage-list sessionstorage-set show snapshot state-load state-save step-over tab-close tab-list tab-new tab-select
-tracing-start tracing-stop type uncheck unroute upload video-hide-actions video-show-actions video-start video-stop""".split())
+# every playwright-cli verb the docs may name (`playwright-cli --help`, 0.1.24, plus the hidden config-print)
+PW_VERBS = set("""attach check clear-color-scheme clear-contrast clear-forced-colors clear-media clear-reduced-motion click close
+close-all config-print console cookie-clear cookie-delete cookie-get cookie-list cookie-set dblclick delete-data detach
+dialog-accept dialog-dismiss drag drop eval fill find generate-locator go-back go-forward goto highlight hover install
+install-browser keydown keyup kill-all list localstorage-clear localstorage-delete localstorage-get localstorage-list
+localstorage-set mousedown mousemove mouseup mousewheel network-state-set open pause-at pdf press recording-start
+recording-stop reload request request-body request-headers requests resize response-body response-headers resume route
+route-list run-code screenshot select sessionstorage-clear sessionstorage-delete sessionstorage-get sessionstorage-list
+sessionstorage-set set-color-scheme set-contrast set-forced-colors set-media set-reduced-motion show snapshot state-load
+state-save step-over tab-close tab-list tab-new tab-select tracing-start tracing-stop type uncheck unroute upload
+video-chapter video-hide-actions video-show-actions video-start video-stop webmcp-call webmcp-list""".split())
 
 
 def load_guard(tmp):
@@ -239,8 +241,6 @@ class Docs(unittest.TestCase):
                 for verb in re.findall(r"playwright-cli (?:-s=[\w-]+ )?(?:--raw )?([a-z][a-z-]+)", span):
                     self.assertIn(verb, PW_VERBS, f"{f.name}: `{span}`")
 
-    def test_frontmatter(self):
-        fm = lambda p: dict(re.findall(r"^([\w-]+): (.*)$", p.read_text().split("---\n")[1], re.M))
     def test_the_batch_eval_recipe_and_the_link_harvester_keep_their_fixes(self):
         tips = text("references/playwright-cli-tips.md")
         recipe = tips.split("Many values in one eval")[1].split("```")[1]
@@ -256,6 +256,8 @@ class Docs(unittest.TestCase):
         for f in ALL:
             self.assertNotRegex(f.read_text(), r"video-show-actions[^\n`]*--cursor", f.name)
 
+    def test_frontmatter(self):
+        fm = lambda p: dict(re.findall(r"^([\w-]+): (.*)$", p.read_text().split("---\n")[1], re.M))
         for path in SKILLS:
             meta, body = fm(path), path.read_text().split("---\n", 2)[2]
             self.assertEqual(meta["name"], path.parent.name)
