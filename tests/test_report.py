@@ -1316,6 +1316,32 @@ class NextAction(Rendering):
         self.assertEqual(report.next_action(d, "a")["action"], "continue")
         self.assertEqual(report.next_action(d, "a")["action"], "continue")  # asked twice about one result: same answer
 
+    def test_a_session_stopped_after_a_page_blocker_does_not_carry_its_streak(self):  # the user interrupted it
+        import time
+        blocked = {"status": "BLOCKED", "block_scope": "page", "summary": "403"}
+        d = self.folder(("a", blocked))
+        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # one so far
+        time.sleep(0.01)
+        (d / ".data/brief-b.md").write_text("b")  # /b was dispatched, then the session stopped: no answer for it
+        (d / ".data/brief-c.md").write_text("c")  # --resume starts with /c, also blocked
+        (d / ".data/run-c.json").write_text(json.dumps(blocked))
+        self.assertEqual(report.next_action(d, "c")["action"], "continue")
+        d2 = self.folder(("a", blocked))
+        self.assertEqual(report.next_action(d2, "a")["action"], "continue")  # stopped right after this answer
+        (d2 / ".data/run-a.json").write_text(json.dumps(blocked))  # --resume runs /a again, still a 403
+        os.utime(d2 / ".data/run-a.json", (time.time() + 5, time.time() + 5))
+        self.assertEqual(report.next_action(d2, "a")["action"], "continue")
+
+    def test_a_sign_in_recovered_mid_row_keeps_the_row(self):  # /b blocked, /c's sign-in recovered, /c blocked: 2 in a row
+        import time
+        d = self.folder(("b", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
+        self.assertEqual(report.next_action(d, "b")["action"], "continue")
+        (d / ".data/run-c.json").write_text(json.dumps({"status": "BLOCKED", "block_scope": "session", "summary": "x"}))
+        self.assertEqual(report.next_action(d, "c")["action"], "recover_sso")
+        (d / ".data/run-c.json").write_text(json.dumps({"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
+        os.utime(d / ".data/run-c.json", (time.time() + 5, time.time() + 5))
+        self.assertEqual(report.next_action(d, "c")["action"], "abort")
+
     def test_block_scope_is_checked_at_ingest(self):
         from qa_sdet import memory
         with self.assertRaises(ValueError):

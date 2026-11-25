@@ -429,6 +429,11 @@ class Evidence(Base):
             code, out, err = cli("evidence", str(self.png), *args)
         return code, (json.loads(out) if out.strip() else None), calls, ann, err
 
+    def test_a_ref_that_looks_like_an_option_is_refused(self):  # it would reach playwright-cli as one
+        code, out, calls, _, err = self.run_evidence("--ref", "--config=/tmp/x.json", "--label", "x")
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("--ref", err)
+
     def test_selector_box_is_drawn_with_pillow(self):
         sel = 'a[title="it\'s"]'
         code, out, calls, ann, _ = self.run_evidence("--selector", sel, "--label", "TC-1 PASS: 130 saved",

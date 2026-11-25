@@ -282,7 +282,7 @@ class R3Secrets(Case):
     def test_playwright_secret_verbs_and_page_js(self):
         self.table([f"playwright-cli -s=qa {v}" for v in self.PW_DENY], True)
         self.table(["playwright-cli -s=qa requests", "playwright-cli -s=qa response-body 3", "playwright-cli -s=qa tracing-stop",
-                    "playwright-cli -s=qa requests --filter /api/", "playwright-cli -s=qa screenshot --type png --filename=x.png"], False)
+                    "playwright-cli -s=qa requests --filter /api/", "playwright-cli -s=qa screenshot --type png --filename=qa-out/r/evidence/x.png"], False)
         self.table([f"playwright-cli -s=qa --raw eval {shlex.quote(js)}" for js in self.JS_DENY], True)
         self.table([f"playwright-cli -s=qa --raw eval {shlex.quote(js)}" for js in self.JS_ALLOW], False)
         self.table(["playwright-cli -s=qa --raw eval '() => `${document.cookie}`'"], True)
@@ -429,6 +429,24 @@ class R4Explorer(Case):
             self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
             self.assertIsNone(bash(cmd, RUN), cmd)  # the skill's main session runs setup and teardown
         self.assertIsNone(bash("cat qa-out/.active", RUN, explorer=True))  # reading it is fine
+
+    def test_explorer_writes_stay_in_its_run_files(self):  # as its Write tool: redirects, playwright-cli files, evidence
+        out = f"{RUN}/qa-out/r"
+        for cmd in (f"playwright-cli -s=qa requests --all > '{out}/.data/requests-form.log'",
+                    f"playwright-cli -s=qa console error --all > {out}/.data/console-form.log",
+                    f"playwright-cli -s=qa screenshot --filename={out}/evidence/BUG-1.png",
+                    f"playwright-cli -s=qa video-start {out}/evidence/BUG-1.webm",
+                    f"playwright-cli -s=qa requests --filter x > {out}/evidence/BUG-1-network.txt",
+                    "playwright-cli -s=qa snapshot > /dev/null 2>&1",
+                    f"qa-mem evidence {out}/evidence/TC-1.png --selector '#f' --label x"):
+            self.assertIsNone(bash(cmd, RUN, explorer=True), cmd)
+        for cmd in (f"playwright-cli -s=qa requests --all > {out}/.data/plan.json",
+                    f"playwright-cli -s=qa console error --all > {out}/REPORT.md",
+                    f"playwright-cli -s=qa screenshot --filename={RUN}/qa-out/shot.png",
+                    "echo hi > /tmp/notes.txt",
+                    "qa-mem evidence /tmp/elsewhere/qa-out/r/evidence/BUG-1.png --selector '#f' --label x"):  # another project
+            self.assertIn("run files", bash(cmd, RUN, explorer=True) or "", cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the main session: the user's own commands
 
     def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
         for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):
@@ -603,6 +621,28 @@ class R6Marker(Case):
         self.assertIsNone(bash("playwright-cli -s=qa close", cwd))  # finishing always works
         self.assertIsNotNone(bash(EVIL, cwd))  # denied for its host, not counted
         self.assertEqual(used(), 2)
+
+    def test_a_call_auto_mode_denies_is_refunded(self):  # it never ran; PermissionDenied names it by tool_use_id
+        cwd = project(budget=10)
+        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+        call = {"tool_name": "Bash", "tool_input": {"command": "playwright-cli -s=qa click e1 && playwright-cli -s=qa click e2"},
+                "cwd": str(cwd), "tool_use_id": "toolu_1"}
+        self.assertIsNone(g.evaluate(call)[0])
+        self.assertIsNone(g.evaluate({**call, "tool_use_id": "toolu_2"})[0])
+        self.assertEqual(used(), 4)
+        denied = {**call, "hook_event_name": "PermissionDenied", "reason": "auto mode classifier"}
+        hook(denied, script="denied.py", project=str(cwd))
+        self.assertEqual(used(), 2)
+        hook(denied, script="denied.py", project=str(cwd))  # told twice: refunded once
+        self.assertEqual(used(), 2)
+
+    def test_evidence_counts_the_browser_commands_it_runs(self):  # --ref: scroll, highlight, screenshot, hide
+        cwd = project(budget=20)
+        used = lambda: json.loads(Path(cwd, "qa-out/.active").read_text()).get("used", 0)
+        self.assertIsNone(bash(f"qa-mem evidence {cwd}/qa-out/r/evidence/BUG-1.png --selector '#f' --label x", cwd))
+        self.assertEqual(used(), 2)
+        self.assertIsNone(bash(f"qa-mem evidence {cwd}/qa-out/r/evidence/BUG-2.png --ref e5 --label x", cwd))
+        self.assertEqual(used(), 6)
 
     def test_denied_spends_nothing_and_a_substitution_counts_once(self):
         cwd = project(budget=10)

@@ -242,8 +242,9 @@ def mark_warned(path, marker):
             f.write(str(marker.get("expires")))
     except OSError:
         pass
-def spend_budget(path, n, explorer=False):
-    """Count n browser commands against the run (locked); deny reason when used up. `used` is kept only with a budget."""
+def _update_marker(path, change):
+    """change(marker) -> (result, write) under the marker lock; the marker is written back atomically when write is
+    true. None when there is no marker (marker stop removed it)."""
     path = Path(path)  # no truncation, no symlink following (a planted `.active.lock -> ~/.bashrc`), no blocking (FIFO)
     lock_path = path.with_name(".active.lock")
     for _ in range(3):
@@ -261,27 +262,8 @@ def spend_budget(path, n, explorer=False):
                 marker = json.loads(path.read_text())
             except FileNotFoundError:
                 return None  # marker stop removed .active between read_marker and flock
-            deadline, budget = float(marker.get("deadline") or 0), int(float(marker.get("budget") or 0))
-            used, done = int(float(marker.get("used") or 0)), "write your bug drafts and <out>/.data/run-<slug>.json now"
-            if deadline and time.time() > deadline + 600 and not explorer:  # a crashed run left it behind (user hint)
-                return f"a qa-sdet run marker expired over 10 minutes ago; if no run is active, delete {path}"
-            if deadline and time.time() > deadline:
-                return f"the run's time budget is used up: close the browser, {done}"
-            if budget and used < budget < used + n:  # a batch bigger than what's left: the run goes on, fewer per call
-                return (f"this call has {n} browser commands but only {budget - used} of the run's {budget} are left "
-                        f"({used} used); send fewer per call, or close the browser and write <out>/.data/run-<slug>.json if done")
-            if budget and used + n > budget:
-                return f"the run's budget of {budget} browser commands is used up ({used} used): close the browser, {done}"
-            reserve = cleanup_reserve(budget)
-            if budget and budget - used > reserve > budget - used - n:  # one call must not skip the warning
-                return (f"this call has {n} browser commands; send at most {budget - used - reserve} now: the run's last "
-                        f"{reserve} are kept for step 9 (delete your qa-sdet- records), and you are told when you reach them")
-            if budget > reserve and budget - used - n < reserve and not warned(path, marker):
-                mark_warned(path, marker)  # e.g. the call that reached the reserve never ran, so no hook warned
-                return (f"only {budget - used} browser commands are left (the run's last {reserve} are for cleanup), so "
-                        f"this call didn't run: {WIND_DOWN}")
-            if budget:
-                marker["used"] = used + n
+            result, write = change(marker)
+            if write:
                 import tempfile  # here, not at the top: it costs ~4 ms of start-up on every call, and only a budget needs it
                 fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".active.")
                 try:
@@ -291,7 +273,48 @@ def spend_budget(path, n, explorer=False):
                 except BaseException:
                     Path(tmp).unlink(missing_ok=True)
                     raise
-            return None
+            return result
+PENDING_KEPT = 50  # the newest calls' spend, by tool_use_id: one Claude Code denies later is refunded
+def spend_budget(path, n, explorer=False, tool_use_id=None):
+    """Count n browser commands against the run (locked); deny reason when used up. `used` is kept only with a budget."""
+    def change(marker):
+        deadline, budget = float(marker.get("deadline") or 0), int(float(marker.get("budget") or 0))
+        used, done = int(float(marker.get("used") or 0)), "write your bug drafts and <out>/.data/run-<slug>.json now"
+        if deadline and time.time() > deadline + 600 and not explorer:  # a crashed run left it behind (user hint)
+            return f"a qa-sdet run marker expired over 10 minutes ago; if no run is active, delete {path}", False
+        if deadline and time.time() > deadline:
+            return f"the run's time budget is used up: close the browser, {done}", False
+        if budget and used < budget < used + n:  # a batch bigger than what's left: the run goes on, fewer per call
+            return (f"this call has {n} browser commands but only {budget - used} of the run's {budget} are left "
+                    f"({used} used); send fewer per call, or close the browser and write <out>/.data/run-<slug>.json if done"), False
+        if budget and used + n > budget:
+            return f"the run's budget of {budget} browser commands is used up ({used} used): close the browser, {done}", False
+        reserve = cleanup_reserve(budget)
+        if budget and budget - used > reserve > budget - used - n:  # one call must not skip the warning
+            return (f"this call has {n} browser commands; send at most {budget - used - reserve} now: the run's last "
+                    f"{reserve} are kept for step 9 (delete your qa-sdet- records), and you are told when you reach them"), False
+        if budget > reserve and budget - used - n < reserve and not warned(path, marker):
+            mark_warned(path, marker)  # e.g. the call that reached the reserve never ran, so no hook warned
+            return (f"only {budget - used} browser commands are left (the run's last {reserve} are for cleanup), so "
+                    f"this call didn't run: {WIND_DOWN}"), False
+        if budget:
+            marker["used"] = used + n
+            if tool_use_id:
+                pending = marker.get("pending") if isinstance(marker.get("pending"), dict) else {}
+                pending[tool_use_id] = n
+                marker["pending"] = dict(list(pending.items())[-PENDING_KEPT:])
+        return None, bool(budget)
+    return _update_marker(path, change)
+def refund(path, tool_use_id):
+    """Give back what a call spent when Claude Code denied it after the guard counted it (it never ran). Once per call."""
+    def change(marker):
+        pending = marker.get("pending") if isinstance(marker.get("pending"), dict) else {}
+        n = pending.pop(tool_use_id, None)
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+            return False, False
+        marker["used"], marker["pending"] = max(int(float(marker.get("used") or 0)) - n, 0), pending
+        return True, True
+    return bool(tool_use_id) and bool(_update_marker(path, change))
 # ---------- 4. text pre-processing ----------
 def normalize(cmd):
     """Drop '#' comments, unquoted newline -> ';', mark quoted '<' '>' as data, `2>&1` -> `2>` FD_DUP `1`, `&>f`/`>|f` -> `>f`."""
@@ -676,15 +699,20 @@ def check_acli(rest):
         if nxt and nxt[0] in ACLI_AUTH_OK:
             return None
     return "acli write command blocked: qa-sdet only reads Jira and drafts content; the user files it"
-def check_qamem(args, ctx):
+def check_qamem(args, ctx, cwds=()):
     """qa-mem browser-open and page-start: allowedHosts only (only '--' words are browser-open's options), one command
     against the budget; qa-mem evidence: two (an eval and a screenshot)."""
     if ctx.explorer and args[:1] and args[0] in MANUAL_WRITES:
         return (f"qa-mem {args[0]} is the user's call (a manual memory write); put what you saw in the run JSON's notes")
     if ctx.explorer and args[:1] and args[0] in MARKER_WRITES:
         return MARKER_REASON
-    if args[:1] == ["evidence"]:
-        ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 2, True, ctx.loop or ctx.loop_depth > 0
+    if ctx.explorer and args[:1] in (["evidence"], ["annotate"]):  # the image it writes: one of its run files
+        png = next((a for a in args[1:] if not a.startswith("-")), "")
+        if not png or "$" in png or not any(run_file(real(png, c), cwds) for c in cwds):
+            return run_files_reason()
+    if args[:1] == ["evidence"]:  # its browser commands: eval and screenshot; with --ref eval, highlight, screenshot, hide
+        n = 4 if any(a == "--ref" or a.startswith("--ref=") for a in args) else 2
+        ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + n, True, ctx.loop or ctx.loop_depth > 0
         return None
     if args[:1] not in (["browser-open"], ["page-start"]):
         return None
@@ -1022,6 +1050,7 @@ class Ctx:
         self.guarded = mentions_guarded(raw, explorer)
         self.area = mentions_data_dir(raw) or mentions_profile(raw) or (explorer and mentions_config(raw))
         self.spend, self.loop, self.loop_depth, self.runs_pw, self.approve, self.segments = 0, False, 0, False, True, 0
+        self.tool_use_id = None
 def check(cmd, cwd, ctx=None, depth=0, explorer=False):
     """Deny reason for a Bash command, or None; only a passing call is counted against the run's budget."""
     ctx = ctx or Ctx(cwd, explorer, cmd)
@@ -1034,7 +1063,7 @@ def check(cmd, cwd, ctx=None, depth=0, explorer=False):
         return "PLAYWRIGHT_MCP_*/PWTEST_* variables change playwright-cli's browser or profile; use qa-mem browser-open without them"
     budget, deadline = (float(ctx.marker.get(k) or 0) for k in ("budget", "deadline")) if ctx.marker else (0, 0)
     if ctx.spend and (budget or deadline):  # no run, or a run without limits: nothing counted; a loop only without a budget
-        return LOOP_REASON if ctx.loop and budget else spend_budget(ctx.marker_path, ctx.spend, ctx.explorer)
+        return LOOP_REASON if ctx.loop and budget else spend_budget(ctx.marker_path, ctx.spend, ctx.explorer, ctx.tool_use_id)
 def _check(cmd, cwd, ctx, depth, carried=()):
     ctx.approve = ctx.approve and not depth
     if depth > 4:
@@ -1120,6 +1149,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     ctx.loop_depth = ctx.loop_depth + 1 if seg[j:j + 1] and seg[j] in LOOP_KEYWORDS else \
         max(0, ctx.loop_depth - 1) if seg[0] == "done" else ctx.loop_depth  # `then for ...`, `time for ...` too
     words, outs, ins, here, ndocs = split_redirects(seg)
+    redirects = list(outs)  # check_pw adds the files playwright-cli reads and writes to outs
     feeds = here + (list(docs) if ndocs else [])  # what it reads on stdin from here-strings and heredocs
     if words[:1] in (["case"], ["for"], ["select"]) and not (outs or ins or feeds):
         ctx.approve = False
@@ -1140,13 +1170,23 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     here_cwd = next(iter(local))  # `bash -c '…'` and `eval '…'`: their text is a command
     r = (_check(unmark(run[1]), here_cwd, ctx, depth + 1, docs) if run[0] == "c" else _check(unmark(" ".join(rest)), here_cwd, ctx,
          depth + 1, docs) if name == "eval" else check_pw(rest, ctx, local, outs) if name == "playwright-cli" else check_acli(rest)
-         if name == "acli" else check_qamem(q, ctx) if q is not None else None) or (
+         if name == "acli" else check_qamem(q, ctx, local) if q is not None else None) or (
         explorer_net(name, rest, ctx.raw) if ctx.explorer and name in NET_CLIS else None)
     ctx.approve = ctx.approve and approvable(i, name, rest, outs, ins, feeds or ndocs, start)
     return r or check_profile(name, rest, outs, ins, local, pw_profile_values(rest) if name == "playwright-cli" else ()) or (
         DB_REASON.format(name or "a redirection") if changes(name, rest, outs, local, DATA_DIR) else None) or (
         CONFIG_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in config_files(local)) else None) or (
-        MARKER_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in marker_files(local)) else None)
+        MARKER_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in marker_files(local)) else None) or (
+        run_files_reason() if ctx.explorer and any(not explorer_out_ok(o, local) for o in redirects + (
+            pw_written(rest) if name == "playwright-cli" else [])) else None)
+def pw_written(rest):
+    """The files a playwright-cli command writes (not the ones upload, drop or state-load read)."""
+    args = pw_args(rest)
+    return opt_values(rest, "--filename") + (args[1:] if (args or [""])[0] in ("video-start", "pdf") else [])
+def explorer_out_ok(out, cwds):
+    """A redirection or playwright-cli file of the explorer: a /dev stream or one of its run files."""
+    o = unmark(out)
+    return o in ("/dev/null", "/dev/stdout", "/dev/stderr") or "$" not in o and all(run_file(real(o, c), cwds) for c in cwds)
 # ---------- 10. other tools, the hook ----------
 def mcp_name_words(name):  # getJiraIssueWithEdit -> [get, jira, issue, with, edit]; jira_create_issue -> [jira, create, issue]
     return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
@@ -1169,17 +1209,21 @@ def check_mapper(tool, tin, cwd):
         if any(is_secret_path(real(p or ".", cwd)) or (extra and is_secret_path(real(os.path.join(p or ".", extra), cwd)))
                for p in tool_paths(tin)):
             return "the qa-mapper reads source only; secret files (.env, keys, credentials, qa-sdet data, config) stay closed: write [secret]"
+def run_file(p, cwds):
+    """R4: p (a real path) is one of the explorer's run files: <project>/qa-out/<run>/{bugs,repro,evidence}/<file> or its
+    .data/run-*.json, requests-/console-*.log, map-<n>.png (never REPORT.md, plan.json, the marker or source)."""
+    roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in (*cwds, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
+    sub = os.path.dirname(p)
+    name = EXPLORER_FILES.get(os.path.basename(sub))
+    return bool(name and re.fullmatch(name, os.path.basename(p)) and os.path.dirname(os.path.dirname(sub)) in roots)
+def run_files_reason(role="explorer"):
+    return f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files"
 def check_explorer(tool, tin, cwd, role="qa-explorer"):
-    """R4: the explorer's tools only, and Write only to its run files: <project>/qa-out/<run>/{bugs,repro,evidence}/<file>
-    and its .data/run-*.json, requests-/console-*.log, map-<n>.png (never REPORT.md, plan.json, the marker or source)."""
+    """R4: the explorer's tools only, and Write only to its run files (run_file)."""
     if tool not in EXPLORER_TOOLS:
         return f"the {role} works through Bash (playwright-cli, qa-mem); {tool} is not one of its tools"
-    roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
-    for t in (real(p, cwd) for p in tool_paths(tin)) if tool == "Write" else ():
-        sub = os.path.dirname(t)
-        name = EXPLORER_FILES.get(os.path.basename(sub))
-        if not (name and re.fullmatch(name, os.path.basename(t)) and os.path.dirname(os.path.dirname(sub)) in roots):
-            return f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files"
+    if tool == "Write" and any(not run_file(real(p, cwd), {cwd}) for p in tool_paths(tin)):
+        return run_files_reason(role)
 def check_reviewer(tool, tin, cwd):
     """The qa-reviewer (a critic of untrusted drafts) only Reads: the project's qa-out run files and the plugin's references."""
     roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
@@ -1231,6 +1275,7 @@ def evaluate(data):
         return r, False
     if tool == "Bash":
         ctx = Ctx(cwd, role in EXPLORERS, clean(tin.get("command") or ""))
+        ctx.tool_use_id = clean(data.get("tool_use_id") or "") or None
         r = check(ctx.raw, cwd, ctx)
         return r, not r and ctx.approve and ctx.segments > 0
     if tool in WRITE_TOOLS | {"Read", "Grep", "Glob", "LS"}:

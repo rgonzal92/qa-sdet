@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -1462,11 +1463,17 @@ def next_action(run_dir, slug):
     prev = _load_json(state_file, [])
     prev = prev if isinstance(prev, dict) else {}
     mtime = _mtime(f)
-    streak = prev.get("before" if (prev.get("slug"), prev.get("mtime")) == (slug, mtime) else "streak")  # asked again
+    again = (prev.get("slug"), prev.get("mtime")) == (slug, mtime)  # asked again about the same result
+    streak = prev.get("before" if again else "streak")
     streak = streak if isinstance(streak, int) and not isinstance(streak, bool) else 0
+    at = prev.get("at") if isinstance(prev.get("at"), (int, float)) else None
+    others = at is not None and any(_mtime(b) > at for b in data.glob("brief-*.md") if b.name != f"brief-{slug}.md")
+    if not again and (others or prev.get("slug") == slug and prev.get("action") != "recover_sso"):
+        streak = 0  # another route was dispatched and never answered, or this one runs again: a session stopped
 
     def answer(out, new_streak):
-        core._write(state_file, json.dumps({"slug": slug, "mtime": mtime, "before": streak, "streak": new_streak}) + "\n")
+        core._write(state_file, json.dumps({"slug": slug, "mtime": mtime, "before": streak, "streak": new_streak,
+                                            "action": out["action"], "at": time.time()}) + "\n")
         return out
     run = _load_json(f, [])
     if not isinstance(run, dict):

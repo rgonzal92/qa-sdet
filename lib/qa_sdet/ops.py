@@ -522,6 +522,8 @@ def evidence(path, label, selector=None, ref=None):
     to the element, take the screenshot and draw the box and label (Pillow); without Pillow, or for a snapshot ref (an
     element in a frame), the browser draws the box and `highlight --hide` always runs after, so no box leaks into the
     next image. Prints {path, annotated, method}; exit 1 when the element or a browser command fails."""
+    if ref is not None and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", ref):  # an option would reach playwright-cli
+        raise core.BadInput(f"evidence: --ref takes a snapshot ref such as e12 (from find or a snapshot), not {ref!r}")
     png = evidence_png(path, must_exist=False)
     env = _pw_env()
     pw = lambda *a: subprocess.run(["playwright-cli", "-s=qa", *a], env=env, capture_output=True, text=True,
