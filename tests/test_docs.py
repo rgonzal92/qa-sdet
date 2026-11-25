@@ -210,6 +210,24 @@ class Docs(unittest.TestCase):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
                 self.assertIsNone(g.check(cmd.replace("/p/", f"{proj}/"), str(proj), explorer=True), cmd)
 
+    def test_the_broken_output_probe_sees_fixed_elements_and_the_explorer_runs_it(self):
+        """D#3: the probe was never called, and `offsetParent` is null for every position: fixed toast and modal."""
+        tips = text("references/playwright-cli-tips.md")
+        probe = tips.split("## Look for broken output")[1].split("```")[1].strip()
+        self.assertNotIn("offsetParent", probe)
+        for want in ("getBoundingClientRect", "getComputedStyle", "elementFromPoint", "duplicate id", r"\{\{", "NaN", "zero count"):
+            self.assertIn(want, probe)
+        self.assertEqual(probe.count('"'), 2)  # one double-quoted shell word: no inner `"`, backtick or `$` the shell would expand
+        self.assertNotIn("`", probe)
+        self.assertNotRegex(probe, r"\$[{(\w]")
+        step5 = text("agents/qa-explorer.md").split("5. **Cases, then the check loop.**")[1].split("\n6. ")[0]
+        self.assertIn("Look for broken output", step5)
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                self.assertIsNone(g.check(probe, os.path.realpath(d), explorer=True), probe[:80])
+
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)

@@ -69,15 +69,25 @@ playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, s
 ```
 
 ## Look for broken output (one call, read-only)
-After the page loads, and after each submit or big state change, one `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text, broken images, a page wider than the window, a region still busy, controls with no accessible name. Each hit is a lead: check it like any other result.
+Step 5 runs this once after the page loads and after each submit or big state change (explore and ticket mode alike). One `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text (a fixed toast, modal or banner included: visibility comes from the element's box and style, not `offsetParent`, which is `null` for every `position: fixed` element), leaked template or i18n text (`{{code}}`, `${price}`, `{0}`, `errors.settings.save_failed`), a count that says `0 … shown` (check the request behind it), broken images, a page wider than the window, a region still busy, controls with no accessible name, duplicate `id`s, and a visible button or field another element covers (a sticky bar or an overlay: `elementFromPoint` at its centre hits something else). Code blocks and text areas are skipped. Each hit is a lead, never a bug by itself: check it like any other result (oracle, 2/2 repro).
 ```
-playwright-cli -s=qa --raw eval "(() => { const out = [], seen = el => el && el.offsetParent !== null;
+playwright-cli -s=qa --raw eval "(() => { const out = [], vis = el => { if (!el || !el.isConnected) return false; const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+    return (r.width > 0 || r.height > 0) && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
+  const bad = /\b(NaN|undefined|Invalid Date)\b|\[object Object\]/, tpl = /\{\{[^}]{1,60}\}\}|\x24\{[^}]{1,60}\}|\{\d\}/,
+    key = /\b(?:errors?|labels?|common|messages?|validation|buttons?|tooltips?|placeholders?)(?:\.[a-z][a-z0-9_-]*)+\b/, zero = /\b0 \w+ (?:shown|found|loaded)\b/i;
   const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  for (let n; (n = w.nextNode());) { const t = n.textContent.trim(); if (t && seen(n.parentElement) && !/^(SCRIPT|STYLE|TEXTAREA)$/.test(n.parentElement.tagName) && /\b(NaN|undefined|Invalid Date)\b|\[object Object\]/.test(t)) out.push('text: ' + t.slice(0, 80)); }
-  for (const i of document.images) if (i.complete && !i.naturalWidth && seen(i)) out.push('broken image: ' + (i.alt || i.src).slice(0, 80));
+  for (let n; (n = w.nextNode());) { const t = n.textContent.trim(), p = n.parentElement; if (!t || !p || /^(SCRIPT|STYLE|TEXTAREA|PRE|CODE|NOSCRIPT)$/.test(p.tagName) || !vis(p)) continue;
+    if (bad.test(t)) out.push('text: ' + t.slice(0, 80)); if (tpl.test(t) || key.test(t)) out.push('leaked template or key: ' + t.slice(0, 80)); if (zero.test(t)) out.push('zero count (see the request behind it): ' + t.slice(0, 60)); }
+  for (const i of document.images) if (i.complete && !i.naturalWidth && vis(i)) out.push('broken image: ' + (i.alt || i.src).slice(0, 80));
   if (document.documentElement.scrollWidth > innerWidth + 2) out.push('wider than the window');
-  for (const b of document.querySelectorAll('[aria-busy=true]')) if (seen(b)) out.push('still busy: ' + (b.id || b.tagName));
-  for (const e of document.querySelectorAll('button, a[href], input:not([type=hidden])')) if (seen(e) && !(e.getAttribute('aria-label') || e.textContent.trim() || (e.labels && e.labels.length) || e.title)) out.push('no accessible name: ' + e.outerHTML.slice(0, 60));
+  for (const b of document.querySelectorAll('[aria-busy=true]')) if (vis(b)) out.push('still busy: ' + (b.id || b.tagName));
+  const ids = {}; for (const e of document.querySelectorAll('[id]')) if (!e.closest('svg')) ids[e.id] = (ids[e.id] || 0) + 1;
+  for (const k in ids) if (ids[k] > 1) out.push('duplicate id: ' + k + ' x' + ids[k]);
+  for (const e of document.querySelectorAll('button, a[href], input:not([type=hidden]), select, textarea')) { if (!vis(e)) continue;
+    if (!(e.getAttribute('aria-label') || e.getAttribute('aria-labelledby') || e.textContent.trim() || (e.labels && e.labels.length) || e.title || e.placeholder || (/^(submit|button|reset)$/.test(e.type) && e.value))) out.push('no accessible name: ' + e.outerHTML.slice(0, 60));
+    const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+    if (e.matches('button, [type=submit], input:not([type=hidden]), select, textarea') && x > 0 && y > 0 && x < innerWidth && y < innerHeight) { const t = document.elementFromPoint(x, y);
+      if (t && t !== e && !e.contains(t) && !t.contains(e) && !(t.closest('label') && t.closest('label').control === e)) out.push('covered: ' + (e.id || e.name || e.textContent.trim().slice(0, 30) || e.tagName) + ' by ' + (t.id || t.tagName)); } }
   return out.slice(0, 20).join(' | ') || 'none'; })()"
 ```
 
