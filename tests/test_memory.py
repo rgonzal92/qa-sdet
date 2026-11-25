@@ -644,6 +644,26 @@ class Gaps(MemBase):
         self.commit(repo, "src/Form.jsx", "2026-01-08T00:00:00Z")
         self.assertIn("source changed (api/zones.js, +1)", memory.gaps(self.con))
 
+    def test_a_change_inside_a_submodule_counts(self):
+        """The scan maps a submodule's files under the parent repo; the parent's log names only the submodule folder."""
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        kit = git_repo(self.t / "kit", {"Button.jsx": "a"})
+        app = git_repo(self.t / "app", {"src/Form.jsx": "a"})
+        git(app, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(kit), "lib/kit")
+        git(app, "commit", "-qm", "add kit")
+        self.row("/form", "locator", "Save", "getByLabel('Save')", "lib/kit/Button.jsx", os.path.realpath(app))
+        self.row("/other", "locator", "Name", "getByLabel('Name')", "lib/kitchen.js", os.path.realpath(app))
+        self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
+        self.visit("/other", "1.0", "2026-01-05T00:00:00Z")
+        self.commit(kit, "Button.jsx", "2026-01-06T00:00:00Z")
+        git(app / "lib/kit", "fetch", "-q")
+        git(app / "lib/kit", "checkout", "-q", "FETCH_HEAD")
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-07T00:00:00Z"
+        git(app, "commit", "-qam", "bump kit")  # the parent's log lists only 'lib/kit'
+        out = memory.gaps(self.con)
+        self.assertIn("source changed (lib/kit/Button.jsx)", next(x for x in out.splitlines() if x.startswith("- /form ")))
+        self.assertNotIn("source changed", next(x for x in out.splitlines() if x.startswith("- /other ")))  # 'lib/kitchen.js'
+
     def test_a_repo_git_cannot_read_is_named_not_fatal(self):
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", "/nowhere/repo")
         self.visit("/form", "1.0", "2026-01-05T00:00:00Z")

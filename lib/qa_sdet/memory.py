@@ -518,8 +518,8 @@ def gaps(con):
 def _source_changes(con, verified):
     """({page: [src, ...]}, [repos git couldn't read]): the files of each visited page (its code-map rows and the
     backend rows of the endpoints it calls) that a commit touched after the page was last verified. Source HEAD may be
-    ahead of the deployed build: a hint, not proof.
-    shortcut: files inside a git submodule are invisible to the parent repo's log; map the submodule as its own folder."""
+    ahead of the deployed build: a hint, not proof. A submodule's files are mapped under the parent repo, whose log
+    names only the submodule folder when it moves: that counts as a change to every mapped file under it."""
     files, by_repo = {}, {}
     for page, ts in verified.items():
         try:
@@ -544,9 +544,11 @@ def _source_changes(con, verified):
                 t = int(line[1:]) if line[1:].isdigit() else 0
             elif line:
                 newest[repo, line] = max(newest.get((repo, line), 0), t)
+    # the file itself, or a folder above it (only a submodule shows up in the log as a folder)
+    stamp = lambda repo, src: max(newest.get((repo, src[:i]), 0) for i in [len(src)] + [m.start() for m in re.finditer("/", src)])
     changed = {}
     for page, (when, fs) in files.items():
-        hit = sorted(src for repo, src in fs if newest.get((repo, src), 0) > when)
+        hit = sorted(src for repo, src in fs if stamp(repo, src) > when)
         if hit:
             changed[page] = hit
     return changed, failed
