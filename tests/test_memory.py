@@ -631,10 +631,66 @@ class Card(MemBase):
         self.row("/zones/new", "rule", "speed", "0-130 km/h")
         self.row("/zones/new", "rule", "start date", "min 2024-01-01")
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
-        self.row("*", "rule", "POST /api/zones speedLimit", "integer, min 0, max 130, required (Joi)", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones speedLimit", "min 0, max 130 (Joi)", "api/zones.js")
         self.row("*", "rule", "POST /api/zones startDate", "min 2024-01-01", "api/zones.js")
         memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
         self.assertEqual(memory._client_server_differ(self.con, "/zones/new"), [])
+
+    def zones(self, client, server, endpoint=True):
+        """A form page calling POST /api/zones: its rules, the backend's rules (and the endpoint row unless endpoint=False)."""
+        self.row("/zones/new", "api", "save", "POST /api/zones")
+        for label, value in client.items():
+            self.row("/zones/new", "rule", label, value)
+        if endpoint:
+            self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
+        for label, value in server.items():
+            self.row("*", "rule", f"POST /api/zones {label}", value, "api/zones.js")
+        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        return memory._client_server_differ(self.con, "/zones/new")
+
+    def test_the_fixture_rules_differ_in_what_the_client_leaves_out(self):  # tests/fixture-src: the real values
+        differ = self.zones({"speed": "min 0, max 130", "name": "required, maxLength 80"},
+                             {"speedLimit": "integer, min 0, max 130, required (Joi)", "name": "trim, min 1, max 80, required (Joi)"})
+        self.assertEqual(len(differ), 2, differ)
+        self.assertTrue(any(d.startswith("speed:") and "server only: integer, required" in d and "max" not in d for d in differ), differ)
+        self.assertTrue(any(d.startswith("name:") and "server only: trim" in d and "required" not in d and "min 1" not in d
+                            for d in differ), differ)  # equal max 80 and required, and min 1 is the server's way of saying required
+
+    def test_a_limit_only_the_client_has_or_only_the_server_has(self):
+        differ = self.zones({"speed": "max 130", "age": "required"}, {"speedLimit": "integer", "age": "min 18, required"})
+        self.assertEqual(len(differ), 2, differ)
+        self.assertTrue(any(d.startswith("speed:") and "client only: max 130" in d and "server only: integer" in d for d in differ), differ)
+        self.assertTrue(any(d.startswith("age:") and "server only: min 18" in d for d in differ), differ)
+
+    def test_enum_options_and_formats_are_compared(self):
+        differ = self.zones({"status": "one of: draft, active", "email": "required, email format"},
+                            {"status": "one of: draft, active, archived (Joi)", "email": "string"})
+        self.assertEqual(len(differ), 2, differ)
+        self.assertTrue(any(d.startswith("status:") and "draft, active" in d and "archived" in d for d in differ), differ)
+        self.assertTrue(any(d.startswith("email:") and "client only: pattern, required" in d for d in differ), differ)
+
+    def test_a_client_rule_with_no_server_rule_is_flagged_only_when_the_endpoint_is_mapped(self):
+        mapped = self.zones({"name": "required", "speed": "max 130"}, {"speedLimit": "max 130"})  # POST /api/zones is mapped, no rule for name
+        self.assertEqual(len(mapped), 1, mapped)
+        self.assertTrue(mapped[0].startswith("name: client only (required)") and "POST /api/zones" in mapped[0], mapped)
+
+    def test_a_frontend_only_map_has_no_one_sided_noise(self):
+        self.assertEqual(self.zones({"name": "required", "speed": "max 130"}, {}, endpoint=False), [])
+
+    def test_a_server_rule_the_page_has_no_rule_for_is_flagged_when_the_page_states_rules(self):
+        differ = self.zones({"speed": "max 130"}, {"speedLimit": "max 130", "approved": "boolean, default false"})
+        self.assertEqual(len(differ), 1, differ)
+        self.assertTrue(differ[0].startswith("POST /api/zones approved") and "server only" in differ[0], differ)
+        self.con.execute("DELETE FROM codemap WHERE page='/zones/new' AND kind='rule'")
+        self.assertEqual(memory._client_server_differ(self.con, "/zones/new"), [])  # a page with no rules: nothing to compare to
+
+    def test_the_card_shows_at_most_four_hints_in_one_line(self):
+        client = {f"f{i}": "required" for i in range(6)}
+        self.zones(client, {f"f{i}": "min 3" for i in range(6)})
+        lines = [x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("CLIENT/SERVER")]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].count("f0") + lines[0].count("f1") + lines[0].count("f2") + lines[0].count("f3"), 4)
+        self.assertNotIn("f4:", lines[0])
 
     def test_a_server_check_does_not_clear_the_page_field_of_the_same_name(self):
         self.row("/form", "api", "save", "POST /api/zones")

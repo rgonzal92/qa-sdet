@@ -659,7 +659,7 @@ def card(con, q, focus=None, ids=False):
                    "coverage target): " + "; ".join(untested[:shown_n]) + more)
     differ = _client_server_differ(con, r)
     if differ:
-        out.append("CLIENT/SERVER RULES DIFFER (a hint to verify through the page, not an oracle): " + "; ".join(differ[:3]))
+        out.append("CLIENT/SERVER RULES DIFFER (a hint to verify through the page, not an oracle): " + "; ".join(differ[:4]))
     out.append(bug_lines(con, r, b))
     shared = _shared_bugs(con, r)
     if shared:
@@ -724,20 +724,79 @@ def _due_states(con, route, build):
                                    (route,)) if x["status"] != "visited" or x["build"] != build]
 
 
+_NUM = r"(-?\d+(?:\.\d+)?)"
+_FLAGS = {"required": r"\b(required|mandatory|not\s?blank|not\s?empty|non-?empty)\b", "integer": r"\b(integer|int|whole number)\b",
+          "trim": r"\btrim", "pattern": r"\b(pattern|regex|regexp|email|uuid|url)\b"}
+
+
+def _rule_traits(value):
+    """What a rule value says, for comparing a client and a server rule: bounds {min, max} (also minLength / maxLength and
+    `0-130`), flags (required, integer, trim, pattern), the options of a `one of: a, b` list, and its other numbers."""
+    v = re.sub(r"\s*\([^()]*\)\s*$", "", str(value or "").lower())  # a trailing note: (Joi), (react-hook-form register)
+    bounds = {}
+    for k in ("min", "max"):
+        m = re.search(rf"\b{k}(?:imum)?(?:\s?length)?\b\s*[:=]?\s*{_NUM}", v)
+        if m:
+            bounds[k] = float(m.group(1))
+    span = re.search(rf"(?<![\w.-]){_NUM}\s*(?:-|–|to)\s*{_NUM}(?![\w.-])", v)
+    if not bounds and span:
+        bounds = {"min": float(span.group(1)), "max": float(span.group(2))}
+    enum = re.search(r"\b(?:one of|oneof|enum|valid|allowed)\b\W*(.+)", v)
+    options = list(dict.fromkeys(x.strip(" '\"`[]()") for x in re.split(r"[,|/]", enum.group(1)) if x.strip(" '\"`[]()"))) if enum else []
+    return {"bounds": bounds, "nums": set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", v)), "text": v.strip(), "enum": options,
+            "flags": {k for k, rx in _FLAGS.items() if re.search(rx, v)}}
+
+
+def _only(mine, other):
+    """What this rule states that the other lacks: flags, a bound the other has no word for, `one of` options. A server
+    `min 1` beside a client `required` (or the reverse) and a lone `min 0` say the same as nothing."""
+    out = sorted(mine["flags"] - other["flags"])
+    for k, n in mine["bounds"].items():
+        if k in other["bounds"] or (k == "min" and (n == 0 or n == 1 and "required" in other["flags"])):
+            continue
+        out.append(f"{k} {int(n) if n == int(n) else n}")
+    return out + (["one of " + ", ".join(mine["enum"])] if mine["enum"] and not other["enum"] else [])
+
+
+def _rule_pair_hint(c, x):
+    """The ways a client rule and a server rule of one field disagree, as text parts (none: they agree)."""
+    a, b = _rule_traits(c["value"]), _rule_traits(x["value"])
+    both = [k for k in ("min", "max") if k in a["bounds"] and k in b["bounds"] and a["bounds"][k] != b["bounds"][k]]
+    n = lambda t, k: f"{k} {int(t['bounds'][k]) if t['bounds'][k] == int(t['bounds'][k]) else t['bounds'][k]}"
+    parts = []
+    if both:
+        parts.append("client " + ", ".join(n(a, k) for k in both) + " vs server " + ", ".join(n(b, k) for k in both))
+    elif not a["bounds"] and not b["bounds"] and a["nums"] and b["nums"] and a["nums"] != b["nums"]:  # numbers, no min/max word
+        parts.append(f"client {core.short(a['text'], 40)} vs server {core.short(b['text'], 40)}")
+    if a["enum"] and b["enum"] and set(a["enum"]) != set(b["enum"]):
+        parts.append(f"options client {', '.join(a['enum'])} vs server {', '.join(b['enum'])}")
+    parts += [f"{who} only: {', '.join(items)}" for who, items in (("client", _only(a, b)), ("server", _only(b, a))) if items]
+    return parts
+
+
 def _client_server_differ(con, route):
-    """'<field>: client <rule> vs server <rule>' where a page rule and a linked server rule on the same field name
-    (camelCase or not) different numbers (negative ones too): a hint (the code isn't the oracle)."""
+    """Hints where a page rule and a linked server rule on the same field name (camelCase or not) don't agree, one per
+    pair: a limit with other numbers (negative ones too), different `one of` options, a trait or bound one side lacks
+    (required, integer, trim, a pattern). Then a page rule no server rule matches (only when the backend maps the page's
+    write endpoint) and a server rule the page has no rule for (only when the page states rules). Hints, not oracles."""
     rows = codemap._codemap_rows(con, route)
     client = [x for x in rows if x["kind"] == "rule" and x["page"] != "*"]
     server = [x for x in rows if x["kind"] == "rule" and x["page"] == "*"]
-    nums = lambda v: set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", str(v or "")))  # not the dash in '0-130' or a date
+    writes = [x["label"] for x in rows if x["kind"] == "api" and x["page"] == "*" and re.match(r"(?i)(post|put|patch)\b", x["label"])]
+    matches = lambda c, x: bool(_field_words(c["label"])) and _field_words(c["label"]) <= _field_words(x["label"])
     out = []
     for c in client:
-        field = _field_words(c["label"])
-        for x in server:
-            if field and field <= _field_words(x["label"]) and nums(c["value"]) and nums(x["value"]) \
-                    and nums(c["value"]) != nums(x["value"]):
-                out.append(f"{c['label']}: client {core.short(c['value'], 40)} vs server {core.short(x['value'], 40)}")
+        hits = [x for x in server if matches(c, x)]
+        for x in hits:
+            if parts := _rule_pair_hint(c, x):
+                out.append(f"{c['label']}: " + "; ".join(parts) + (f" [{x['label']}]" if len(hits) > 1 else ""))
+    out.sort(key=lambda t: "vs server" not in t)  # a limit that differs first, then what one side lacks
+    if writes:  # the backend maps the endpoint this page writes to: a page rule it has no rule for
+        out += [f"{c['label']}: client only ({core.short(_rule_traits(c['value'])['text'], 40)}), no server rule on {writes[0]}"
+                for c in client if not any(matches(c, x) for x in server)]
+    if client:  # the page states rules: a server rule it has none for
+        out += [f"{x['label']}: server only ({core.short(_rule_traits(x['value'])['text'], 40)}), the page has no rule for it"
+                for x in server if not any(matches(c, x) for c in client)]
     return list(dict.fromkeys(out))
 
 
