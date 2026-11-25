@@ -427,6 +427,19 @@ class Docs(unittest.TestCase):
             self.assertIn("impacted_routes", text(doc))
         self.assertIn("impacted_routes", text("lib/qa_sdet/memory.py"))  # the key prep's context carries
 
+    def test_hypothesis_and_target_route_reach_the_cli_the_skill_the_setup_and_the_explorer(self):
+        for flag in ("--hypothesis", "--target-route"):
+            for doc in ("README.md", "skills/qa-explore/SKILL.md", "references/run-setup.md"):
+                self.assertIn(flag, text(doc), f"{doc}: {flag}")
+            self.assertIn(flag, cli.COMMANDS["dispatch"])
+        skill = text("skills/qa-explore/SKILL.md")
+        for word in ("`frontier`", "`run_patterns`", "`entry_route`", "`entry_chain`"):
+            self.assertIn(word, skill)
+        self.assertIn("HYPOTHESIS:", text("agents/qa-explorer.md"))
+        self.assertIn("test data", text("agents/qa-explorer.md"))
+        for key in ("frontier", "run_patterns"):  # the keys explore-next writes
+            self.assertIn(f'"{key}"', text("lib/qa_sdet/report.py"))
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)

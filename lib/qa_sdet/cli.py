@@ -234,7 +234,8 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "page-start": "<url>",
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
-                "[--faults] [--api-writes] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
+                "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
+                "[--hypothesis '<why this page>']", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
@@ -523,13 +524,15 @@ def run_cmd(con, cmd, args):
         print(memory.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
     elif cmd == "dispatch":
         o = _opts(args, flags=("--faults", "--open-record", "--api-writes"),
-                  valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs"))
+                  valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs", "--target-route",
+                          "--hypothesis"))
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
             return usage_error(cmd)
         from . import ops
         print(json.dumps(ops.dispatch(con, o["_"][0], o["--route"], o.get("--mode"), o.get("--focus"), _count(o, "--budget"),
                                       _count(o, "--minutes", ops.MARKER_HOURS * 60), o.get("--faults", False),
-                                      o.get("--known-bugs") or "", o.get("--open-record", False), o.get("--api-writes", False))))
+                                      o.get("--known-bugs") or "", o.get("--open-record", False), o.get("--api-writes", False),
+                                      o.get("--hypothesis"), o.get("--target-route"))))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
