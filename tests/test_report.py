@@ -1271,6 +1271,14 @@ class Traceability(Rendering):
         self.assertEqual([x.split(" | ")[0] for x in rows], ["| PROJ-2"])  # only the 3.6 ticket
 
 
+    def test_trace_counts_the_acs_a_partial_retest_carries_from_prior_passes(self):
+        plan = {**PLAN1, "retest_of": "2026-11-23-PROJ-1", "cases": [PLAN1["cases"][1]],  # only TC-2 (AC-2) retested
+                "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}  # TC-1 (AC-1) passed on the prior build
+        self.rundir("2026-11-24-PROJ-1", plan=plan, runs=[("form", {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "PASS"}]})])
+        line = next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("2/2 AC", line)  # the verdict counts AC-1 too ("verified on prior build 1.42")
+
+
 class NewestRun(Rendering):
     """A ticket's latest run is its newest one, whether it ran alone or with other tickets."""
 

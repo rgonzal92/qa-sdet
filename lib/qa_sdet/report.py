@@ -615,8 +615,9 @@ def audit_bugs(run_dir):
 
 def verify_run(run_dir, slug, since=0):
     """What an explorer that is stopping left undone in run file run-<slug>.json, as instructions (empty: complete): the
-    run file, the browser signal logs, a status for each case its brief gave, every draft it wrote (since `since`)
-    listed in `bugs`, and the critical problems audit_bugs finds in its bugs."""
+    run file, the browser signal logs, a status for each case its brief gave, an `actual` on each PASS and FAIL and a
+    `bug` on each FAIL, every draft it wrote (since `since`) listed in `bugs`, and the critical problems audit_bugs
+    finds in its bugs."""
     run_dir, data = Path(run_dir), Path(run_dir) / ".data"
     rf = data / f"run-{slug}.json"
     try:
@@ -637,6 +638,11 @@ def verify_run(run_dir, slug, since=0):
     if missing := [cid for cid in given if cid not in told]:
         todo.append(f"give every case of your brief a status in `cases`: {', '.join(missing)} missing "
                     "(NOT_RUN with why, when the budget or time ran out first)")
+    done = [(str(c.get("id")), core.case_status(c.get("status")), c) for c in _list(run, "cases")]
+    if blank := [cid for cid, status, c in done if status in ("PASS", "FAIL") and not str(c.get("actual") or "").strip()]:
+        todo.append(f"say in `actual` what you saw for each PASS and FAIL case: {', '.join(blank)} need `actual`")
+    if no_bug := [cid for cid, status, c in done if status == "FAIL" and not str(c.get("bug") or "").strip()]:
+        todo.append(f"a FAIL names its bug in `bug` (BUG-<n>, a known bug's hash or a Jira key): {', '.join(no_bug)} failed without a `bug`")
     listed = {bug_id(b) for b in _list(run, "bugs")} - {""}
     drafts = [p.stem for p in sorted((run_dir / "bugs").glob("BUG-*.md")) if p.is_file() and _mtime(p) >= since]
     if unlisted := [x for x in drafts if x not in listed]:
@@ -1794,6 +1800,7 @@ def trace(project, keys=None, fix_version=None):
             continue
         cases, bugs = merged_cases(plan, runs), run_bugs(runs)
         vmap = _verdicts(plan, runs, cases, bugs)
+        prior = _prior_passed(plan, [t["key"] for t in _plan_tickets(plan)])
         builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
         for t in _plan_tickets(plan):
             k = t["key"].upper()
@@ -1803,7 +1810,7 @@ def trace(project, keys=None, fix_version=None):
             if k in rows:
                 continue
             acs = [_ac_key(_ac_id(a)) for a in _list(t, "acs") if _ac_id(a)]
-            covered = {a for c in cases if c.get("ticket") == t["key"] for a in _case_acs(c)}
+            covered = {a for c in cases + prior if c.get("ticket") == t["key"] for a in _case_acs(c)}  # as verdict() counts
             v, why = vmap[t["key"]]
             rows[k] = row(t["key"], VERDICT_ICON[v], f"{sum(a in covered for a in acs)}/{len(acs)} AC", builds,
                           len(ticket_bugs(t["key"], cases, bugs, list(vmap))), p.name,

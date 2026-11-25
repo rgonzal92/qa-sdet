@@ -221,8 +221,31 @@ class Hooks(Base):
         for kind in ("requests", "console"):
             (d / f".data/{kind}-form.log").write_text("")
         (d / "bugs/BUG-1.md").unlink()
-        runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS"},
+        runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"},
                                                                            {"id": "TC-2", "status": "NOT_RUN", "notes": "time"}]}))
+        r = self.explorer_stop(d)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+
+    def test_a_pass_or_fail_without_what_was_seen_and_a_fail_without_a_bug_are_sent_back(self):
+        import time
+        from support import PLAN
+        d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:3]})
+        (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
+        for kind in ("requests", "console"):
+            (d / f".data/{kind}-form.log").write_text("")
+        (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d),
+                                                              "slug": "form"}))
+        cases = [{"id": "TC-1", "status": "PASS", "actual": " "}, {"id": "TC-2", "status": "FAIL", "actual": "Saved 131"},
+                 {"id": "TC-3", "status": "fail", "actual": "", "bug": "BUG-1"}]
+        (d / ".data/run-form.json").write_text(json.dumps({**run(), "run_id": "r1", "cases": cases}))
+        r = self.explorer_stop(d)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("TC-1, TC-3 need `actual`", r.stderr)
+        self.assertIn("TC-2 failed without a `bug`", r.stderr)
+        self.assertNotIn("TC-2 need", r.stderr)
+        cases = [{"id": "TC-1", "status": "PASS", "actual": "Saved"}, {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
+                 {"id": "TC-3", "status": "NOT_RUN", "notes": "time"}]
+        (d / ".data/run-form.json").write_text(json.dumps({**run(), "run_id": "r1", "cases": cases}))
         r = self.explorer_stop(d)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 

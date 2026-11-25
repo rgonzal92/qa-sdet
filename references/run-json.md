@@ -34,7 +34,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
 }
 ```
 - `target`: the route explored, never a ticket key. `build`: exactly the text read via `buildSource`, or `unknown` (other text counts as a new build). `run_id`: `<mode>-<slug>-<UTC yyyymmdd-hhmm>`, new for each run.
-- `cases`: one per given case, ids as given; none given: empty. NOT_RUN (the budget or time ran out first) says why in `notes`; one you reached but couldn't do is `BLOCKED`. A FAIL names its bug in `bug`: `BUG-<n>`, a KNOWN BUG's hash, or a Jira key.
+- `cases`: one per given case, ids as given; none given: empty. NOT_RUN (the budget or time ran out first) says why in `notes`; one you reached but couldn't do is `BLOCKED`. A PASS or FAIL says what you saw in `actual`. A FAIL names its bug in `bug`: `BUG-<n>`, a KNOWN BUG's hash, or a Jira key (the stop check sends a case without these back).
 - `not_tested.category`: `safety` held back by the run's rules; `out_of_scope` outside this ticket; `not_reached` budget, time or route ran out; `needs_setup` needs a fault, account or data this run lacks; `heuristic` an UNTRIED heuristic you skipped; `other`.
 - Facts are verified (seen, or stated in a ticket); guesses are `questions`. Locators: only ones that worked, in role, label or test-id form.
 - `states` and `transitions` are optional: the page's in-page states the harvester (tips file) found, `visited` once you opened and checked one, and the app pages it links to (a detail page's `sample_path`: a record you opened, ideally a `qa-sdet-` one). Cards then list UNVISITED STATES and how to reach a detail page, and batch runs open `:id` pages from their entry page.
