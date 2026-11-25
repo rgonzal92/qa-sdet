@@ -508,6 +508,20 @@ class Layout(Rendering):
         self.assertIn("| b1 |", r)
         self.assertNotIn("[image](evidence/", r)
 
+    def test_bug_video_is_linked_only_when_the_file_exists(self):
+        run = {"mode": "explore", "target": "/f", "status": "COMPLETED", "bugs": [
+            {"title": t, "severity": "HIGH", "classification": "CONFIRMED", "draft_path": f"/x/bugs/BUG-{n}.md"}
+            for n, t in ((1, "image and video"), (2, "video only"), (3, "folder named like a video"))]}
+        d = self.rundir("2026-11-24-v", runs=[("f", run)])
+        (d / "evidence/BUG-1.png").write_bytes(b"png")
+        (d / "evidence/BUG-1.webm").write_bytes(b"webm")
+        (d / "evidence/BUG-2.webm").write_bytes(b"webm")
+        (d / "evidence/BUG-3.webm").mkdir()
+        r = report.render_report(d)
+        self.assertIn("| image and video | /f |  | [image](evidence/BUG-1.png) · [video](evidence/BUG-1.webm) |", r)
+        self.assertIn("| video only | /f |  | [video](evidence/BUG-2.webm) |", r)
+        self.assertIn("| folder named like a video | /f |  | — |", r)
+
     def test_odd_not_tested_shapes(self):  # a string listed its letters; a list category raised TypeError
         _, r = self.render_run([("form", {**RUN1, "not_tested": "keyboard"})])
         self.assertNotIn("## Not tested", r)  # each case alone: one failure must not hide the other

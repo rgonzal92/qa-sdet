@@ -75,6 +75,7 @@ qa-out/
     REPORT.md                     open this: verdict, what needs action, test cases with images, not tested
     bugs/BUG-1.md                 Jira-ready bug drafts (the run reply prints the acli command to file each)
     evidence/BUG-1.png            bug screenshots, problem boxed in red (labelled when Pillow is installed)
+    evidence/BUG-1.webm           video of the bug's clean-state repro
     evidence/TC-1.png             one screenshot per checked case
     jira-comment-PROJ-1234.md     pass comment draft (PASS / PASS WITH NOTES): paste into Jira yourself
     repro/BUG-1.spec.ts           Playwright spec that fails while the bug exists
@@ -88,7 +89,7 @@ Each run creates a fresh folder. `qa-out/` and `.playwright-cli/` are added to `
 `qa-mem report` renders `REPORT.md` from `.data/plan.json` and `.data/run-*.json`; agents never edit it directly. Top to bottom:
 
 - **Header and verdict:** single ticket gets a verdict line with counts (bugs, open questions, cases needing attention, evidence images) and a link to the Jira pass-comment draft when eligible. Two or more tickets get a summary table (ticket, verdict, why, cases pass/fail/other, bugs).
-- **Needs your action:** bugs to file (draft and image links, ticket column aligned with the verdict), open questions (blocking first; duplicates across pages merged), failed/blocked/not-run cases, and browser signals no bug explains: failed requests (4xx, 5xx, network errors) and console errors the explorer saved before closing the browser (`.data/requests-<page>.log`, `console-<page>.log`) that neither its run JSON nor a bug draft names, each once with a count. Signals never change a verdict. When empty, prints "Nothing needs your action."
+- **Needs your action:** bugs to file (draft, image and video links, ticket column aligned with the verdict), open questions (blocking first; duplicates across pages merged), failed/blocked/not-run cases, and browser signals no bug explains: failed requests (4xx, 5xx, network errors) and console errors the explorer saved before closing the browser (`.data/requests-<page>.log`, `console-<page>.log`) that neither its run JSON nor a bug draft names, each once with a count. Signals never change a verdict. When empty, prints "Nothing needs your action."
 - **Per ticket:** acceptance criteria with status, then a compact test case table (ID, optional priority, AC, optional page, case, status, actual, evidence link). Steps, expected, actual, notes, and `evidence/TC-<n>.png` sit in folded `<details>` blocks (non-pass cases open by default; unannotated screenshots are flagged `(not highlighted)`). The test plan folds after the cases.
 - **Not tested, Resolved questions & Exploration notes:** folded blocks by category (`safety`, `out_of_scope`, `not_reached`, `needs_setup`, `heuristic`, `other`), resolved questions with answers, and per-page notes with heuristic coverage icons (✅ checked, ❌ problem found, ⛔ could not be checked). `Problems reading this folder` appears if any JSON file was unreadable or malformed.
 - **Plan-only reports** (no run yet) show the summary table and questions, without an action block.
@@ -196,7 +197,7 @@ The guard prevents mistakes; it is not a sandbox. It inspects command text in a 
 
 - **Login:** your QA session lives in `~/.local/share/qa-sdet/profiles/main` (mode `700`). Only the browser reads it; the guard blocks all other access. `qa-mem browser-open` strips every `PLAYWRIGHT_MCP_*` and `PWTEST_*` env var so personal cookies never enter the QA browser. To sign out or reset the profile, run `playwright-cli -s=qa close` and `playwright-cli -s=qa-login close`, then delete `~/.local/share/qa-sdet/profiles/` in your own terminal. Uninstalling the plugin leaves `~/.local/share/qa-sdet/` and `~/.config/qa-sdet/` intact; delete them yourself if desired.
 - **Page snapshots:** `playwright-cli` writes snapshots under `<project>/.playwright-cli/` (excluded from git); teardown removes the current run's snapshots and any older than 7 days.
-- **Redaction:** ingest scrubs auth/cookie headers, known token formats (JWT, GitHub, Slack, AWS, GitLab, Atlassian, `sk-` keys, private keys, `Bearer` tokens), URL credentials, and token query parameters from Markdown/text files, plus secret-named keys and cookie objects in JSON. Repro specs lose literal tokens only so they remain runnable. Plain-prose passwords are not recognized — keep real passwords out of notes — and screenshots cannot be scrubbed, so inspect them before attaching to Jira.
+- **Redaction:** ingest scrubs auth/cookie headers, known token formats (JWT, GitHub, Slack, AWS, GitLab, Atlassian, `sk-` keys, private keys, `Bearer` tokens), URL credentials, and token query parameters from Markdown/text files, plus secret-named keys and cookie objects in JSON. Repro specs lose literal tokens only so they remain runnable. Plain-prose passwords are not recognized — keep real passwords out of notes — and screenshots and videos cannot be scrubbed, so inspect them before attaching to Jira.
 - **Source code:** `/qa-sdet:qa-init` runs locally; secret files are skipped and mappers write `[secret]` instead of literal values.
 
 ## Self-test
@@ -213,4 +214,4 @@ claude --plugin-dir . -p "/qa-sdet:qa-explore http://localhost:8765/form.html"
 - One QA run at a time per machine: runs share the `qa` browser session, the `main` profile, and per-project `qa-out/.active` marker.
 - Linux-only browser and Pillow hints (`qa-mem doctor` checks Linux Chrome/Edge paths and suggests `apt-get` on PEP 668 systems).
 - The guard checks command text, not intent (see Safety); JS that constructs URLs or storage names dynamically (`'https:/' + '/evil.example'`, `window['local' + 'Storage']`) passes.
-- Jira writes stay manual: run replies print the `acli` create command for each confirmed bug draft; attach images and repro specs yourself.
+- Jira writes stay manual: run replies print the `acli` create command for each confirmed bug draft; attach images, videos and repro specs yourself.

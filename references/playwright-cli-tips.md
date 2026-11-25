@@ -21,6 +21,16 @@ playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelecto
   return JSON.stringify(out); })()"
 ```
 
+## Bug video (the clean-state repro)
+```
+playwright-cli -s=qa recording-start && playwright-cli -s=qa video-start '<out>/evidence/BUG-<n>.webm'
+playwright-cli -s=qa reload
+playwright-cli -s=qa video-stop && playwright-cli -s=qa recording-stop
+```
+- Between `reload` (or a `goto` to the start page) and `video-stop`: the repro steps with real `fill` / `click`. n = the number this bug will get (the highest in `<out>/bugs/` + 1).
+- The bug didn't show again (SUSPECTED): keep the video and say in the draft that it shows the attempt that didn't hit.
+- No `--cursor` (it slows every action by 800 ms). No videos for cases.
+
 ## Evidence image (bug or case)
 A bug: after `recording-stop` (its toolbar shows in screenshots). A case: before you cancel any dialog. Run nothing between the eval and the screenshot.
 ```

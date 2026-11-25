@@ -447,7 +447,10 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file"):
         img = f"evidence/{quote(png.name)}" if bid and png.is_file() else \
             f"evidence/{quote(ev.name)}" if b.get("evidence") and (Path(run_dir) / "evidence" / ev.name).is_file() else ""
         # (is_file: evidence '.', '..' or '/' names a folder, and a link to it is broken)
-        evidence = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else "—"
+        image = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else ""
+        webm = Path(run_dir) / "evidence" / f"{bid}.webm"  # the video of the clean-state repro
+        video = f"[video](evidence/{quote(webm.name)})" if bid and webm.is_file() else ""
+        evidence = " · ".join(x for x in (image, video) if x) or "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), core.short(b.get("title"), 120), b.get("route"),
                        ", ".join(owners), Raw(evidence)))

@@ -30,6 +30,7 @@ Per CONFIRMED or SUSPECTED bug write `<out>/bugs/BUG-<n>.md`, `<out>/repro/BUG-<
 
 ## Evidence (attach these files to the Jira item: the local links below don't open from Jira)
 - Screenshot: BUG-<n>.png ![BUG-<n>](../evidence/BUG-<n>.png) (red box marks the problem)
+- Video: BUG-<n>.webm (../evidence/BUG-<n>.webm), the clean-state repro (SUSPECTED: the attempt that didn't show it)
 - Network: `<METHOD> <path>` → <status> (redacted)
 - Console: <message>
 - Repro spec: BUG-<n>.spec.ts (../repro/BUG-<n>.spec.ts); run it with `BASE_URL=<qaBaseUrl> npx playwright test BUG-<n>.spec.ts`
