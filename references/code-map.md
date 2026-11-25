@@ -36,6 +36,7 @@ A backend map (its own scan, `area` `backend`) holds only page `*` rows:
 - `page`: the app route the row belongs to, as the browser shows it (`/zones/new`, `/incidents/:id`, `/#/map`; any parameter syntax becomes `:id`), or `*` for backend rows only. Shared components' locators go on each page that renders them (`*` rows never reach a card). Use the same route string for every row of one page.
 - `kind`:
   - `route`: one per page. `label` = the page's human name (title, menu text or component name), `value` = component or file.
+    An app shell's menu config (`config.json` with `nav`, `module`, `key`) is read by code, not a mapper: its route rows say `module <id> at <url>`, binding the shell route users open to the page its module is mounted at. The shell route then shows that page's rows; give the module's locators, rules and endpoints to the module's own route.
   - `locator`: an element a tester acts on or reads. `label` = what it is ("Save button"), `value` = a Playwright locator, preferring `getByTestId('…')`, then `getByRole('…', { name: '…' })` / `getByLabel('…')`, then CSS (`[name=speed]`, `#msg`); never XPath built on layout. Copy test ids and labels exactly as written.
   - `rule`: validation or a limit as the code states it ("min 0, max 130", "required", "max 80 chars", "one of: open, closed"). Say what the code says, not what the app should do.
   - `api`: an endpoint, as `METHOD /path` (`GET /api/incidents?status=`). Frontend calls go in `value`, on the page that makes them.

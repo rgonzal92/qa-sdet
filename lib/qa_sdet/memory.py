@@ -583,6 +583,9 @@ def card(con, q, focus=None, ids=False):
         out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
     elif unknown_page and b != core.UNKNOWN:
         out.append(f"NOTE: this page's build was never readable; its knowledge may predate build {b}.")
+    module = codemap.module_bindings(con).get(r)
+    if module:  # an app-shell route: its module page's rows (code, rules, endpoints, changes) are read as this page's
+        out.append(f"MODULE: {module[0] or '?'} at {module[1]} (its code-map rows below are this page's)")
     facts, seen = [], []
     focus_words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w+", str(focus or ""))))[:8]
     # the charter's facts first (stemmed match on any of its words), then rules, flows, validations, API facts and
@@ -1013,7 +1016,9 @@ def ticket_context(con, text, n=8):
     pairs = _fts_query(list(itertools.combinations(terms, 2)), []) if len(terms) > 1 else None
     facts, bug_rows = (_search(con, pairs), _search_bugs(con, pairs)) if pairs else ([], [])  # 2+ of the ticket's words
     score, why = {}, {}
+    shell_of = {m: s for s, (_, m) in codemap.module_bindings(con).items()}  # a module page counts for its shell route
     def add(route, points, reason):
+        route = shell_of.get(route, route)
         if route in names:
             score[route] = score.get(route, 0) + points
             why.setdefault(route, [])
@@ -1283,7 +1288,10 @@ def _unrechecked_fixed(con, route, build):
 def gaps(con, changed_only=False, top=None, as_json=False):
     """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
     verified on an older build, un-rechecked FIXED bugs, then the most untried heuristics and untested fields, then open bugs."""
-    pages = con.execute("SELECT route, name, build, last_verified, explored FROM pages WHERE route != '*'").fetchall()
+    bound = codemap.module_bindings(con)
+    mounted = {m for _, m in bound.values()}  # module pages: users open their shell route, which stands for both
+    pages = [pg for pg in con.execute("SELECT route, name, build, last_verified, explored FROM pages WHERE route != '*'")
+             if pg["route"] not in mounted or pg["route"] in bound]
     current = core.meta(con, "build")
     if not pages:
         if as_json:
@@ -1304,6 +1312,7 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         if x["kind"] == "rule" or codemap._api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE") \
                 or codemap._api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE"):
             forms.add(x["page"])
+    forms |= {shell for shell, (_, module) in bound.items() if module in forms}
     ranked = []
     for pg in pages:
         r, b = pg["route"], current or pg["build"]

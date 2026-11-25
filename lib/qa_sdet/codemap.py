@@ -254,11 +254,37 @@ def _same_call(a, b):
     return _same_endpoint(a[1], b[1]) and (not a[0] or not b[0] or a[0] == b[0])
 
 
+MODULE_RE = re.compile(r"module\s*(.*?)\s*at\s+(\S+)")
+
+
+def module_bindings(con):
+    """{shell route: (module id, module page)} from the app shell menu's route rows (`module m1 at /m/daily`): the shell
+    path users open and the page its module is mounted at. One hop: a module that is itself a shell route is not chained."""
+    out = {}
+    for x in con.execute("SELECT page, value FROM codemap WHERE kind='route' AND value LIKE 'module %at %' ORDER BY page"):
+        m = MODULE_RE.fullmatch(x["value"])
+        target = core.norm_route(m.group(2)) if m else ""
+        if target and target != x["page"]:
+            out.setdefault(x["page"], (m.group(1), target))
+    return out
+
+
+def module_target(con, route):
+    """The module page mounted at this shell route, or None."""
+    return (module_bindings(con).get(route) or (None, None))[1]
+
+
+def shell_alias(con, module_route):
+    """The shell routes that mount this module page (users open these, never the module path)."""
+    return sorted(s for s, (_, m) in module_bindings(con).items() if m == module_route)
+
+
 def _codemap_rows(con, route):
-    """This page's rows plus the backend rows ('*') for the endpoints its frontend calls (same path; same method
-    when both sides name one)."""
-    rows = con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page=? ORDER BY kind, label",
-                       (route,)).fetchall()
+    """This page's rows (a shell route's include its module page's) plus the backend rows ('*') for the endpoints its
+    frontend calls (same path; same method when both sides name one)."""
+    module = module_target(con, route) if route != "*" else None
+    rows = con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page IN (?,?) ORDER BY kind, label",
+                       (route, module or route)).fetchall()
     called = _called(rows)
     if called and route != "*":
         for x in con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
@@ -273,16 +299,39 @@ def _codemap_rows(con, route):
 APP_WIDE_CALLERS = 5
 
 
+def page_group(con, route, bindings=None):
+    """The routes that are one page: a shell route with its module page, a module page with its shell routes."""
+    bound = module_bindings(con) if bindings is None else bindings
+    group = {route} | {s for s, (_, m) in bound.items() if m == route}
+    return group | ({bound[route][1]} if route in bound else set())
+
+
+def _with_aliases(pages, bound):
+    """`pages` plus the shell routes of every module page among them: a bug or a run names whichever the user opened."""
+    return sorted(set(pages) | {s for s, (_, m) in bound.items() if m in pages})
+
+
+def _calls_by_page(con):
+    """{page: {(METHOD or '', path)}} for every frontend page's `api` rows."""
+    rows = {}
+    for x in con.execute("SELECT page,kind,label,value FROM codemap WHERE kind='api' AND page!='*'"):
+        rows.setdefault(x["page"], []).append(x)
+    return {page: _called(r) for page, r in rows.items()}
+
+
+def _group_calls(con, group):
+    return _called(con.execute(f"SELECT kind,label,value FROM codemap WHERE kind='api' AND page IN ({','.join('?' * len(group))})",
+                               sorted(group)))
+
+
 def sharing_pages(con, route):
     """Other pages whose frontend calls an endpoint this page calls: a bug in that endpoint may show on both."""
-    mine = _called(con.execute("SELECT kind,label,value FROM codemap WHERE page=? AND kind='api'", (route,))) \
-        if route != "*" else set()
+    bound = module_bindings(con)
+    group = page_group(con, route, bound)
+    mine = _group_calls(con, group) if route != "*" else set()
     if not mine:
         return []
-    theirs = {}
-    for x in con.execute("SELECT page,kind,label,value FROM codemap WHERE kind='api' AND page NOT IN ('*', ?)", (route,)):
-        theirs.setdefault(x["page"], []).append(x)
-    theirs = {page: _called(rows) for page, rows in theirs.items()}
+    theirs = {page: refs for page, refs in _calls_by_page(con).items() if page not in group}
     out = set()
     for ref in mine:
         pages = {page for page, refs in theirs.items() if any(_same_call(ref, c) for c in refs)}
@@ -290,7 +339,97 @@ def sharing_pages(con, route):
         # card would list every bug; upgrade to per-endpoint bug links if real shared bugs get missed
         if len(pages) <= APP_WIDE_CALLERS:
             out |= pages
-    return sorted(out)
+    return _with_aliases(out, bound)
+
+
+def _shown(pages, bound):
+    """The routes users open for `pages`: a module page is its shell route."""
+    shell = {}
+    for s, (_, m) in sorted(bound.items()):
+        shell.setdefault(m, s)
+    return sorted({shell.get(p, p) for p in pages})
+
+
+# ---------- the graph: which pages a change on one page reaches ----------
+WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+GENERIC_RESOURCES = {"graphql", "rpc", "batch", "health", "me", "config"}  # utility endpoints: every page calls them
+RESOURCE_FANOUT = 12  # a resource more pages than this call links nothing
+COMPONENT_FANOUT = 15  # a component file more pages than this render is chrome (a layout, the menu), not a neighbour
+
+
+def resource_root(path):
+    """'api/zones' from 'api/zones/:id/history': the path before its first id. '' when there is none (a path that
+    starts with an id) or it is a utility endpoint (graphql, me, config...)."""
+    segs = []
+    for seg in path.split("/"):
+        if seg == ":id":
+            break
+        segs.append(seg)
+    named = list(segs)
+    while named and API_BASE_SEG_RE.fullmatch(named[0]):
+        named.pop(0)
+    return "/".join(segs) if named and named[0] not in GENERIC_RESOURCES else ""
+
+
+def resource_links(con, calls, group=()):
+    """{producers, consumers, siblings}: pages (a list of {route, why}) that call the resource roots of `calls`
+    ((METHOD or '', path) refs), apart from the pages in `group`. For a page that writes the resource: its readers are
+    consumers (they show what it writes) and its other writers siblings (the same record, edited elsewhere). For a page
+    that only reads it: the writers are producers."""
+    bound = module_bindings(con)
+    roots = {}
+    for method, path in calls:
+        if root := resource_root(path):
+            roots.setdefault(root, set()).add(method)
+    out = {"producers": {}, "consumers": {}, "siblings": {}}
+    by_page = {p: refs for p, refs in _calls_by_page(con).items() if p not in group}
+    for root, methods in roots.items():
+        called = {p: [(m, path) for m, path in refs if (r := resource_root(path)) and _same_endpoint(r, root)]
+                  for p, refs in by_page.items()}
+        called = {p: refs for p, refs in called.items() if refs}
+        if len(called) + bool(group) > RESOURCE_FANOUT:
+            continue
+        writes = bool(methods & set(WRITE_METHODS))
+        for page, refs in called.items():
+            wrote = [f"{m} {path}" for m, path in refs if m in WRITE_METHODS]
+            read = [f"{m or 'GET'} {path}" for m, path in refs if m not in WRITE_METHODS]
+            if writes and wrote:
+                out["siblings"][page] = wrote[0]
+            elif writes and read:
+                out["consumers"][page] = read[0]
+            elif wrote:
+                out["producers"][page] = wrote[0]
+    result = {}
+    for kind, found in out.items():
+        shown = {}
+        for page, why in sorted(found.items()):
+            shown.setdefault(_shown({page}, bound)[0], why)
+        result[kind] = [{"route": r, "why": w} for r, w in shown.items()]
+    for kind in ("consumers", "producers"):  # a page listed once: as a sibling when it writes too
+        result[kind] = [x for x in result[kind] if x["route"] not in {y["route"] for y in result["siblings"]}]
+    return result
+
+
+def resource_neighbors(con, route):
+    """resource_links of what this page (a shell route with its module page) calls."""
+    group = page_group(con, route)
+    return resource_links(con, _group_calls(con, group) if route != "*" else set(), group)
+
+
+def component_neighbors(con, route):
+    """Pages whose frontend rows (locators, rules) come from a component file this page's rows come from too, as
+    [{route, why: <file>}]; a file on more than COMPONENT_FANOUT pages is app chrome and links nothing."""
+    bound = module_bindings(con)
+    group = page_group(con, route, bound)
+    where = "area='frontend' AND kind IN ('locator','rule') AND src!='' AND page!='*'"
+    found = {}
+    for repo, src in con.execute(f"SELECT DISTINCT repo, src FROM codemap WHERE {where} AND page IN "
+                                 f"({','.join('?' * len(group))})", sorted(group)).fetchall() if route != "*" else []:
+        pages = {p for (p,) in con.execute(f"SELECT DISTINCT page FROM codemap WHERE {where} AND repo=? AND src=?", (repo, src))}
+        if 2 <= len(pages) <= COMPONENT_FANOUT:
+            for page in _shown(pages - group, bound):
+                found.setdefault(page, src)
+    return [{"route": r, "why": w} for r, w in sorted(found.items())]
 
 
 def codemap_block(con, route, shown=None, first=()):
