@@ -509,8 +509,6 @@ class Dispatch(Base):
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")  # --resume of that route: same run file
         self.assertIn("FOCUS: ties", (self.run_dir / ".data/brief-list-2.md").read_text())
 
-    def test_refusals(self):
-        self.assertEqual(cli("dispatch", str(self.proj), "--route", "/x")[0], 2)  # not a run folder
     def seed_list_and_detail(self):
         from qa_sdet import memory
         con = core.connect()
@@ -543,6 +541,8 @@ class Dispatch(Base):
         self.assertEqual(self.dispatch("/incidents", "--open-record")[1]["slug"], "incidents-record")
         self.assertEqual(self.dispatch("/incidents")[1]["slug"], "incidents")
 
+    def test_refusals(self):
+        self.assertEqual(cli("dispatch", str(self.proj), "--route", "/x")[0], 2)  # not a run folder
         code, _, err = self.dispatch("https://evil.example.com/x")
         self.assertEqual(code, 2)
         self.assertIn("allowedHosts", err)
