@@ -74,12 +74,14 @@ def wrapper_cmd(cmd, args):
         keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
         print(ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or "")))
     elif cmd == "marker":
-        o = _opts(args[1:], flags=("--faults", "--api-writes"), valued=("--budget", "--minutes"))
+        o = _opts(args[1:], flags=("--faults", "--api-writes"), valued=("--budget", "--minutes", "--max-turns"))
         if not args or args[0] not in ("start", "stop") or len(o["_"]) != 1:
-            raise core.BadInput("usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] [--api-writes] | marker stop <project>")
+            raise core.BadInput("usage: qa-mem marker start <project> [--budget N] [--minutes M] [--faults] [--api-writes] "
+                                "[--max-turns N] | marker stop <project>")
         if args[0] == "start":
             print(json.dumps(ops.marker_start(o["_"][0], _count(o, "--budget"), _count(o, "--minutes", ops.MARKER_HOURS * 60),
-                                              o.get("--faults", False), api_writes=o.get("--api-writes", False))))
+                                              o.get("--faults", False), api_writes=o.get("--api-writes", False),
+                                              max_turns=_count(o, "--max-turns", 1000))))
         else:
             if len(o) > 1:
                 raise core.BadOption("marker stop takes no options")
@@ -229,13 +231,13 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "stale": "<build>", "ingest": "<run.json>", "ingest-pending": "<dir>...", "code": "[route] | code --repos",
     "codemap-scan": "[--full] [--out DIR] <source folder>...", "init-status": "<init dir>", "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
-    "marker": "start <project> [--budget N] [--minutes M] [--faults] [--api-writes] | marker stop <project>",
+    "marker": "start <project> [--budget N] [--minutes M] [--faults] [--api-writes] [--max-turns N] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
     "page-start": "<url>",
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
-                "[--hypothesis '<why this page>']", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
+                "[--hypothesis '<why this page>'] [--max-turns N]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> [--box x,y,w,h ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "dup-check": "<run dir> <BUG-n>   (acli search JSON on stdin)", "trace": "<project> [--keys K1,K2] [--fix-version VER]", "next-action": "<run dir> <slug>", "explore-next": "<project> [--run DIR]", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
@@ -525,14 +527,14 @@ def run_cmd(con, cmd, args):
     elif cmd == "dispatch":
         o = _opts(args, flags=("--faults", "--open-record", "--api-writes"),
                   valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs", "--target-route",
-                          "--hypothesis"))
+                          "--hypothesis", "--max-turns"))
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
             return usage_error(cmd)
         from . import ops
         print(json.dumps(ops.dispatch(con, o["_"][0], o["--route"], o.get("--mode"), o.get("--focus"), _count(o, "--budget"),
                                       _count(o, "--minutes", ops.MARKER_HOURS * 60), o.get("--faults", False),
                                       o.get("--known-bugs") or "", o.get("--open-record", False), o.get("--api-writes", False),
-                                      o.get("--hypothesis"), o.get("--target-route"))))
+                                      o.get("--hypothesis"), o.get("--target-route"), _count(o, "--max-turns", 1000))))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:

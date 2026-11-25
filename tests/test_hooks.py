@@ -127,6 +127,90 @@ class Hooks(Base):
         marker.unlink()
         self.assertEqual(self.post(call), "")
 
+    def default_run(self, **m):
+        """A run marker with no budget and no deadline (a default `qa-explore`), as the hook reads it."""
+        import time
+        (self.proj / "qa-out").mkdir(exist_ok=True)
+        marker = self.proj / "qa-out/.active"
+        marker.write_text(json.dumps({"expires": time.time() + 3600, **m}))
+        return marker
+
+    def pw(self, cmd="playwright-cli -s=qa snapshot", agent="qa-sdet:qa-explorer", failed=False, tool="Bash"):
+        data = {"tool_name": tool, "agent_type": agent, "cwd": str(self.proj), "tool_input": {"command": cmd},
+                "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse"}
+        return self.post(data | ({"error": "Exit code 1"} if failed else {}))
+
+    def test_a_default_run_is_warned_once_before_the_turn_limit(self):
+        """No --budget or --minutes: the explorer used to reach maxTurns with no step 9 and no run file."""
+        self.default_run(max_turns=20)  # the wind-down is at max_turns - max(8, max_turns // 4) = 12 calls
+        calls = [f"playwright-cli -s=qa click e{n}" for n in range(1, 13)]
+        self.assertEqual([self.pw(c) for c in calls[:11]], [""] * 11)
+        note = self.pw(calls[11])
+        self.assertIn("12 of the 20 turns", note)
+        self.assertIn("qa-sdet-", note)
+        self.assertIn("run-<slug>.json", note)
+        self.assertEqual(self.pw("playwright-cli -s=qa click e13"), "")  # once per run
+
+    def test_every_call_counts_as_a_turn_a_failed_one_and_a_write_too(self):
+        self.default_run(max_turns=20)
+        for n in range(1, 6):
+            self.pw(f"playwright-cli -s=qa click e{n}", failed=True)  # a failed Bash call fires only PostToolUseFailure
+        for n in range(6):
+            self.pw(tool="Write", cmd="")  # an explorer's Write is a turn as well
+        self.assertIn("12 of the 20 turns", self.pw("qa-mem signals-triage qa-out/r --slug x"))  # any Bash call, the 12th
+
+    def test_the_turn_limit_defaults_to_the_agents_frontmatter(self):
+        self.default_run()  # no max_turns in the marker
+        limit = lambda agent: int(re.search(r"^maxTurns:\s*(\d+)", (ROOT / f"agents/{agent}.md").read_text(), re.M).group(1))
+        for agent, role in (("qa-crawler", "qa-sdet:qa-crawler"), ("qa-explorer", "qa-sdet:qa-explorer")):
+            (self.proj / "qa-out/.active.progress").unlink(missing_ok=True)
+            (self.proj / "qa-out/.active.warned").unlink(missing_ok=True)
+            line = limit(agent) - max(8, limit(agent) // 4)
+            seen = [self.pw(f"playwright-cli -s=qa click e{n}", agent=role) for n in range(1, line + 1)]
+            self.assertEqual(seen[:-1], [""] * (line - 1), agent)
+            self.assertIn(f"{line} of the {limit(agent)} turns", seen[-1], agent)
+
+    def test_the_crawlers_wind_down_names_its_own_finish(self):
+        self.default_run(max_turns=20)
+        notes = [self.pw(f"playwright-cli -s=qa goto 'http://x/{n}'", agent="qa-sdet:qa-crawler") for n in range(12)]
+        self.assertIn("INCOMPLETE", notes[-1])
+        self.assertNotIn("qa-sdet-", notes[-1])  # a crawler creates no records
+
+    def test_the_turn_wind_down_is_for_explorers_and_crawlers_only(self):
+        self.default_run(max_turns=20)
+        for agent in ("", "qa-sdet:qa-mapper", "qa-sdet:qa-reviewer"):
+            self.assertEqual([self.pw(f"playwright-cli click e{n}", agent=agent) for n in range(15)], [""] * 15, agent)
+        self.assertFalse((self.proj / "qa-out/.active.progress").exists())
+
+    def test_a_budget_warning_already_given_is_not_repeated_by_the_turn_count(self):
+        self.default_run(max_turns=20, budget=20, used=18)
+        self.assertIn("2 browser commands left", self.pw("playwright-cli -s=qa click e1"))
+        self.assertEqual([self.pw(f"playwright-cli -s=qa click e{n}") for n in range(2, 16)], [""] * 14)
+
+    def test_a_new_run_counts_its_turns_from_zero(self):
+        import time
+        marker = self.default_run(max_turns=20)
+        for n in range(1, 12):
+            self.pw(f"playwright-cli -s=qa click e{n}")
+        marker.write_text(json.dumps({"expires": time.time() + 7200, "max_turns": 20}))  # the next explorer; stale progress stays
+        self.assertEqual(self.pw("playwright-cli -s=qa click e50"), "")
+
+    def test_a_planted_or_malformed_progress_file_is_never_followed_and_never_fails(self):
+        self.default_run(max_turns=20)
+        victim = Path(self.tmp.name) / "victim.txt"
+        victim.write_text("keep")
+        link = self.proj / "qa-out/.active.progress"
+        link.symlink_to(victim)
+        for n in range(15):
+            self.assertEqual(self.pw(f"playwright-cli -s=qa click e{n}"), "")  # no count: the link is not trusted
+        self.assertEqual(victim.read_text(), "keep")
+        link.unlink()
+        link.write_text("{oops\n[1]\n" + "\x00" * 50 + "\n")
+        self.assertEqual(self.pw("playwright-cli -s=qa click e1"), "")
+        link.unlink()
+        os.mkfifo(link)  # opening it must neither block nor fail the hook
+        self.assertEqual(self.pw("playwright-cli -s=qa click e1"), "")
+
     def bad_map(self, n):
         init = self.proj / "qa-out/init"
         init.mkdir(parents=True, exist_ok=True)
@@ -186,12 +270,62 @@ class Hooks(Base):
                                                    "tool_input": {"command": cmd}, "error": "Exit code 1"})
         click = "playwright-cli -s=qa click e5"
         self.assertEqual((call(click), call(click)), ("", ""))
-        self.assertEqual(call("playwright-cli -s=qa snapshot", failed=False), "")  # a success in between: not stuck
+        self.assertEqual(call("playwright-cli -s=qa click e9", failed=False), "")  # real progress in between: it counts again
         self.assertEqual((call(click), call(click)), ("", ""))
         note = call(click)
         self.assertIn("click e5", note)
         self.assertIn("find", note)
         self.assertEqual(call(click), "")  # told once; it counts again from here
+
+    def test_a_failure_that_alternates_with_looking_is_still_stuck(self):
+        """snapshot, click e5 (fails), snapshot, click e5 (fails)...: a success that gets nowhere is no progress."""
+        self.default_run()
+        click, look = "playwright-cli -s=qa click e5", "playwright-cli -s=qa snapshot"
+        seen = []
+        for _ in range(3):
+            seen += [self.pw(look), self.pw(click, failed=True)]
+        self.assertEqual(seen[:-1], [""] * 5)
+        self.assertIn("click e5", seen[-1])
+
+    def test_a_different_failing_call_is_not_the_same_stuck(self):
+        self.default_run()
+        for n in range(1, 7):
+            self.assertEqual(self.pw(f"playwright-cli -s=qa click e{n}", failed=True), "")
+
+    def test_a_spinning_explorer_is_nudged_once(self):
+        """Repeating or alternating calls that open no new state and write nothing burn the turns."""
+        self.default_run()
+        # next page, previous page: the first of each is new, the rest repeat them
+        seen = [self.pw(f"playwright-cli -s=qa click e{12 + n % 2}") for n in range(12)]
+        self.assertEqual(seen[:9], [""] * 9)
+        self.assertIn("8 browser calls", seen[9])
+        self.assertEqual(seen[10:], ["", ""])  # once
+
+    def test_a_new_interaction_or_a_file_written_is_progress(self):
+        self.default_run(max_turns=999)
+        for n in range(1, 31):  # 30 different clicks, each looked at: never a spin
+            self.assertEqual(self.pw(f"playwright-cli -s=qa click e{n}"), "")
+            self.assertEqual(self.pw("playwright-cli -s=qa snapshot"), "")
+        for _ in range(7):
+            self.pw("playwright-cli -s=qa find 'Save'")
+        self.pw(tool="Write", cmd="")  # a file written: the count starts again
+        self.assertEqual([self.pw("playwright-cli -s=qa find 'Save'") for _ in range(7)], [""] * 7)
+        self.assertEqual(self.pw("qa-mem evidence x.png --selector body --label a"), "")  # an image is a file too
+        self.assertEqual([self.pw("playwright-cli -s=qa eval 'document.title'") for _ in range(7)], [""] * 7)
+
+    def test_a_failed_interaction_is_not_progress(self):
+        self.default_run()
+        seen = [self.pw(f"playwright-cli -s=qa fill e{n} 'x'", failed=True) for n in range(8)]
+        self.assertEqual(seen[:7], [""] * 7)
+        self.assertIn("8 browser calls", seen[7])
+
+    def test_calls_that_are_not_browser_calls_neither_count_nor_reset_the_spin(self):
+        self.default_run()
+        seen = []
+        for _ in range(8):
+            seen += [self.pw("playwright-cli -s=qa snapshot"), self.pw("qa-mem card /x")]
+        self.assertEqual(seen[:14], [""] * 14)
+        self.assertIn("8 browser calls", seen[14])
 
     def explorer_stop(self, run_dir, event="SubagentStop", agent="qa-sdet:qa-explorer", active=False):
         env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))

@@ -440,6 +440,14 @@ class Docs(unittest.TestCase):
         for key in ("frontier", "run_patterns"):  # the keys explore-next writes
             self.assertIn(f'"{key}"', text("lib/qa_sdet/report.py"))
 
+    def test_the_turn_wind_down_is_documented_and_reads_the_agents_limit(self):
+        for doc in ("README.md", "references/run-setup.md"):
+            self.assertIn("--max-turns", text(doc), doc)
+        self.assertIn(".active.progress", text("README.md"))
+        self.assertIn("--max-turns", cli.COMMANDS["dispatch"] + cli.COMMANDS["marker"])
+        for agent in ("qa-explorer", "qa-crawler"):  # the hook warns before this file's maxTurns: they must say what to do
+            self.assertRegex(text(f"agents/{agent}.md"), r"turns are (nearly used|left)")
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)

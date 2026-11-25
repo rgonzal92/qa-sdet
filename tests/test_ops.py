@@ -119,6 +119,19 @@ class Marker(Base):
         cli("marker", "start", str(self.proj), "--api-writes")
         self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["api_writes"], True)
 
+    def test_max_turns_is_recorded_only_when_given_and_progress_goes_with_the_marker(self):
+        marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
+        cli("marker", "start", str(self.proj))
+        self.assertNotIn("max_turns", marker())  # the hook then reads the agent's own maxTurns
+        cli("marker", "start", str(self.proj), "--max-turns", "12")
+        self.assertEqual(marker()["max_turns"], 12)
+        for name in (".active.progress", ".active.warned"):
+            (self.proj / "qa-out" / name).write_text("x")
+        cli("marker", "stop", str(self.proj))
+        self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
+        for bad in ("-1", "x", "1001"):
+            self.assertEqual(cli("marker", "start", str(self.proj), "--max-turns", bad)[0], 2, bad)
+
     def test_bad_input(self):
         for argv in (("marker",), ("marker", "go", str(self.proj)), ("marker", "start", str(self.proj), "--budget", "-1"),
                      ("marker", "start", str(self.proj), "--budget", "x"), ("marker", "start", str(self.proj), "--budget", ""), ("marker", "start", str(self.proj), "--minutes", ""), ("marker", "start", str(self.proj), "--bogus")):
@@ -680,6 +693,13 @@ class Dispatch(Base):
         out = self.dispatch("/list?a=1", "--faults", "--api-writes")[1]
         self.assertIs(marker()["api_writes"], True)
         self.assertIn("faults: yes\napi_writes: yes", Path(out["brief"]).read_text())
+
+    def test_max_turns_goes_to_the_marker(self):
+        marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
+        self.dispatch("/list?a=1")
+        self.assertNotIn("max_turns", marker())
+        self.dispatch("/list?a=1", "--max-turns", "10")
+        self.assertEqual(marker()["max_turns"], 10)
 
     def test_routes_with_one_slug_get_their_own_and_a_route_keeps_its_slug(self):
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")

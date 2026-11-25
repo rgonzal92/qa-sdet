@@ -1033,10 +1033,12 @@ def http_writes(rest, cwds):
     dirs = set(cwds) | {p for w in words for c in cwds if os.path.isdir(p := real(w, c))}
     return words + [os.path.join(d, n) for d in dirs for n in names]
 def marker_files(cwds):
-    """R6: the run marker the explorer runs under, as read_marker finds it (cwd or project, then qa-out/.active)."""
+    """R6: the run marker the explorer runs under, as read_marker finds it (cwd or project, then qa-out/.active), and the
+    progress file beside it (the hook's count of its turns: the wind-down warning reads it)."""
     bases = {b for b in (*cwds, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
-    return {real(os.path.join(b, "qa-out", ".active"), "/") for b in bases} | {
-        real(os.path.join(b, ".active"), "/") for b in bases if os.path.basename(os.path.normpath(b)) == "qa-out"}
+    names = (".active", ".active.progress")
+    return {real(os.path.join(b, "qa-out", n), "/") for b in bases for n in names} | {
+        real(os.path.join(b, n), "/") for b in bases for n in names if os.path.basename(os.path.normpath(b)) == "qa-out"}
 def config_files(cwds):
     """R4: the qa-sdet config (allowedHosts) and the playwright-cli config files that would pick its browser."""
     return {os.path.realpath(CONFIG), real("~/.playwright/cli.config.json", "/")} | {real(".playwright/cli.config.json", c) for c in cwds}

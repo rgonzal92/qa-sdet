@@ -6,9 +6,13 @@
   mapper's stop hook may have read the file first.
 - A file written in a run folder is checked as it lands: a bug draft or repro spec (references/bug-draft.md), a run JSON
   (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there.
-- An explorer whose same playwright-cli command failed 3 times in a row hears once to change approach.
+- An explorer or crawler near its maxTurns hears once, even in a run with no budget or deadline (a default run), so it
+  reaches step 9 (or the crawler's step 4) before Claude Code ends it. Its calls are counted in qa-out/.active.progress
+  (Bash and Write calls only: a Read or Grep is not seen here, so the line is drawn early).
+- An explorer whose same playwright-cli command failed 3 times since its last real progress hears once to change approach.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -19,6 +23,12 @@ import time
 HERE = os.path.dirname(os.path.realpath(__file__))
 CODE_MAP = re.compile(r"code-map-(frontend|backend|tests)(-\d+)?\.json")
 STUCK_AFTER = 3
+SPIN_AFTER = 8  # playwright-cli calls in a row with no progress
+NOVELTY_WINDOW = 12  # a call repeated within this many playwright-cli calls is no progress
+AGENTS = ("qa-explorer", "qa-crawler")
+# calls that only look: they are never progress by themselves
+OBSERVE = {"snapshot", "find", "eval", "requests", "console", "screenshot", "tab-list", "network", "pdf"}
+PROGRESS_CAP = 1 << 20
 PW_CALL = re.compile(r"playwright-cli\s+(?:-s=\S+\s+)?(?:--raw\s+)?([\w-]+)(?:\s+(\S+))?")
 
 
@@ -26,24 +36,48 @@ def role(data):
     return str(data.get("agent_type") or "").strip().lower().split(":")[-1].strip()
 
 
-def wind_down(data):
-    sys.path.insert(0, HERE)  # as pretooluse.py: also with PYTHONSAFEPATH set
+def max_turns(m, who):
+    """The agent's turn limit: the marker's max_turns, else maxTurns in the agent's own frontmatter."""
+    try:
+        n = int(float(m.get("max_turns")))
+        if n > 0:
+            return n
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        text = open(os.path.join(os.path.dirname(HERE), "agents", f"{who}.md"), encoding="utf-8").read(2000)
+        return int(re.search(r"^maxTurns:\s*(\d+)", text, re.M).group(1))
+    except (OSError, AttributeError):
+        return 0
+
+
+def turn_line(limit):
+    """Calls to count before the wind-down: the last few turns are kept for step 9 (a Read or Grep isn't counted)."""
+    return max(limit - max(8, limit // 4), 1)
+
+
+def wind_down(path, m, who, turns):
+    """The one wind-down warning: the budget or time nearly used up, else (any run) the turn limit near."""
     import guard
-    path, m = guard.read_marker(guard._cwd(data))
-    if not path:
-        return None
     budget, used, deadline = int(float(m.get("budget") or 0)), int(float(m.get("used") or 0)), float(m.get("deadline") or 0)
     left, secs, low = budget - used, deadline - time.time(), []
     if budget and left <= guard.cleanup_reserve(budget):
         low.append(f"{max(left, 0)} browser command{'' if left == 1 else 's'}")
     if deadline and secs <= 120:
         low.append(f"{max(int(secs), 0)} seconds")
-    if not low:
+    limit = max_turns(m, who)
+    if not low and not (limit and turns >= turn_line(limit)):
         return None
     if guard.warned(path, m):  # one warning per run marker (the guard may have given it by refusing a call)
         return None
     guard.mark_warned(path, m)
-    return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
+    if low:
+        return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
+    done = ("Stop crawling now and do step 4: save the requests and console logs, close the browser and write "
+            "run-<slug>.json with status INCOMPLETE and the pages and locators so far" if who == "qa-crawler" else
+            "Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
+            "browser and write run-<slug>.json")
+    return f"qa-sdet: {turns} of the {limit} turns you have are used, and the run ends at {limit} however much budget is left. {done}."
 
 
 def code_map_feedback(data):
@@ -111,47 +145,112 @@ def file_lint(data):
     return f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
 
 
-def stuck(data):
-    """A one-time hint when the explorer's same playwright-cli command failed STUCK_AFTER times in a row."""
+def read_progress(path, expires):
+    """This run's records in qa-out/.active.progress (one JSON object per line), not through a planted link or FIFO."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            text = f.read(PROGRESS_CAP).decode("utf-8", "replace")
+    except OSError:
+        return []
+    recs = []
+    for line in text.splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("e") == expires:
+            recs.append(r)
+    return recs
+
+
+def append_progress(path, expires, rec):
+    """One O_APPEND write of one short line: calls running in parallel add to it without losing each other's lines."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"e": expires, **rec}, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def classify(data, recs):
+    """What this call was, for the progress file. p: real progress (a file written, or a successful interaction that
+    isn't a repeat of one of the last NOVELTY_WINDOW playwright-cli calls): it clears the failure and spin counts."""
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    if data.get("tool_name") == "Write":
+        return {"t": "w", "p": 1}  # a new file
+    cmd = " ".join(str(tin.get("command") or "").split())
+    ok = data.get("hook_event_name") != "PostToolUseFailure"
+    calls = PW_CALL.findall(cmd)
+    if not calls:  # qa-mem and the rest: a turn, but not a browser call; an evidence image is a new file
+        return {"t": "o", "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd)))}
+    key = hashlib.sha1(cmd.encode("utf-8", "replace")).hexdigest()[:12]  # never the text: it can hold a typed value
+    seen = {r.get("k") for r in [r for r in recs if r.get("t") == "pw"][-NOVELTY_WINDOW:]}
+    interacts = any(verb not in OBSERVE for verb, _ in calls)
+    return {"t": "pw", "s": " ".join(x for x in calls[0] if x), "k": key, "ok": int(ok), "p": int(ok and interacts and key not in seen)}
+
+
+def replay(recs):
+    """(calls counted, playwright-cli calls since the last progress, failures per call since then, nudges given)."""
+    turns = spin = 0
+    fails, given = {}, set()
+    for r in recs:
+        if r.get("t") == "n":
+            if r.get("n") == "stuck":
+                fails.pop(r.get("s"), None)
+            else:
+                given.add(r.get("n"))
+            continue
+        turns += 1
+        if r.get("p"):
+            fails.clear()
+            spin = 0
+        elif r.get("t") == "pw":
+            spin += 1
+            if not r.get("ok"):
+                fails[r.get("s")] = fails.get(r.get("s"), 0) + 1
+    return turns, spin, fails, given
+
+
+def run_feedback(data, who):
+    """Count this call in the run's progress file, then: the same failing call repeated, a spin, the wind-down."""
     sys.path.insert(0, HERE)
     import guard
     path, m = guard.read_marker(guard._cwd(data))
-    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    call = PW_CALL.search(str(tin.get("command") or ""))
     if not path:
         return None
-    state = path.with_name(".active.stuck")
-    try:
-        seen = json.loads(state.read_text())
-        fails = seen["fails"] if seen.get("expires") == m.get("expires") and isinstance(seen.get("fails"), list) else []
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        fails = []
-    sig = " ".join(x for x in call.groups() if x) if call else None
-    failed = data.get("hook_event_name") == "PostToolUseFailure"
-    fails = (fails + [sig] if fails[-1:] in ([sig], []) else [sig]) if failed and sig else []
-    note = None
-    if len(fails) >= STUCK_AFTER:
-        note = (f"qa-sdet: `{sig}` failed {len(fails)} times in a row. Change approach: take a fresh `snapshot` or "
-                "`find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark the case BLOCKED "
-                "with why and go on.")
-        fails = []
-    try:  # not through a planted link
-        with os.fdopen(os.open(state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as f:
-            json.dump({"expires": m.get("expires"), "fails": fails}, f)
-    except OSError:
-        pass
-    return note
+    state, expires = path.with_name(".active.progress"), m.get("expires")
+    recs = read_progress(state, expires)
+    rec = classify(data, recs)
+    append_progress(state, expires, rec)
+    turns, spin, fails, given = replay(recs + [rec])
+    notes, sig = [], rec.get("s")
+    if sig and fails.get(sig, 0) >= STUCK_AFTER:
+        notes.append(f"qa-sdet: `{sig}` failed {fails[sig]} times since you last got anywhere. Change approach: take a fresh "
+                     "`snapshot` or `find '<text on the element>'` for its ref (an element in a frame needs a ref), or mark "
+                     "the case BLOCKED with why and go on.")
+        append_progress(state, expires, {"t": "n", "n": "stuck", "s": sig})  # it counts again from here
+    elif spin >= SPIN_AFTER and "spin" not in given:
+        notes.append(f"qa-sdet: your last {spin} browser calls opened no new page state, sent no new interaction and wrote no "
+                     "file. If you are not in the middle of a check, change approach: another heuristic or element, or wrap up "
+                     "and list what you did not test in not_tested.")
+        append_progress(state, expires, {"t": "n", "n": "spin"})
+    notes.append(wind_down(path, m, who, turns))
+    return " ".join(x for x in notes if x) or None
 
 
 def main():
     try:
         data = json.load(sys.stdin)
         note = None
-        if isinstance(data, dict) and data.get("tool_name") == "Bash" and role(data) in ("qa-explorer", "qa-crawler"):
-            note = " ".join(x for x in (stuck(data), wind_down(data)) if x) or None
-        elif isinstance(data, dict) and data.get("tool_name") == "Write" and role(data) == "qa-mapper":
+        who = role(data) if isinstance(data, dict) else ""
+        tool = data.get("tool_name") if isinstance(data, dict) else None
+        if tool in ("Bash", "Write") and who in AGENTS:
+            note = " ".join(x for x in (run_feedback(data, who), file_lint(data) if tool == "Write" else None) if x) or None
+        elif tool == "Write" and who == "qa-mapper":
             note = code_map_feedback(data)
-        elif isinstance(data, dict) and data.get("tool_name") == "Write":
+        elif tool == "Write":
             note = file_lint(data)
         if note:
             event = "PostToolUseFailure" if data.get("hook_event_name") == "PostToolUseFailure" else "PostToolUse"

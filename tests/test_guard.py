@@ -486,6 +486,14 @@ class R4Explorer(Case):
             self.assertIsNone(bash(cmd, RUN), cmd)  # the skill's main session runs setup and teardown
         self.assertIsNone(bash("cat qa-out/.active", RUN, explorer=True))  # reading it is fine
 
+    def test_the_progress_file_beside_the_marker_is_the_coordinators_too(self):  # deleting it would reset the turn count
+        for cmd in ("rm -f qa-out/.active.progress", "printf x>qa-out/.active.progress", "mv qa-out/.active.progress /tmp/m",
+                    "cp /tmp/m qa-out/.active.progress", f"rm -f {RUN}/qa-out/.active.progress", "truncate -s0 qa-out/.active.progress",
+                    "tee qa-out/.active.progress < /tmp/m", "ln -sf /tmp/m qa-out/.active.progress"):
+            self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the main session may
+        self.assertIsNone(bash("cat qa-out/.active.progress", RUN, explorer=True))
+
     def test_explorer_writes_stay_in_its_run_files(self):  # as its Write tool: redirects, playwright-cli files, evidence
         out = f"{RUN}/qa-out/r"
         for cmd in (f"playwright-cli -s=qa requests --all > '{out}/.data/requests-form.log'",

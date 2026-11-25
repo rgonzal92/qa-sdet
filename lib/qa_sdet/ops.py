@@ -120,10 +120,11 @@ def make_rundir(project, label, day=None):
 MARKER_HOURS = 8  # the guard ignores a marker after this (a crashed run); also caps --minutes
 
 
-def marker_start(project, budget=0, minutes=0, faults=False, t=None, run_dir=None, slug=None, api_writes=False):
+def marker_start(project, budget=0, minutes=0, faults=False, t=None, run_dir=None, slug=None, api_writes=False, max_turns=0):
     """qa-out/.active for the guard: 0 = unlimited budget / no deadline. Written atomically. run_dir and slug (from
     dispatch) name the explorer's run for the hooks. faults and api_writes are the run's opt-in flags (route / network-state-set;
-    POST, PUT, PATCH, DELETE through api-probe)."""
+    POST, PUT, PATCH, DELETE through api-probe). max_turns: the turn count the wind-down hook warns before (default: the
+    agent's own maxTurns); for a test run with a small limit."""
     t = time.time() if t is None else t
     root = _project(project) / "qa-out"
     root.mkdir(exist_ok=True)
@@ -131,6 +132,8 @@ def marker_start(project, budget=0, minutes=0, faults=False, t=None, run_dir=Non
             "budget": int(budget or 0), "faults": bool(faults), "api_writes": bool(api_writes), "used": 0}
     if run_dir:
         data |= {"run_dir": str(run_dir), "slug": str(slug)}
+    if max_turns:
+        data["max_turns"] = int(max_turns)
     core._write(root / ".active", json.dumps(data) + "\n")
     return data
 
@@ -159,7 +162,7 @@ HYPOTHESIS_CAP = 400
 
 
 def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults=False, known_bugs="", open_record=False,
-             api_writes=False, hypothesis=None, target_route=None):
+             api_writes=False, hypothesis=None, target_route=None, max_turns=0):
     """One explorer's setup: starts the run marker, picks the route's slug, writes <run>/.data/brief-<slug>.md (target,
     limits, config, card, this route's cases and its tickets' AC, the project's qa-rules.md, the charter, known Jira bugs;
     scrubbed) and returns {slug, target, brief, mode, case_count}. open_record: the explorer starts on the list page
@@ -235,13 +238,13 @@ def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults
         out += ["", "## Known Jira bugs (no hash: name the key, never list them in bugs)", str(known_bugs).strip()[:4000]]
     brief = data / f"brief-{slug}.md"
     core._write(brief, scrub.redact("\n".join(out)) + "\n")
-    marker_start(run.parent.parent, budget, minutes, faults, run_dir=run, slug=slug, api_writes=api_writes)
+    marker_start(run.parent.parent, budget, minutes, faults, run_dir=run, slug=slug, api_writes=api_writes, max_turns=max_turns)
     return {"slug": slug, "target": target, "brief": str(brief), "mode": mode, "case_count": len(cases)}
 
 
 def marker_stop(project):
     root = _project(project) / "qa-out"
-    for name in (".active", ".active.lock", ".active.warned", ".active.stuck"):
+    for name in (".active", ".active.lock", ".active.warned", ".active.progress"):
         (root / name).unlink(missing_ok=True)
 
 
