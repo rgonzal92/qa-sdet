@@ -16,7 +16,6 @@ import re
 import select
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 from . import codemap, core, memory, scrub  # the rest load in the commands that use them (start-up time)
 
@@ -60,7 +59,7 @@ def _count(o, name, most=None):
 
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
-    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "login-ok", "prune", "annotate", "report",
+    if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "prune", "annotate", "report",
                    "plan-find", "setup-permissions"):
         return None
     from . import ops
@@ -90,10 +89,6 @@ def wrapper_cmd(cmd, args):
         if o["_"]:
             raise core.BadOption("session-check takes no positional arguments")
         return ops.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
-    elif cmd == "login-ok":
-        ops.ensure_profile_dir()
-        core._write(ops.signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
-        print("sign-in recorded: qa-mem doctor now reports the profile as signed in")
     elif cmd == "prune":
         if len(args) not in (1, 2):
             raise core.BadInput("usage: qa-mem prune <project> [<run dir>]")
@@ -151,7 +146,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
-    "login-ok": "", "prune": "<project> [<run dir>]",
+    "prune": "<project> [<run dir>]",
     "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",

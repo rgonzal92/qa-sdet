@@ -154,13 +154,17 @@ class Doctor(Base):
                 doctor.doctor()
             self.assertIn("run /qa-sdet:qa-login", out.getvalue())
             self.assertNotIn("signed-in profile present", out.getvalue())
-            self.assertEqual(cli("login-ok")[0], 0)  # qa-login verified the sign-in
+            self.config(app="x", browser="chrome", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"],
+                        ssoHost="login.example.com")  # qa-login verifies the sign-in and records it in one call
+            seq = [done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false}'), done(0)]
+            with mock.patch.object(subprocess, "run", side_effect=seq):
+                self.assertEqual(cli("session-check", "--record")[0], 0)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 doctor.doctor()
             self.assertIn("ok   signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)",
                           out.getvalue())
-            self.assertEqual(cli("login-ok", "x")[0], 2)
+            self.assertEqual(cli("login-ok")[0], 2)  # gone: it recorded a sign-in without checking one
             with mock.patch.object(subprocess, "run", return_value=done(0)):
                 self.config(app="x", browser="chrome")
                 cli_mod.main(["browser-open"])  # a test run keeps the sign-in

@@ -143,7 +143,7 @@ def profile_dir():
 
 
 def signed_in_stamp():
-    """Written by `qa-mem login-ok` after qa-login verified the sign-in; removed when a new qa-login starts."""
+    """Written by `qa-mem session-check --record` once qa-login's sign-in is verified; removed when a new qa-login starts."""
     return core.DATA_DIR / "profiles" / ".signed-in"
 
 
@@ -188,7 +188,7 @@ def browser_open(args):
     # every PLAYWRIGHT_MCP_* var (storage state, isolated, browser, user data dir…) would override the profile or break the launch
     env = {k: v for k, v in os.environ.items() if not k.startswith(("PLAYWRIGHT_MCP_", "PWTEST_"))}
     profile = ensure_profile_dir()
-    if session == "qa-login":  # a new sign-in starts: until it is verified (login-ok), doctor says to sign in
+    if session == "qa-login":  # a new sign-in starts: until it is verified (session-check --record), doctor says to sign in
         signed_in_stamp().unlink(missing_ok=True)
     other = "qa-login" if session == "qa" else "qa"
     try:  # both sessions use profiles/main, which opens in one browser only: stop the other one (no-op if it's closed)
