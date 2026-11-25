@@ -217,9 +217,25 @@ def read_marker(cwd):
         if ok and nums["expires"] > time.time():
             return path, marker
     return None, None
+WIND_DOWN = ("stop new checks now and go to step 9: delete the qa-sdet-… records you created while UI actions still work "
+             "(the guard refuses them once the budget or time is used up), then save the signals, close the browser and "
+             "write run-<slug>.json")
 def cleanup_reserve(budget):
-    """The run's last browser commands, kept for step 9's UI cleanup: the PostToolUse hook warns on reaching them."""
+    """The run's last browser commands, kept for step 9's UI cleanup: the explorer is warned on reaching them."""
     return max(3, int(budget) * 15 // 100)
+def warned(path, marker):
+    """Whether this run's explorer got the wind-down warning (from the PostToolUse hook or a refused call)."""
+    try:
+        return Path(path).with_name(".active.warned").read_text() == str(marker.get("expires"))
+    except OSError:
+        return False
+def mark_warned(path, marker):
+    try:  # not through a planted link
+        fd = os.open(Path(path).with_name(".active.warned"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(str(marker.get("expires")))
+    except OSError:
+        pass
 def spend_budget(path, n, explorer=False):
     """Count n browser commands against the run (locked); deny reason when used up. `used` is kept only with a budget."""
     path = Path(path)  # no truncation, no symlink following (a planted `.active.lock -> ~/.bashrc`), no blocking (FIFO)
@@ -254,6 +270,10 @@ def spend_budget(path, n, explorer=False):
             if budget and budget - used > reserve > budget - used - n:  # one call must not skip the warning
                 return (f"this call has {n} browser commands; send at most {budget - used - reserve} now: the run's last "
                         f"{reserve} are kept for step 9 (delete your qa-sdet- records), and you are told when you reach them")
+            if budget > reserve and budget - used - n < reserve and not warned(path, marker):
+                mark_warned(path, marker)  # e.g. the call that reached the reserve never ran, so no hook warned
+                return (f"only {budget - used} browser commands are left (the run's last {reserve} are for cleanup), so "
+                        f"this call didn't run: {WIND_DOWN}")
             if budget:
                 marker["used"] = used + n
                 import tempfile  # here, not at the top: it costs ~4 ms of start-up on every call, and only a budget needs it

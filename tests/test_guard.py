@@ -624,9 +624,17 @@ class R6Marker(Case):
         cwd = project(budget=12, used=3)
         chain = lambda n: " && ".join(["playwright-cli -s=qa click e1"] * n)
         self.assertIn("send at most 6 now", bash(chain(9), cwd, True))
-        self.assertIsNone(bash(chain(6), cwd, True))  # down to the reserve: the warning comes with 3 left
-        self.assertIsNone(bash(chain(3), cwd, True))  # inside it, as before
+        self.assertIsNone(bash(chain(6), cwd, True))  # down to the reserve: the hook warns with 3 left
+        # no warning yet (the call that got there never ran: Claude Code denied it after the guard counted it), so the
+        # first call into the reserve is refused once, and that refusal is the warning
+        r = bash(chain(3), cwd, True)
+        self.assertIn("only 3 browser commands are left", r)
+        self.assertIn("delete the qa-sdet-", r)
+        self.assertIsNone(bash(chain(3), cwd, True))  # told: the reserve is its to spend
         self.assertIn("used up", bash("playwright-cli -s=qa click e1", cwd, True))
+        warned = project(budget=12, used=9)
+        (warned / "qa-out/.active.warned").write_text(str(json.loads((warned / "qa-out/.active").read_text())["expires"]))
+        self.assertIsNone(bash("playwright-cli -s=qa click e1", warned, True))  # the hook already warned: no refusal
         self.assertEqual((g.cleanup_reserve(2), g.cleanup_reserve(12), g.cleanup_reserve(100)), (3, 3, 15))
 
     def test_used_is_untouched_without_a_budget(self):

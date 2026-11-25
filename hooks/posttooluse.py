@@ -35,20 +35,10 @@ def wind_down(data):
         low.append(f"{max(int(secs), 0)} seconds")
     if not low:
         return None
-    flag, stamp = path.with_name(".active.warned"), str(m.get("expires"))  # one warning per run marker
-    try:
-        if flag.read_text() == stamp:
-            return None
-    except OSError:
-        pass
-    try:  # not through a planted link
-        with os.fdopen(os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as f:
-            f.write(stamp)
-    except OSError:
-        pass
-    return (f"qa-sdet: only {' and '.join(low)} left in this run. Stop new checks now and go to step 9: delete the "
-            "qa-sdet-… records you created while UI actions still work (the guard refuses them once the budget or time is "
-            "used up), then save the signals, close the browser and write run-<slug>.json.")
+    if guard.warned(path, m):  # one warning per run marker (the guard may have given it by refusing a call)
+        return None
+    guard.mark_warned(path, m)
+    return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
 
 
 def code_map_feedback(data):
