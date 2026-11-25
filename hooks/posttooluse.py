@@ -64,7 +64,7 @@ def main():
     try:
         data = json.load(sys.stdin)
         note = None
-        if isinstance(data, dict) and data.get("tool_name") == "Bash" and role(data) == "qa-explorer":
+        if isinstance(data, dict) and data.get("tool_name") == "Bash" and role(data) in ("qa-explorer", "qa-crawler"):
             note = wind_down(data)
         elif isinstance(data, dict) and data.get("tool_name") == "Write" and role(data) == "qa-mapper":
             note = code_map_feedback(data)

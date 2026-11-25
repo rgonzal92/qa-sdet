@@ -396,6 +396,15 @@ class R4Explorer(Case):
         finally:
             link.unlink()
 
+    def test_the_crawler_has_the_explorers_limits(self):  # qa-init --crawl's agent reads untrusted pages too
+        CR = "qa-sdet:qa-crawler"
+        self.assertIn("not one of its tools", tool("mcp__github__create_issue", CR, cwd=RUN) or "")
+        self.assertIn("writes only", tool("Write", CR, cwd=RUN, file_path=f"{RUN}/src/app.tsx", content="x") or "")
+        self.assertIsNone(tool("Write", CR, cwd=RUN, file_path=f"{RUN}/qa-out/r/.data/run-init-crawl.json", content="{}"))
+        self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": CR, "cwd": str(RUN),
+                                       "tool_input": {"command": "bash /tmp/x.sh"}}))  # no script files, as the explorer
+        self.assertIsNotNone(tool("Write", CR, cwd=RUN, file_path=str(CFG), content="{}"))
+
     def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
         for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):
             self.assertIn("not one of its tools", tool(name, EX, cwd=RUN) or "", name)

@@ -318,5 +318,19 @@ class Docs(unittest.TestCase):
                 self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": os.path.realpath(d)}),
                                  (None, True), cmd)
 
+    def test_the_crawl_has_its_own_slim_agent(self):  # map mode loaded every testing rule of the explorer
+        crawler = text("agents/qa-crawler.md")
+        meta = dict(re.findall(r"^([\w-]+): (.*)$", crawler.split("---\n")[1], re.M))
+        with tempfile.TemporaryDirectory() as d:
+            g, _ = load_guard(os.path.realpath(d))
+        self.assertLessEqual({t.strip() for t in meta["tools"].split(",")}, g.EXPLORER_TOOLS)
+        self.assertLess(len(crawler.encode()), 3500)
+        self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
+        self.assertIn("qa-sdet:qa-crawler", text("skills/qa-init/SKILL.md"))
+        hooks = json.loads(text("hooks/hooks.json"))["hooks"]
+        self.assertIn("qa-sdet:qa-crawler", hooks["SubagentStop"][0]["matcher"].split("|"))
+        for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
+            self.assertIn(marker, crawler)
+
 if __name__ == "__main__":
     unittest.main()

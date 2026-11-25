@@ -102,6 +102,7 @@ MCP_JIRA_READ_RE = re.compile(r"^(batch_)?(get|search|lookup|list|fetch|read|vie
 MCP_WRITE_WORDS = set("create edit update delete remove transition add assign archive unarchive move upload post put patch "
                       "write set clone restore replace publish rank invoke run execute send import bulk upsert modify change".split())
 MAPPER_TOOLS = set("Read Grep Glob LS Write ToolSearch TodoWrite TaskCreate TaskUpdate TaskGet TaskList".split())
+EXPLORERS = {"qa-explorer", "qa-crawler"}  # agents that read untrusted pages: R4 holds for both
 EXPLORER_TOOLS = MAPPER_TOOLS | {"Bash"}  # no MCP tool: the session's GitHub, Slack, ... servers are not the explorer's
 EXPLORER_FILES = {"bugs": r"[^/]+", "repro": r"[^/]+", "evidence": r"[^/]+",  # agents/qa-explorer.md "Files you write"
                   ".data": r"run-[^/]+\.json|(requests|console)-[^/]+\.log|map-\d+\.png"}
@@ -1153,17 +1154,17 @@ def check_mapper(tool, tin, cwd):
         if any(is_secret_path(real(p or ".", cwd)) or (extra and is_secret_path(real(os.path.join(p or ".", extra), cwd)))
                for p in tool_paths(tin)):
             return "the qa-mapper reads source only; secret files (.env, keys, credentials, qa-sdet data, config) stay closed: write [secret]"
-def check_explorer(tool, tin, cwd):
+def check_explorer(tool, tin, cwd, role="qa-explorer"):
     """R4: the explorer's tools only, and Write only to its run files: <project>/qa-out/<run>/{bugs,repro,evidence}/<file>
     and its .data/run-*.json, requests-/console-*.log, map-<n>.png (never REPORT.md, plan.json, the marker or source)."""
     if tool not in EXPLORER_TOOLS:
-        return f"the qa-explorer tests the page through Bash (playwright-cli, qa-mem); {tool} is not one of its tools"
+        return f"the {role} works through Bash (playwright-cli, qa-mem); {tool} is not one of its tools"
     roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
     for t in (real(p, cwd) for p in tool_paths(tin)) if tool == "Write" else ():
         sub = os.path.dirname(t)
         name = EXPLORER_FILES.get(os.path.basename(sub))
         if not (name and re.fullmatch(name, os.path.basename(t)) and os.path.dirname(os.path.dirname(sub)) in roots):
-            return "the qa-explorer writes only <project>/qa-out/<run>/{bugs,repro,evidence}/<file> and its .data/ run files"
+            return f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files"
 def check_files(tool, tin, cwd, explorer):
     """R3, R4, R5 for the file tools: the profile stays closed, the data folder unwritten, the config the explorer's."""
     for raw in tool_paths(tin):
@@ -1200,14 +1201,14 @@ def evaluate(data):
         return "malformed tool input (not an object)", False
     if role == "qa-mapper" and (r := check_mapper(tool, tin, cwd)):
         return r, False
-    if role == "qa-explorer" and (r := check_explorer(tool, tin, cwd)):
+    if role in EXPLORERS and (r := check_explorer(tool, tin, cwd, role)):
         return r, False
     if tool == "Bash":
-        ctx = Ctx(cwd, role == "qa-explorer", clean(tin.get("command") or ""))
+        ctx = Ctx(cwd, role in EXPLORERS, clean(tin.get("command") or ""))
         r = check(ctx.raw, cwd, ctx)
         return r, not r and ctx.approve and ctx.segments > 0
     if tool in WRITE_TOOLS | {"Read", "Grep", "Glob", "LS"}:
-        return check_files(tool, tin, cwd, role == "qa-explorer"), False
+        return check_files(tool, tin, cwd, role in EXPLORERS), False
     return check_jira_mcp(tool), False
 def decide(data):
     return evaluate(data)[0]
@@ -1261,7 +1262,7 @@ def main():
         reason, approve = evaluate(data)
     except Exception as e:  # noqa: BLE001 - a crashing guard must not mean "allowed" for anything guarded (or the mapper)
         role, text = agent_role(data), json.dumps(data.get("tool_input"), ensure_ascii=False, default=str)
-        guarded = mentions_guarded(text, role == "qa-explorer") or role == "qa-mapper"
+        guarded = mentions_guarded(text, role in EXPLORERS) or role == "qa-mapper"
         reason, approve = f"guard error ({type(e).__name__}) on a call that names a guarded tool or path" if guarded else None, False
     if reason or approve:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny" if reason else "allow",
