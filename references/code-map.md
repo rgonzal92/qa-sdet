@@ -12,9 +12,20 @@ files and writes the matching `qa-out/init/code-map-<area>[-<n>].json`; the plug
     {"repo": "/abs/path/traffic-ui", "page": "/zones/new", "kind": "route",   "label": "Create speed zone", "value": "SpeedZoneForm", "file": "src/routes.ts:14"},
     {"repo": "/abs/path/traffic-ui", "page": "/zones/new", "kind": "locator", "label": "Speed limit",       "value": "getByLabel('Speed limit (km/h)')", "file": "src/zones/SpeedZoneForm.tsx:22"},
     {"repo": "/abs/path/traffic-ui", "page": "/zones/new", "kind": "rule",    "label": "speed",             "value": "min 0, max 130 (react-hook-form register)", "file": "src/zones/SpeedZoneForm.tsx:22"},
-    {"repo": "/abs/path/traffic-ui", "page": "/zones/new", "kind": "api",     "label": "save zone",         "value": "POST /api/zones", "file": "src/api/zones.ts:8"},
-    {"repo": "/abs/path/traffic-api","page": "*",          "kind": "api",     "label": "POST /api/zones",   "value": "create zone (zones controller)", "file": "routes/zones.js:10"},
-    {"repo": "/abs/path/traffic-api","page": "*",          "kind": "rule",    "label": "POST /api/zones speedLimit", "value": "integer, min 0, max 130, required (Joi)", "file": "routes/zones.js:6"}
+    {"repo": "/abs/path/traffic-ui", "page": "/zones/new", "kind": "api",     "label": "save zone",         "value": "POST /api/zones", "file": "src/api/zones.ts:8"}
+  ]
+}
+```
+
+A backend map (its own scan, `area` `backend`) holds only page `*` rows:
+
+```json
+{
+  "scan_id": "backend-20261123-181335",
+  "area": "backend",
+  "rows": [
+    {"repo": "/abs/path/traffic-api", "page": "*", "kind": "api",  "label": "POST /api/zones",            "value": "create zone (zones controller)", "file": "routes/zones.js:10"},
+    {"repo": "/abs/path/traffic-api", "page": "*", "kind": "rule", "label": "POST /api/zones speedLimit", "value": "integer, min 0, max 130, required (Joi)", "file": "routes/zones.js:6"}
   ]
 }
 ```

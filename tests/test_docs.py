@@ -112,6 +112,29 @@ class Docs(unittest.TestCase):
         self.assertIn(plan["tickets"][0]["acs"][0]["id"], out)
         self.assertEqual({c["priority"] for c in plan["cases"]} - {"P1", "P2", "P3"}, set())
 
+    def test_code_map_examples_ingest_whole(self):
+        """Each example in code-map.md is one mapper's file: the hook ingests it with no row rejected or dropped."""
+        from qa_sdet import memory
+        blocks = re.findall(r"```json\n(.*?)```", text("references/code-map.md"), re.S)
+        self.assertTrue(blocks)
+        for n, block in enumerate(blocks):
+            with self.subTest(example=n), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.dict(os.environ, {"QA_MEM_DB": f"{d}/t.db", "HOME": d}):
+                cm, files = json.loads(block.replace("/abs/path/", f"{d}/")), {}
+                for r in cm["rows"]:  # the repo files the rows cite, and a scan listing exactly those
+                    src = Path(r["repo"], re.sub(r":\d+$", "", r["file"]))
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    src.write_text("x")
+                    files.setdefault(r["repo"], set()).add(str(src.relative_to(r["repo"])))
+                init = Path(d) / "qa-out/init"
+                init.mkdir(parents=True)
+                (init / f"scan-{cm['area']}.json").write_text(json.dumps({"scan_id": cm["scan_id"], "area": cm["area"], "repos": [
+                    {"path": p, "files": sorted(f)} for p, f in files.items()]}))
+                (init / f"code-map-{cm['area']}.json").write_text(json.dumps(cm))
+                self.assertEqual(memory.ingest_pending(init.parent), 1, memory.PARKED)
+                self.assertTrue(Path(d, "t.db").exists())
+                self.assertNotIn("dropped rows", (init / f"code-map-{cm['area']}.json.ingested").read_text())
+
     def test_run_setup_chains_are_approved_by_the_guard(self):
         """Setup and teardown are one Bash call each: the guard must approve every command in the chain itself."""
         with tempfile.TemporaryDirectory() as d:

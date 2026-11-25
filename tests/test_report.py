@@ -1,9 +1,9 @@
 """REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira pass-comment draft."""
-import fcntl, json, os, threading, unittest
+import fcntl, json, os, re, threading, unittest
 from unittest import mock
 
 from support import Base, cli, PLAN, RUN_FORM, RUN_LIST
-from qa_sdet import core, report
+from qa_sdet import core, memory, report
 
 PLAN1 = {"kind": "ticket", "title": "PROJ-1", "created": "2026-11-23T18:00:00Z",
          "env": {"url": "https://qa.example", "browser": "chrome"},
@@ -230,6 +230,22 @@ class Report(Base):
         order = [r.index(h) for h in ("## Summary", "## Needs your action", "## PROJ-1", "## PROJ-2",
                                       "## Not tested", "## Exploration notes")]
         self.assertEqual(order, sorted(order))
+
+    def test_a_known_bug_resighted_as_run_json_says_counts_like_a_new_one(self):
+        """run-json.md: a re-sighting carries the hash and severity its card line shows, classification CONFIRMED. Rated
+        HIGH, it fails the ticket (README FAIL rule), as a new HIGH bug would."""
+        self.rundir(name="2026-11-22-PROJ-0", runs=[("form", {**RUN1, "run_id": "r-0", "cases": [], "bugs": [
+            {"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved", "severity": "HIGH", "classification": "CONFIRMED"}]})])
+        memory.ingest_pending(self.proj / "qa-out")
+        con = core.connect()
+        try:
+            line = next(x for x in memory.card(con, "/form").splitlines() if "Speed accepts 131" in x)
+        finally:
+            con.close()
+        h, sev = re.match(r"- ([0-9a-f]{12}) \w+ \[([^\]]+)\]", line).groups()
+        resight = {"route": "/form", "title": "Speed accepts 131", "hash": h, "severity": sev, "classification": "CONFIRMED"}
+        d = self.rundir(name="2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", {**RUN1, "run_id": "r-1", "bugs": [resight]})])
+        self.assertIn("**Verdict: ❌ FAIL** — known bug Speed accepts 131 HIGH", report.render_report(d))
 
     def test_nothing_run_yet(self):
         d = self.rundir(plan=PLAN)
