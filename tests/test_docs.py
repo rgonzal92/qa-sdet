@@ -177,18 +177,20 @@ class Docs(unittest.TestCase):
 
     def test_explorer_signal_dump_is_approved_by_the_guard(self):
         """Step 9 saves the browser signals and closes the browser in one call: the guard must approve all of it."""
-        chain = re.search(r"`(playwright-cli -s=qa requests --all [^`]+)`", text("agents/qa-explorer.md")).group(1)
-        self.assertIn("console error --all", chain)
-        self.assertTrue(chain.endswith("playwright-cli -s=qa close"), chain)
+        chains = re.findall(r"`(playwright-cli -s=qa requests --all [^`]+)`", text("agents/qa-explorer.md"))
+        self.assertTrue(all("console error --all" in c for c in chains), chains)
+        self.assertTrue(any(c.endswith("playwright-cli -s=qa close") for c in chains), chains)  # save, then close
+        self.assertTrue(any("qa-mem signals-triage" in c for c in chains), chains)  # triage first, browser still open
         with tempfile.TemporaryDirectory() as d:
             g, env = load_guard(os.path.realpath(d))
             proj = Path(os.path.realpath(d)) / "my project"
             (proj / "qa-out/run/.data").mkdir(parents=True)
-            cmd = chain.replace("<out>", f"{proj}/qa-out/run").replace("<slug>", "form")
-            with mock.patch.dict(os.environ, env):
-                os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                             "agent_type": "qa-sdet:qa-explorer"}), (None, True), cmd)
+            for chain in chains:
+                cmd = chain.replace("<out>", f"{proj}/qa-out/run").replace("<slug>", "form")
+                with mock.patch.dict(os.environ, env):
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                    self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
+                                                 "agent_type": "qa-sdet:qa-explorer"}), (None, True), cmd)
 
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""

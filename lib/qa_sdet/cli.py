@@ -61,7 +61,7 @@ def _count(o, name, most=None):
 def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "prune", "annotate",
-                   "evidence", "report", "audit-bugs", "plan-find", "setup-permissions"):
+                   "evidence", "report", "audit-bugs", "signals-triage", "plan-find", "setup-permissions"):
         return None
     from . import ops
     if cmd == "keys":
@@ -121,6 +121,23 @@ def wrapper_cmd(cmd, args):
             raise core.BadInput("usage: qa-mem report <run dir>")
         from . import report
         print(report.write_report(args[0]))
+    elif cmd == "signals-triage":
+        o = _opts(args, valued=("--slug",))
+        if len(o["_"]) != 1 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir():
+            raise core.BadInput("usage: qa-mem signals-triage <run dir> --slug <slug>")
+        from . import report
+        data = Path(o["_"][0]) / ".data"
+        try:
+            run = json.loads((data / f"run-{o['--slug']}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            run = {}  # step 9 writes the run file last: nothing named yet
+        t = report.triage_signals(o["_"][0], o["--slug"], run if isinstance(run, dict) else {})
+        lines = [f"- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
+        print(("APP SIGNALS NO BUG EXPLAINS YET (while the browser is open: `playwright-cli -s=qa response-body <#>`; a "
+               "real failure is a bug, a known one goes in notes by method and path):\n" + "\n".join(lines))
+              if lines else "no unexplained app signals")
+        if t["third_party"]:
+            print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
     elif cmd == "audit-bugs":
         if len(args) != 1 or not Path(args[0]).is_dir():
             raise core.BadInput("usage: qa-mem audit-bugs <run dir>")
@@ -170,7 +187,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--known-bugs <text>] [--open-record]", "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
-    "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>",
+    "annotate": "<png> --box x,y,w,h [--box ...] --label <text>", "report": "<run dir>", "audit-bugs": "<run dir>", "signals-triage": "<run dir> --slug <slug>",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)", "prep": "<project> <number|KEY>...",
     "inbox": "<project>", "setup-permissions": "[--settings PATH] [--apply]",
 }

@@ -727,6 +727,24 @@ class Signals(Rendering):
         self.assertIn("- /form: GET /api/zones/7 → 404", r)
         self.assertNotIn("PUT /api/zones", r)
 
+    def test_third_party_failures_fold_into_one_line_and_request_loops_show(self):
+        self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])
+        loop = "".join(f"{i}. [GET] http://localhost:8765/api/zones/{i} => [200] OK\n" for i in range(4, 10))
+        (d / ".data/requests-form.log").write_text("1. [POST] http://localhost:8765/form => [500] Error\n"
+                                                   "2. [GET] https://cdn.example.com/lib.js => [404] Not Found\n"
+                                                   "3. [GET] https://tiles.example.org/1/2/3.png => [FAILED] net::ERR\n" + loop)
+        report.write_report(d)
+        sec = (d / "REPORT.md").read_text().split("## Needs your action")[1].split("\n## ")[0]
+        self.assertIn("- /form: POST /form → 500", sec)
+        self.assertIn("- /form: GET /api/zones/:id ×6 (the same call 6 times: a request loop?)", sec)
+        self.assertNotIn("cdn.example.com", sec.split("<details>")[0])
+        self.assertIn("<summary>2 third-party signal(s) (hosts outside allowedHosts)</summary>", sec)
+        code, out, _ = cli("signals-triage", str(d), "--slug", "form")
+        self.assertEqual(code, 0)
+        self.assertIn("#1 POST /form → 500", out)  # the index for `response-body 1`
+        self.assertIn("2 third-party", out)
+
     def test_no_logs_or_only_explained_ones_leave_nothing_to_act_on(self):
         for requests, console, drafts in ((None, None, ()), ("3. [GET] http://h/api/closures.json => [404] Not found\n",
                                                               None, ["GET /api/closures.json → 404"])):

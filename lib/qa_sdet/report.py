@@ -743,7 +743,7 @@ def _notes_section(runs):
 
 
 # ---------- browser signals: playwright-cli `requests --all` / `console error --all`, saved by the explorer at its end ----
-REQUEST_LINE = re.compile(r"\s*\d+\.\s+\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d{3}|FAILED)\]\s*(.*)")  # 3. [GET] url => [404] text
+REQUEST_LINE = re.compile(r"\s*(\d+)\.\s+\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d{3}|FAILED)\]\s*(.*)")  # 3. [GET] url => [404] text
 SIGNALS_SHOWN = 15
 
 
@@ -761,33 +761,54 @@ def _names_request(named, method, path):
                      named) is not None
 
 
-def _signals(run_dir, name, run):
-    """[(signal, count)] from .data/requests-<slug>.log and console-<slug>.log of run file `name`: failed requests
-    (4xx, 5xx, FAILED) and console errors, each once, minus those the run JSON or a bug draft names (a request by its
-    method and path, a message by its first 60 characters). "Failed to load resource" lines repeat the requests log
-    and are skipped.
-    shortcut: no host filter, so a failing third-party call shows too; filter by allowedHosts if real runs get noisy."""
-    data, slug, found = Path(run_dir) / ".data", name[len("run-"):-len(".json")], {}
+STORM_CALLS = 5  # the same call this often in one page visit: a fetch loop, likely
+
+
+def triage_signals(run_dir, slug, run, hosts=None):
+    """{"app": [(signal, count, first request index or None)], "third_party": count} from .data/requests-<slug>.log and
+    console-<slug>.log: failed requests (4xx, 5xx, FAILED), a call made STORM_CALLS+ times (a request loop), and
+    console errors, each once, minus those the run JSON or a bug draft names (a request by its method and path, a
+    message by its first 60 characters). A failed request to a host outside allowedHosts (a CDN, map tiles) is only
+    counted. "Failed to load resource" lines repeat the requests log and are skipped. hosts: allowedHosts (None: the
+    config's; empty: every host is the app's)."""
+    data, found, calls, third = Path(run_dir) / ".data", {}, {}, 0
+    hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
-        if not m or m.group(3) != "FAILED" and int(m.group(3)) < 400:
+        if not m:
             continue
+        index, method, url, code, text = m.groups()
         try:
-            path = urlsplit(m.group(2)).path or m.group(2)
+            path = urlsplit(url).path or url
         except ValueError:  # an odd host such as an unclosed [IPv6
-            path = m.group(2)
-        status = m.group(3) if m.group(3) != "FAILED" else f"FAILED {m.group(4)}".strip()
-        found.setdefault(f"{m.group(1)} {path} → {status}", [(m.group(1), path), 0])[1] += 1
+            path = url
+        if hosts and url.lower().startswith(("http://", "https://")) and not core.url_allowed(url, hosts):
+            third += code == "FAILED" or int(code) >= 400
+            continue
+        shape = core._ids(path) or path
+        calls.setdefault((method, shape), [0, index])[0] += 1
+        if code == "FAILED" or int(code) >= 400:
+            status = code if code != "FAILED" else f"FAILED {text}".strip()
+            found.setdefault(f"{method} {path} → {status}", [(method, path), 0, index])[1] += 1
+    for (method, shape), (n, index) in calls.items():
+        if n >= STORM_CALLS:
+            found[f"{method} {shape} ×{n} (the same call {n} times: a request loop?)"] = [(method, shape), 1, index]
     for line in scrub.redact(_text(data / f"console-{slug}.log")).splitlines():
         if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
             continue  # blank, stack lines, headers
         level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
         msg = re.sub(r"\s+@\s+\S*$", "", line[level.end():] if level else line).strip()  # " @ <source>:1"
         if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
-            found.setdefault(f"console: {msg}", [msg[:60], 0])[1] += 1
+            found.setdefault(f"console: {msg}", [msg[:60], 0, None])[1] += 1
     named = (json.dumps(run, ensure_ascii=False) + "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))).lower()
     explained = lambda w: _names_request(named, *w) if isinstance(w, tuple) else w.lower() in named
-    return [(key, n) for key, (what, n) in found.items() if not explained(what)]
+    return {"app": [(key, n, index) for key, (what, n, index) in found.items() if not explained(what)], "third_party": third}
+
+
+def _signals(run_dir, name, run, hosts=None):
+    """([(signal, count)], third-party count) of run file `name` (triage_signals)."""
+    t = triage_signals(run_dir, name[len("run-"):-len(".json")], run, hosts)
+    return [(key, n) for key, n, _ in t["app"]], t["third_party"]
 
 
 # ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
@@ -1004,7 +1025,10 @@ def render_report_parts(run_dir, cfg=None):
         if left:  # step 9 couldn't delete them (budget or time used up): they stay in the shared QA app
             action += [f"### Test data left in the app ({len(left)})"] + [
                 f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left] + [""]
-        signals = [(r.get("target") or name, key, n) for name, r in runs for key, n in _signals(run_dir, name, r)]
+        hosts = core.allowed_hosts(cfg)
+        triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts)) for name, r in runs]
+        signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
+        third = sum(n for _, (_, n) in triaged)
         if signals:
             action += [f"### Browser signals no bug explains ({len(signals)})"] + [
                 f"- {one_line(route)}: {one_line(core.short(key, 200))}" + (f" (×{n})" if n > 1 else "")
@@ -1012,6 +1036,9 @@ def render_report_parts(run_dir, cfg=None):
             if len(signals) > SIGNALS_SHOWN:
                 action.append(f"- +{len(signals) - SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`")
             action.append("")
+        if third:  # a CDN or map-tile failure can still break the page: counted, folded, never mixed with the app's
+            action += [f"<details><summary>{third} third-party signal(s) (hosts outside allowedHosts)</summary>", "",
+                       "Failed requests to hosts outside `allowedHosts`: see `requests-*.log` in `.data/`.", "", "</details>", ""]
         out += ["## Needs your action"] + (action or ["Nothing needs your action.", ""])
 
     for t in tickets:
