@@ -154,6 +154,21 @@ class Docs(unittest.TestCase):
                     self.assertIn("host", g.check("playwright-cli -s=qa goto /form", str(proj)))  # a bare path has no host
                     self.assertIn("--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj)))  # also with no run
 
+    def test_explorer_signal_dump_is_approved_by_the_guard(self):
+        """Step 9 saves the browser signals and closes the browser in one call: the guard must approve all of it."""
+        chain = re.search(r"`(playwright-cli -s=qa requests --all [^`]+)`", text("agents/qa-explorer.md")).group(1)
+        self.assertIn("console error --all", chain)
+        self.assertTrue(chain.endswith("playwright-cli -s=qa close"), chain)
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            proj = Path(os.path.realpath(d)) / "my project"
+            (proj / "qa-out/run/.data").mkdir(parents=True)
+            cmd = chain.replace("<out>", f"{proj}/qa-out/run").replace("<slug>", "form")
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
+                                             "agent_type": "qa-sdet:qa-explorer"}), (None, True), cmd)
+
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)

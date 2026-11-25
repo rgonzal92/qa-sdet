@@ -573,6 +573,13 @@ class R6Marker(Case):
         self.assertIn("time budget is used up", bash("playwright-cli -s=qa screenshot", stale, True))
         self.assertIn("delete", bash("playwright-cli -s=qa screenshot", stale))  # the user gets the cleanup hint
 
+    def test_signal_dump_runs_past_the_limits(self):  # the explorer's step 9: a run that ran out still keeps its signals
+        for cwd in (project(deadline=time.time() - 5), project(budget=2, used=2)):
+            for cmd in (f"playwright-cli -s=qa requests --all > '{cwd}/qa-out/r/.data/requests-form.log'",
+                        f"playwright-cli -s=qa console error --all > '{cwd}/qa-out/r/.data/console-form.log'"):
+                self.assertIsNone(bash(cmd, cwd, True), cmd)
+            self.assertIsNotNone(bash("playwright-cli -s=qa snapshot", cwd, True))  # what drives the app is still counted
+
     def test_batch_over_budget_says_what_is_left(self):
         cwd = project(budget=15, used=7)
         self.assertIn("only 8 of the run's 15 are left", bash("; ".join(["playwright-cli -s=qa click e1"] * 9), cwd))

@@ -44,7 +44,8 @@ PW_VALUE_OPTS = set("-s --session --browser --config --device --profile --idle-t
                     "--host --port --isolated-context --user-data-dir --type --filter --data --size --fps "
                     "--status --body --content-type --header --remove-header".split())  # route's: else they pass as the verb
 NAV_VERBS, FAULT_VERBS = {"goto", "open", "tab-new"}, {"route", "network-state-set"}
-BUDGET_FREE = {"", "close", "close-all", "kill-all", "list", "state-save"}  # always allowed so a run can finish
+BUDGET_FREE = {"", "close", "close-all", "kill-all", "list", "state-save",  # always allowed so a run can finish
+               "requests", "console"}  # read-only: the explorer saves the browser signals at its end (step 9)
 PW_SOURCE_OPTS = ("--config", "--extension", "--cdp", "--endpoint")  # a config file or someone else's browser
 _SECRET_HINT = "it prints session secrets; use requests / response-body, or one header: --raw eval \"fetch(url).then(r => r.headers.get('n'))\""
 PW_DENY = {"attach": "attach connects to an unverified browser",

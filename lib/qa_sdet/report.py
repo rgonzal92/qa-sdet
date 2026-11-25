@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from . import core, scrub, ops
 
 
@@ -476,6 +476,45 @@ def _notes_section(runs):
     return out
 
 
+# ---------- browser signals: playwright-cli `requests --all` / `console error --all`, saved by the explorer at its end ----
+REQUEST_LINE = re.compile(r"\s*\d+\.\s+\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d{3}|FAILED)\]\s*(.*)")  # 3. [GET] url => [404] text
+SIGNALS_SHOWN = 15
+
+
+def _text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _signals(run_dir, name, run):
+    """[(signal, count)] from .data/requests-<slug>.log and console-<slug>.log of run file `name`: failed requests
+    (4xx, 5xx, FAILED) and console errors, each once, minus those the run JSON or a bug draft names (the request path,
+    or the message's first 60 characters). "Failed to load resource" lines repeat the requests log and are skipped.
+    shortcut: no host filter, so a failing third-party call shows too; filter by allowedHosts if real runs get noisy."""
+    data, slug, found = Path(run_dir) / ".data", name[len("run-"):-len(".json")], {}
+    for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
+        m = REQUEST_LINE.fullmatch(line)
+        if not m or m.group(3) != "FAILED" and int(m.group(3)) < 400:
+            continue
+        try:
+            path = urlsplit(m.group(2)).path or m.group(2)
+        except ValueError:  # an odd host such as an unclosed [IPv6
+            path = m.group(2)
+        status = m.group(3) if m.group(3) != "FAILED" else f"FAILED {m.group(4)}".strip()
+        found.setdefault(f"{m.group(1)} {path} → {status}", [path, 0])[1] += 1
+    for line in scrub.redact(_text(data / f"console-{slug}.log")).splitlines():
+        if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
+            continue  # blank, stack lines, headers
+        level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
+        msg = re.sub(r"\s+@\s+\S*$", "", line[level.end():] if level else line).strip()  # " @ <source>:1"
+        if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
+            found.setdefault(f"console: {msg}", [msg[:60], 0])[1] += 1
+    named = (json.dumps(run, ensure_ascii=False) + "".join(map(_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))).lower()
+    return [(key, n) for key, (needle, n) in found.items() if needle.lower() not in named]
+
+
 # ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
 def _q_items(obj, label):
     out = []
@@ -651,6 +690,14 @@ def render_report_parts(run_dir, cfg=None):
                 f"- {cell(c['id'])} {STATUS_ICON[c['status']]}" + (f" ({cell(c['ac'])})" if c.get("ac") else "") +
                 (f" — {cell(core.short(c.get('actual') or c.get('notes'), 160))}" if (c.get("actual") or c.get("notes")) else "")
                 + (f" · {cell(c['ticket'])}" if c.get("ticket") else "") for c in attention] + [""]
+        signals = [(r.get("target") or name, key, n) for name, r in runs for key, n in _signals(run_dir, name, r)]
+        if signals:
+            action += [f"### Browser signals no bug explains ({len(signals)})"] + [
+                f"- {one_line(route)}: {one_line(core.short(key, 200))}" + (f" (×{n})" if n > 1 else "")
+                for route, key, n in signals[:SIGNALS_SHOWN]]
+            if len(signals) > SIGNALS_SHOWN:
+                action.append(f"- +{len(signals) - SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`")
+            action.append("")
         out += ["## Needs your action"] + (action or ["Nothing needs your action.", ""])
 
     for t in tickets:

@@ -7,7 +7,7 @@ Every command starts `playwright-cli -s=qa <cmd>` (the allow rules match that sh
 | Is X on the page? | `find 'Save'`, `find --regex '/error|invalid/i'` | a full `snapshot` |
 | Act | a card locator directly: `click "getByRole('button', { name: 'Save' })"` | a snapshot just for a ref |
 | Structure, refs | `snapshot --depth=4`, then `snapshot <ref>`; a locator to keep: `generate-locator <ref>` | whole-page snapshots every step |
-| Silent failure | `console error`, `requests`, then `response-body <n>` / `request-body <n>` | `request <n>`, `response-headers <n>` (denied: cookies) |
+| Silent failure | `console error`, `requests`, then `response-body <n>` / `request-body <n>` | `request <n>`, `response-headers <n>` (denied: cookies); `--clear` (it also empties the `--all` list your step 9 saves) |
 | Read a value | `--raw eval "document.querySelector('#x').textContent"`; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | snapshot + reading |
 | Many input values | one `--raw eval` loop (below) | a fill and a read per value; `run-code` (denied) |
 | Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"` (each still counts toward a budget) | one call per command |

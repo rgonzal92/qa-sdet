@@ -530,6 +530,82 @@ class Layout(Rendering):
         self.assertNotIn("Not reached", sec)  # empty groups are left out
 
 
+# verbatim playwright-cli 0.1.24 output of `requests --all` and `console error --all` (fixture map.html, then form.html)
+REQUESTS_LOG = """### Result
+2. [GET] http://localhost:8765/api/incidents.json => [200] OK
+3. [GET] http://localhost:8765/api/closures.json => [404] File not found
+4. [GET] http://localhost:8765/api/incidents.json => [200] OK
+5. [GET] http://localhost:8765/api/closures.json => [404] File not found
+6. [GET] http://localhost:9/api/x?token=abc123secret => [FAILED] net::ERR_UNSAFE_PORT
+
+Note: 2 static requests not shown, run with --static option to see them.
+"""
+CONSOLE_LOG = """### Result
+Total messages: 7 (Errors: 6, Warnings: 1)
+Returning 6 messages for level "error"
+
+[ERROR] Failed to load resource: the server responded with a status of 404 (File not found) @ http://localhost:8765/favicon.ico:1
+[ERROR] Failed to load resource: the server responded with a status of 404 (File not found) @ http://localhost:8765/api/closures.json:1
+[ERROR] Zone save failed: 500 @ :1
+[ERROR] Failed to load resource: net::ERR_UNSAFE_PORT @ http://localhost:9/api/x?token=abc123secret:1
+TypeError: rows is undefined
+    at eval (eval at <anonymous> (eval at evaluate (:370:30)), <anonymous>:1:35)
+"""
+
+
+class Signals(Rendering):
+    """Console errors and failed requests the explorer saved before closing the browser (.data/*-<slug>.log)."""
+
+    def signals_run(self, run=RUN1, requests=REQUESTS_LOG, console=CONSOLE_LOG, drafts=()):
+        self.config(releaseTemplates=TEMPLATES)
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", run)])  # nothing else to act on
+        for kind, text in (("requests", requests), ("console", console)):
+            if text is not None:
+                (d / f".data/{kind}-form.log").write_text(text)
+        for i, text in enumerate(drafts, 1):
+            (d / f"bugs/BUG-{i}.md").write_text(text)
+        report.write_report(d)
+        return (d / "REPORT.md").read_text()
+
+    def test_unexplained_signals_are_listed_once_with_counts(self):
+        r = self.signals_run()
+        self.assertIn("### Browser signals no bug explains (4)\n"
+                      "- /form: GET /api/closures.json → 404 (×2)\n"
+                      "- /form: GET /api/x → FAILED net::ERR_UNSAFE_PORT\n"
+                      "- /form: console: Zone save failed: 500\n"
+                      "- /form: console: TypeError: rows is undefined\n", r)
+        for gone in ("incidents.json", "Failed to load resource", "favicon", "at eval", "abc123secret"):
+            self.assertNotIn(gone, r)  # 2xx, network lines the requests log carries, stack lines, a token
+        self.assertIn("**Verdict: ✅ PASS**", r)  # signals never change a verdict
+        self.assertNotIn("Nothing needs your action.", r)
+
+    def test_a_signal_the_run_or_a_bug_draft_names_is_explained(self):
+        r = self.signals_run(run={**RUN1, "notes": "The toast says zone save failed: 500, as the ticket expects."},
+                             drafts=["## Evidence\n- Network: `GET /api/closures.json` → 404"])
+        sec = r[r.index("## Needs your action"):r.index("## PROJ-1")]
+        self.assertIn("### Browser signals no bug explains (2)\n"
+                      "- /form: GET /api/x → FAILED net::ERR_UNSAFE_PORT\n"
+                      "- /form: console: TypeError: rows is undefined\n", sec)
+
+    def test_no_logs_or_only_explained_ones_leave_nothing_to_act_on(self):
+        for requests, console, drafts in ((None, None, ()), ("3. [GET] http://h/api/closures.json => [404] Not found\n",
+                                                              None, ["GET /api/closures.json → 404"])):
+            r = self.signals_run(requests=requests, console=console, drafts=drafts)
+            self.assertNotIn("Browser signals", r)
+            self.assertIn("Nothing needs your action.", r)
+            self.assertNotIn("Problems reading this folder", r)
+
+    def test_page_text_in_a_message_stays_text(self):
+        r = self.signals_run(requests=None, console="[ERROR] <img src=x onerror=alert(1)> [go](https://evil.example) | x @ :1\n")
+        self.assertIn("- /form: console: &lt;img src=x onerror=alert(1)> [go]\\(https://evil.example) \\| x\n", r)
+
+    def test_a_long_list_is_cut_and_says_where_the_rest_is(self):
+        r = self.signals_run(requests=None, console="".join(f"[ERROR] row {i} failed @ :1\n" for i in range(30)))
+        self.assertIn("### Browser signals no bug explains (30)", r)
+        self.assertIn("- /form: console: row 14 failed\n- +15 more: see `requests-*.log` and `console-*.log` in `.data/`\n", r)
+        self.assertNotIn("row 15 failed", r)
+
+
 class Escaping(Rendering):
     """Text from a run or a plan can't break the Markdown or add HTML."""
 
