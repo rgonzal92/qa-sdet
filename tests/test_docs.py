@@ -251,7 +251,9 @@ class Docs(unittest.TestCase):
         self.assertLess(recipe.index("checkValidity()"), recipe.index("requestSubmit()"))
         harvester = tips.split("## Map the page's states and links")[1].split("```")[1]
         self.assertNotIn("u.search", harvester)  # one path is one page: ?page=2 and ?sort=x are not new pages
-        self.assertIn("query string", text("agents/qa-crawler.md"))
+        from qa_sdet import crawl  # qa-mem discover runs this harvester: one copy for the explorer and the crawl
+        said = harvester.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
+        self.assertEqual(" ".join(crawl.HARVESTER_JS.split()), " ".join(said.split()))
 
     def test_no_doc_passes_cursor_to_video_show_actions(self):  # 0.1.24 reads `--cursor none` as a boolean plus an argument
         for f in ALL:
@@ -381,28 +383,21 @@ class Docs(unittest.TestCase):
                 self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": os.path.realpath(d)}),
                                  (None, True), cmd)
 
-    def test_the_crawl_has_its_own_slim_agent(self):  # map mode loaded every testing rule of the explorer
-        crawler = text("agents/qa-crawler.md")
-        meta = dict(re.findall(r"^([\w-]+): (.*)$", crawler.split("---\n")[1], re.M))
-        with tempfile.TemporaryDirectory() as d:
-            g, _ = load_guard(os.path.realpath(d))
-        self.assertLessEqual({t.strip() for t in meta["tools"].split(",")}, g.EXPLORER_TOOLS)
-        self.assertLess(len(crawler.encode()), 4500)  # two short read-only modes: still a third of the explorer's prompt
-        self.assertIn("## Discover", crawler)
-        self.assertIn("--discover", text("skills/qa-explore/SKILL.md"))
-        self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
-        self.assertIn("qa-sdet:qa-crawler", text("skills/qa-init/SKILL.md"))
+    def test_crawl_and_discover_are_qa_mem_commands_not_an_agent(self):
+        # found live: one 20-turn agent for 19 routes and ~1,280 locators ran out of turns twice and saved almost nothing
+        self.assertFalse((ROOT / "agents/qa-crawler.md").exists())
+        init, explore = text("skills/qa-init/SKILL.md"), text("skills/qa-explore/SKILL.md")
+        self.assertIn("qa-mem crawl '<run>'", init)
+        self.assertIn("qa-mem discover '<run>'", explore)
+        for skill in (init, explore):
+            self.assertIn("run_in_background", skill)  # minutes long: a foreground Bash call ends at 10 minutes
+        self.assertIn("crawl", cli.COMMANDS)
+        self.assertIn("discover", cli.COMMANDS)
         hooks = json.loads(text("hooks/hooks.json"))["hooks"]
-        self.assertIn("qa-sdet:qa-crawler", hooks["SubagentStop"][0]["matcher"].split("|"))
-        for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
-            self.assertIn(marker, crawler)
-        self.assertIn("page-start's browser", crawler)  # found live: never given the config, it wrote a made-up browser
-        self.assertNotIn("the config's browser", crawler)
-        # found live: an app shell's pages sit in a cross-origin iframe, so the document-only check confirmed 0 of ~1,280
-        # module locators and the crawler reached for run-code (denied); eval on a frame target reads inside it
-        self.assertIn("'iframe >> internal:control=enter-frame >> :root'", crawler)
-        self.assertIn("const document = el.ownerDocument", crawler)
-        self.assertIn("strict mode violation", crawler)  # 2+ iframes: name the module's, from the error
+        self.assertNotIn("qa-crawler", hooks["SubagentStop"][0]["matcher"])
+        self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
+        for f in ALL + [ROOT / "CHANGELOG.md", ROOT / "hooks/guard.py", ROOT / "hooks/posttooluse.py"]:
+            self.assertNotIn("qa-crawler", f.read_text(), f.name)
 
     def test_the_explorer_stops_on_every_page_start_blocker(self):  # found live: it reached a 404 target via goto
         step1 = re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0)
@@ -445,7 +440,7 @@ class Docs(unittest.TestCase):
             self.assertIn("--max-turns", text(doc), doc)
         self.assertIn(".active.progress", text("README.md"))
         self.assertIn("--max-turns", cli.COMMANDS["dispatch"] + cli.COMMANDS["marker"])
-        for agent in ("qa-explorer", "qa-crawler"):  # the hook warns before this file's maxTurns: they must say what to do
+        for agent in ("qa-explorer",):  # the hook warns before this file's maxTurns: it must say what to do
             self.assertRegex(text(f"agents/{agent}.md"), r"turns are (nearly used|left)")
 
     def test_stop_reason_and_the_expansion_gate_are_documented(self):
@@ -493,7 +488,7 @@ class Docs(unittest.TestCase):
         self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
 
     def test_agents_have_a_turn_limit(self):  # a looping agent burned turns until its context ran out, results unwritten
-        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-crawler": 20, "qa-reviewer": 4}
+        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-reviewer": 4}
         for path in AGENTS:
             meta = dict(re.findall(r"^([\w-]+): (.*)$", path.read_text().split("---\n")[1], re.M))
             self.assertEqual(int(meta["maxTurns"]), limits[path.stem], path.name)

@@ -6,8 +6,8 @@
   mapper's stop hook may have read the file first.
 - A file written in a run folder is checked as it lands: a bug draft or repro spec (references/bug-draft.md), a run JSON
   (the shape ingest needs), a plan.json (case ids), so the agent fixes it while its context is still there.
-- An explorer or crawler near its maxTurns hears once, even in a run with no budget or deadline (a default run), so it
-  reaches step 9 (or the crawler's step 4) before Claude Code ends it. Its calls are counted in qa-out/.active.progress
+- An explorer near its maxTurns hears once, even in a run with no budget or deadline (a default run), so it reaches
+  step 9 before Claude Code ends it. Its calls are counted in qa-out/.active.progress
   (Bash and Write calls only: a Read or Grep is not seen here, so the line is drawn early).
 - An explorer whose same playwright-cli command failed 3 times since its last real progress hears once to change approach.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
@@ -25,7 +25,7 @@ CODE_MAP = re.compile(r"code-map-(frontend|backend|tests)(-\d+)?\.json")
 STUCK_AFTER = 3
 SPIN_AFTER = 8  # playwright-cli calls in a row with no progress
 NOVELTY_WINDOW = 12  # a call repeated within this many playwright-cli calls is no progress
-AGENTS = ("qa-explorer", "qa-crawler")
+AGENTS = ("qa-explorer",)
 # calls that only look: they are never progress by themselves
 OBSERVE = {"snapshot", "find", "eval", "requests", "console", "screenshot", "tab-list", "network", "pdf"}
 PROGRESS_CAP = 1 << 20
@@ -93,9 +93,7 @@ def wind_down(path, m, who, turns):
                                       "slug": m.get("slug")})
     if low:
         return f"qa-sdet: only {' and '.join(low)} left in this run. {guard.WIND_DOWN[0].upper()}{guard.WIND_DOWN[1:]}."
-    done = ("Stop crawling now and do step 4: save the requests and console logs, close the browser and write "
-            "run-<slug>.json with status INCOMPLETE and the pages and locators so far" if who == "qa-crawler" else
-            "Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
+    done = ("Stop new checks now and go to step 9: delete the qa-sdet-… records you created, save the signals, close the "
             "browser and write run-<slug>.json with stop_reason turn_limit")
     return f"qa-sdet: {turns} of the {limit} turns you have are used, and the run ends at {limit} however much budget is left. {done}."
 
@@ -280,7 +278,7 @@ def run_feedback(data, who):
 def _log_tool_failure(data, who):
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     cmd = " ".join(str(tin.get("command") or "").split())
-    if who not in ("qa-explorer", "qa-crawler", "qa-mapper") and not QA_TOOL_RE.search(cmd):
+    if who not in ("qa-explorer", "qa-mapper") and not QA_TOOL_RE.search(cmd):
         return
     err = data.get("error") or data.get("tool_response") or ""
     if isinstance(err, (dict, list)):

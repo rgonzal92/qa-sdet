@@ -414,7 +414,7 @@ class PageStart(Base):
         self.config(**self.CFG)
         code, out, mrun = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":404}')])
         self.assertEqual((code, out), (1, {"status": "blocked", "block_scope": "page", "reason": "the page returned HTTP 404",
-                                           "browser": "chrome"}))  # the crawler's run file names the browser from here
+                                           "browser": "chrome"}))  # a crawl's run file names the browser from here
         self.assertNotIn(["playwright-cli", "-s=qa", "close"], [c[0][0] for c in mrun.call_args_list])
         code, out, _ = self.start([done(0), done(0), done(0, out='{"host":"qa.example.com","hasPassword":false,"status":0}'),
                                    done(0, out="1.43.0\n")])  # 0: the browser doesn't expose it, so no blocker

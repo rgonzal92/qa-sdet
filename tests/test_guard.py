@@ -299,18 +299,15 @@ class R3Secrets(Case):
     EXPLORER_ONLY_DENY = ["webmcp-call lookup", "cookie-clear", "cookie-delete sid", "state-load /tmp/s.json",
                           "--raw webmcp-call lookup", "--session=qa cookie-delete sid"]
 
-    def test_explorers_and_crawlers_cannot_wipe_the_login_or_call_page_tools(self):
+    def test_explorers_cannot_wipe_the_login_or_call_page_tools(self):
         cmds = [f"playwright-cli -s=qa {v}" for v in self.EXPLORER_ONLY_DENY]
         self.table(cmds, True, cwd=RUN, agents=(True,))
-        for cmd in cmds:  # the crawler is an explorer role too
-            self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": "qa-sdet:qa-crawler", "cwd": str(RUN),
-                                           "tool_input": {"command": cmd}}), cmd)
         self.table(cmds[:4], False, cwd=RUN, agents=(False,))  # the main session keeps them (the user's own call)
         self.table(["playwright-cli -s=qa webmcp-list", "playwright-cli -s=qa cookie-set a b"], False, cwd=RUN, agents=(True,))
 
     def test_a_module_frame_is_read_by_eval_on_a_frame_target_not_run_code(self):
-        """An app shell loads its pages in a cross-origin iframe `document` can't reach: the crawler's way in is eval with
-        a frame-piercing target, in one call per route; the frame's own cookie stays closed and run-code stays denied."""
+        """An app shell loads its pages in a cross-origin iframe `document` can't reach: the way in is eval with a
+        frame-piercing target (qa-mem crawl's too); the frame's own cookie stays closed and run-code stays denied."""
         frame = "'iframe >> internal:control=enter-frame >> :root'"
         check = "\"el => { const document = el.ownerDocument; return !!document.querySelector('[data-testid=x]'); }\""
         allow = [f"playwright-cli -s=qa --raw eval {check} {frame}",
@@ -318,7 +315,7 @@ class R3Secrets(Case):
                  f"\"!!document.querySelector('#menu')\"; playwright-cli -s=qa --raw eval {check} {frame}"]
         deny = [f"playwright-cli -s=qa --raw eval \"el => el.ownerDocument.cookie\" {frame}",
                 "playwright-cli -s=qa run-code \"async page => page.frames()[1].content()\""]
-        for agent in ("qa-sdet:qa-crawler", "qa-sdet:qa-explorer"):
+        for agent in ("qa-sdet:qa-explorer",):
             for cmd in allow:
                 self.assertIsNone(tool("Bash", agent, RUN, command=cmd), (agent, cmd))
             for cmd in deny:
@@ -452,14 +449,12 @@ class R4Explorer(Case):
         finally:
             link.unlink()
 
-    def test_the_crawler_has_the_explorers_limits(self):  # qa-init --crawl's agent reads untrusted pages too
-        CR = "qa-sdet:qa-crawler"
-        self.assertIn("not one of its tools", tool("mcp__github__create_issue", CR, cwd=RUN) or "")
-        self.assertIn("writes only", tool("Write", CR, cwd=RUN, file_path=f"{RUN}/src/app.tsx", content="x") or "")
-        self.assertIsNone(tool("Write", CR, cwd=RUN, file_path=f"{RUN}/qa-out/r/.data/run-init-crawl.json", content="{}"))
-        self.assertIsNotNone(g.decide({"tool_name": "Bash", "agent_type": CR, "cwd": str(RUN),
-                                       "tool_input": {"command": "bash /tmp/x.sh"}}))  # no script files, as the explorer
-        self.assertIsNotNone(tool("Write", CR, cwd=RUN, file_path=str(CFG), content="{}"))
+    def test_explorers_cannot_run_crawl_or_discover(self):  # whole browser passes the guard can't count
+        for cmd in (f"qa-mem crawl '{RUN}/qa-out/r'", f"qa-mem crawl '{RUN}/qa-out/r' /zones",
+                    f"qa-mem discover '{RUN}/qa-out/r' 'https://qa.traffic.example/'"):
+            self.assertIn("coordinator's", bash(cmd, RUN, True) or "", cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the main session runs them
+        self.assertIsNone(tool("Bash", "qa-sdet:qa-crawler", RUN, command="bash /tmp/x.sh"))  # no such agent: not an explorer
 
     def test_the_reviewer_only_reads_run_files(self):  # a critic of untrusted drafts: no shell, no writes, no secrets
         RV = "qa-sdet:qa-reviewer"

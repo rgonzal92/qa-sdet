@@ -104,7 +104,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
         if known and (core.meta(con, "build_ts") or "") <= ts:
             core.set_meta(con, "build", build)
             core.set_meta(con, "build_ts", ts)
-        # the crawler's read-only map (qa-init --crawl, qa-explore --discover) and a blocked start test nothing
+        # the read-only map (qa-mem crawl and discover) and a blocked start test nothing
         explored = core.norm(run.get("mode")) != "map" and core.norm(run.get("status")) != "blocked"
         for pg in pages:
             route = pg["route"]
@@ -167,7 +167,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             con.execute("DELETE FROM coverage WHERE page=? AND rowid NOT IN (SELECT rowid FROM coverage WHERE page=? "
                         "ORDER BY ts DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_COVERAGE))
             con.execute("DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
-                        "ORDER BY stale, last_verified DESC LIMIT 60)", (pg["route"], pg["route"]))
+                        "ORDER BY stale, last_verified DESC LIMIT ?)", (pg["route"], pg["route"], core.MAX_LOCATORS))
         # sightings = which bugs this run file reported. A rewritten run.json (or a sibling's hook ingesting it
         # mid-run) replaces its earlier version: a bug it no longer lists is un-sighted (dropped when only it ever
         # saw it), and seen_count counts distinct run ids even when runs are re-ingested interleaved.

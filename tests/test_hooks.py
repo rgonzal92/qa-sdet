@@ -162,7 +162,7 @@ class Hooks(Base):
     def test_the_turn_limit_defaults_to_the_agents_frontmatter(self):
         self.default_run()  # no max_turns in the marker
         limit = lambda agent: int(re.search(r"^maxTurns:\s*(\d+)", (ROOT / f"agents/{agent}.md").read_text(), re.M).group(1))
-        for agent, role in (("qa-crawler", "qa-sdet:qa-crawler"), ("qa-explorer", "qa-sdet:qa-explorer")):
+        for agent, role in (("qa-explorer", "qa-sdet:qa-explorer"),):
             (self.proj / "qa-out/.active.progress").unlink(missing_ok=True)
             (self.proj / "qa-out/.active.warned").unlink(missing_ok=True)
             line = limit(agent) - max(8, limit(agent) // 4)
@@ -170,15 +170,9 @@ class Hooks(Base):
             self.assertEqual(seen[:-1], [""] * (line - 1), agent)
             self.assertIn(f"{line} of the {limit(agent)} turns", seen[-1], agent)
 
-    def test_the_crawlers_wind_down_names_its_own_finish(self):
+    def test_the_turn_wind_down_is_for_explorers_only(self):
         self.default_run(max_turns=20)
-        notes = [self.pw(f"playwright-cli -s=qa goto 'http://x/{n}'", agent="qa-sdet:qa-crawler") for n in range(12)]
-        self.assertIn("INCOMPLETE", notes[-1])
-        self.assertNotIn("qa-sdet-", notes[-1])  # a crawler creates no records
-
-    def test_the_turn_wind_down_is_for_explorers_and_crawlers_only(self):
-        self.default_run(max_turns=20)
-        for agent in ("", "qa-sdet:qa-mapper", "qa-sdet:qa-reviewer"):
+        for agent in ("", "qa-sdet:qa-mapper", "qa-sdet:qa-reviewer", "qa-sdet:qa-crawler"):
             self.assertEqual([self.pw(f"playwright-cli click e{n}", agent=agent) for n in range(15)], [""] * 15, agent)
         self.assertFalse((self.proj / "qa-out/.active.progress").exists())
 

@@ -62,7 +62,7 @@ def wrapper_cmd(cmd, args):
     """The v0.4 commands that need no memory DB. Returns an exit code, or None for other commands."""
     if cmd not in ("keys", "rundir", "marker", "browser-open", "session-check", "page-start", "api-probe", "prune",
                    "annotate", "evidence", "report", "audit-bugs", "signals-triage", "dup-check", "trace", "next-action", "explore-next", "plan-find",
-                   "setup-permissions", "spend", "plugin-log"):
+                   "setup-permissions", "spend", "plugin-log", "discover"):
         return None
     from . import ops
     if cmd == "keys":
@@ -94,6 +94,14 @@ def wrapper_cmd(cmd, args):
         if o["_"]:
             raise core.BadOption("session-check takes no positional arguments")
         return ops.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
+    elif cmd == "discover":
+        o = _opts(args, valued=("--depth", "--max-pages"))
+        if len(o["_"]) not in (1, 2):
+            raise core.BadInput(f"usage: qa-mem discover {COMMANDS['discover']}")
+        from . import crawl
+        return crawl.discover(o["_"][0], o["_"][1] if len(o["_"]) == 2 else None,
+                              _count(o, "--depth", 5) if "--depth" in o else 2,
+                              (_count(o, "--max-pages", 200) if "--max-pages" in o else 25) or 25)
     elif cmd == "page-start":
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem page-start <url>")
@@ -282,7 +290,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] [--api-writes] [--max-turns N] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
-    "page-start": "<url>",
+    "page-start": "<url>", "crawl": "<run dir> [<route>...]", "discover": "<run dir> [<url>] [--depth D] [--max-pages N]",
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] [--budget N] [--minutes M] "
                 "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
@@ -416,7 +424,7 @@ def _main(argv):
         if stale and hin.get("hook_event_name") == "SubagentStop" and role == "qa-mapper":
             memory.PARKED.extend(stale)
         todo = []
-        if marker and hin.get("hook_event_name") == "SubagentStop" and role in ("qa-explorer", "qa-crawler") \
+        if marker and hin.get("hook_event_name") == "SubagentStop" and role == "qa-explorer" \
                 and not hin.get("stop_hook_active"):
             from . import ops, report  # the marker was started MARKER_HOURS before it expires
             todo = report.verify_run(marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600)
@@ -621,6 +629,11 @@ def run_cmd(con, cmd, args):
             if top < 1:
                 raise core.BadInput("--top must be a whole number >= 1")
         print(memory.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
+    elif cmd == "crawl":
+        if not args:
+            return usage_error(cmd)
+        from . import crawl
+        return crawl.crawl(con, args[0], args[1:])
     elif cmd == "dispatch":
         o = _opts(args, flags=("--faults", "--open-record", "--api-writes"),
                   valued=("--route", "--mode", "--focus", "--budget", "--minutes", "--known-bugs", "--target-route",

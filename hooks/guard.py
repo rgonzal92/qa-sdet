@@ -61,7 +61,7 @@ PW_DENY = {"attach": "attach connects to an unverified browser",
                       "run it yourself (`! playwright-cli install`), or install a browser: playwright-cli install-browser <name>",
            **dict.fromkeys(("cookie-list cookie-get localstorage-list localstorage-get sessionstorage-list sessionstorage-get "
                             "request request-headers response-headers").split(), _SECRET_HINT)}  # response: Set-Cookie
-# denied to the explorer and crawler only (pages steer them); the user's own session may still run these
+# denied to the explorer only (pages steer it); the user's own session may still run these
 PW_DENY_EXPLORER = {"webmcp-call": "webmcp-call runs a tool the page registered; untrusted page text must not act in the QA session",
                     "cookie-clear": "cookie-clear would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
                     "cookie-delete": "cookie-delete would sign the QA browser out; the login lives in the main profile (qa-mem browser-open)",
@@ -116,7 +116,7 @@ MCP_JIRA_READ_RE = re.compile(r"^(batch_)?(get|search|lookup|list|fetch|read|vie
 MCP_WRITE_WORDS = set("create edit update delete remove transition add assign archive unarchive move upload post put patch "
                       "write set clone restore replace publish rank invoke run execute send import bulk upsert modify change".split())
 MAPPER_TOOLS = set("Read Grep Glob LS Write ToolSearch TodoWrite TaskCreate TaskUpdate TaskGet TaskList".split())
-EXPLORERS = {"qa-explorer", "qa-crawler"}  # agents that read untrusted pages: R4 holds for both
+EXPLORERS = {"qa-explorer"}  # the agent that reads untrusted pages: R4 holds for it
 EXPLORER_TOOLS = MAPPER_TOOLS | {"Bash"}  # no MCP tool: the session's GitHub, Slack, ... servers are not the explorer's
 EXPLORER_FILES = {"bugs": r"[^/]+", "repro": r"[^/]+", "evidence": r"[^/]+",  # agents/qa-explorer.md "Files you write"
                   ".data": r"run-[^/]+\.json|(requests|console)-[^/]+\.log|map-\d+\.png"}
@@ -128,6 +128,7 @@ CONFIG_REASON = "the qa-sdet config holds allowedHosts (cli.config.json picks th
 MARKER_REASON = ("the run marker (qa-out/.active) is the coordinator's: it sets your budget, deadline and fault injection; "
                  "finish with what you have (step 9)")
 MARKER_WRITES = {"dispatch", "marker"}  # qa-mem commands that (re)write or remove the run marker
+CRAWLS = {"crawl", "discover"}  # whole browser passes the guard can't see: they charge the marker themselves
 DB_REASON = "{} on the qa-sdet memory DB directory is blocked (only qa-mem writes it)"
 LOOP_REASON = "playwright-cli in a loop can't be counted against the run budget; run commands one by one, or batch values in one eval"
 UPLOAD_REASON = "an upload of a secret (key, .env, credentials, qa-sdet data or config) or a glob; upload a test file, by name"
@@ -608,7 +609,7 @@ def check_pw(rest, ctx, cwds, outs):
     if verb in PW_DENY:
         return f"playwright-cli {verb} blocked: {PW_DENY[verb]}"
     if verb in PW_DENY_EXPLORER and ctx.explorer:
-        return f"playwright-cli {verb} blocked for the explorer and crawler: {PW_DENY_EXPLORER[verb]}"
+        return f"playwright-cli {verb} blocked for the explorer: {PW_DENY_EXPLORER[verb]}"
     if verb == "open" and ctx.explorer and not pw_profile_values(rest):
         return OPEN_REASON
     if verb == "show" and any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in opt_values(rest, "--host")):
@@ -723,6 +724,9 @@ def check_qamem(args, ctx, cwds=()):
         return (f"qa-mem {args[0]} is the user's call (a manual memory write); put what you saw in the run JSON's notes")
     if ctx.explorer and args[:1] and args[0] in MARKER_WRITES:
         return MARKER_REASON
+    if ctx.explorer and args[:1] and args[0] in CRAWLS:
+        return (f"qa-mem {args[0]} drives a whole browser pass the guard can't count; it is the coordinator's. Test your "
+                "page with playwright-cli")
     if ctx.explorer and args[:1] in (["evidence"], ["annotate"]):  # the image it writes: one of its run files
         png = next((a for a in args[1:] if not a.startswith("-")), "")
         if not png or "$" in png or not any(run_file(real(png, c), cwds) for c in cwds):

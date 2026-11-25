@@ -17,6 +17,7 @@ CONFIG = Path(os.environ.get("QA_SDET_CONFIG") or "~/.config/qa-sdet/config.json
 DATA_DIR = Path(os.environ.get("QA_SDET_DATA") or "~/.local/share/qa-sdet").expanduser()
 MAX_TEXT = 300
 MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
+MAX_LOCATORS = 200  # confirmed locators kept per page: a crawl confirms every mapped one (about 90 on a busy page)
 UNKNOWN = "unknown"
 STATUSES = {"OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"}
 BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli --browser values
