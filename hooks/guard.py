@@ -109,6 +109,8 @@ CONFIG_REASON = "the qa-sdet config holds allowedHosts (cli.config.json picks th
 DB_REASON = "{} on the qa-sdet memory DB directory is blocked (only qa-mem writes it)"
 LOOP_REASON = "playwright-cli in a loop can't be counted against the run budget; run commands one by one, or batch values in one eval"
 UPLOAD_REASON = "an upload of a secret (key, .env, credentials, qa-sdet data or config) or a glob; upload a test file, by name"
+OPEN_REASON = ("playwright-cli open starts a new browser without the QA sign-in and drops the request and console history "
+               "step 9 saves; navigate with goto <full URL> (qa-mem browser-open starts the run's browser)")
 # ---------- 2. hosts and paths ----------
 def allowed_hosts():
     """config allowedHosts, read on every call; a broken config allows no navigation. localhost only when listed."""
@@ -532,6 +534,8 @@ def check_pw(rest, ctx, cwds, outs):
         return f"playwright-cli {opt} picks another browser, profile or config file; open the browser with qa-mem browser-open [<url>]"
     if verb in PW_DENY:
         return f"playwright-cli {verb} blocked: {PW_DENY[verb]}"
+    if verb == "open" and ctx.explorer and not pw_profile_values(rest):
+        return OPEN_REASON
     if verb == "show" and any(h.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1") for h in opt_values(rest, "--host")):
         return "playwright-cli show --host would expose the logged-in QA browser to the network; keep it on localhost"
     if verb == "eval" and secret_js(" ".join(rest)):

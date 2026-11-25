@@ -179,8 +179,7 @@ class R2Hosts(Case):
             f"cd {PROF} && playwright-cli -s=qa open --profile main", f"playwright-cli -s=qa open --profile {MAIN} --profile /tmp/x",
             "playwright-cli -s=qa open --profile ~/.local/share/qa-sdet/profiles/main/Default"]
     ALLOW = ["playwright-cli -s=qa goto https://qa.traffic.example/form", "playwright-cli -s=qa goto https://api.qa.traffic.example/x",
-             "playwright-cli -s=qa goto http://localhost:8000/form.html", "playwright-cli -s=qa open --browser=firefox",
-             "playwright-cli -s qa open --browser firefox http://localhost:8765/", "playwright-cli --session qa --raw eval \"document.title\"",
+             "playwright-cli -s=qa goto http://localhost:8000/form.html", "playwright-cli --session qa --raw eval \"document.title\"",
              "playwright-cli -s=qa goto https://api.qa.traffic.example/x 2>&1", "playwright-cli goto http://[::1]:8765/",
              "playwright-cli goto https://qa.traffic.example./x", "playwright-cli -s=qa goto about:blank",
              "playwright-cli -s=qa fill e12 'https://example.org/x'", "playwright-cli -s=qa eval \"fetch('//qa.traffic.example/api')\"",
@@ -194,7 +193,7 @@ class R2Hosts(Case):
              "playwright-cli show", "playwright-cli show --port 9000 --host localhost", "playwright-cli -s=qa goto --help",
              "playwright-cli route --help | head -30", "playwright-cli --help open 2>&1 | head -30", "playwright-cli goto https://evil.com --help",
              "playwright-cli -s=qa --raw eval true", "playwright-cli -s=qa tab-new --isolated-context anon https://qa.traffic.example/admin",
-             "env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --browser chrome", "playwright-cli install-browser firefox",
+             "playwright-cli install-browser firefox",
              "export FOO=1; playwright-cli -s=qa snapshot", "export PLAYWRIGHT_MCP_HEADLESS=1",
              f"python3 {Q} browser-open https://qa.traffic.example/form", "qa-mem browser-open --session=qa-login --headed https://qa.traffic.example/",
              "qa-mem browser-open", "echo https://github.com/x; playwright-cli -s=qa goto \"https://qa.traffic.example/$P\"",
@@ -206,9 +205,15 @@ class R2Hosts(Case):
              'playwright-cli --session qa open --profile "${HOME}/.local/share/qa-sdet/profiles/main/"',
              f"env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --profile {MAIN}"]
 
+    # a new browser without the main profile: the main session may, the explorer navigates its own browser with goto
+    BARE_OPEN = ["playwright-cli -s=qa open --browser=firefox", "playwright-cli -s qa open --browser firefox http://localhost:8765/",
+                 "env -u PLAYWRIGHT_MCP_STORAGE_STATE playwright-cli -s=qa open --browser chrome"]
+
     def test_navigation_and_browser_sources(self):
         self.table(self.DENY, True)
         self.table(self.ALLOW, False)
+        self.table(self.BARE_OPEN, False, agents=(False,))
+        self.table(self.BARE_OPEN, True, agents=(True,))
 
     def test_config_decides_hosts(self):
         try:
@@ -355,6 +360,13 @@ class R4Explorer(Case):
     def test_explorer_rules(self):
         self.table(self.DENY, True, RUN, agents=(True,))
         self.table(self.ALLOW, False, RUN, agents=(True,))
+
+    def test_explorer_navigates_in_its_browser_not_a_new_one(self):  # a bare open drops the sign-in and the signal history
+        for cmd in ("playwright-cli -s=qa open 'https://qa.traffic.example/map?layer=closures'", "playwright-cli -s=qa open",
+                    "playwright-cli -s=qa --raw open https://qa.traffic.example/ && playwright-cli -s=qa snapshot"):
+            self.assertIn("goto", bash(cmd, RUN, True), cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the main session may (a user's own check)
+        self.assertIsNone(bash("playwright-cli -s=qa goto 'https://qa.traffic.example/map?layer=closures'", RUN, True))
 
     def test_main_session_edits_config_fetches_and_runs_scripts(self):
         self.table([f"printf x > {self.cfg}", "curl -s https://example.com", "ssh host uptime", "bash /tmp/x.sh", "python3 /tmp/x.py",
