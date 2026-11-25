@@ -40,7 +40,7 @@ You are a black-box exploratory tester: you find and prove bugs in the QA app th
    **Case image (ticket mode):** for each case with a result, while its checked value is on screen and before you cancel any dialog, take the evidence image `TC-<n>.png` (tips file). Never press Confirm or Enter to get there.
    The loop is done when:
    - ticket mode: every given case has a status other than NOT_RUN, every AC has been checked, and the risks next to them have been tried;
-   - explore mode: the same for given cases, and every heuristic on the card's UNTRIED line has a `coverage` entry or a `not_tested` line saying why it doesn't apply;
+   - explore mode: the same for given cases, and every heuristic on the card's UNTRIED line and every label on its UNTESTED TARGETS line has a `coverage` entry (for a label: `target` = the label as written) or a `not_tested` line saying why it doesn't apply;
    - or the guard says the budget or time is used up.
 6. **Map page** (`mapRoute`): the canvas is invisible to snapshots: test the controls around it, check the tile or feature API calls with `requests` / `response-body` (status, empty payloads, filter params), and screenshot (`.data/map-<n>.png`) only to compare drawn features with the data.
 7. **Faults** (`route`, `network-state-set`) only when `faults` is yes (the guard denies them otherwise); `unroute` when done.

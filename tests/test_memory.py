@@ -439,6 +439,56 @@ class Card(MemBase):
         self.assertNotIn("boundary", untried)
         self.assertIn("happy-path", untried)
 
+    def rules(self, page, *labels):
+        with self.con:
+            for i, label in enumerate(labels):
+                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                                 (page, "rule", label, "max 10", f"src/F.jsx:{i}", "/repo", "frontend", core.now(), "src/F.jsx"))
+
+    @staticmethod
+    def untested(card):
+        line = next((x for x in card.splitlines() if x.startswith("UNTESTED TARGETS")), "")
+        return line.split("): ", 1)[1] if line else ""
+
+    def test_card_lists_code_rule_fields_no_run_covered(self):
+        """One boundary-tested field must not hide the page's other validated fields."""
+        self.rules("/form", "speed", "name", "start date")
+        memory.ingest(self.con, run(coverage=[{"target": "Speed limit field", "heuristic": "boundary", "result": "pass"}]))
+        c = memory.card(self.con, "/form")
+        self.assertEqual(self.untested(c), "name; start date")
+        self.assertIn("covered on build 1.0", c)
+        self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])  # the heuristic view is unchanged
+
+    def test_untested_targets_match_one_way_and_ignore_blocked(self):
+        self.rules("/form", "speed", "speed (2)", "start date", "name")
+        memory.ingest(self.con, run(coverage=[{"target": "date", "heuristic": "boundary", "result": "pass"},
+                                              {"target": "name", "heuristic": "empty-null", "result": "blocked"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; speed; start date")  # 'speed (2)': one field
+        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; start date")
+
+    def test_untested_targets_reset_on_a_new_build(self):
+        self.rules("/form", "speed")
+        memory.ingest(self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z")
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")
+        memory.ingest(self.con, run("2.0"), "2026-01-02T00:00:00Z")
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")
+
+    def test_untested_targets_line_is_capped_and_absent_without_rules(self):
+        memory.ingest(self.con, run())
+        self.assertNotIn("UNTESTED TARGETS", memory.card(self.con, "/form"))
+        self.rules("/form", *(f"field {i:02}" for i in range(12)))
+        line = self.untested(memory.card(self.con, "/form"))
+        self.assertEqual(line.count(";"), 10)  # 10 labels, then the remainder
+        self.assertTrue(line.endswith("+2 more (qa-mem code '/form')"), line)
+
+    def test_untested_targets_on_a_code_only_page_name_no_build(self):
+        self.rules("/zones/new", "speed")
+        self.con.execute("INSERT INTO pages(route) VALUES('/zones/new')")
+        line = next(x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("UNTESTED TARGETS"))
+        self.assertIn("covered on this build", line)
+        self.assertNotIn("None", line)
+
     def test_unknown_page_card(self):
         self.assertIn("NO CARD", memory.card(self.con, "/nope"))
 

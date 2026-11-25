@@ -350,21 +350,48 @@ def card(con, q):
             more = f" (+{len(rows) - len(locs)} more verified; find them with a snapshot)" if len(rows) > len(locs) else ""
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
     out += codemap.codemap_block(con, r, shown)
-    cov = {}
-    # Coverage from runs that couldn't read the build counts for a week, then the heuristic is retried.
-    week_ago = datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for c in con.execute("SELECT heuristic, target, result FROM coverage WHERE page=? AND ((build=? AND "
-                         "build!='unknown') OR (build='unknown' AND ts >= ?)) ORDER BY heuristic, result='pass', ts DESC",
-                         (r, b, week_ago)):  # failures first
-        cov.setdefault(c["heuristic"], []).append(f"{core.short(c['target'], 40)}:{core.short(c['result'], 12)}")
-    # A heuristic only blocked (e.g. needs --faults) is still untried: the next run may be able to do it.
-    tried = {h for h, t in cov.items() if any(not x.endswith(":blocked") for x in t)}
+    cov, tried, targets = _coverage(con, r, b)
     if cov:  # at most 4 targets per heuristic keeps the card short
         out.append(f"COVERED on build {b} (only-blocked ones are retried, listed in UNTRIED): " + " | ".join(
             f"{h}({', '.join(t[:4])}{f', +{len(t) - 4} more' if len(t) > 4 else ''})" for h, t in cov.items()))
     out.append("UNTRIED: " + (", ".join(h for h in core.HEURISTICS if h not in tried) or "none"))
+    untested = _untested_rules(con, r, targets)
+    if untested:  # labels stay whole: the explorer copies them as coverage targets
+        more = f"; +{len(untested) - 10} more (qa-mem code '{r}')" if len(untested) > 10 else ""
+        on = f"build {b}" if b and b != core.UNKNOWN else "this build"
+        out.append(f"UNTESTED TARGETS (code rules no run covered on {on}; write the label as the coverage target): "
+                   + "; ".join(untested[:10]) + more)
     out.append(bug_lines(con, r))
     return "\n".join(x for x in out if x)
+
+
+def _coverage(con, route, build):
+    """({heuristic: ['target:result', ...]}, heuristics tried, normalised targets checked) on `build`. Coverage from
+    runs that couldn't read the build counts for a week, then it is retried."""
+    cov, targets = {}, set()
+    week_ago = datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for c in con.execute("SELECT heuristic, target, result FROM coverage WHERE page=? AND ((build=? AND "
+                         "build!='unknown') OR (build='unknown' AND ts >= ?)) ORDER BY heuristic, result='pass', ts DESC",
+                         (route, build, week_ago)):  # failures first
+        cov.setdefault(c["heuristic"], []).append(f"{core.short(c['target'], 40)}:{core.short(c['result'], 12)}")
+        if c["result"] != "blocked":
+            targets.add(core.norm(c["target"]))
+    # A heuristic only blocked (e.g. needs --faults) is still untried: the next run may be able to do it.
+    tried = {h for h, t in cov.items() if any(not x.endswith(":blocked") for x in t)}
+    return cov, tried, targets
+
+
+def _untested_rules(con, route, targets):
+    """Labels of the page's code-map rules that no checked target names: target 'Speed limit field' covers rule
+    'speed', target 'date' doesn't cover 'start date'. Backend rules (page '*') need API calls, so they don't count."""
+    out, seen = [], set()
+    for (label,) in con.execute("SELECT label FROM codemap WHERE page=? AND kind='rule' ORDER BY label", (route,)):
+        label = re.sub(r"\s\(\d+\)$", "", label)  # apply_codemap's 'speed (2)': another rule row of the same field
+        words = core.norm(label)
+        if words and words not in seen and not any(f" {words} " in f" {t} " for t in targets):
+            out.append(label)
+        seen.add(words)
+    return out
 
 
 def bug_lines(con, route):
