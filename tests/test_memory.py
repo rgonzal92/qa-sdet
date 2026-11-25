@@ -587,6 +587,32 @@ class Card(MemBase):
         memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
         self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; start date")
 
+    def row(self, page, kind, label, value, src="src/F.jsx"):
+        with self.con:
+            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                             (page, kind, label, value, f"{src}:1", "/repo", "frontend" if page != "*" else "backend",
+                              core.now(), src))
+
+    def test_only_an_adversarial_check_clears_a_rule(self):  # a happy-path save of a valid speed proved nothing
+        self.rules("/form", "speed")
+        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "happy-path", "result": "pass"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")
+        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "invalid-format", "result": "pass"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")
+
+    def test_linked_server_rules_are_targets_and_a_client_server_mismatch_is_hinted(self):
+        self.row("/form", "api", "save", "POST /api/zones")
+        self.row("/form", "rule", "speed", "max 130")
+        self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones speed", "max 150", "api/zones.js")
+        memory.ingest(self.con, run())
+        c = memory.card(self.con, "/form")
+        self.assertIn("[server] POST /api/zones speed", self.untested(c))
+        hint = next(x for x in c.splitlines() if x.startswith("CLIENT/SERVER"))
+        self.assertIn("speed", hint)
+        self.assertIn("max 130", hint)
+        self.assertIn("max 150", hint)
+
     def test_untested_targets_reset_on_a_new_build(self):
         self.rules("/form", "speed")
         memory.ingest(self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z")
@@ -833,6 +859,37 @@ class Gaps(MemBase):
         self.assertTrue(out.rstrip().endswith("Next: /qa-sdet:qa-explore '/incidents'"), out)
         data = json.loads(memory.gaps(self.con, top=1, as_json=True))
         self.assertEqual(([p["route"] for p in data["pages"]], data["needs_id"]), (["/incidents"], ["/incidents/:id"]))
+
+    def test_the_card_names_what_changed_since_the_last_visit(self):
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        repo = git_repo(self.t / "app", {"src/Form.jsx": "a"})
+        self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", os.path.realpath(repo))
+        self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
+        self.assertNotIn("CHANGED SINCE", memory.card(self.con, "/form"))
+        self.commit(repo, "src/Form.jsx", "2026-01-06T00:00:00Z")
+        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("CHANGED SINCE"))
+        self.assertIn("src/Form.jsx", line)
+        self.assertIn("speed", line)  # the rule defined in the changed file
+
+    def test_tiers_changed_new_with_forms_old_build_current_and_history_breaks_ties(self):
+        self.row("/static", "locator", "Help", "getByText('Help')", "src/Help.jsx")  # never explored, nothing to submit
+        self.row("/new-form", "rule", "speed", "max 130", "src/New.jsx")  # never explored, a validated form
+        self.visit("/old", "1.0", "2026-01-01T00:00:00Z")
+        for route in ("/quiet", "/fragile", "/regressed"):
+            self.visit(route, "2.0", "2026-01-02T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "b", "build": "2.0", "pages": [{"route": "/fragile"}],
+                                 "bugs": [{"route": "/fragile", "title": f"t{i}", "symptom": f"s{i}", "severity": "HIGH"}
+                                          for i in range(2)]}, "2026-01-02T00:00:00Z")
+        memory.ingest(self.con, {"run_id": "c", "build": "2.0", "pages": [{"route": "/regressed"}],
+                                 "bugs": [{"route": "/regressed", "title": "r", "symptom": "r"}]}, "2026-01-02T00:00:00Z")
+        self.con.execute("UPDATE bugs SET status='REGRESSED' WHERE page='/regressed'")
+        self.con.execute("UPDATE bugs SET status='FILED' WHERE page='/fragile'")
+        routes = [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
+        self.assertEqual(routes[:3], ["/regressed", "/new-form", "/old"])
+        self.assertLess(routes.index("/fragile"), routes.index("/quiet"))  # 2 HIGH bugs: a hotspot first in its tier
+        self.assertEqual(routes[-1], "/static")
+        info = json.loads(memory.gaps(self.con, as_json=True))["pages"][0]
+        self.assertEqual((info["tier"], info["hotspot"] >= 0), ("changed or regressed", True))
 
     def test_a_repo_git_cannot_read_is_named_not_fatal(self):
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", "/nowhere/repo")

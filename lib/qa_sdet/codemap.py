@@ -257,11 +257,11 @@ def _same_call(a, b):
 def _codemap_rows(con, route):
     """This page's rows plus the backend rows ('*') for the endpoints its frontend calls (same path; same method
     when both sides name one)."""
-    rows = con.execute("SELECT kind,label,value,file,repo,area,src FROM codemap WHERE page=? ORDER BY kind, label",
+    rows = con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page=? ORDER BY kind, label",
                        (route,)).fetchall()
     called = _called(rows)
     if called and route != "*":
-        for x in con.execute("SELECT kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
+        for x in con.execute("SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
                              "ORDER BY kind, label"):
             ref = _api_ref(x["label"])
             ref = ref if ref[1] else _api_ref(x["value"])
@@ -293,8 +293,9 @@ def sharing_pages(con, route):
     return sorted(out)
 
 
-def codemap_block(con, route, shown=None):
-    """Card lines for the code map: compact (about 12 lines); `qa-mem code <route>` has everything."""
+def codemap_block(con, route, shown=None, first=()):
+    """Card lines for the code map: compact (about 12 lines); `qa-mem code <route>` has everything. Rules whose label is
+    in `first` (untested, or in a file changed since the last visit) come before the others within the cap."""
     all_rows = _codemap_rows(con, route)
     rows = [x for x in all_rows if x["kind"] != "route"]
     if not rows:
@@ -303,6 +304,7 @@ def codemap_block(con, route, shown=None):
     seen = shown if shown is not None else \
         {x["locator"] for x in con.execute("SELECT locator FROM locators WHERE page=? AND stale=0", (route,))}
     by = {k: [x for x in rows if x["kind"] == k] for k in ("locator", "rule", "api")}
+    by["rule"].sort(key=lambda x: x["label"] not in first)  # stable: alphabetical within each group
     uniq = {}
     for x in by["locator"]:  # confirmed by a run: shown above already; the same locator from two files: once
         if x["value"] not in seen:

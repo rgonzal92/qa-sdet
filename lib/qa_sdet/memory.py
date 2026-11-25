@@ -507,13 +507,18 @@ def card(con, q, focus=None, ids=False):
         if locs:
             more = f" (+{len(rows) - len(locs)} more verified; find them with a snapshot)" if len(rows) > len(locs) else ""
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
-    out += codemap.codemap_block(con, r, shown)
     cov, tried, targets = _coverage(con, r, b)
+    untested = _untested_rules(con, r, targets)
+    changed, in_changed = _changed_here(con, r, pg)
+    out += codemap.codemap_block(con, r, shown, first=set(untested) | {x.removeprefix("[server] ") for x in untested} | in_changed)
+    if changed:
+        out.append(f"CHANGED SINCE LAST VISIT (git; source HEAD may be ahead of the deployed build: attack these first): "
+                   f"{', '.join(changed[:5])}" + (f" (+{len(changed) - 5})" if len(changed) > 5 else "")
+                   + (f"; defined there: {'; '.join(sorted(in_changed)[:6])}" if in_changed else ""))
     if cov:  # at most 4 targets per heuristic keeps the card short
         out.append(f"COVERED on build {b} (only-blocked ones are retried, listed in UNTRIED): " + " | ".join(
             f"{h}({', '.join(t[:4])}{f', +{len(t) - 4} more' if len(t) > 4 else ''})" for h, t in cov.items()))
     out.append("UNTRIED: " + (", ".join(h for h in core.HEURISTICS if h not in tried) or "none"))
-    untested = _untested_rules(con, r, targets)
     if focus_words:  # the charter's fields first ('date filters' puts 'Date' and 'Filter' ahead)
         stems = {w.rstrip("s") for w in focus_words}
         untested.sort(key=lambda label: not ({w.rstrip("s") for w in core.norm(label).split()} & stems))
@@ -521,8 +526,11 @@ def card(con, q, focus=None, ids=False):
         shown_n = next((n for n in range(len(untested), 0, -1) if len("; ".join(untested[:n])) <= 400), 1)
         more = f"; +{len(untested) - shown_n} more (qa-mem code '{r}')" if len(untested) > shown_n else ""
         on = f"build {b}" if b and b != core.UNKNOWN else "this build"
-        out.append(f"UNTESTED TARGETS (code rules no run covered on {on}; write the label as the coverage target): "
-                   + "; ".join(untested[:shown_n]) + more)
+        out.append(f"UNTESTED TARGETS (code rules no adversarial check covered on {on}; write the label as the "
+                   "coverage target): " + "; ".join(untested[:shown_n]) + more)
+    differ = _client_server_differ(con, r)
+    if differ:
+        out.append("CLIENT/SERVER RULES DIFFER (a hint to verify through the page, not an oracle): " + "; ".join(differ[:3]))
     out.append(bug_lines(con, r, b))
     shared = _shared_bugs(con, r)
     if shared:
@@ -532,6 +540,48 @@ def card(con, q, focus=None, ids=False):
     if recurring:
         out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [_pattern_line(g) for g in recurring]
     return "\n".join(x for x in out if x)
+
+
+# heuristics that try to break a rule: only these clear a code-map rule from UNTESTED TARGETS (a happy-path save of a
+# valid value proves nothing about the rule)
+ADVERSARIAL = {"boundary", "empty-null", "invalid-format", "unicode-whitespace", "duplicate", "sequence-repeat",
+               "error-handling", "permissions"}
+
+
+def _visited(con, pg):
+    """When the page was last visited: last_verified, else (build never read) its last run's time."""
+    if pg["last_verified"]:
+        return pg["last_verified"]
+    times = [ts for target, ts in con.execute("SELECT target, ts FROM runs WHERE ts IS NOT NULL")
+             if core.norm_route(target) == pg["route"]]
+    return max(times, default=None)
+
+
+def _changed_here(con, route, pg):
+    """(files changed since the last visit, labels of the code-map rules and endpoints defined in them)."""
+    ts = _visited(con, pg)
+    if not ts or not con.execute("SELECT 1 FROM codemap WHERE page=? AND src != '' LIMIT 1", (route,)).fetchone():
+        return [], set()
+    files = _source_changes(con, {route: ts})[0].get(route, [])
+    labels = {x["label"] for x in codemap._codemap_rows(con, route) if x["src"] in files and x["kind"] in ("rule", "api")}
+    return files, labels
+
+
+def _client_server_differ(con, route):
+    """'<field>: client <rule> vs server <rule>' where a page rule and a linked server rule on the same field name
+    different numbers: a hint (the code isn't the oracle)."""
+    rows = codemap._codemap_rows(con, route)
+    client = [x for x in rows if x["kind"] == "rule" and x["page"] != "*"]
+    server = [x for x in rows if x["kind"] == "rule" and x["page"] == "*"]
+    nums = lambda v: set(re.findall(r"\d+(?:\.\d+)?", str(v or "")))
+    out = []
+    for c in client:
+        field = set(core.norm(re.sub(r"\s\(\d+\)$", "", c["label"])).split())
+        for x in server:
+            if field and field <= set(core.norm(x["label"]).split()) and nums(c["value"]) and nums(x["value"]) \
+                    and nums(c["value"]) != nums(x["value"]):
+                out.append(f"{c['label']}: client {core.short(c['value'], 40)} vs server {core.short(x['value'], 40)}")
+    return list(dict.fromkeys(out))
 
 
 # coverage that counts on a build (params: build, a week ago): runs that couldn't read the build count for a week
@@ -615,7 +665,7 @@ def _coverage(con, route, build):
     for c in con.execute(f"SELECT heuristic, target, result FROM coverage WHERE page=? AND {ON_BUILD} "
                          "ORDER BY heuristic, result='pass', ts DESC", (route, build, _week_ago())):  # failures first
         cov.setdefault(c["heuristic"], []).append(f"{core.short(c['target'], 40)}:{core.short(c['result'], 12)}")
-        if c["result"] != "blocked":
+        if c["result"] != "blocked" and c["heuristic"] in ADVERSARIAL:
             targets.add(core.norm(c["target"]))
     # A heuristic only blocked (e.g. needs --faults) is still untried: the next run may be able to do it.
     tried = {h for h, t in cov.items() if any(not x.endswith(":blocked") for x in t)}
@@ -623,15 +673,16 @@ def _coverage(con, route, build):
 
 
 def _untested_rules(con, route, targets):
-    """Labels of the page's code-map rules that no checked target names: target 'Speed limit field' covers rule
-    'speed', target 'date' doesn't cover 'start date'. Backend rules (page '*') need API calls, so they don't count."""
+    """Labels of the page's code-map rules, then the linked server rules ('[server] <label>'), that no adversarial check
+    named: target 'Speed limit field' covers rule 'speed', target 'date' doesn't cover 'start date'."""
     out, seen = [], set()
-    for (label,) in con.execute("SELECT label FROM codemap WHERE page=? AND kind='rule' ORDER BY label", (route,)):
+    rows = [(x["label"], x["page"] == "*") for x in codemap._codemap_rows(con, route) if x["kind"] == "rule"]
+    for label, server in sorted(rows, key=lambda t: (t[1], t[0])):
         label = re.sub(r"\s\(\d+\)$", "", label)  # apply_codemap's 'speed (2)': another rule row of the same field
         words = core.norm(label)
-        if words and words not in seen and not any(f" {words} " in f" {t} " for t in targets):
-            out.append(label)
-        seen.add(words)
+        if words and (server, words) not in seen and not any(f" {words} " in f" {t} " for t in targets):
+            out.append(f"[server] {label}" if server else label)
+        seen.add((server, words))
     return out
 
 
@@ -1016,6 +1067,13 @@ def gaps(con, changed_only=False, top=None, as_json=False):
     verified |= {pg["route"]: visits[pg["route"]] for pg in pages
                  if not pg["last_verified"] and pg["build"] == core.UNKNOWN and visits.get(pg["route"])}
     changed, unchecked = _source_changes(con, verified)
+    hot = _hotspots(con)
+    regressed = {p for (p,) in con.execute("SELECT DISTINCT page FROM bugs WHERE status='REGRESSED'")}
+    forms = set()  # pages with something to submit: a validation rule or a write call
+    for x in con.execute("SELECT page, kind, label, value FROM codemap WHERE page != '*' AND kind IN ('rule', 'api')"):
+        if x["kind"] == "rule" or codemap._api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE") \
+                or codemap._api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE"):
+            forms.add(x["page"])
     ranked = []
     for pg in pages:
         r, b = pg["route"], current or pg["build"]
@@ -1040,12 +1098,20 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append(f"{untested} untested field{'s' * (untested != 1)}")
         if open_bugs:
             parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
+        if r in regressed:
+            parts.append("a bug regressed")
+        if hot.get(r, 0) >= 3:
+            parts.append(f"hotspot {hot[r]} (bug history)")
         if "/:id" in r:  # a detail page: the explorer can't open it without a real record
             parts.append("(needs a record id)")
-        info = {"route": r, "name": pg["name"] or "", "never_explored": never, "old_build": old, "changed": bool(src),
-                "changed_files": src, "unrechecked_fixed": fixed_recheck, "untried": untried,
-                "untested_fields": untested, "open_bugs": open_bugs}
-        ranked.append(((not never, not src, not old, not fixed_recheck, -(untried + untested), -open_bugs, r),
+        # tiers: what changed or broke again first, then unexplored pages with something to submit, then pages on an
+        # older build, then the rest; bug history (hotspot) and untried checks order each tier
+        tier = 0 if src or r in regressed or fixed_recheck else 1 if never and r in forms else 2 if old else 3
+        info = {"route": r, "name": pg["name"] or "", "tier": TIERS[tier], "hotspot": hot.get(r, 0),
+                "never_explored": never, "old_build": old, "changed": bool(src), "changed_files": src,
+                "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested, "open_bugs": open_bugs,
+                "risk_reasons": parts}
+        ranked.append(((tier, -hot.get(r, 0), -(untried + untested), -open_bugs, r),
                        f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts), info))
     ranked.sort(key=lambda x: x[0])
     shown = ranked[:top] if top is not None else ranked
@@ -1066,6 +1132,22 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         return "\n".join(out + ["Next: these pages need a record id: /qa-sdet:qa-explore '<a real record URL>'"])
     route = route.replace("'", "'\\''")
     return "\n".join(out + [f"Next: /qa-sdet:qa-explore '{route}'"])
+
+
+TIERS = ("changed or regressed", "new, with forms", "old build", "current")
+SEVERITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def _hotspots(con):
+    """{page: score} from its bug history: each bug by severity (CRITICAL 4 … LOW 1; INVALID never), +4 for a bug that
+    regressed, +1 per build a check failed on. Deterministic, and shown as is (gaps, hotspots)."""
+    score = {}
+    for x in con.execute("SELECT page, severity, status FROM bugs WHERE status != 'INVALID'"):
+        w = SEVERITY_WEIGHT.get((core.norm(x["severity"]).split() or [""])[0], 1) + 4 * (x["status"] == "REGRESSED")
+        score[x["page"]] = score.get(x["page"], 0) + w
+    for page, n in con.execute("SELECT page, count(DISTINCT build) FROM coverage WHERE result='fail' GROUP BY page"):
+        score[page] = score.get(page, 0) + n
+    return score
 
 
 def _source_changes(con, verified):
