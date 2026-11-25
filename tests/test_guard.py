@@ -352,9 +352,9 @@ class R4Explorer(Case):
     ALLOW = [f"cat {cfg}", f"sed -n 1,5p {cfg}", f"cp {cfg} {RUN}/qa-out/r/.data/cfg-copy.json", "cat .playwright/cli.config.json",
              "ls -l ~/.playwright/cli.config.json", "jq . .playwright/cli.config.json", "timeout 5 wget -qO- http://localhost:1/api",
              "echo $(curl -s qa.traffic.example)", "curl -s -o /tmp/r.json -H 'Accept: application/json' https://qa.traffic.example/api/x | jq .",
-             "playwright-cli -s=qa find \"Retry http error\"", "command -v curl", "rm -f qa-out/.active", "rm -rf qa-out/r/.data/x",
-             "cat qa-out/.active", "printf x>qa-out/.active", "git status", "python3 -c 'print(1)'", "python3 -m unittest discover -s tests",
-             f"python3 {Q} card /x", f"python3 {Q} marker stop .", "qa-mem report qa-out/r", "echo hi | bash", "bash -c 'ls -la'",
+             "playwright-cli -s=qa find \"Retry http error\"", "command -v curl", "rm -rf qa-out/r/.data/x",
+             "cat qa-out/.active", "git status", "python3 -c 'print(1)'", "python3 -m unittest discover -s tests",
+             f"python3 {Q} card /x", "qa-mem report qa-out/r", "echo hi | bash", "bash -c 'ls -la'",
              "playwright-cli kill-all", "curl -s https://qa.traffic.example/api/x", "/usr/bin/env ls", f"{Q} card /x", "playwright-cli -s=qa --raw eval 'document.body.innerHTML'"]
 
     def test_explorer_rules(self):
@@ -419,6 +419,16 @@ class R4Explorer(Case):
                     "qa-mem remember /x rule 'no limit'", "qa-mem answer 1 yes", "qa-mem stale 9.9"):
             self.assertIn("the user's", bash(cmd, RUN, explorer=True) or "", cmd)
             self.assertIsNone(bash(cmd, RUN), cmd)  # the main session (the user's request) may
+
+    def test_the_run_marker_is_the_coordinators(self):  # a steered explorer could lift its budget or turn on faults
+        for cmd in (f"qa-mem dispatch '{RUN}/qa-out/r' --route /x --faults", f"qa-mem marker start '{RUN}' --faults",
+                    f"qa-mem marker start '{RUN}' --budget 999", f"qa-mem marker stop '{RUN}'", f"python3 {Q} marker stop .",
+                    "rm -f qa-out/.active", "printf x>qa-out/.active", "echo '{\"expires\": 9}' > qa-out/.active",
+                    "cp /tmp/m.json qa-out/.active", "mv qa-out/.active /tmp/m", "tee qa-out/.active < /tmp/m",
+                    f"rm -f {RUN}/qa-out/.active"):
+            self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
+            self.assertIsNone(bash(cmd, RUN), cmd)  # the skill's main session runs setup and teardown
+        self.assertIsNone(bash("cat qa-out/.active", RUN, explorer=True))  # reading it is fine
 
     def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
         for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):

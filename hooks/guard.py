@@ -8,7 +8,8 @@ R4 The qa-explorer uses only its tools (no MCP), writes only its run files, leav
 .playwright/cli.config.json alone, fetches only from allowedHosts and
 runs no script file or package (a page it read could have steered it to write or name one). R5 Nobody changes the qa-sdet data folder
 (memory DB); sqlite3 on it only -readonly. R6 A run marker (qa-out/.active) with a budget or deadline limits browser
-commands; faults need `faults: true`. R7 The qa-mapper reads source (no secrets) and writes only its code map. R8 A Bash
+commands; faults need `faults: true`; the explorer neither writes nor removes it. R7 The qa-mapper reads source
+(no secrets) and writes only its code map. R8 A Bash
 call fully checked in one parse is approved; every denial is logged. It doesn't emulate the shell: a call that names a
 guarded tool or path and hides something in an odd form ($VAR program or verb, eval of a variable, a script fed to a
 shell, inline code, xargs, a command string handed to another program, a computed path) is denied: run it directly."""
@@ -112,6 +113,9 @@ ODD = "{} can't be checked; run the guarded command directly (spell out program,
 PROFILE_REASON = ("the qa-sdet browser profile folder holds the signed-in QA session (cookies); only qa-mem browser-open "
                   "(playwright-cli open --profile <main profile>) may use it")
 CONFIG_REASON = "the qa-sdet config holds allowedHosts (cli.config.json picks the browser): read them, but leave them unchanged"
+MARKER_REASON = ("the run marker (qa-out/.active) is the coordinator's: it sets your budget, deadline and fault injection; "
+                 "finish with what you have (step 9)")
+MARKER_WRITES = {"dispatch", "marker"}  # qa-mem commands that (re)write or remove the run marker
 DB_REASON = "{} on the qa-sdet memory DB directory is blocked (only qa-mem writes it)"
 LOOP_REASON = "playwright-cli in a loop can't be counted against the run budget; run commands one by one, or batch values in one eval"
 UPLOAD_REASON = "an upload of a secret (key, .env, credentials, qa-sdet data or config) or a glob; upload a test file, by name"
@@ -677,6 +681,8 @@ def check_qamem(args, ctx):
     against the budget; qa-mem evidence: two (an eval and a screenshot)."""
     if ctx.explorer and args[:1] and args[0] in MANUAL_WRITES:
         return (f"qa-mem {args[0]} is the user's call (a manual memory write); put what you saw in the run JSON's notes")
+    if ctx.explorer and args[:1] and args[0] in MARKER_WRITES:
+        return MARKER_REASON
     if args[:1] == ["evidence"]:
         ctx.spend, ctx.runs_pw, ctx.loop = ctx.spend + 2, True, ctx.loop or ctx.loop_depth > 0
         return None
@@ -955,6 +961,11 @@ def http_writes(rest, cwds):
     names = {os.path.basename(re.split(r"[?#]", w)[0]) for w in words if "/" in w} - {""}
     dirs = set(cwds) | {p for w in words for c in cwds if os.path.isdir(p := real(w, c))}
     return words + [os.path.join(d, n) for d in dirs for n in names]
+def marker_files(cwds):
+    """R6: the run marker the explorer runs under, as read_marker finds it (cwd or project, then qa-out/.active)."""
+    bases = {b for b in (*cwds, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
+    return {real(os.path.join(b, "qa-out", ".active"), "/") for b in bases} | {
+        real(os.path.join(b, ".active"), "/") for b in bases if os.path.basename(os.path.normpath(b)) == "qa-out"}
 def config_files(cwds):
     """R4: the qa-sdet config (allowedHosts) and the playwright-cli config files that would pick its browser."""
     return {os.path.realpath(CONFIG), real("~/.playwright/cli.config.json", "/")} | {real(".playwright/cli.config.json", c) for c in cwds}
@@ -1134,7 +1145,8 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     ctx.approve = ctx.approve and approvable(i, name, rest, outs, ins, feeds or ndocs, start)
     return r or check_profile(name, rest, outs, ins, local, pw_profile_values(rest) if name == "playwright-cli" else ()) or (
         DB_REASON.format(name or "a redirection") if changes(name, rest, outs, local, DATA_DIR) else None) or (
-        CONFIG_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in config_files(local)) else None)
+        CONFIG_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in config_files(local)) else None) or (
+        MARKER_REASON if ctx.explorer and any(changes(name, rest, outs, local, f) for f in marker_files(local)) else None)
 # ---------- 10. other tools, the hook ----------
 def mcp_name_words(name):  # getJiraIssueWithEdit -> [get, jira, issue, with, edit]; jira_create_issue -> [jira, create, issue]
     return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]

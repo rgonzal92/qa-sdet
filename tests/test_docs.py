@@ -150,9 +150,10 @@ class Docs(unittest.TestCase):
                 cmd = re.sub(r" \[[^\]]*\]", " --budget 5 --faults", cmd)  # the optional flags
                 with mock.patch.dict(os.environ, env):
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                    for agent in ("", "qa-sdet:qa-explorer"):
-                        self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
-                                                     "agent_type": agent}), (None, True), cmd)
+                    ev = lambda agent: g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(proj),
+                                                   "agent_type": agent})
+                    self.assertEqual(ev(""), (None, True), cmd)
+                    self.assertIn("coordinator", ev("qa-sdet:qa-explorer")[0] or "", cmd)  # they set the run marker
                     self.assertIn("host", g.check("playwright-cli -s=qa goto /form", str(proj)))  # a bare path has no host
                     self.assertIn("--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj)))  # also with no run
 
