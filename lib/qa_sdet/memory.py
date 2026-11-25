@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from . import codemap, core, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from typing import Any
 
     from .contracts import JsonObj

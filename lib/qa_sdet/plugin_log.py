@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from . import core, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from collections.abc import Mapping
     from typing import Any
 
@@ -109,7 +109,8 @@ def _scrub_fields(obj, long_keys=("text",)):
 def _trim_log(log_path, cap=MAX_EVENTS):
     """Keep only the newest `cap` lines atomically, never following links or FIFOs."""
     try:
-        fd = os.open(log_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        # not a vulnerability (S2083): the project's own qa-out (CLAUDE_PROJECT_DIR or the cwd), not agent data
+        fd = os.open(log_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # NOSONAR
         with os.fdopen(fd, "rb") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 return
@@ -122,7 +123,8 @@ def _trim_log(log_path, cap=MAX_EVENTS):
             with os.fdopen(tfd, "w", encoding="utf-8", errors="replace") as fh:
                 fh.writelines(keep)
             os.chmod(tmp, 0o600)
-            os.replace(tmp, log_path)
+            # not a vulnerability (S2083): the project's own qa-out (CLAUDE_PROJECT_DIR or the cwd), not agent data
+            os.replace(tmp, log_path)  # NOSONAR
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -145,15 +147,18 @@ def append_event(
             return False
         folder = Path(qa_out)
         if create:
-            folder.mkdir(parents=True, exist_ok=True)
-        elif not folder.is_dir():
+            # not a vulnerability (S2083): the project's own qa-out (CLAUDE_PROJECT_DIR or the cwd), not agent data
+            folder.mkdir(parents=True, exist_ok=True)  # NOSONAR
+        # not a vulnerability (S6549): a local path the user's own project or config names, not agent data
+        elif not folder.is_dir():  # NOSONAR
             return False
         rec = {"ts": ts or core.now(), "v": plugin_version(), "type": str(event_type)}
         if isinstance(fields, dict):
             rec.update(_scrub_fields(fields))
         line = json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n"
         log = folder / LOG_NAME
-        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        # not a vulnerability (S2083): the project's own qa-out (CLAUDE_PROJECT_DIR or the cwd), not agent data
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)  # NOSONAR
         size = 0
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
             st = os.fstat(fh.fileno())
@@ -385,7 +390,8 @@ class Anonymizer:
         if not s:
             return ""
         try:
-            u = urlsplit(s if "://" in s else "http://" + s)
+            # not a vulnerability (S5332): a scheme added only to parse a bare host; nothing is fetched
+            u = urlsplit(s if "://" in s else "http://" + s)  # NOSONAR
             return (u.hostname or "").rstrip(".").removeprefix("*.")
         except ValueError:
             return ""

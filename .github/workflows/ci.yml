@@ -85,7 +85,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - run: npm install --global @anthropic-ai/claude-code@2.1.330 # pinned: a validator change must be a decision
+      # pinned: a validator change must be a decision. --ignore-scripts: no install script runs; the native binary
+      # ships in the platform package, so its folder goes on PATH (2.1.330's layout)
+      - run: |
+          npm install --global --ignore-scripts @anthropic-ai/claude-code@2.1.330
+          echo "$(npm root --global)/@anthropic-ai/claude-code-linux-x64" >> "$GITHUB_PATH"
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: ${{ env.UV_VERSION }}

@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 from . import core, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     import sqlite3
     from typing import Any
 
@@ -570,7 +570,8 @@ def browser_open(args):
     except (OSError, subprocess.TimeoutExpired):
         pass  # the open below reports a missing playwright-cli or a profile still in use
     try:  # captured (the daemon gets its own stdio, so this returns) to translate the profile-in-use error
-        r = subprocess.run(
+        # not a vulnerability (S6350): an argument list (no shell) from the user's own config, which agents can't write
+        r = subprocess.run(  # NOSONAR
             browser_cmd(session, headed, url, browser, profile),
             env=env,
             capture_output=True,
@@ -611,7 +612,8 @@ def _norm_host(raw):
     if not s:
         return "", ""
     try:
-        u = urlsplit(s if "://" in s else "http://" + s)
+        # not a vulnerability (S5332): a scheme added only to parse a bare host; nothing is fetched
+        u = urlsplit(s if "://" in s else "http://" + s)  # NOSONAR
     except ValueError:
         return "", ""
     hostname = (u.hostname or "").rstrip(".")

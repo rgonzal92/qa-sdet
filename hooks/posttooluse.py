@@ -169,7 +169,7 @@ def draft_match(name, text):
     title, route = re.match(r"#[ \t]+(.+)", text), re.search(r"\*\*Route:\*\*\s*(\S+)", text)
     if not title or not route:
         return None
-    actual = re.search(r"^## Actual[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    actual = re.search(r"^## Actual[ \t]*\n(.*?)(?=(?:^## )|\Z)", text, re.M | re.S)
     net = re.search(r"Network:\s*`?([A-Z]+ /[^\s`]+)", text)
     try:
         import sqlite3

@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true); importing typing costs every call ~5 ms
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from collections.abc import Iterable, Mapping
 
     from .contracts import JsonObj
@@ -456,7 +456,8 @@ def _write(path: str | Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:  # a lone surrogate in Jira or page text
             f.write(text)
-        os.chmod(tmp, 0o644)
+        # not a vulnerability (S2612): a normal file mode for reports and stamps; the DB and browser profile folders are 0700
+        os.chmod(tmp, 0o644)  # NOSONAR
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

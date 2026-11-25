@@ -1112,6 +1112,20 @@ class DevWork(Case):
 class OddForms(Case):
     """O1-O10: a call that names a guarded tool or path and hides what the guard can't read simply is denied."""
 
+    def test_eval_of_many_variables_is_read_in_linear_time(self):  # SonarQube S5852: a hung guard is killed at 10 s
+        probe = (
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import guard; "
+            "print(json.dumps([bool(guard.ONLY_VARS_RE.fullmatch(a)) for a in json.loads(sys.argv[2])]))"
+        )
+        args = ["$a " * 40 + "!", " $a  ${b}\x04 ", "$a$b", "$a!", "", "  "]
+        r = subprocess.run(
+            [sys.executable, "-c", probe, str(ROOT / "hooks"), json.dumps(args)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )  # the exponential regex took 3 s at 24 variables, 4x more with each 2 added
+        self.assertEqual(json.loads(r.stdout), [False, True, True, False, False, False], r.stderr)
+
     DENY = [
         "P=playwright-cli; $P goto x",
         "$(which acli) jira workitem create",

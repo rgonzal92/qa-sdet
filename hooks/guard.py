@@ -213,7 +213,7 @@ HOSTISH_RE = re.compile(
 NOT_A_PATH_RE, GLOB_RE = re.compile(r"[\s()'\"`;|<>]"), re.compile(r"[*?\[]")  # code or text in an argument; a glob
 MSG_OPT_RE = re.compile(r"(-m|--message|--body|--title)(=|$)")  # its value is text (a commit message), not a path
 POS_PARAM_RE = re.compile(r"^\$(\{?[@*]\}?|\{?[1-9]\}?)$")  # "$@", $1: a function passing its arguments through
-ONLY_VARS_RE = re.compile(r"(\s*(\$\{?\w+\}?|\x04)\s*)+")  # wholly $VAR / $(...)
+ONLY_VARS_RE = re.compile(r"(?:\s*(?:\$\{?\w+\}?|\x04))+\s*")  # wholly $VAR / $(...); one way to split spaces: linear
 MCP_JIRA_RE = re.compile(
     r"^mcp__.*(atlassian|jira|confluence)", re.I
 )  # server or tool name (mcp__corp__createJiraIssue)
@@ -286,7 +286,8 @@ def host_ok(url, hosts):
     from urllib.parse import urlparse  # here: ~2 ms of start-up on every tool call, and only URL checks need it
 
     try:
-        host = (urlparse(url if "://" in url else "http://" + url).hostname or "").lower().rstrip(".")
+        # not a vulnerability (S5332): a scheme added only to parse a bare host; nothing is fetched
+        host = (urlparse(url if "://" in url else "http://" + url).hostname or "").lower().rstrip(".")  # NOSONAR
     except ValueError:
         return False  # %23, %2f in the host: browsers decode it first, so what urlparse reads isn't where they go
     return bool(host) and "%" not in host and any(host == h or host.endswith("." + h) for h in hosts)
@@ -353,7 +354,9 @@ def path_hits(word, cwd):
         if (
             any(under(fixed, r) or ancestor(fixed, r) for r in roots) or os.path.basename(fixed) == "qa-out"
         ):  # the run marker
-            hits += map(os.path.realpath, islice(glob.iglob(full, recursive=any(under(fixed, r) for r in roots)), 500))
+            # not a vulnerability (S2083): the guard expands a command's paths to check them against protected folders
+            found = glob.iglob(full, recursive=any(under(fixed, r) for r in roots))  # NOSONAR
+            hits += map(os.path.realpath, islice(found, 500))
             if "**" in t:  # recursive glob rooted above a profile: match inside profiles without walking all of HOME
                 pat = os.path.normpath(full)
                 for r in profiles():
@@ -947,7 +950,9 @@ def js_urls(text):
     """Full URLs (not ones only compared) and `//host` references in page JS or arguments."""
     hosts = [h for h in SCHEMELESS_URL_RE.findall(text) if "." in h or h.lower() == "localhost"]  # not XPath //td
     return [m.group(0) for m in URL_RE.finditer(text) if not compared_only(text, m.start(), m.group(0))] + [
-        "http://" + h for h in hosts
+        # not a vulnerability (S5332): a scheme added only to parse a bare host; nothing is fetched
+        "http://" + h  # NOSONAR
+        for h in hosts
     ]
 
 

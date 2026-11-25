@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from collections.abc import Callable
     from typing import Any
 
@@ -240,7 +240,8 @@ def scrub_tree(root: Path, budget: float = 4.0) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                 fh.write(f"{done[0]} {done[1]}" if done else str(started))
-            os.chmod(tmp, 0o644)
+            # not a vulnerability (S2612): a normal file mode for reports and stamps; the DB and browser profile folders are 0700
+            os.chmod(tmp, 0o644)  # NOSONAR
             os.replace(tmp, stamp)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)

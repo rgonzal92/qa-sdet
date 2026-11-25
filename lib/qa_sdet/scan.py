@@ -14,7 +14,7 @@ from pathlib import Path
 from . import codemap, core, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from typing import Any
 
 
@@ -151,7 +151,7 @@ PAGE_SIGNAL_RE = re.compile(
     r"(?i:(^|/)(pages|pom|po|steps?|page-?objects?|e2e|cypress|playwright)/)"
 )
 SPEC_VERSION_RE = re.compile(
-    r"(?m)^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d|[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d"
+    r"(?m)(?:^\s*['\"]?(openapi|swagger)['\"]?\s*:\s*['\"]?\d)|(?:[{,]\s*\"(openapi|swagger)\"\s*:\s*\"\d)"
 )
 CONFIG_FILE_RE = re.compile(
     r"(?i)(^|/)(application|bootstrap)[\w.-]*\.(ya?ml|properties)$|(^|/)docker-compose[\w.-]*\.ya?ml$|"

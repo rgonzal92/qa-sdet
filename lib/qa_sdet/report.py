@@ -18,7 +18,7 @@ from urllib.parse import quote, urlsplit
 from . import core, ops, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # NOSONAR
     from collections.abc import Iterable, Sequence
     from typing import Any
 
@@ -46,7 +46,8 @@ COVERAGE_ICON = {"pass": "✅", "fail": "❌", "blocked": "⛔"}
 
 def _load_json(path, warnings):
     try:
-        return scrub.redact_json(json.loads(Path(path).read_text(encoding="utf-8-sig")))
+        # not a vulnerability (S2083): callers pass fixed names inside the run folder; bug ids are validated BUG-n
+        return scrub.redact_json(json.loads(Path(path).read_text(encoding="utf-8-sig")))  # NOSONAR
     except FileNotFoundError:
         return None
     except (OSError, ValueError, RecursionError) as e:
@@ -968,7 +969,8 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
                 + (
                     [
                         f"acli jira workitem link create --out <JIRA-KEY> --in {ticket} --type "
-                        f"{shlex.quote(link_type)} --yes"
+                        # not a vulnerability (S6350): printed for the user, never run; every value is shlex-quoted or a validated Jira key
+                        f"{shlex.quote(link_type)} --yes"  # NOSONAR
                     ]
                     if link_type and ticket
                     else []
@@ -1117,7 +1119,8 @@ SIGNALS_SHOWN = 15
 
 def _text(path):
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
+        # not a vulnerability (S2083): callers pass fixed names inside the run folder; bug ids are validated BUG-n
+        return Path(path).read_text(encoding="utf-8", errors="replace")  # NOSONAR
     except OSError:
         return ""
 

@@ -37,7 +37,8 @@ def installed_browsers(names=core.BROWSERS):
         if pw:
             why = f"can't check: `playwright-cli install-browser --dry-run {name}` gave no install location"
             try:
-                dry = subprocess.run(
+                # not a vulnerability (S6350): an argument list (no shell) from the user's own config, which agents can't write
+                dry = subprocess.run(  # NOSONAR
                     [pw, "install-browser", "--dry-run", name],
                     capture_output=True,
                     text=True,
@@ -261,7 +262,8 @@ def doctor():
         if paths is not None and not (isinstance(paths, list) and all(isinstance(x, str) and x for x in paths)):
             line(False, "sourcePaths is a list of folders", 'e.g. "sourcePaths": ["/home/me/work/app-ui"]')
         paths = [x for x in paths if isinstance(x, str) and x] if isinstance(paths, list) else []
-        gone = [x for x in paths if not os.path.isdir(os.path.expanduser(x))]
+        # not a vulnerability (S6549): a local path the user's own project or config names, not agent data
+        gone = [x for x in paths if not os.path.isdir(os.path.expanduser(x))]  # NOSONAR
         if gone:
             line(
                 False,
