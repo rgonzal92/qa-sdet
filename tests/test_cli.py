@@ -59,6 +59,7 @@ class Cli(Base):
         # L6: marker stop rejects flags, code rejects --repos=1 / --repos + route, bugs/ingest reject extra args
         for bad in (("marker", "stop", str(self.proj), "--budget", "10"),
                     ("marker", "stop", str(self.proj), "--faults"),
+                    ("marker", "stop", str(self.proj), "--api-writes"),
                     ("code", "--repos=1"),
                     ("code", "--repos", "/form"),
                     ("bugs", "OPEN", "extra"),

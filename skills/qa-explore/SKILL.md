@@ -1,12 +1,12 @@
 ---
 name: qa-explore
 description: Exploratory bug hunt on one or more pages of the QA web app (or changed/top pages from memory gaps), no ticket needed, with annotated bug images, repro specs and a readable report. Use when asked to explore or find bugs on a page, URL, changed pages or feature, or what to explore next.
-argument-hint: <url | route | page name>... | --changed | --top N | --continue [run] | --discover [<url>] [--depth D] [--adaptive] [--faults] [--budget N] [--minutes M] [--focus '<charter>'] [--verify]
+argument-hint: <url | route | page name>... | --changed | --top N | --continue [run] | --discover [<url>] [--depth D] [--adaptive] [--faults] [--api-writes] [--budget N] [--minutes M] [--focus '<charter>'] [--verify]
 ---
 
 Explore and find bugs: $ARGUMENTS
 
-Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. First read `${CLAUDE_SKILL_DIR}/../../references/run-setup.md`. `--faults`, `--budget N` and `--minutes M` are optional and apply per page (they go to `qa-mem dispatch`); without them there is no fault injection and no limit. `--focus '<charter>'` (optional, e.g. `--focus 'date filters across time zones'`) narrows the session to that charter: it goes to dispatch too, which puts it in the brief as `FOCUS: <charter>`.
+Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. First read `${CLAUDE_SKILL_DIR}/../../references/run-setup.md`. `--faults`, `--api-writes`, `--budget N` and `--minutes M` are optional and apply per page (they go to `qa-mem dispatch`); without them there is no fault injection, no write through `qa-mem api-probe` (reads always work) and no limit. `--api-writes` lets the explorer send POST, PUT, PATCH and DELETE with `qa-mem api-probe`, only on `qa-sdet-` records it created: the mass-assignment probe. `--focus '<charter>'` (optional, e.g. `--focus 'date filters across time zones'`) narrows the session to that charter: it goes to dispatch too, which puts it in the brief as `FOCUS: <charter>`.
 
 1. **Config and target(s):**
    - No target and neither `--changed` nor `--top`: run `qa-mem gaps`, show its header and first 5 page lines, and ask which page(s) to explore (its `Next:` line is the top pick); go on with the answer.

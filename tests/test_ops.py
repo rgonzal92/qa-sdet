@@ -113,6 +113,12 @@ class Marker(Base):
         self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
         self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)  # already gone: fine
 
+    def test_api_writes_is_a_flag_of_the_run_and_off_by_default(self):
+        cli("marker", "start", str(self.proj))
+        self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["api_writes"], False)
+        cli("marker", "start", str(self.proj), "--api-writes")
+        self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["api_writes"], True)
+
     def test_bad_input(self):
         for argv in (("marker",), ("marker", "go", str(self.proj)), ("marker", "start", str(self.proj), "--budget", "-1"),
                      ("marker", "start", str(self.proj), "--budget", "x"), ("marker", "start", str(self.proj), "--budget", ""), ("marker", "start", str(self.proj), "--minutes", ""), ("marker", "start", str(self.proj), "--bogus")):
@@ -665,6 +671,15 @@ class Dispatch(Base):
             self.assertNotIn(gone, brief)
         m = json.loads((self.proj / "qa-out/.active").read_text())
         self.assertEqual((m["budget"], m["run_dir"], m["slug"]), (20, str(self.run_dir), "list"))
+
+    def test_api_writes_goes_to_the_marker_and_the_brief(self):
+        marker = lambda: json.loads((self.proj / "qa-out/.active").read_text())
+        out = self.dispatch("/list?a=1")[1]
+        self.assertIs(marker()["api_writes"], False)
+        self.assertIn("faults: no\napi_writes: no", Path(out["brief"]).read_text())
+        out = self.dispatch("/list?a=1", "--faults", "--api-writes")[1]
+        self.assertIs(marker()["api_writes"], True)
+        self.assertIn("faults: yes\napi_writes: yes", Path(out["brief"]).read_text())
 
     def test_routes_with_one_slug_get_their_own_and_a_route_keeps_its_slug(self):
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")

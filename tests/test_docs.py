@@ -256,6 +256,15 @@ class Docs(unittest.TestCase):
         for f in ALL:
             self.assertNotRegex(f.read_text(), r"video-show-actions[^\n`]*--cursor", f.name)
 
+    def test_api_writes_flag_reaches_the_marker_the_brief_and_every_doc(self):
+        self.assertIn("--api-writes", cli.COMMANDS["dispatch"])
+        self.assertIn("--api-writes", cli.COMMANDS["marker"])
+        for rel in ("skills/qa-explore/SKILL.md", "skills/qa-ticket/SKILL.md", "references/run-setup.md", "README.md"):
+            self.assertIn("--api-writes", text(rel), rel)
+        for rel in ("skills/qa-explore/SKILL.md", "skills/qa-ticket/SKILL.md"):
+            self.assertIn("--api-writes", text(rel).split("---\n")[1], rel)  # the argument-hint
+        self.assertIn("api_writes", text("agents/qa-explorer.md"))  # the brief line it reads
+
     def test_frontmatter(self):
         fm = lambda p: dict(re.findall(r"^([\w-]+): (.*)$", p.read_text().split("---\n")[1], re.M))
         for path in SKILLS:
