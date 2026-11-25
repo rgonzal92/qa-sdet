@@ -281,6 +281,56 @@ def parked(f):
     return lines[1].split(" ", 1)[-1] if lines[0] == digest and len(lines) > 1 else None
 
 
+def init_status(init_dir):
+    """{total, ingested, dropped_rows: {out: note}, retry: [{area, scan, out, reason}]} for the newest codemap-scan in
+    init_dir: a mapper chunk (a scan file with files to read) is settled when its code map, written for that scan, is
+    ingested. Maps written but not read yet are ingested first."""
+    d = Path(init_dir)
+    if d.is_dir():
+        ingest_pending(d)
+    scans = []
+    for f in sorted(d.glob("scan-*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            sid = str(data.get("scan_id") or "")
+            repos = [r for r in data.get("repos") or [] if isinstance(r, dict)]
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+        stamp = re.search(r"(\d{8}-\d{6})$", sid)
+        if stamp and any(r.get("files") for r in repos):  # nothing to read: settled, no mapper
+            scans.append((stamp.group(1), f, data))
+    newest = max((x[0] for x in scans), default="")
+    out = {"total": 0, "ingested": 0, "dropped_rows": {}, "retry": []}
+    for stamp, f, data in scans:
+        if stamp != newest:
+            continue  # a scan file left from an earlier scan
+        cm = f.with_name("code-map-" + f.name[len("scan-"):])
+        out["total"] += 1
+        retry = lambda why: out["retry"].append({"area": data.get("area"), "scan": str(f), "out": str(cm), "reason": why})
+        try:
+            body = cm.read_bytes()
+        except OSError:
+            retry("no code map written")
+            continue
+        try:
+            written_for = json.loads(body).get("scan_id")
+        except (ValueError, AttributeError):
+            written_for = data.get("scan_id")  # unreadable: its .error says why
+        if written_for != data.get("scan_id"):
+            retry(f"the code map was written for an older scan ({written_for})")
+        elif err := parked(cm):
+            retry(err)
+        elif (_first_line(cm.with_name(cm.name + ".ingested")) or "") == hashlib.sha1(body).hexdigest():
+            out["ingested"] += 1
+            note = next((x[len("dropped rows: "):] for x in cm.with_name(cm.name + ".ingested").read_text().splitlines()
+                         if x.startswith("dropped rows: ")), "")
+            if note:
+                out["dropped_rows"][str(cm)] = note
+        else:
+            retry("not ingested (the memory DB was busy): run init-status again")
+    return out
+
+
 def parked_codemaps(root):
     """["<file>: <error>"] for the code maps in <qa-out>/init that are parked and unchanged since."""
     root = Path(root)

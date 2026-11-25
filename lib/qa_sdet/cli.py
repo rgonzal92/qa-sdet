@@ -151,7 +151,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
     "bug-sync": "[--jql]",
     "stale": "<build>", "ingest": "<run.json>", "ingest-pending": "<dir>...", "code": "[route] | code --repos",
-    "codemap-scan": "[--full] [--out DIR] <source folder>...", "codemap-forget": "<source folder>",
+    "codemap-scan": "[--full] [--out DIR] <source folder>...", "init-status": "<init dir>", "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...", "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
     "marker": "start <project> [--budget N] [--minutes M] [--faults] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]", "session-check": "[--record] [--build]",
@@ -254,6 +254,11 @@ def _main(argv):
                   "and rewrite the whole file; it is re-read automatically. A file you did not write belongs to another "
                   "agent: leave it.\n" + "\n".join(memory.PARKED), file=sys.stderr)
             return 2
+        return 0
+    if cmd == "init-status":
+        if len(args) != 1:
+            return usage_error(cmd)
+        print(json.dumps(memory.init_status(args[0]), indent=1))
         return 0
     if cmd == "doctor":
         from . import doctor

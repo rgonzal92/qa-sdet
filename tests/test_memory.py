@@ -1108,5 +1108,45 @@ class IngestPending(MemBase):
         self.assertEqual((d / ".data/run-x.json.ingested").read_text().splitlines()[0], hashlib.sha1(rf.read_bytes()).hexdigest())
 
 
+class InitStatus(MemBase):
+    """`qa-mem init-status <init dir>`: which mapper chunks of the newest scan are settled, and which to start again."""
+
+    def test_settled_parked_missing_and_stale_maps(self):
+        import hashlib
+        d = Path(self.tmp.name) / "qa-out/init"
+        d.mkdir(parents=True)
+        def scan(name, sid, files):
+            (d / f"scan-{name}.json").write_text(json.dumps({"scan_id": sid, "area": name.split("-")[0],
+                                                              "repos": [{"repo": "/r", "files": files}]}))
+        def cmap(name, sid, sentinel=None, note=""):
+            f = d / f"code-map-{name}.json"
+            f.write_text(json.dumps({"scan_id": sid, "area": name.split("-")[0], "rows": []}))
+            if sentinel:
+                (d / f"{f.name}.{sentinel}").write_text(f"{hashlib.sha1(f.read_bytes()).hexdigest()}\n2026-11-25T10:00:00Z {note}\n")
+        new = "20261125-100000"
+        scan("frontend-1", f"frontend-1-{new}", ["a.jsx"])
+        scan("frontend-2", f"frontend-2-{new}", ["b.jsx"])
+        scan("frontend-3", f"frontend-3-{new}", ["c.jsx"])
+        scan("backend", f"backend-{new}", ["d.js"])
+        scan("tests", f"tests-{new}", [])  # nothing to read: settled, no mapper
+        scan("old", "old-20261120-090000", ["x.js"])  # a scan file left from an earlier scan
+        cmap("frontend-1", f"frontend-1-{new}", "ingested")
+        (d / "code-map-frontend-1.json.ingested").write_text(
+            (d / "code-map-frontend-1.json.ingested").read_text().split("\n")[0] + "\nT\ndropped rows: {'kind': 2}\n")
+        cmap("frontend-2", f"frontend-2-{new}", "error", "ValueError: row 3 has no label")
+        cmap("backend", "backend-20261120-090000", "ingested")  # the mapper didn't write this scan's map
+        code, out, _ = qa_mem("init-status", str(d))
+        st = json.loads(out)
+        self.assertEqual((code, st["total"], st["ingested"]), (0, 4, 1))
+        self.assertEqual(st["dropped_rows"], {str(d / "code-map-frontend-1.json"): "{'kind': 2}"})
+        retry = {Path(r["out"]).name: r for r in st["retry"]}
+        self.assertEqual(set(retry), {"code-map-frontend-2.json", "code-map-frontend-3.json", "code-map-backend.json"})
+        self.assertIn("row 3 has no label", retry["code-map-frontend-2.json"]["reason"])
+        self.assertIn("no code map", retry["code-map-frontend-3.json"]["reason"])
+        self.assertIn("older scan", retry["code-map-backend.json"]["reason"])
+        self.assertEqual((retry["code-map-backend.json"]["area"], retry["code-map-backend.json"]["scan"]),
+                         ("backend", str(d / "scan-backend.json")))
+
+
 if __name__ == "__main__":
     unittest.main()
