@@ -4,7 +4,7 @@ import contextlib, io, json, os, sqlite3, time, unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemBase, runfile, run, PLAN, RUN_FORM, RUN_LIST, core, memory
+from support import MemBase, runfile, run, PLAN, RUN_FORM, RUN_LIST, core, memory, cli as qa_mem, git, git_repo
 from qa_sdet import cli, scrub
 
 
@@ -589,6 +589,73 @@ class Card(MemBase):
         c = memory.card(self.con, "/form")
         self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT", c)
         self.assertLess(len(c), 15000)  # ~3.5k tokens at worst
+
+
+class Gaps(MemBase):
+    """`qa-mem gaps`: every page, the most urgent to explore first."""
+
+    def row(self, page, kind, label, value, src, repo="/repo", area="frontend"):
+        with self.con:
+            if page != "*":
+                self.con.execute("INSERT OR IGNORE INTO pages(route) VALUES(?)", (page,))
+            self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                             (page, kind, label, value, f"{src}:1", repo, area, core.now(), src))
+
+    def visit(self, route, build, ts):
+        memory.ingest(self.con, {"run_id": f"r-{route}-{ts}", "build": build, "pages": [{"route": route}]}, ts)
+
+    @staticmethod
+    def lines(out):
+        return [x for x in out.splitlines() if x.startswith("- ")]
+
+    def commit(self, repo, rel, when):
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = when  # restored by the sandbox
+        (repo / rel).write_text(when)
+        git(repo, "commit", "-qam", when)
+
+    def test_no_pages_is_a_hint(self):
+        self.assertIn("/qa-sdet:qa-init", memory.gaps(self.con))
+
+    def test_order_never_explored_then_old_build_then_the_rest(self):
+        self.row("/new", "rule", "speed", "max 130", "src/New.jsx")
+        self.visit("/old", "1.0", "2026-01-01T00:00:00Z")
+        self.visit("/cur", "2.0", "2026-01-02T00:00:00Z")
+        self.visit("/unread", "unknown", "2026-01-03T00:00:00Z")
+        out = memory.gaps(self.con)
+        self.assertIn("current build 2.0", out.splitlines()[0])
+        lines = self.lines(out)
+        self.assertTrue(lines[0].startswith('- /new "": never explored; 1 untested field'), lines)
+        self.assertTrue(lines[1].startswith('- /old "": verified on build 1.0: re-verify; 15 untried'), lines)
+        self.assertEqual({x.split()[1] for x in lines[2:]}, {"/cur", "/unread"})
+        self.assertIn("build never read", next(x for x in lines if "/unread" in x))
+        self.assertTrue(out.rstrip().endswith("Next: /qa-sdet:qa-explore '/new'"), out)
+
+    def test_source_changed_since_the_last_visit(self):
+        os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
+        repo = git_repo(self.t / "app", {"src/Form.jsx": "a", "src/Other.jsx": "b", "api/zones.js": "c"})
+        rp = os.path.realpath(repo)
+        self.row("/form", "api", "save", "POST /api/zones", "src/Form.jsx", rp)
+        self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js", rp, "backend")
+        self.visit("/form", "1.0", "2026-01-05T00:00:00Z")  # after the first commit: nothing changed since
+        self.commit(repo, "src/Other.jsx", "2026-01-06T00:00:00Z")  # another page's file
+        self.assertNotIn("source changed", memory.gaps(self.con))
+        self.commit(repo, "api/zones.js", "2026-01-07T00:00:00Z")  # the backend of an endpoint the page calls
+        self.assertIn("source changed (api/zones.js)", memory.gaps(self.con))
+        self.commit(repo, "src/Form.jsx", "2026-01-08T00:00:00Z")
+        self.assertIn("source changed (api/zones.js, +1)", memory.gaps(self.con))
+
+    def test_a_repo_git_cannot_read_is_named_not_fatal(self):
+        self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", "/nowhere/repo")
+        self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
+        out = memory.gaps(self.con)
+        self.assertIn("/form", out)
+        self.assertIn("source changes not checked for /nowhere/repo", out)
+
+    def test_cli(self):
+        self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
+        code, out, _ = qa_mem("gaps")
+        self.assertEqual(code, 0)
+        self.assertIn("/form", out)
 
 
 class Search(MemBase):

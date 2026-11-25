@@ -474,3 +474,79 @@ def bugs(con, status="OPEN"):
     if total > len(rows):
         lines.append(f"... {total - len(rows)} older {status} bugs not shown (search facts or ask for a page's card)")
     return "\n".join(lines) or f"no {status} bugs"
+
+
+def gaps(con):
+    """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
+    verified on an older build, then the most untried heuristics and untested fields, then the most open bugs."""
+    pages = con.execute("SELECT route, name, build, last_verified FROM pages WHERE route != '*'").fetchall()
+    if not pages:
+        return "no pages yet: /qa-sdet:qa-init maps them from the source, or /qa-sdet:qa-explore <route> visits one"
+    current = core.meta(con, "build")
+    verified = {pg["route"]: pg["last_verified"] for pg in pages if pg["last_verified"]}
+    changed, unchecked = _source_changes(con, verified)
+    ranked = []
+    for pg in pages:
+        r, b = pg["route"], current or pg["build"]
+        never, unread = pg["build"] is None, pg["build"] == core.UNKNOWN
+        old = not never and not unread and pg["build"] != b
+        _, tried, targets = _coverage(con, r, b)
+        untried, untested = sum(h not in tried for h in core.HEURISTICS), len(_untested_rules(con, r, targets))
+        bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)).fetchone()[0]
+        src = changed.get(r, [])
+        parts = ["never explored" if never else "build never read" if unread
+                 else f"verified on build {pg['build']}: re-verify" if old else f"build {b}"]
+        if src:
+            parts.append(f"source changed ({core.short(src[0], 60)}" + (f", +{len(src) - 1}" if len(src) > 1 else "") + ")")
+        if not never:  # a page never explored has every heuristic untried
+            parts.append(f"{untried} untried")
+        if untested:
+            parts.append(f"{untested} untested field{'s' * (untested != 1)}")
+        if bugs:
+            parts.append(f"{bugs} open bug{'s' * (bugs != 1)}")
+        ranked.append(((not never, not src, not old, -(untried + untested), -bugs, r),
+                       f"- {r} \"{core.short(pg['name'] or '', 60)}\": " + "; ".join(parts)))
+    ranked.sort()
+    out = [f"PAGES TO EXPLORE (most urgent first; current build {current or 'unknown'}):"] + [x for _, x in ranked[:20]]
+    if len(ranked) > 20:
+        out.append(f"(+{len(ranked) - 20} more)")
+    out += [f"source changes not checked for {repo} (not a git repo, or git failed)" for repo in unchecked]
+    route = ranked[0][0][-1].replace("'", "'\\''")
+    return "\n".join(out + [f"Next: /qa-sdet:qa-explore '{route}'"])
+
+
+def _source_changes(con, verified):
+    """({page: [src, ...]}, [repos git couldn't read]): the files of each visited page (its code-map rows and the
+    backend rows of the endpoints it calls) that a commit touched after the page was last verified. Source HEAD may be
+    ahead of the deployed build: a hint, not proof.
+    shortcut: files inside a git submodule are invisible to the parent repo's log; map the submodule as its own folder."""
+    files, by_repo = {}, {}
+    for page, ts in verified.items():
+        try:
+            when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        files[page] = (when, {(x["repo"], x["src"]) for x in codemap._codemap_rows(con, page) if x["src"]})
+        for repo, _ in files[page][1]:
+            by_repo.setdefault(repo, []).append(ts)
+    newest, failed = {}, []
+    for repo, stamps in sorted(by_repo.items()):
+        # --first-parent -m: a merged branch counts when it landed; --no-renames: a renamed file's old path is listed
+        log = None if core.GIT_SLOW else core._git(repo, "log", "--first-parent", "-m", "--no-renames", "--relative",
+                                                   "--name-only", "--format=%x01%ct", f"--since={min(stamps)}", "--", ".",
+                                                   timeout=10)
+        if log is None:
+            failed.append(repo)
+            continue
+        t = 0
+        for line in log.splitlines():
+            if line.startswith("\x01"):
+                t = int(line[1:]) if line[1:].isdigit() else 0
+            elif line:
+                newest[repo, line] = max(newest.get((repo, line), 0), t)
+    changed = {}
+    for page, (when, fs) in files.items():
+        hit = sorted(src for repo, src in fs if newest.get((repo, src), 0) > when)
+        if hit:
+            changed[page] = hit
+    return changed, failed

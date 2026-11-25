@@ -128,7 +128,7 @@ def wrapper_cmd(cmd, args):
 
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
-    "doctor": "", "browsers": "", "where": "", "card": "<route|page name>", "search": "<words> [-word to exclude]",
+    "doctor": "", "browsers": "", "where": "", "card": "<route|page name>", "gaps": "", "search": "<words> [-word to exclude]",
     "bugs": "[STATUS]", "hash": "<route> <symptom>", "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + ">",
     "stale": "<build>", "ingest": "<run.json>", "ingest-pending": "<dir>...", "code": "[route] | code --repos",
     "codemap-scan": "[--full] [--out DIR] <source folder>...", "codemap-forget": "<source folder>",
@@ -296,6 +296,8 @@ def run_cmd(con, cmd, args):
             return 2
         from . import scan
         print(json.dumps(scan.codemap_scan(con, paths, o.get("--out") or "qa-out/init", o.get("--full", False)), indent=1))
+    elif cmd == "gaps":
+        print(memory.gaps(con))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
