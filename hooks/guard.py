@@ -4,7 +4,8 @@ Every agent, unless noted: R1 Jira stays read-only (acli reads, never from inlin
 goes only to config allowedHosts (goto/open/tab-new, qa-mem browser-open, URLs in eval); no other browser, config file, install or
 PLAYWRIGHT_MCP_*/PWTEST_* variable; --profile only on `open`, only the main profile. R3 Session secrets stay out:
 cookie/storage/header reads, traces, state-save, run-code, the browser profile folder, uploads of secret files or globs.
-R4 The qa-explorer leaves the qa-sdet config and .playwright/cli.config.json alone, fetches only from allowedHosts and
+R4 The qa-explorer uses only its tools (no MCP), writes only its run files, leaves the qa-sdet config and
+.playwright/cli.config.json alone, fetches only from allowedHosts and
 runs no script file or package (a page it read could have steered it to write or name one). R5 Nobody changes the qa-sdet data folder
 (memory DB); sqlite3 on it only -readonly. R6 A run marker (qa-out/.active) with a budget or deadline limits browser
 commands; faults need `faults: true`. R7 The qa-mapper reads source (no secrets) and writes only its code map. R8 A Bash
@@ -101,6 +102,9 @@ MCP_JIRA_READ_RE = re.compile(r"^(batch_)?(get|search|lookup|list|fetch|read|vie
 MCP_WRITE_WORDS = set("create edit update delete remove transition add assign archive unarchive move upload post put patch "
                       "write set clone restore replace publish rank invoke run execute send import bulk upsert modify change".split())
 MAPPER_TOOLS = set("Read Grep Glob LS Write ToolSearch TodoWrite TaskCreate TaskUpdate TaskGet TaskList".split())
+EXPLORER_TOOLS = MAPPER_TOOLS | {"Bash"}  # no MCP tool: the session's GitHub, Slack, ... servers are not the explorer's
+EXPLORER_FILES = {"bugs": r"[^/]+", "repro": r"[^/]+", "evidence": r"[^/]+",  # agents/qa-explorer.md "Files you write"
+                  ".data": r"run-[^/]+\.json|(requests|console)-[^/]+\.log|map-\d+\.png"}
 WRITE_TOOLS, PATH_KEYS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}, ("file_path", "notebook_path", "path")
 ODD = "{} can't be checked; run the guarded command directly (spell out program, verb and paths)"
 PROFILE_REASON = ("the qa-sdet browser profile folder holds the signed-in QA session (cookies); only qa-mem browser-open "
@@ -1118,6 +1122,17 @@ def check_mapper(tool, tin, cwd):
         if any(is_secret_path(real(p or ".", cwd)) or (extra and is_secret_path(real(os.path.join(p or ".", extra), cwd)))
                for p in tool_paths(tin)):
             return "the qa-mapper reads source only; secret files (.env, keys, credentials, qa-sdet data, config) stay closed: write [secret]"
+def check_explorer(tool, tin, cwd):
+    """R4: the explorer's tools only, and Write only to its run files: <project>/qa-out/<run>/{bugs,repro,evidence}/<file>
+    and its .data/run-*.json, requests-/console-*.log, map-<n>.png (never REPORT.md, plan.json, the marker or source)."""
+    if tool not in EXPLORER_TOOLS:
+        return f"the qa-explorer tests the page through Bash (playwright-cli, qa-mem); {tool} is not one of its tools"
+    roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
+    for t in (real(p, cwd) for p in tool_paths(tin)) if tool == "Write" else ():
+        sub = os.path.dirname(t)
+        name = EXPLORER_FILES.get(os.path.basename(sub))
+        if not (name and re.fullmatch(name, os.path.basename(t)) and os.path.dirname(os.path.dirname(sub)) in roots):
+            return "the qa-explorer writes only <project>/qa-out/<run>/{bugs,repro,evidence}/<file> and its .data/ run files"
 def check_files(tool, tin, cwd, explorer):
     """R3, R4, R5 for the file tools: the profile stays closed, the data folder unwritten, the config the explorer's."""
     for raw in tool_paths(tin):
@@ -1153,6 +1168,8 @@ def evaluate(data):
     if not isinstance(tin, dict):
         return "malformed tool input (not an object)", False
     if role == "qa-mapper" and (r := check_mapper(tool, tin, cwd)):
+        return r, False
+    if role == "qa-explorer" and (r := check_explorer(tool, tin, cwd)):
         return r, False
     if tool == "Bash":
         ctx = Ctx(cwd, role == "qa-explorer", clean(tin.get("command") or ""))

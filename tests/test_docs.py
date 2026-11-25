@@ -284,12 +284,39 @@ class Docs(unittest.TestCase):
         retest = next(x for x in text("skills/qa-ticket/SKILL.md").splitlines() if x.startswith("- **`--retest"))
         self.assertIn("the prior plan's case objects (steps and expected included) whose ids are in `retest_cases`", retest)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_batch_explore_skips_routes_that_need_a_record_id(self):
         """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""
         skill = text("skills/qa-explore/SKILL.md")
         self.assertIn("`needs_id`", skill)
         self.assertIn('"needs_id"', text("lib/qa_sdet/memory.py"))  # the key gaps --json writes
+
+    def test_explorer_tools_are_the_ones_the_guard_allows(self):  # a denylist inherited every MCP server of the session
+        meta = dict(re.findall(r"^([\w-]+): (.*)$", text("agents/qa-explorer.md").split("---\n")[1], re.M))
+        self.assertNotIn("disallowedTools", meta)
+        with tempfile.TemporaryDirectory() as d:
+            g, _ = load_guard(os.path.realpath(d))
+        tools = {t.strip() for t in meta["tools"].split(",")}
+        self.assertLessEqual(tools, g.EXPLORER_TOOLS)
+        self.assertNotIn("Agent", tools)
+        for name in re.findall(r"`<out>/(bugs|repro|evidence|\.data)/([^`]+)`", text("agents/qa-explorer.md")):
+            self.assertIn(name[0], g.EXPLORER_FILES)
+
+
+    def test_leftover_test_data_line_is_the_one_the_report_reads(self):
+        explorer = text("agents/qa-explorer.md")
+        self.assertIn("`Left in the app: ", explorer)
+        self.assertIn("Left in the app:", text("lib/qa_sdet/report.py"))
+
+    def test_bug_sync_search_reads_every_page_and_is_approved(self):  # without --paginate acli stops at its first page
+        line = next(x for x in text("skills/qa-inbox/SKILL.md").splitlines() if "| qa-mem bug-sync" in x)
+        cmd = re.search(r"`(acli jira workitem search [^`]+\| qa-mem bug-sync)`", line).group(1).replace("<that JQL>", "key in (P-1)")
+        self.assertIn("--paginate", cmd)
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            (Path(os.path.realpath(d)) / "qa-out").mkdir()
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(g.evaluate({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": os.path.realpath(d)}),
+                                 (None, True), cmd)
+
+if __name__ == "__main__":
+    unittest.main()

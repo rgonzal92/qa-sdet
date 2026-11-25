@@ -85,6 +85,70 @@ class Hooks(Base):
         self.assertEqual(r.returncode, 0)
         self.assertNotIn("/qa-out", r.stderr)
 
+    def post(self, data, env=None):
+        """Run the PostToolUse hook as Claude Code does: JSON on stdin, from the project folder."""
+        r = subprocess.run([sys.executable, str(ROOT / "hooks/posttooluse.py")], input=json.dumps(data), capture_output=True,
+                           text=True, cwd=self.proj, env={**os.environ, **(env or {})})
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else ""
+
+    def test_post_tool_use_wiring(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        entry = hooks["PostToolUse"][0]
+        self.assertEqual(entry["matcher"], "Bash|Write")
+        self.assertIn("/hooks/posttooluse.py", entry["hooks"][0]["command"])
+        self.assertIn('[ -d qa-out ]', entry["hooks"][0]["command"])  # no Python start in unrelated projects
+
+    def test_explorer_is_warned_once_before_the_budget_runs_out(self):
+        """Step 9 deletes test data through the UI, which the guard refuses once the budget is used up: warn first."""
+        import time
+        (self.proj / "qa-out").mkdir(exist_ok=True)
+        marker = self.proj / "qa-out/.active"
+        call = {"tool_name": "Bash", "agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj),
+                "tool_input": {"command": "playwright-cli -s=qa click e1"}, "tool_response": {}}
+        marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 10}))
+        self.assertEqual(self.post(call), "")
+        marker.write_text(json.dumps({"expires": time.time() + 3600, "budget": 20, "used": 17}))
+        self.assertEqual(self.post({**call, "agent_type": ""}), "")  # the main session is no explorer
+        note = self.post(call)
+        self.assertIn("3 browser commands left", note)
+        self.assertIn("qa-sdet-", note)
+        self.assertEqual(self.post(call), "")  # once per run
+        marker.write_text(json.dumps({"expires": time.time() + 7200, "deadline": time.time() + 90}))  # a new run, by time
+        self.assertIn("left", self.post(call))
+        marker.unlink()
+        self.assertEqual(self.post(call), "")
+
+    def bad_map(self, n):
+        init = self.proj / "qa-out/init"
+        init.mkdir(parents=True, exist_ok=True)
+        f = init / f"code-map-frontend-{n}.json"
+        f.write_text('{"area": "frontend", "scan_id": "missing"}')
+        return f
+
+    def test_a_mapper_hears_about_its_own_code_map_when_it_writes_it(self):
+        env = {"QA_MEM_DB": str(Path(self.tmp.name) / "hook.db")}
+        sibling, mine = self.bad_map(1), self.bad_map(2)
+        note = self.post({"tool_name": "Write", "agent_type": "qa-sdet:qa-mapper", "cwd": str(self.proj),
+                          "tool_input": {"file_path": str(mine), "content": "x"}}, env)
+        self.assertIn(mine.name, note)
+        self.assertNotIn(sibling.name, note)  # a sibling's file is the sibling's to fix
+        self.assertTrue(mine.with_name(mine.name + ".error").exists())
+
+    def test_a_sibling_mappers_stop_no_longer_takes_the_authors_feedback(self):
+        env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
+        f1, f2 = self.bad_map(1), self.bad_map(2)
+        stop = lambda event, agent="qa-sdet:qa-mapper": subprocess.run(
+            [sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")], capture_output=True,
+            text=True, env=env, input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": False}))
+        first = stop("SubagentStop")  # the first mapper to stop ingests both files
+        self.assertEqual(first.returncode, 2)
+        later = stop("SubagentStop")  # the author of the other file stops next: it still hears about it
+        self.assertEqual(later.returncode, 2, later.stderr)
+        self.assertIn(f1.name, later.stderr)
+        self.assertIn(f2.name, later.stderr)
+        self.assertEqual(stop("Stop", "").returncode, 0)  # the main session isn't nagged on every turn
+
 
 if __name__ == "__main__":
     unittest.main()

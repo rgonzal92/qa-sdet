@@ -133,7 +133,7 @@ def marker_start(project, budget=0, minutes=0, faults=False, t=None):
 
 def marker_stop(project):
     root = _project(project) / "qa-out"
-    for name in (".active", ".active.lock"):
+    for name in (".active", ".active.lock", ".active.warned"):
         (root / name).unlink(missing_ok=True)
 
 

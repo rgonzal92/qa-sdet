@@ -270,6 +270,25 @@ def _pending(root):
 PARKED = []  # run.json / code-map files this process could not ingest (shown to the agent by the hook)
 
 
+def parked(f):
+    """The error ingest parked run file or code map `f` with, while the file is unchanged since; else None."""
+    f = Path(f)
+    try:
+        digest = hashlib.sha1(f.read_bytes()).hexdigest()
+        lines = f.with_name(f.name + ".error").read_text().split("\n")
+    except OSError:
+        return None
+    return lines[1].split(" ", 1)[-1] if lines[0] == digest and len(lines) > 1 else None
+
+
+def parked_codemaps(root):
+    """["<file>: <error>"] for the code maps in <qa-out>/init that are parked and unchanged since."""
+    root = Path(root)
+    if root.name != "qa-out":
+        root = next((p for p in root.parents if p.name == "qa-out"), root)
+    return [f"{f}: {e}" for f in sorted((root / "init").glob("code-map-*.json")) if (e := parked(f))]
+
+
 def _ingest_files(con, pending):
     n = 0
     for f, data, mtime, digest in pending:

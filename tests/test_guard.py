@@ -378,9 +378,30 @@ class R4Explorer(Case):
             self.assertIsNotNone(tool("Write", at, file_path=str(CFG), content="{}"), at)
             self.assertIsNotNone(tool("Edit", at, file_path=str(CFG), old_string="a", new_string="b"), at)
             self.assertIsNotNone(tool("Write", at, file_path=f"{PROJ}/.playwright/cli.config.json", content="{}"), at)
-            for p in (f"{RUN}/qa-out/r/bugs/BUG-1.md", f"{RUN}/qa-out/r/.data/run-form.json", f"{RUN}/qa-out/.active", "/srv/app/x.ts"):
-                self.assertIsNone(tool("Write", at, file_path=p, content="x"), (at, p))
+            for p in (f"{RUN}/qa-out/r/bugs/BUG-1.md", f"{RUN}/qa-out/r/.data/run-form.json", f"{RUN}/qa-out/r/evidence/TC-1.png",
+                      f"{RUN}/qa-out/r/repro/BUG-1.spec.ts", f"{RUN}/qa-out/r/.data/requests-form.log", f"{RUN}/qa-out/r/.data/map-1.png"):
+                self.assertIsNone(tool("Write", at, cwd=RUN, file_path=p, content="x"), (at, p))
         self.assertIsNone(tool("Write", file_path=str(CFG), content="{}"))  # the main session may (with the user's yes)
+
+    def test_explorer_writes_only_its_run_files(self):  # page text could steer it to write source or the report
+        for p in (f"{RUN}/qa-out/.active", f"{RUN}/qa-out/r/REPORT.md", f"{RUN}/qa-out/r/.data/plan.json", f"{RUN}/qa-out/README.md",
+                  f"{RUN}/qa-out/guard-denials.log", f"{RUN}/qa-out/r/.data/run-form.json.ingested", f"{RUN}/src/app.tsx",
+                  "/srv/app/x.ts", f"{PROJ}/qa-out/r/bugs/BUG-1.md", f"{RUN}/qa-out/r/bugs/sub/x.md", f"{RUN}/qa-out/r/x.md"):
+            self.assertIn("qa-explorer writes only", tool("Write", EX, cwd=RUN, file_path=p, content="x") or "", p)
+        link = RUN / "qa-out/r/bugs/BUG-9.md"
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(RUN / "app.tsx")  # a link out of the run folder is its target
+        try:
+            self.assertIn("qa-explorer writes only", tool("Write", EX, cwd=RUN, file_path=str(link), content="x") or "")
+        finally:
+            link.unlink()
+
+    def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
+        for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):
+            self.assertIn("not one of its tools", tool(name, EX, cwd=RUN) or "", name)
+            self.assertIsNone(tool(name, "", cwd=RUN) if name.startswith("mcp__") else None)  # the main session keeps them
+        for name in ("Read", "Grep", "Glob", "ToolSearch"):
+            self.assertIsNone(tool(name, EX, cwd=RUN, file_path=str(RUN / "qa-out/r/.data/run-form.json")), name)
 
 
 class R5DataFolder(Case):

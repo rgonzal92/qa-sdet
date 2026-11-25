@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -d qa-out ] || { [ -n \"$CLAUDE_PROJECT_DIR\" ] && [ -d \"$CLAUDE_PROJECT_DIR/qa-out\" ]; }; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse.py\"; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "PermissionDenied": [
       {
         "matcher": "*",

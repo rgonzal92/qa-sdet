@@ -869,6 +869,11 @@ def render_report_parts(run_dir, cfg=None):
                 f"- {cell(c['id'])} {STATUS_ICON[c['status']]}" + (f" ({cell(c['ac'])})" if c.get("ac") else "") +
                 (f" — {cell(core.short(c.get('actual') or c.get('notes'), 160))}" if (c.get("actual") or c.get("notes")) else "")
                 + (f" · {cell(c['ticket'])}" if c.get("ticket") else "") for c in attention] + [""]
+        left = [(r.get("target") or name, m.group(1).strip()) for name, r in runs
+                for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))]
+        if left:  # step 9 couldn't delete them (budget or time used up): they stay in the shared QA app
+            action += [f"### Test data left in the app ({len(left)})"] + [
+                f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left] + [""]
         signals = [(r.get("target") or name, key, n) for name, r in runs for key, n in _signals(run_dir, name, r)]
         if signals:
             action += [f"### Browser signals no bug explains ({len(signals)})"] + [

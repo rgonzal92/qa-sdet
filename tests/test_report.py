@@ -615,6 +615,12 @@ class Layout(Rendering):
         self.assertNotIn("not a draft", r)
         self.assertNotIn("Nothing needs your action.", r)
 
+    def test_test_data_left_in_the_app_is_something_to_act_on(self):  # it was only in the folded exploration notes
+        run = {**RUN1, "notes": "Explored the form.\nLeft in the app: qa-sdet-zone-1 (delete refused: budget used up)"}
+        _, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        sec = r[r.index("## Needs your action"):r.index("## PROJ-1")]
+        self.assertIn("### Test data left in the app (1)\n- /form: qa-sdet-zone-1 (delete refused: budget used up)\n", sec)
+
     def test_bug_video_is_linked_only_when_the_file_exists(self):
         run = {"mode": "explore", "target": "/f", "status": "COMPLETED", "bugs": [
             {"title": t, "severity": "HIGH", "classification": "CONFIRMED", "draft_path": f"/x/bugs/BUG-{n}.md"}

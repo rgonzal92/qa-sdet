@@ -221,12 +221,20 @@ def _main(argv):
         skip = a in valued
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
         memory.PARKED.clear()
-        for root in dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a):  # cwd + project dir
+        roots = list(dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a))  # cwd + project dir
+        for root in roots:
             try:
                 memory.ingest_pending(root)
             except Exception as e:  # noqa: BLE001
                 print(f"qa-mem: {e}", file=sys.stderr)
-        if memory.PARKED and not hook_input().get("stop_hook_active"):
+        # parallel mappers: the first to stop parks every bad code map, so each mapper hears about all still parked
+        stale = [x for root in roots for x in memory.parked_codemaps(root)
+                 if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)]
+        hin = hook_input() if memory.PARKED or stale else {}
+        if stale and hin.get("hook_event_name") == "SubagentStop" and \
+                str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip() == "qa-mapper":
+            memory.PARKED.extend(stale)
+        if memory.PARKED and not hin.get("stop_hook_active"):
             # Exit 2 from a Stop/SubagentStop hook shows this to the agent that just wrote the file, once.
             refs = Path(__file__).resolve().parent.parent.parent / "references"
             print(f"qa-sdet memory could not save this (file(s) below). For each one YOU wrote this run: fix the field the "
