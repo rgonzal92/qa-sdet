@@ -1,7 +1,7 @@
 ---
 name: qa-ticket
 description: Test one or more Jira items in the QA app: test plan, test cases, a run per page, and a report with a verdict per ticket. Supports resuming interrupted runs (--resume) and selective retesting after fixes (--retest). Use when given Jira keys or ticket numbers to test, resume or retest ("test PROJ-123", "QA 1234", "retest 1234"). For a plan or cases without running them, use qa-plan.
-argument-hint: <ticket numbers or keys, e.g. 1234 1250 OPS-7> [--faults] [--budget N] [--minutes M] [--review] [--resume [run]] [--retest [run]] [--all]
+argument-hint: <ticket numbers or keys, e.g. 1234 1250 OPS-7> [--faults] [--budget N] [--minutes M] [--review] [--resume [run]] [--retest [run]] [--all] [--verify]
 ---
 
 Test these Jira items and report a verdict per ticket: $ARGUMENTS
@@ -30,6 +30,8 @@ With `--review`, stop: reply with the case count per ticket, the REPORT.md path 
 ## 3. Test
 Group the cases to run by route (`incomplete_routes` only on `--resume`). For each route, one at a time, as run-setup says: `qa-mem dispatch '<run>' --route '<route>' --known-bugs '<the Known bugs search's keys and summaries>'` (run-setup's Setup; it puts this route's cases, all AC of their tickets and the known bugs in the brief, cases first), delegate with its brief, teardown.
 If an explorer returns BLOCKED, skip the remaining routes (their cases stay NOT_RUN) and keep its summary (the user can continue later with `/qa-sdet:qa-ticket --resume`).
+
+With `--verify`: after the last teardown, run-setup's Second opinion (a `qa-sdet:qa-reviewer` read-only check of the serious drafts; its reply saved as `<run>/.data/review.json`).
 
 ## 4. Reply
 The renderer decides each ticket's verdict (README, "Reading REPORT.md"): report it as rendered, never your own. Reply as run-setup's Reply says, but start with the verdict block at the top of `<run>/REPORT.md` as rendered (the Summary table when there are 2+ tickets). The one next step, in order: a BLOCKED explorer's fix (and `/qa-sdet:qa-ticket --resume` to continue); for a PASS or PASS WITH NOTES ticket the draft `<run>/jira-comment-<KEY>.md` (the user pastes it into Jira after checking its CHECK block: build, partial-retest note, images, placeholders); for each CONFIRMED draft the filing command; else none.

@@ -641,14 +641,30 @@ def verify_run(run_dir, slug, since=0):
     return todo
 
 
-def _repro_badge(bid, b, audit):
-    """'repro ✓' or '⚠ <worst problem> (+n)' for a CONFIRMED or SUSPECTED draft; '' otherwise."""
+def _reviews(run_dir, warnings):
+    """{BUG-n: (verdict, notes)} from .data/review.json, the qa-reviewer's reply (--verify); {} when there is none."""
+    data = _load_json(Path(run_dir) / ".data" / "review.json", warnings)
+    out = {}
+    for x in _list(data, "bugs"):
+        if isinstance(x.get("id"), str) and str(x.get("verdict")).strip().lower() in ("solid", "needs_check"):
+            out[x["id"]] = (str(x["verdict"]).strip().lower(), " ".join(str(x.get("notes") or "").split()))
+    return out
+
+
+def _repro_badge(bid, b, audit, reviews=None):
+    """'repro ✓' or '⚠ <worst problem> (+n)' for a CONFIRMED or SUSPECTED draft, and the reviewer's word when there is
+    one (a note for the user: it never changes a verdict); '' otherwise."""
     if not bid or _first_word(b.get("classification")) not in ("confirmed", "suspected"):
         return ""
     issues = audit.get(bid, [])
-    if not issues:
-        return "repro ✓"
-    return f"⚠ {issues[0][1]}" + (f" (+{len(issues) - 1}: qa-mem audit-bugs)" if len(issues) > 1 else "")
+    badge = "repro ✓" if not issues else \
+        f"⚠ {issues[0][1]}" + (f" (+{len(issues) - 1}: qa-mem audit-bugs)" if len(issues) > 1 else "")
+    verdict, notes = (reviews or {}).get(bid, (None, ""))
+    if verdict == "solid":
+        badge += " · reviewed ✓"
+    elif verdict == "needs_check":
+        badge += f" · ⚠ check before filing: {core.short(notes, 160) or 'see .data/review.json'}"
+    return badge
 
 
 def _filing_block(bugs, cases, tickets, run_dir, cfg):
@@ -683,7 +699,7 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
             *entries, "</details>"]
 
 
-def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None, audit=None):
+def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None, audit=None, reviews=None):
     out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
@@ -696,7 +712,7 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
         image = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else ""
         webm = Path(run_dir) / "evidence" / f"{bid}.webm"  # the video of the clean-state repro
         video = f"[video](evidence/{quote(webm.name)})" if bid and webm.is_file() else ""
-        badge = cell(_repro_badge(bid, b, audit or {}))
+        badge = cell(_repro_badge(bid, b, audit or {}, reviews))
         evidence = " · ".join(x for x in (image, video, badge) if x) or "—"
         link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
         out.append(row(Raw(link), b.get("severity"), b.get("classification"), core.short(b.get("title"), 120), b.get("route"),
@@ -965,7 +981,7 @@ def render_report_parts(run_dir, cfg=None):
         action = []
         if bugs:
             action += _bug_section(bugs, cases, keys, run_dir, heading=f"### Bugs to file ({len(bugs)})", cfg=cfg,
-                                   audit=audit_bugs(run_dir)) + [""]
+                                   audit=audit_bugs(run_dir), reviews=_reviews(run_dir, d["warnings"])) + [""]
         # a draft whose run file a later one replaced (--resume): still shown, but no verdict counts it
         listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
         orphans = sorted((p for p in (run_dir / "bugs").glob("BUG-*.md")

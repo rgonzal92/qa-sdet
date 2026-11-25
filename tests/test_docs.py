@@ -339,11 +339,20 @@ class Docs(unittest.TestCase):
         self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
 
     def test_agents_have_a_turn_limit(self):  # a looping agent burned turns until its context ran out, results unwritten
-        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-crawler": 20}
+        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-crawler": 20, "qa-reviewer": 4}
         for path in AGENTS:
             meta = dict(re.findall(r"^([\w-]+): (.*)$", path.read_text().split("---\n")[1], re.M))
             self.assertEqual(int(meta["maxTurns"]), limits[path.stem], path.name)
         self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
+
+    def test_the_critic_is_opt_in_and_read_only(self):
+        meta = dict(re.findall(r"^([\w-]+): (.*)$", text("agents/qa-reviewer.md").split("---\n")[1], re.M))
+        self.assertEqual((meta["tools"], meta["model"]), ("Read", "sonnet"))
+        for skill in ("qa-ticket", "qa-explore"):
+            body = text(f"skills/{skill}/SKILL.md")
+            self.assertIn("--verify", body.split("---\n")[1])  # in argument-hint
+            self.assertIn("qa-sdet:qa-reviewer", body)
+            self.assertIn(".data/review.json", body)
 
 if __name__ == "__main__":
     unittest.main()

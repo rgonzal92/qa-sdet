@@ -1165,6 +1165,15 @@ def check_explorer(tool, tin, cwd, role="qa-explorer"):
         name = EXPLORER_FILES.get(os.path.basename(sub))
         if not (name and re.fullmatch(name, os.path.basename(t)) and os.path.dirname(os.path.dirname(sub)) in roots):
             return f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files"
+def check_reviewer(tool, tin, cwd):
+    """The qa-reviewer (a critic of untrusted drafts) only Reads: the project's qa-out run files and the plugin's references."""
+    roots = {os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))}
+    roots.add(os.path.realpath(Path(PLUGIN_QA_MEM).parent.parent / "references"))
+    if tool not in ("Read", "ToolSearch", "TodoWrite"):
+        return f"the qa-reviewer only reads run files; {tool} is not one of its tools"
+    if tool == "Read" and not all(any(under(real(p, cwd), r) for r in roots) and not is_secret_path(real(p, cwd))
+                                  for p in tool_paths(tin)):
+        return "the qa-reviewer reads only <project>/qa-out/ run files and the plugin's references"
 def check_files(tool, tin, cwd, explorer):
     """R3, R4, R5 for the file tools: the profile stays closed, the data folder unwritten, the config the explorer's."""
     for raw in tool_paths(tin):
@@ -1202,6 +1211,8 @@ def evaluate(data):
     if role == "qa-mapper" and (r := check_mapper(tool, tin, cwd)):
         return r, False
     if role in EXPLORERS and (r := check_explorer(tool, tin, cwd, role)):
+        return r, False
+    if role == "qa-reviewer" and (r := check_reviewer(tool, tin, cwd)):
         return r, False
     if tool == "Bash":
         ctx = Ctx(cwd, role in EXPLORERS, clean(tin.get("command") or ""))

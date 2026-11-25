@@ -405,6 +405,15 @@ class R4Explorer(Case):
                                        "tool_input": {"command": "bash /tmp/x.sh"}}))  # no script files, as the explorer
         self.assertIsNotNone(tool("Write", CR, cwd=RUN, file_path=str(CFG), content="{}"))
 
+    def test_the_reviewer_only_reads_run_files(self):  # a critic of untrusted drafts: no shell, no writes, no secrets
+        RV = "qa-sdet:qa-reviewer"
+        self.assertIsNone(tool("Read", RV, cwd=RUN, file_path=f"{RUN}/qa-out/r/bugs/BUG-1.md"))
+        self.assertIsNone(tool("Read", RV, cwd=RUN, file_path=str(Path(g.PLUGIN_QA_MEM).parent.parent / "references/bug-draft.md")))
+        for name, tin in (("Bash", {"command": "ls"}), ("Write", {"file_path": f"{RUN}/qa-out/r/x.md", "content": "x"}),
+                          ("Read", {"file_path": f"{RUN}/src/app.tsx"}), ("Read", {"file_path": str(Path.home() / ".ssh/id_rsa")}),
+                          ("Grep", {"pattern": "x", "path": f"{RUN}/qa-out"}), ("mcp__github__create_issue", {})):
+            self.assertIn("qa-reviewer", tool(name, RV, cwd=RUN, **tin) or "", name)
+
     def test_explorer_has_only_its_tools(self):  # it inherited every MCP server of the session (GitHub, Slack, ...)
         for name in ("mcp__github__create_issue", "mcp__slack__post_message", "Edit", "WebFetch", "Agent", "NotebookEdit"):
             self.assertIn("not one of its tools", tool(name, EX, cwd=RUN) or "", name)

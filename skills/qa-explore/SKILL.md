@@ -1,7 +1,7 @@
 ---
 name: qa-explore
 description: Exploratory bug hunt on one or more pages of the QA web app (or changed/top pages from memory gaps), no ticket needed, with annotated bug images, repro specs and a readable report. Use when asked to explore or find bugs on a page, URL, changed pages or feature, or what to explore next.
-argument-hint: <url | route | page name>... | --changed | --top N [--faults] [--budget N] [--minutes M] [--focus '<charter>']
+argument-hint: <url | route | page name>... | --changed | --top N [--faults] [--budget N] [--minutes M] [--focus '<charter>'] [--verify]
 ---
 
 Explore and find bugs: $ARGUMENTS
@@ -17,4 +17,5 @@ Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. Firs
 2. **Pre-flight session check** (run-setup): verify the QA session is active (recovering inline with headed `qa-login` if expired) before creating a run folder.
 3. **Run folder and plan:** create ONE run folder: `qa-mem rundir '${CLAUDE_PROJECT_DIR}' --route '<route>'` for one page, `qa-mem rundir '${CLAUDE_PROJECT_DIR}' --label '<changed-Npages or explore-Npages>'` for 2+ pages. Write `<run>/.data/plan.json`: `{"kind": "explore", "title": "<route or comma-separated routes>", "created": "<date -u +%Y-%m-%dT%H:%M:%SZ>", "env": {"url": "<first target>", "browser": "<config browser>"}, "tickets": [], "cases": [], "questions": []}`; with `--focus` append `, focus: <charter>` to `title`. When the user listed checks to run, they are `cases` (fields in `${CLAUDE_SKILL_DIR}/../../references/planning.md`).
 4. **Explore:** for each target page, sequentially (one explorer at a time; dispatch gives each route its own slug): `qa-mem dispatch '<run>' --route '<route>' --mode explore` (run-setup's Setup; plus `--focus '<charter>'` and the limits), delegate with its brief, teardown. If an explorer returns `BLOCKED`, skip remaining pages and keep its summary.
+With `--verify`: after the last teardown, run-setup's Second opinion (a `qa-sdet:qa-reviewer` read-only check of the serious drafts; its reply saved as `<run>/.data/review.json`).
 5. **Reply** (run-setup).

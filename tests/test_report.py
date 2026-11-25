@@ -1236,6 +1236,19 @@ class AuditBugs(Rendering):
         self.assertEqual(code, 0)
         self.assertIn("BUG-1", out)
 
+    def test_a_review_shows_next_to_its_bug_and_never_changes_the_verdict(self):
+        d = self.folder(good_draft(self.H), GOOD_SPEC)
+        review = {"bugs": [{"id": "BUG-1", "verdict": "needs_check", "oracle_ok": False, "notes": "the oracle cites the code"}]}
+        (d / ".data/review.json").write_text(json.dumps(review))
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("⚠ check before filing: the oracle cites the code", r)
+        self.assertIn("**Verdict: ❌ FAIL**", r)  # the review is a note for the user, not a verdict
+        (d / ".data/review.json").write_text(json.dumps({"bugs": [{"id": "BUG-1", "verdict": "solid"}]}))
+        self.assertIn("reviewed ✓", report.render_report(d))
+        (d / ".data/review.json").write_text("{oops")
+        self.assertIn("review.json unreadable", report.render_report(d))
+
     def test_contract_warnings(self):
         spec = GOOD_SPEC.replace("'/form'", "'/incidents/:id'").replace("...(process.env.STORAGE_STATE ? { storageState: "
                                                                           "process.env.STORAGE_STATE } : {})", "") \
