@@ -154,7 +154,7 @@ def wrapper_cmd(cmd, args):
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
     "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
-    "patterns": "[--min-pages N] [--json]", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "patterns": "[--min-pages N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
@@ -351,6 +351,11 @@ def run_cmd(con, cmd, args):
         if not o["_"]:
             return usage_error(cmd)
         print(memory.card(con, " ".join(o["_"]), o.get("--focus"), o.get("--ids", False)))
+    elif cmd == "bug-match":
+        o = _opts(args, valued=("--endpoint",))
+        if len(o["_"]) < 2:
+            return usage_error(cmd)
+        print(memory.bug_match(con, o["_"][0], " ".join(o["_"][1:]), o.get("--endpoint")))
     elif cmd == "patterns":
         o = _opts(args, flags=("--json",), valued=("--min-pages",))
         if o["_"]:

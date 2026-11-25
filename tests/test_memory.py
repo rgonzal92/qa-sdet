@@ -1045,6 +1045,48 @@ class Patterns(MemBase):
         self.assertEqual(tuple(row), ("error-handling", "silent-error-as-empty"))
 
 
+class BugMatch(MemBase):
+    """`qa-mem bug-match <route> <symptom> [--endpoint]`: a likely duplicate before a new draft is written."""
+
+    def setUp(self):
+        super().setUp()
+        with self.con:
+            for page in ("/zones/new", "/zones/:id"):
+                self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                                 (page, "api", "save", "POST /api/zones", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
+
+    def bug(self, page, title, symptom, status="OPEN", **extra):
+        memory.ingest(self.con, {"run_id": f"r-{symptom}", "build": "1", "pages": [{"route": page}],
+                                 "bugs": [{"route": page, "title": title, "symptom": symptom, "severity": "HIGH", **extra}]})
+        h = core.bug_hash(page, symptom)
+        self.con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, h))
+        return h
+
+    def test_a_reworded_bug_seen_from_another_page_is_found(self):
+        h = self.bug("/zones/new", "Speed 131 saved", "speed 131 saved without error", endpoint="POST /api/zones")
+        self.bug("/zones/new", "Header misaligned", "header misaligned on narrow screens")
+        out = memory.bug_match(self.con, "/zones/:id", "form saves speed limit above 130 (131)", "POST /api/zones")
+        self.assertIn(h, out)
+        self.assertIn("report a sighting with its hash", out)
+        self.assertNotIn("Header misaligned", out)
+        code, cli_out, _ = qa_mem("bug-match", "/zones/:id", "form saves speed limit above 130 (131)", "--endpoint", "POST /api/zones")
+        self.assertEqual(code, 0)
+        self.assertIn(h, cli_out)
+
+    def test_fixed_and_invalid_matches_say_what_to_do(self):
+        fixed = self.bug("/zones/new", "Speed 131 saved", "speed 131 saved", "FIXED")
+        invalid = self.bug("/zones/new", "Speed label typo", "speed field label typo", "INVALID")
+        self.assertIn("regression", memory.bug_match(self.con, "/zones/new", "speed 131 is saved again"))
+        out = memory.bug_match(self.con, "/zones/new", "typo in the speed field label")
+        self.assertIn(invalid, out)
+        self.assertIn("NOT A BUG", out)
+        self.assertNotIn(fixed, out)
+
+    def test_a_bug_on_an_unrelated_page_is_no_match(self):
+        self.bug("/incidents", "Speed 131 saved", "speed 131 saved")  # same words, a page sharing nothing
+        self.assertIn("no likely duplicate", memory.bug_match(self.con, "/zones/new", "speed 131 saved"))
+
+
 class Database(MemBase):
     """core.connect."""
 

@@ -771,6 +771,51 @@ def ticket_context(con, text, n=8):
             "relevant_bugs": [_bug_line(x, True) for x in bug_rows[:15]]}
 
 
+def _stems(text):
+    """Words of a symptom or title, crudely stemmed ('saves', 'saved', 'save' -> 'sav'), minus filler."""
+    out = set()
+    for w in core.norm(text).split():
+        if len(w) < 3 or w in STOP_WORDS:
+            continue
+        for suffix in ("ing", "ed", "es", "s"):
+            if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+                w = w[:-len(suffix)]
+                break
+        out.add(w[:-1] if w.endswith("e") and len(w) > 3 else w)
+    return out
+
+
+MATCH_ADVICE = {"INVALID": "the user marked it NOT A BUG: don't report it",
+                "FIXED": "fixed before: if this is it, it's a regression: report its hash with a short draft"}
+
+
+def bug_match(con, route, symptom, endpoint=None, limit=3):
+    """Likely duplicates of a bug about to be drafted: bugs on this page, on pages sharing its calls, sighted here, or
+    recorded on the same endpoint, whose title and symptom share words with this symptom (any status, so a NOT A BUG
+    and a fixed one are named too). Candidates for the explorer to judge, never merged by themselves."""
+    page, words = core.norm_route(route), _stems(symptom)
+    ep = codemap._api_ref(endpoint) if endpoint else ("", "")
+    near = {page} | set(codemap.sharing_pages(con, page))
+    sighted = {h for (h,) in con.execute("SELECT hash FROM sightings WHERE page=?", (page,))}
+    scored = []
+    for x in con.execute(f"SELECT {BUG_COLS},endpoint FROM bugs"):
+        theirs = _stems(f"{x['title']} {x['symptom'] or ''}")
+        shared = len(words & theirs)
+        same_ep = bool(ep[1] and x["endpoint"] and codemap._same_call(_endpoint_ref(x["endpoint"]), ep))
+        if not shared or not (same_ep or x["page"] in near or x["hash"] in sighted):
+            continue  # same words on a page that shares nothing with this one: another bug
+        score = shared / len(words | theirs) + 0.5 * same_ep + 0.1 * (x["page"] == page)
+        if score >= 0.5 or shared >= 2:
+            scored.append((score, x))
+    scored.sort(key=lambda t: -t[0])
+    if not scored:
+        return "no likely duplicate on this page, the pages sharing its calls, or that endpoint: draft it as new"
+    return "\n".join(["LIKELY DUPLICATES (judge each; the same bug = report a sighting with its hash, no new draft):"] + [
+        f"- {x['hash']} {x['status']}" + (f" {x['jira_key']}" if x["jira_key"] else "") + f" [{x['severity'] or '?'}] "
+        f"{x['page']} {core.short(x['title'], 80)}" + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "")
+        + f": {MATCH_ADVICE.get(x['status'], 'known: report a sighting with its hash')}" for _, x in scored[:limit]])
+
+
 def questions(con, status="open"):
     rows = con.execute("SELECT * FROM questions" + ("" if status == "all" else " WHERE status=?") + " ORDER BY last_seen DESC "
                        "LIMIT 50", () if status == "all" else (status,)).fetchall()
