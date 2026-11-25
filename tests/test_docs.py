@@ -601,7 +601,7 @@ class Docs(unittest.TestCase):
         hooks = json.loads(text("hooks/hooks.json"))["hooks"]
         self.assertNotIn("qa-crawler", hooks["SubagentStop"][0]["matcher"])
         self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
-        for f in ALL + [ROOT / "CHANGELOG.md", ROOT / "hooks/guard.py", ROOT / "hooks/posttooluse.py"]:
+        for f in ALL + [ROOT / "hooks/guard.py", ROOT / "hooks/posttooluse.py"]:
             self.assertNotIn("qa-crawler", f.read_text(), f.name)
 
     def test_the_explorer_stops_on_every_page_start_blocker(self):  # found live: it reached a 404 target via goto
@@ -666,15 +666,14 @@ class Docs(unittest.TestCase):
         self.assertIn('"expand_recommended"', text("lib/qa_sdet/report.py"))
 
     def test_observed_endpoints_are_documented_where_gaps_and_the_card_are(self):
-        for doc in ("README.md", "CHANGELOG.md"):
-            self.assertIn("unexercised_apis", text(doc), doc)
+        self.assertIn("unexercised_apis", text("README.md"))
         self.assertIn("unexercised_apis", text("skills/qa-memory/SKILL.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("agents/qa-explorer.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/memory.py"))  # the card line the explorer prompt names
 
     def test_blindspots_is_a_command_and_documented(self):
         self.assertIn("blindspots", cli.COMMANDS)
-        for doc in ("README.md", "skills/qa-memory/SKILL.md", "CHANGELOG.md"):
+        for doc in ("README.md", "skills/qa-memory/SKILL.md"):
             self.assertIn("blindspots", text(doc), doc)
         for section in (
             "UNVISITED STATES",

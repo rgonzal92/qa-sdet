@@ -102,7 +102,7 @@ bin = ["bin/", "*/bin/"]
 # `make mutation` runs mutmut in a temporary copy where lib/ is renamed src/: mutmut only knows ./, src/ and source/.
 # A bounded trial: name the mutants to run (MUTANTS=...), for the redactor, the host rules and the verdict.
 source_paths = ["src/qa_sdet"]
-also_copy = ["hooks", "bin", "references", "agents", "skills", ".claude-plugin", "README.md", "CHANGELOG.md", "pyproject.toml"]
+also_copy = ["hooks", "bin", "references", "agents", "skills", ".claude-plugin", "README.md", "pyproject.toml"]
 # in-process tests only: mutmut tracks mutants inside the test process, so code run by a subprocess (hooks,
 # bin/qa-mem) can't be attributed
 pytest_add_cli_args_test_selection = [
