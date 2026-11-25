@@ -381,6 +381,13 @@ def check_report_fields(run):
     if not isinstance(items, list) or not all(
             isinstance(i, str) or (isinstance(i, dict) and isinstance(i.get("text"), str)) for i in items):
         raise ValueError("'not_tested' must be a list of strings, or of {\"category\", \"text\"} objects")
+    items = run.get("leads")
+    if not isinstance([] if items is None else items, list) or not all(
+            isinstance(i, dict) and isinstance(i.get("route"), str) for i in items or []):
+        raise ValueError("'leads' must be a list of {\"route\", \"kind\", \"target\", \"reason\", \"priority\"} objects")
+    for i in items or []:
+        for f in ("kind", "target", "reason", "priority"):
+            core.txt(i.get(f), f"leads.{f}")
     core.txt(run.get("notes"), "notes")
     env = run.get("env")
     env = {} if env is None else env

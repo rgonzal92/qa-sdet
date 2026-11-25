@@ -774,6 +774,23 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
     return out + _filing_block(bugs, cases, tickets, run_dir, cfg or {})
 
 
+LEAD_RANK = {"HIGH": 0, "MEDIUM": 1}
+
+
+def _leads(runs, skip=()):
+    """Follow-up leads the explorers left (`leads` in their run files), one per route and target, HIGH first; routes in
+    `skip` (already explored) left out."""
+    seen, out = set(), []
+    for _, r in runs:
+        for lead in _list(r, "leads"):
+            route = core.norm_route(lead.get("route"))
+            key = (route, core.norm(lead.get("target")))
+            if route and route not in skip and key not in seen:
+                seen.add(key)
+                out.append({**lead, "route": route, "priority": str(lead.get("priority") or "MEDIUM").strip().upper()})
+    return sorted(out, key=lambda x: LEAD_RANK.get(x["priority"], 2))
+
+
 def _notes_section(runs):
     out = ["## Exploration notes", "Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", ""]
     for name, r in runs:
@@ -793,6 +810,12 @@ def _notes_section(runs):
         if r.get("notes") or r.get("summary"):
             out += [paragraph(core.short(r.get("notes") or r.get("summary"), 1500)), ""]
         out += ["</details>", ""]
+    leads = _leads(runs)
+    if leads:
+        out += [f"<details><summary>Suggested follow-up leads ({len(leads)})</summary>", ""]
+        out += [f"- {cell(x['priority'])} {cell(x['route'])}" + (f" ({cell(x['kind'])})" if x.get("kind") else "") + ": " +
+                cell(core.short(": ".join(str(x[f]) for f in ("target", "reason") if x.get(f)), 200)) for x in leads[:10]]
+        out += ["", "</details>", ""]
     return out
 
 
@@ -1456,6 +1479,46 @@ def next_action(run_dir, slug):
         return {"action": "abort", "block_scope": scope,
                 "reason": f"{streak} pages in a row blocked (the QA app may be down): {why}"}
     return {"action": "continue", "block_scope": scope, "reason": why}
+
+
+def explore_next(project, run_dir=None):
+    """What an explore run (the newest, or `run_dir`) left to do: planned routes with no run file, or INCOMPLETE, or
+    blocked by the sign-in or browser; the leads its explorers left on routes it didn't explore; and pages sharing an
+    endpoint with a CONFIRMED bug it found (the code map's sharing_pages), not explored in it."""
+    proj = ops._project(project)
+    qa_out = proj / "qa-out"
+    if run_dir is not None:
+        folders = [Path(run_dir).resolve()]
+    else:
+        folders = [p for p in (_plan_folders(qa_out) if qa_out.is_dir() else [])
+                   if (_load_json(p / ".data" / "plan.json", []) or {}).get("kind") == "explore"][:1]
+    if not folders or not (folders[0] / ".data" / "plan.json").is_file():
+        raise core.BadInput("explore-next: no explore run folder (qa-out/<run>/ with an explore plan.json)")
+    d = load_run(folders[0])
+    title = str((d["plan"] or {}).get("title") or "")
+    planned = [core.norm_route(x) for x in title.split(", ") if x.strip().startswith(("/", "http", "#"))]
+    done = {core.norm_route(r.get("target")): r for _, r in d["runs"] if core.norm_route(r.get("target"))}
+    unfinished = lambda r: _first_word(r.get("status")) == "incomplete" or (
+        _first_word(r.get("status")) == "blocked" and block_scope(r) != "page")
+    incomplete = [x for x in dict.fromkeys(planned) if x and x not in done] + [x for x, r in done.items() if unfinished(r)]
+    explored = set(planned) | set(done)
+    radius = []
+    confirmed = {core.norm_route(b.get("route")) for _, r in d["runs"] for b in _list(r, "bugs")
+                 if core.norm(b.get("classification")) == "confirmed" and b.get("route")}
+    if confirmed and core.db_path().is_file():
+        import sqlite3
+        from . import codemap
+        try:
+            con = sqlite3.connect(core.db_path().resolve().as_uri() + "?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            try:
+                radius = sorted({p for route in confirmed for p in codemap.sharing_pages(con, route)} - explored)
+            finally:
+                con.close()
+        except sqlite3.Error:
+            radius = []
+    return {"run": str(folders[0]), "incomplete_routes": incomplete,
+            "leads": _leads(d["runs"], skip=explored)[:5], "blast_radius_routes": radius[:5]}
 
 
 def _slice(st, want):

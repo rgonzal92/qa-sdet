@@ -1278,6 +1278,39 @@ class NextAction(Rendering):
         memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
 
 
+class Continuation(Rendering):
+    """Leads an explorer leaves, and `qa-mem explore-next`: what an explore run left to do and what its bugs may reach."""
+
+    def test_leads_are_checked_shown_and_explore_next_picks_up_the_rest(self):
+        from qa_sdet import memory
+        with self.assertRaises(ValueError):
+            memory.check_report_fields({"leads": "look at /zones"})
+        con = core.connect()
+        for page in ("/zones/new", "/zones/:id"):  # the bug's endpoint is called from both
+            con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (page, "api", "save", "POST /api/zones", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
+        con.commit()
+        con.close()
+        plan = {"kind": "explore", "title": "/zones/new, /closures", "tickets": [], "cases": []}
+        lead = {"route": "/zones/:id/history", "kind": "child-route", "target": "History tab", "reason": "edits keep a log",
+                "priority": "HIGH"}
+        runs = [("zones-new", {"target": "/zones/new", "status": "COMPLETED", "build": "1", "leads": [lead],
+                               "bugs": [{"route": "/zones/new", "title": "Speed 131 saved", "severity": "HIGH",
+                                         "classification": "CONFIRMED"}]}),
+                ("closures", {"target": "/closures", "status": "INCOMPLETE", "build": "1"})]
+        d = self.rundir("2026-11-25-explore-2pages", plan=plan, runs=runs)
+        r = report.render_report(d)
+        self.assertIn("<summary>Suggested follow-up leads (1)</summary>", r)
+        self.assertIn("- HIGH /zones/:id/history (child-route): History tab: edits keep a log", r)
+        code, out, _ = cli("explore-next", str(self.proj))
+        nxt = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(os.path.basename(nxt["run"]), "2026-11-25-explore-2pages")
+        self.assertEqual(nxt["incomplete_routes"], ["/closures"])
+        self.assertEqual([x["route"] for x in nxt["leads"]], ["/zones/:id/history"])
+        self.assertEqual(nxt["blast_radius_routes"], ["/zones/:id"])  # shares POST /api/zones with the bug's page
+
+
 class FilingBundle(Rendering):
     """Persistent shell-safe filing commands & attachments folded inside REPORT.md."""
 

@@ -336,6 +336,15 @@ class Docs(unittest.TestCase):
         for marker in ('"mode": "map"', "page-start", "requests --all", "run-<slug>.json"):
             self.assertIn(marker, crawler)
 
+    def test_continue_and_adaptive_use_explore_next(self):
+        skill = text("skills/qa-explore/SKILL.md")
+        for flag in ("--continue", "--adaptive"):
+            self.assertIn(flag, skill.split("---")[1])  # in argument-hint
+            self.assertIn(f"**`{flag}", skill)
+        self.assertIn("qa-mem explore-next", skill)
+        self.assertIn("up to 2 more pages", skill)  # the settled cap on adaptive expansion
+        self.assertIn('"leads"', text("references/run-json.md"))
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
