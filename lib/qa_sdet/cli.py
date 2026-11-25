@@ -13,6 +13,7 @@ Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) ke
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -492,6 +493,35 @@ def _log_cli_error(cmd, code, reason):
         pass
 
 
+class _StderrTee:
+    """sys.stderr that still prints everything and keeps the start, so cli_error logs why a command failed."""
+
+    def __init__(self, real):
+        self.real, self.seen = real, ""
+
+    def write(self, text):
+        if len(self.seen) < 400:
+            self.seen += text[: 400 - len(self.seen)]
+        return self.real.write(text)
+
+    def __getattr__(self, name):  # flush, isatty, encoding, fileno, ... stay the real stream's
+        return getattr(self.real, name)
+
+    def reason(self, cmd, code):
+        line = next((x.strip() for x in self.seen.splitlines() if x.strip()), "")
+        return line.removeprefix("qa-mem: ") if line else f"{cmd} exited {code}"
+
+
+@contextlib.contextmanager
+def _tee_stderr():
+    tee = _StderrTee(sys.stderr)
+    sys.stderr = tee
+    try:
+        yield tee
+    finally:
+        sys.stderr = tee.real
+
+
 def usage_error(cmd: str, why: str = "") -> int:
     if why:
         _log_cli_error(cmd, 2, why)
@@ -680,10 +710,11 @@ def _main(argv: list[str]) -> int:
             _log_cli_error("doctor", 1, f"{problems} doctor gap(s)")
         return 1 if problems else 0
     try:
-        code_ = wrapper_cmd(cmd, args)
+        with _tee_stderr() as tee:
+            code_ = wrapper_cmd(cmd, args)
         if code_ is not None:
             if code_ != 0:
-                _log_cli_error(cmd, code_, f"{cmd} exited {code_}")
+                _log_cli_error(cmd, code_, tee.reason(cmd, code_))
             return code_
         if cmd == "inbox":
             from . import report
@@ -723,9 +754,10 @@ def _main(argv: list[str]) -> int:
         return 0
     con = core.connect()
     try:
-        rc = run_cmd(con, cmd, args)
+        with _tee_stderr() as tee:
+            rc = run_cmd(con, cmd, args)
         if rc != 0 and cmd != "ingest":
-            _log_cli_error(cmd, rc, f"{cmd} exited {rc}")
+            _log_cli_error(cmd, rc, tee.reason(cmd, rc))
         return rc
     except core.BadOption as e:
         return usage_error(cmd, str(e))

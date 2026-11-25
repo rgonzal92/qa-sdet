@@ -692,7 +692,8 @@ def render_digest(events, anon, bad_lines=0):
         statuses = Counter(str(r.get("status") or "UNKNOWN") for r in runs)
         stops = Counter(str(r.get("stop_reason") or "none") for r in runs)
         bscopes = Counter(str(r.get("block_scope")) for r in runs if r.get("block_scope"))
-        known_builds = sum(1 for r in runs if r.get("build_known") is True)
+        build_runs = [r for r in runs if isinstance(r.get("build_known"), bool)]  # code maps read no build
+        known_builds = sum(1 for r in build_runs if r["build_known"])
         missing_files = sum(1 for r in runs if r.get("missing_run_file"))
         audit_runs = sum(1 for r in runs if int(r.get("audit_issues") or 0) > 0)
         turns_vals = [int(r["turns"]) for r in runs if isinstance(r.get("turns"), int)]
@@ -704,7 +705,11 @@ def render_digest(events, anon, bad_lines=0):
             + (f" (`block_scope`: {', '.join(f'{k}={v}' for k, v in bscopes.most_common())})" if bscopes else "")
         )
         lines.append("- **Stop reasons:** " + ", ".join(f"`{k}`: {v}" for k, v in stops.most_common()))
-        lines.append(f"- **Build detection:** {known_builds}/{len(runs)} known ({len(runs) - known_builds} `unknown`)")
+        lines.append(
+            f"- **Build detection:** {known_builds}/{len(build_runs)} known ({len(build_runs) - known_builds} `unknown`)"
+            if build_runs
+            else "- **Build detection:** n/a (code-map runs only)"
+        )
         avg_t = f"{sum(turns_vals) / len(turns_vals):.1f}" if turns_vals else "n/a"
         avg_d = f"{sum(dur_vals) / len(dur_vals):.0f}s" if dur_vals else "n/a"
         lines.append(

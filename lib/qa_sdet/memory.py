@@ -834,7 +834,6 @@ def _ingest_files(con, pending):
                             "slug": f.stem,
                             "mode": "map",
                             "status": "COMPLETED",
-                            "build_known": True,
                             "bugs_found": 0,
                             "rows": rows_n,
                             "audit_issues": 1 if dropped else 0,

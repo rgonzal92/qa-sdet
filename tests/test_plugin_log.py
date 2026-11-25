@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import unittest
 
 from support import ROOT, Base, core
@@ -335,6 +336,19 @@ class PluginLogAnonymizerAndExport(Base):
         since_res = pl.export_digest(self.proj, since=t3, preview=True)
         self.assertEqual(since_res["events"], 1)
 
+    def test_build_detection_counts_only_runs_that_read_a_build(self):  # a code map reads source, never a build
+        pl = self._mod()
+        qa_out = self.proj / "qa-out"
+        qa_out.mkdir()
+        for i in range(3):
+            pl.append_event(qa_out, "run_summary", {"run": "init", "slug": f"code-map-{i}", "mode": "map"})
+        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        self.assertIn("**Build detection:** n/a (code-map runs only)", md)
+        for slug in ("a", "b"):
+            pl.append_event(qa_out, "run_summary", {"run": "r", "slug": slug, "mode": "explore", "build_known": False})
+        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        self.assertIn("**Build detection:** 0/2 known (2 `unknown`)", md)
+
     def test_show_and_clear(self):
         pl = self._mod()
         qa_out = self.proj / "qa-out"
@@ -354,6 +368,38 @@ class PluginLogAnonymizerAndExport(Base):
 
 
 class PluginLogCli(Base):
+    def test_cli_error_logs_what_the_command_printed_not_just_its_exit_code(self):
+        import subprocess
+        from unittest import mock
+
+        from support import cli, done
+
+        (self.proj / "qa-out").mkdir()
+        self.config(
+            app="x",
+            browser="chrome",
+            qaBaseUrl="https://qa.example.com/app",
+            allowedHosts=["qa.example.com"],
+            ssoHost="login.microsoftonline.com",
+        )
+        expired = '{"host":"login.microsoftonline.com","hasPassword":false}'
+        leak = lambda *a, **k: (print("qa-mem: Authorization: Bearer abcdefghijklmnopqrst", file=sys.stderr), 1)[1]
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(self.proj)}):
+            with mock.patch.object(subprocess, "run", side_effect=[done(0), done(0), done(0, out=expired), done(0)]):
+                code, _, err = cli("session-check")
+            self.assertEqual(code, 1)
+            self.assertIn("session expired", err)  # still printed for the caller
+            with mock.patch("qa_sdet.ops.session_check", side_effect=leak):
+                self.assertEqual(cli("session-check")[0], 1)
+            self.assertEqual(cli("signal-ignore", "99")[0], 1)  # prints to stdout: the generic reason stays
+        recs = [json.loads(x) for x in (self.proj / "qa-out/plugin-log.jsonl").read_text().splitlines()]
+        reasons = [r["reason"] for r in recs if r["type"] == "cli_error"]
+        self.assertEqual(len(reasons), 3, reasons)
+        self.assertTrue(reasons[0].startswith("session expired"), reasons[0])
+        self.assertTrue(reasons[1].startswith("Authorization: [REDACTED]"), reasons[1])
+        self.assertNotIn("abcdefghijklmnopqrst", reasons[1])  # scrubbed
+        self.assertEqual(reasons[2], "signal-ignore exited 1")
+
     def test_cli_note_show_export_clear_and_cli_error_capture(self):
         from unittest import mock
 
