@@ -670,8 +670,7 @@ def card(con, q, focus=None, ids=False):
     if noisy:
         out += ["RECURRING UNEXPLAINED SIGNALS (no bug explains them; investigate or draft; the user can ignore noise):"] + [
             f"- {x['sig_key']} (seen in {x['seen_runs']} runs since build {x['first_build']})" for x in noisy]
-    states = con.execute("SELECT state_key, status, build FROM page_states WHERE page=? ORDER BY ts DESC", (r,)).fetchall()
-    due = [x["state_key"] for x in states if x["status"] != "visited" or x["build"] != b]
+    due = [x["state_key"] + (f" ({core.short(x['trigger'], 80)})" if x["trigger"] else "") for x in _due_states(con, r, b)]
     if due:
         out.append(f"UNVISITED STATES (on this page, not opened on {'build ' + b if b and b != core.UNKNOWN else 'this build'}: "
                    "open each, check it, report it as visited): " + "; ".join(due[:8]) + (f" (+{len(due) - 8})" if len(due) > 8 else ""))
@@ -714,18 +713,29 @@ def _changed_here(con, route, pg):
     return files, labels
 
 
+def _field_words(label):
+    """A rule label's words, camelCase split ('POST /api/zones speedLimit' -> post api zones speed limit)."""
+    return set(core.norm(re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", re.sub(r"\s\(\d+\)$", "", label))).split())
+
+
+def _due_states(con, route, build):
+    """The page's in-page states not opened on `build` (newest first): what the card's UNVISITED STATES and `gaps` count."""
+    return [x for x in con.execute("SELECT state_key, trigger, status, build FROM page_states WHERE page=? ORDER BY ts DESC",
+                                   (route,)) if x["status"] != "visited" or x["build"] != build]
+
+
 def _client_server_differ(con, route):
     """'<field>: client <rule> vs server <rule>' where a page rule and a linked server rule on the same field name
-    different numbers: a hint (the code isn't the oracle)."""
+    (camelCase or not) different numbers (negative ones too): a hint (the code isn't the oracle)."""
     rows = codemap._codemap_rows(con, route)
     client = [x for x in rows if x["kind"] == "rule" and x["page"] != "*"]
     server = [x for x in rows if x["kind"] == "rule" and x["page"] == "*"]
-    nums = lambda v: set(re.findall(r"\d+(?:\.\d+)?", str(v or "")))
+    nums = lambda v: set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", str(v or "")))  # not the dash in '0-130' or a date
     out = []
     for c in client:
-        field = set(core.norm(re.sub(r"\s\(\d+\)$", "", c["label"])).split())
+        field = _field_words(c["label"])
         for x in server:
-            if field and field <= set(core.norm(x["label"]).split()) and nums(c["value"]) and nums(x["value"]) \
+            if field and field <= _field_words(x["label"]) and nums(c["value"]) and nums(x["value"]) \
                     and nums(c["value"]) != nums(x["value"]):
                 out.append(f"{c['label']}: client {core.short(c['value'], 40)} vs server {core.short(x['value'], 40)}")
     return list(dict.fromkeys(out))
@@ -821,13 +831,24 @@ def _coverage(con, route, build):
 
 def _untested_rules(con, route, targets):
     """Labels of the page's code-map rules, then the linked server rules ('[server] <label>'), that no adversarial check
-    named: target 'Speed limit field' covers rule 'speed', target 'date' doesn't cover 'start date'."""
+    named: target 'Speed limit field' covers rule 'speed', target 'date' doesn't cover 'start date'. A check of a server
+    rule ('[server] POST /api/zones speed') doesn't cover the page's own field of that name."""
     out, seen = [], set()
     rows = [(x["label"], x["page"] == "*") for x in codemap._codemap_rows(con, route) if x["kind"] == "rule"]
-    for label, server in sorted(rows, key=lambda t: (t[1], t[0])):
-        label = re.sub(r"\s\(\d+\)$", "", label)  # apply_codemap's 'speed (2)': another rule row of the same field
+    labels = [(re.sub(r"\s\(\d+\)$", "", label), server) for label, server in rows]  # apply_codemap's 'speed (2)': one field
+    server_words = {core.norm(label) for label, server in labels if server}
+    for label, server in sorted(labels, key=lambda t: (t[1], t[0])):
         words = core.norm(label)
-        if words and (server, words) not in seen and not any(f" {words} " in f" {t} " for t in targets):
+
+        def covers(t):
+            if server:
+                return f" {words} " in f" {t} "
+            rest = f" {t} "
+            for w in sorted(server_words - {words}, key=len, reverse=True):  # a longer server label holding these words
+                if words in w:
+                    rest = rest.replace(f" {w} ", " ")
+            return not t.startswith("server ") and f" {words} " in rest
+        if words and (server, words) not in seen and not any(covers(t) for t in targets):
             out.append(f"[server] {label}" if server else label)
         seen.add((server, words))
     return out
@@ -1058,7 +1079,8 @@ def forget_fact(con, fid):
 
 
 def forget_page(con, route, force=False):
-    """Retire a page (a typo or a removed route): its facts, locators, coverage and the page; bugs stay as history.
+    """Retire a page (a typo or a removed route): its facts, locators, coverage, states, transitions (to and from it),
+    signals, questions and the page; bugs stay as history.
     Refused while it has open bugs, unless force. Returns (removed, reason)."""
     page = core.norm_route(route)
     open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (page, *core.VISIBLE)).fetchone()[0]
@@ -1067,8 +1089,9 @@ def forget_page(con, route, force=False):
     if not con.execute("SELECT 1 FROM pages WHERE route=?", (page,)).fetchone():
         return False, f"no page {page}"
     with con:
-        for table in ("facts", "locators", "coverage"):
+        for table in ("facts", "locators", "coverage", "page_states", "signals", "questions"):
             con.execute(f"DELETE FROM {table} WHERE page=?", (page,))
+        con.execute("DELETE FROM transitions WHERE from_route=? OR to_route=?", (page, page))
         con.execute("DELETE FROM pages WHERE route=?", (page,))
     return True, f"forgot {page} (its bugs are kept)"
 
@@ -1231,6 +1254,7 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         untried, untested = sum(h not in tried for h in core.HEURISTICS), len(_untested_rules(con, r, targets))
         open_bugs = con.execute("SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)).fetchone()[0]
         fixed_recheck = _unrechecked_fixed(con, r, b)
+        states = len(_due_states(con, r, b))
         src = changed.get(r, [])
         if changed_only and not src:
             continue
@@ -1244,6 +1268,8 @@ def gaps(con, changed_only=False, top=None, as_json=False):
             parts.append(f"{untried} untried")
         if untested:
             parts.append(f"{untested} untested field{'s' * (untested != 1)}")
+        if states:
+            parts.append(f"{states} unvisited state{'s' * (states != 1)}")
         if open_bugs:
             parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
         if r in regressed:
@@ -1259,8 +1285,8 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         tier = 0 if src or r in regressed or fixed_recheck else 1 if never and r in forms else 2 if old else 3
         info = {"route": r, "name": pg["name"] or "", "tier": TIERS[tier], "hotspot": hot.get(r, 0),
                 "never_explored": never, "old_build": old, "changed": bool(src), "changed_files": src,
-                "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested, "open_bugs": open_bugs,
-                "risk_reasons": parts}
+                "unrechecked_fixed": fixed_recheck, "untried": untried, "untested_fields": untested,
+                "unvisited_states": states, "open_bugs": open_bugs, "risk_reasons": parts}
         if entry:
             info |= {"entry_route": entry["from_route"], "entry_trigger": entry["trigger"]}
         ranked.append(((tier, -hot.get(r, 0), -(untried + untested), -open_bugs, r),

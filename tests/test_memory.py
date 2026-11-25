@@ -613,6 +613,41 @@ class Card(MemBase):
         self.assertIn("max 130", hint)
         self.assertIn("max 150", hint)
 
+    def test_camel_case_server_fields_and_negative_bounds_are_compared(self):
+        self.row("/zones/new", "api", "save", "POST /api/zones")
+        self.row("/zones/new", "rule", "speed", "min 0, max 130 (react-hook-form register)")
+        self.row("/zones/new", "rule", "offset", "min -5, max 5")
+        self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones speedLimit", "integer, min 0, max 150, required (Joi)", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones offset", "min 5, max 5", "api/zones.js")  # -5 vs 5: the minus counts
+        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        differ = memory._client_server_differ(self.con, "/zones/new")
+        self.assertEqual(len(differ), 2, differ)
+        self.assertTrue(any(d.startswith("speed:") and "max 150" in d for d in differ), differ)
+        self.assertTrue(any(d.startswith("offset:") and "min -5" in d for d in differ), differ)
+
+    def test_equal_camel_case_bounds_and_range_text_are_not_a_mismatch(self):
+        self.row("/zones/new", "api", "save", "POST /api/zones")
+        self.row("/zones/new", "rule", "speed", "0-130 km/h")
+        self.row("/zones/new", "rule", "start date", "min 2024-01-01")
+        self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones speedLimit", "integer, min 0, max 130, required (Joi)", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones startDate", "min 2024-01-01", "api/zones.js")
+        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        self.assertEqual(memory._client_server_differ(self.con, "/zones/new"), [])
+
+    def test_a_server_check_does_not_clear_the_page_field_of_the_same_name(self):
+        self.row("/form", "api", "save", "POST /api/zones")
+        self.row("/form", "rule", "speed", "max 130")
+        self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
+        self.row("*", "rule", "POST /api/zones speed", "max 150", "api/zones.js")
+        memory.ingest(self.con, run(coverage=[{"target": "[server] POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")  # the form's own field is still untested
+        memory.ingest(self.con, run(coverage=[{"target": "POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")  # also without the [server] prefix
+        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "pass"}]))
+        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")  # the form's check clears it; the server rule was checked
+
     def test_untested_targets_reset_on_a_new_build(self):
         self.rules("/form", "speed")
         memory.ingest(self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z")
@@ -1079,6 +1114,24 @@ class Curation(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)  # bug history stays
 
 
+    def test_forget_page_also_drops_its_states_transitions_signals_and_questions(self):
+        ts = core.now()
+        memory.ingest(self.con, run())
+        memory.ingest(self.con, {"run_id": "o", "build": "1", "pages": [{"route": "/other"}]})
+        with self.con:
+            for page in ("/form", "/other"):
+                self.con.execute("INSERT INTO page_states VALUES(?,?,?,?,?,?,?)", (page, "tab: A", "tab", "click A", "unvisited", "1", ts))
+                self.con.execute("INSERT INTO signals(page,kind,sig_key) VALUES(?,?,?)", (page, "request", "GET /x"))
+                self.con.execute("INSERT INTO questions(page,text) VALUES(?,?)", (page, "Is 0 valid?"))
+            self.con.execute("INSERT INTO transitions VALUES('/form','/other','link','/other','link','1',?)", (ts,))
+            self.con.execute("INSERT INTO transitions VALUES('/other','/form','link','/form','link','1',?)", (ts,))
+            self.con.execute("INSERT INTO transitions VALUES('/other','/third','link','/third','link','1',?)", (ts,))
+        self.assertEqual(memory.forget_page(self.con, "/form")[0], True)
+        for table, col in (("page_states", "page"), ("signals", "page"), ("questions", "page")):
+            self.assertEqual([r[0] for r in self.con.execute(f"SELECT {col} FROM {table}")], ["/other"], table)
+        self.assertEqual([tuple(r) for r in self.con.execute("SELECT from_route, to_route FROM transitions")], [("/other", "/third")])
+
+
 class Patterns(MemBase):
     """`qa-mem patterns`: how this app breaks again and again, from the heuristic and pattern each bug was recorded with."""
 
@@ -1235,14 +1288,18 @@ class States(MemBase):
                      "kind": "detail-row"}])
         card = memory.card(self.con, "/incidents")
         line = next(x for x in card.splitlines() if x.startswith("UNVISITED STATES"))
-        self.assertIn("tab: Scheduled", line)
-        self.assertIn("dialog: Filter", line)
+        self.assertIn("tab: Scheduled (getByRole('tab', { name: 'Scheduled' }))", line)  # with the trigger that opens it
+        self.assertIn("dialog: Filter (getByRole('button', { name: 'Filter' }))", line)
         self.assertNotIn("tab: Active", line)
         self.assertIn("/incidents/:id (row click)", next(x for x in card.splitlines() if x.startswith("LEADS TO")))
         detail = memory.card(self.con, "/incidents/:id")
         self.assertIn("ENTRY: from /incidents (row click; e.g. /incidents/4521)", detail)
         self.assertNotIn("abc123secretvalue", detail)
         data = json.loads(memory.gaps(self.con, as_json=True))
+        listing = next(p for p in data["pages"] if p["route"] == "/incidents")
+        self.assertEqual(listing["unvisited_states"], 2)
+        self.assertIn("2 unvisited states", listing["risk_reasons"])
+        self.assertIn("2 unvisited states", memory.gaps(self.con))
         page = next(p for p in data["pages"] if p["route"] == "/incidents/:id")
         self.assertEqual((page["entry_route"], page["entry_trigger"]), ("/incidents", "row click"))
         self.assertNotIn("/incidents/:id", data["needs_id"])  # it can be opened from its list page now
