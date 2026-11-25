@@ -1126,6 +1126,18 @@ class OddForms(Case):
         )  # the exponential regex took 3 s at 24 variables, 4x more with each 2 added
         self.assertEqual(json.loads(r.stdout), [False, True, True, False, False, False], r.stderr)
 
+    def test_long_option_clusters_are_read_in_linear_time(self):  # SonarQube S8786: a hung guard is killed at 10 s
+        for cmd in ("bash -" + "c" * 95_000 + "! x; " + ACLI_W, "tar -x" + "C" * 95_000 + "'\n'x; " + ACLI_W):
+            r = subprocess.run(
+                [sys.executable, str(GUARD)],
+                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(RUN)}),
+                capture_output=True,
+                text=True,
+                env={**os.environ, "CLAUDE_PROJECT_DIR": ""},
+                timeout=10,
+            )  # the backtracking regexes took 16 s at 40k characters, 4x more each time the length doubled
+            self.assertIn('"permissionDecision": "deny"', r.stdout, r.stderr)
+
     DENY = [
         "P=playwright-cli; $P goto x",
         "$(which acli) jira workitem create",
@@ -1902,8 +1914,12 @@ class R8ApproveAndLog(Case):
             f"unzip a.zip -d{D}",
             f"tar xf a.tar -C /tmp -C {D}",
             f"unzip a.zip -d /tmp -d {D}",
+            f"tar xf a.tar -CaC/../{os.path.relpath(D, RUN)}",  # tar reads -C 'aC/../…', not -C '/../…'
         ]:
             self.assertIsNotNone(bash(cmd, RUN), cmd)
+        self.assertEqual(g.tar_dirs(["-xCaC/x"]), ["aC/x"])  # getopt: the first C takes the rest of the word
+        self.assertEqual(g.tar_dirs(["-xC", "d"]), ["d"])
+        self.assertEqual(g.tar_dirs(["-xfC", "a.tar"]), ["a.tar"])  # f's value, also checked as a folder: stricter
         # 4. sqlite3 -- -readonly bypass
         self.assertIsNotNone(bash(f"sqlite3 {DB} 'DELETE FROM bugs;' -- -readonly", RUN))
         # 5. acli workitem link type delete/create

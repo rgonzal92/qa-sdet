@@ -829,7 +829,7 @@ def how_run(name, rest):
     for k, a in enumerate(rest):
         if k and rest[k - 1] in (("-o", "+o", "-O", "+O") if shell else ("-v", "-F", "-W", "-X")):
             continue  # an option's value
-        if shell and re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a):
+        if shell and re.fullmatch(r"-[a-zA-Z]*", a) and "c" in a:  # not -[a-zA-Z]*c[a-zA-Z]*: quadratic backtracking
             c_text = True  # the text is the first word after the options: `bash -c -x -- 'cmd'`
             continue
         if c_text:
@@ -1335,7 +1335,7 @@ def tar_dirs(rest):
                     dirs.append(val)
                 else:
                     skip = True
-        elif m := re.match(r"^-[A-Za-z]*C(.*)$", a):
+        elif m := re.match(r"-[A-Za-z]*?C(.*)", a, re.S):  # the first C takes the rest, as getopt reads -xCaC/x
             if m.group(1):
                 dirs.append(m.group(1))
             else:
