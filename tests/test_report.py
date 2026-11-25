@@ -862,6 +862,43 @@ class Signals(Rendering):
         self.assertIn("console: column \"x\" does not exist SQLSTATE 42703 [leak: SQL error]", out.split("CLIENT 4xx")[0])
         self.assertIn("qa-mem body-check", out)
 
+    def pass_draft(self, requests, console=None, run=RUN1, **kw):
+        d = self.triage_dir(requests, console, run=run, **kw)
+        for c in run.get("cases") or []:
+            (d / f"evidence/{c['id']}.png").write_bytes(b"png")
+        report.write_report(d)
+        return d, (d / "jira-comment-PROJ-1.md").read_text(), (d / "jira-comment-PROJ-1.txt").read_text()
+
+    def test_a_pass_draft_warns_about_unexplained_severe_signals_and_the_verdict_stays(self):
+        d, md, txt = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Internal Server Error\n"
+                                     "2. [GET] http://localhost:8765/api/closures.json => [404] Not Found\n",
+                                     console="[ERROR] TypeError: rows is undefined @ :1\n")
+        check = md.split("---------- paste below")[0]
+        self.assertIn("- Unexplained server errors, failed requests or leaks in this run (1): /form: POST /form → 500.", check)
+        self.assertIn("read REPORT.md", check)
+        self.assertIn("- 2 other unexplained browser signal(s) (4xx, console errors, request loops): see REPORT.md.", check)
+        self.assertNotIn("Unexplained", txt)  # the comment body stays clean
+        self.assertIn("**Verdict: ✅ PASS**", (d / "REPORT.md").read_text())  # signals never change a verdict
+
+    def test_a_pass_draft_has_no_signal_warning_when_the_run_names_the_call_or_the_user_ignored_it(self):
+        _, md, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n",
+                                   run={**RUN1, "notes": "POST /form 500 is the known fixture error, bug BUG-9."})
+        self.assertNotIn("Unexplained", md)
+        self.assertNotIn("other unexplained", md)
+        ignored = {("/form", "request", "POST /form 500"): ("IGNORED", 2, "r0")}
+        with mock.patch.object(report, "_signal_baseline", return_value=ignored):
+            _, md, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n")
+        self.assertNotIn("Unexplained", md)
+
+    def test_a_checked_error_body_and_a_leak_reach_the_pass_draft(self):
+        d = self.triage_dir("1. [POST] http://localhost:8765/graphql => [200] OK\n")
+        cli("body-check", str(d), "--slug", "form", "1", stdin='{"errors": [{"message": "Forbidden"}]}')
+        for c in RUN1.get("cases") or []:
+            (d / f"evidence/{c['id']}.png").write_bytes(b"png")
+        report.write_report(d)
+        md = (d / "jira-comment-PROJ-1.md").read_text()
+        self.assertIn("/form: POST /graphql → 200 [error body: errors: Forbidden]", md)
+
     def test_third_party_failures_fold_into_one_line_and_request_loops_show(self):
         self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
         d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])

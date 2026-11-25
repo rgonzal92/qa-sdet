@@ -1151,7 +1151,23 @@ def _jira_fail_draft(t, verdict_v, why, mine, cases, bugs, keys, builds, plan):
     return "\n".join(lines) + "\n"
 
 
-def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", prior_passed=()):
+def _signal_warnings(signals):
+    """CHECK BEFORE POSTING lines for the unexplained browser signals [(route, key)] of the runs that tested a ticket: the
+    severe ones named (at most 5), the rest counted. The verdict never changes; the user decides before posting a pass."""
+    severe = [(r, k) for r, k in signals if signal_severity(k) == "severe"]
+    out = []
+    if severe:
+        shown = "; ".join(f"{' '.join(str(r).split())}: {core.short(' '.join(k.split()), 120)}" for r, k in severe[:5])
+        out.append(f"- Unexplained server errors, failed requests or leaks in this run ({len(severe)}): {shown}"
+                   + (f"; +{len(severe) - 5} more" if len(severe) > 5 else "")
+                   + ". A pass over these may hide a bug: read REPORT.md (Browser signals no bug explains) before you post.")
+    if len(signals) > len(severe):
+        out.append(f"- {len(signals) - len(severe)} other unexplained browser signal(s) (4xx, console errors, request loops): "
+                   "see REPORT.md.")
+    return out
+
+
+def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", prior_passed=(), signals=()):
     fix = t.get("fix_version")
     # one line each in the draft: newlines collapsed; JSON true is no version
     fix = " ".join(str(fix).split()) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
@@ -1187,6 +1203,7 @@ def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", pri
         pids = ", ".join(str(c.get("id") or "?") for c in prior_passed)
         tag = f" of {' '.join(str(retest_of).split())}" if retest_of else ""
         lines.append(f"- Partial retest{tag}: {len(prior_passed)} case(s) ({pids}) passed on prior build {pb} and were not re-run here.")
+    lines += _signal_warnings(signals)
     lines += [f"- {g.split(':')[0]} has no evidence image: take it or say why" for g in _evidence_gaps(mine, run_dir, "ticket")]
     lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
     if not shots:
@@ -1224,16 +1241,19 @@ def render_report_parts(run_dir, cfg=None):
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
     drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs) if tickets and with_status else {})
+    hosts, baseline = core.allowed_hosts(cfg), _signal_baseline()
+    triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs]  # per run, in order
     if vmap:
         for t in tickets:
             prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
             v, why = vmap[t["key"]]
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
-            builds = sorted({core.norm_build(r.get("build")) for _, r in runs
-                             if any(str(x.get("id")) in ids for x in _list(r, "cases"))})
+            tested = [k for k, (_, r) in enumerate(runs) if any(str(x.get("id")) in ids for x in _list(r, "cases"))]
+            builds = sorted({core.norm_build(runs[k][1].get("build")) for k in tested})
+            signals = [(triaged[k][0], key) for k in tested for key, _ in triaged[k][1][0]]
             if v in ("PASS", "PASS WITH NOTES") and (mine or prior_mine) and _safe_key(t["key"]):
-                drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine)
+                drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine, signals)
             elif v in ("FAIL", "BLOCKED") and _safe_key(t["key"]):  # the rejection the user would type by hand
                 drafts[f"jira-comment-{t['key']}.md"] = _jira_fail_draft(t, v, why, mine, cases, bugs, keys, builds, plan)
         for name in list(drafts):  # the clean body acli posts as is: no check list, plain text
@@ -1316,9 +1336,6 @@ def render_report_parts(run_dir, cfg=None):
         if left:  # step 9 couldn't delete them (budget or time used up): they stay in the shared QA app
             action += [f"### Test data left in the app ({len(left)})"] + [
                 f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left] + [""]
-        hosts = core.allowed_hosts(cfg)
-        baseline = _signal_baseline()
-        triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
         if gaps := _evidence_gaps(cases, run_dir, kind):
             action += [f"### Evidence gaps ({len(gaps)})"] + [f"- {cell(g)}" for g in gaps] + [""]
         signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
