@@ -338,5 +338,12 @@ class Docs(unittest.TestCase):
         body = tmpl + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
         self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
 
+    def test_agents_have_a_turn_limit(self):  # a looping agent burned turns until its context ran out, results unwritten
+        limits = {"qa-explorer": 45, "qa-mapper": 25, "qa-crawler": 20}
+        for path in AGENTS:
+            meta = dict(re.findall(r"^([\w-]+): (.*)$", path.read_text().split("---\n")[1], re.M))
+            self.assertEqual(int(meta["maxTurns"]), limits[path.stem], path.name)
+        self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
+
 if __name__ == "__main__":
     unittest.main()

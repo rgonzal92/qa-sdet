@@ -3,6 +3,7 @@ name: qa-crawler
 description: Light verify pass for /qa-sdet:qa-init --crawl. Opens each mapped static route of the QA web app and confirms which code-map locators exist. Tests nothing, types nothing, submits nothing.
 tools: Bash, Read, Write
 model: haiku
+maxTurns: 20
 effort: medium
 ---
 

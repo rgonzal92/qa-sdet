@@ -608,6 +608,39 @@ def audit_bugs(run_dir):
     return out
 
 
+def verify_run(run_dir, slug, since=0):
+    """What an explorer that is stopping left undone in run file run-<slug>.json, as instructions (empty: complete): the
+    run file, the browser signal logs, a status for each case its brief gave, every draft it wrote (since `since`)
+    listed in `bugs`, and the critical problems audit_bugs finds in its bugs."""
+    run_dir, data = Path(run_dir), Path(run_dir) / ".data"
+    rf = data / f"run-{slug}.json"
+    try:
+        run = json.loads(rf.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return [f"write {rf} (references/run-json.md) as your last file: without it this page's results are lost"]
+    except (OSError, ValueError, RecursionError):
+        return [f"{rf} is not valid JSON: write it again (references/run-json.md)"]
+    if not isinstance(run, dict):
+        return [f"{rf} must be one JSON object (references/run-json.md)"]
+    todo = [f"save the browser signals before closing (step 9): .data/{k}-{slug}.log is missing"
+            for k in ("requests", "console") if not (data / f"{k}-{slug}.log").is_file()]
+    route = re.search(r"^route: (.*)$", _text(data / f"brief-{slug}.md"), re.M)
+    plan = _load_json(data / "plan.json", [])
+    given = [str(c["id"]) for c in _list(plan, "cases") if c.get("id") not in (None, "") and route
+             and core.route_key(c.get("route")) == core.route_key(route.group(1))]
+    told = {str(c.get("id")) for c in _list(run, "cases")}
+    if missing := [cid for cid in given if cid not in told]:
+        todo.append(f"give every case of your brief a status in `cases`: {', '.join(missing)} missing "
+                    "(NOT_RUN with why, when the budget or time ran out first)")
+    listed = {bug_id(b) for b in _list(run, "bugs")} - {""}
+    drafts = [p.stem for p in sorted((run_dir / "bugs").glob("BUG-*.md")) if p.is_file() and _mtime(p) >= since]
+    if unlisted := [x for x in drafts if x not in listed]:
+        todo.append(f"list each bug you drafted in `bugs` (draft_path bugs/<id>.md): {', '.join(unlisted)}")
+    todo += [f"{bid}: {problem}" for bid, issues in audit_bugs(run_dir).items() if bid in listed
+             for critical, problem in issues if critical]
+    return todo
+
+
 def _repro_badge(bid, b, audit):
     """'repro ✓' or '⚠ <worst problem> (+n)' for a CONFIRMED or SUSPECTED draft; '' otherwise."""
     if not bid or _first_word(b.get("classification")) not in ("confirmed", "suspected"):

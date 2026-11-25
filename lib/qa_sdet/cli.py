@@ -16,6 +16,7 @@ import re
 import select
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from . import codemap, core, memory, scrub  # the rest load in the commands that use them (start-up time)
 
@@ -178,6 +179,20 @@ def usage_error(cmd, why=""):
     return 2
 
 
+def _run_marker(roots):
+    """The active run marker that names an explorer's run (run_dir and slug, from dispatch), or None."""
+    for root in roots:
+        root = Path(root)
+        qa_out = root if root.name == "qa-out" else next((p for p in root.parents if p.name == "qa-out"), root)
+        try:
+            m = json.loads((qa_out / ".active").read_text())
+            if isinstance(m, dict) and m.get("run_dir") and m.get("slug") and float(m.get("expires") or 0) > time.time():
+                return m
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
 def hook_input():
     """The hook's JSON on stdin (Claude Code sends it and closes stdin); {} when run by hand."""
     try:
@@ -249,10 +264,21 @@ def _main(argv):
         # parallel mappers: the first to stop parks every bad code map, so each mapper hears about all still parked
         stale = [x for root in roots for x in memory.parked_codemaps(root)
                  if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)]
-        hin = hook_input() if memory.PARKED or stale else {}
-        if stale and hin.get("hook_event_name") == "SubagentStop" and \
-                str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip() == "qa-mapper":
+        marker = _run_marker(roots)  # an explorer's run (dispatch wrote run_dir and slug)
+        hin = hook_input() if memory.PARKED or stale or marker else {}
+        role = str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip()
+        if stale and hin.get("hook_event_name") == "SubagentStop" and role == "qa-mapper":
             memory.PARKED.extend(stale)
+        todo = []
+        if marker and hin.get("hook_event_name") == "SubagentStop" and role in ("qa-explorer", "qa-crawler") \
+                and not hin.get("stop_hook_active"):
+            from . import ops, report  # the marker was started MARKER_HOURS before it expires
+            todo = report.verify_run(marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600)
+        if todo:
+            print("qa-sdet: before you stop, finish these (then stop again):\n" + "\n".join(f"- {t}" for t in todo),
+                  file=sys.stderr)
+            if not memory.PARKED:
+                return 2
         if memory.PARKED and not hin.get("stop_hook_active"):
             # Exit 2 from a Stop/SubagentStop hook shows this to the agent that just wrote the file, once.
             refs = Path(__file__).resolve().parent.parent.parent / "references"

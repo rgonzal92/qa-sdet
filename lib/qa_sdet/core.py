@@ -147,6 +147,16 @@ def norm_route(r):
     return path + (f"#{bang}{frag}" if frag else "")
 
 
+def route_key(r):
+    """(norm_route, query): /list?a=1 and /list?a=2 are two routes of one card (two explorers, two run files)."""
+    r = str(r or "").strip()
+    try:
+        q = urlsplit(r if "://" in r else "http://x" + ("" if r.startswith(("/", "#")) else "/") + r).query
+    except ValueError:
+        q = ""
+    return norm_route(r), q
+
+
 ID_SEGMENT = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|"
                         r":\w+|\{\w+\}|\[\.{0,3}\w+\]|<[^/>]+>|\$\{[^}/]*\}", re.I)  # route params: :id, {id}, [id], <id>
 

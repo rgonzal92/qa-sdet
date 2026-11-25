@@ -173,15 +173,8 @@ def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults
     target = route if "://" in route else base + ("" if route.startswith("/") else "/") + route
     if not core.url_allowed(target, hosts):
         raise core.BadInput(f"dispatch: {target!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
-    def key(r):  # the route and its query: /list?a=1 and /list?a=2 are two routes of one card
-        r = str(r or "").strip()
-        try:
-            q = urlsplit(r if "://" in r else "http://x" + ("" if r.startswith(("/", "#")) else "/") + r).query
-        except ValueError:
-            q = ""
-        return core.norm_route(r), q
     lst = lambda o, k: [x for x in o.get(k) or [] if isinstance(x, dict)] if isinstance(o.get(k), list) else []
-    cases = [c for c in lst(plan, "cases") if key(c.get("route")) == key(route)]
+    cases = [c for c in lst(plan, "cases") if core.route_key(c.get("route")) == core.route_key(route)]
     mode = mode or ("explore" if plan.get("kind") == "explore" else "ticket")
     slug = _brief_slug(data, route)
     text = lambda v: " ".join(str(v).split()) if v is not None and not isinstance(v, (dict, list)) else ""

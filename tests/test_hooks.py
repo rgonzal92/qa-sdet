@@ -193,6 +193,39 @@ class Hooks(Base):
         self.assertIn("find", note)
         self.assertEqual(call(click), "")  # told once; it counts again from here
 
+    def explorer_stop(self, run_dir, event="SubagentStop", agent="qa-sdet:qa-explorer", active=False):
+        env = dict(os.environ, QA_MEM_DB=str(Path(self.tmp.name) / "hook.db"))
+        return subprocess.run([sys.executable, str(ROOT / "bin/qa-mem"), "ingest-pending", str(self.proj / "qa-out")],
+                              capture_output=True, text=True, env=env,
+                              input=json.dumps({"hook_event_name": event, "agent_type": agent, "stop_hook_active": active}))
+
+    def test_an_explorer_that_stops_unfinished_gets_one_turn_to_finish(self):
+        import time
+        from support import PLAN
+        d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
+        (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
+        (self.proj / "qa-out/.active").write_text(json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d),
+                                                              "slug": "form"}))
+        r = self.explorer_stop(d)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("run-form.json", r.stderr)
+        self.assertEqual(self.explorer_stop(d, active=True).returncode, 0)  # one extra turn, never a loop
+        self.assertEqual(self.explorer_stop(d, event="Stop", agent="").returncode, 0)  # the main session isn't the explorer
+        (d / "bugs/BUG-1.md").write_text("# t\n")
+        runfile_ = d / ".data/run-form.json"
+        runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS"}]}))
+        r = self.explorer_stop(d)
+        self.assertEqual(r.returncode, 2)
+        for want in ("TC-2", "BUG-1", "requests-form.log"):
+            self.assertIn(want, r.stderr)
+        for kind in ("requests", "console"):
+            (d / f".data/{kind}-form.log").write_text("")
+        (d / "bugs/BUG-1.md").unlink()
+        runfile_.write_text(json.dumps({**run(), "run_id": "r1", "cases": [{"id": "TC-1", "status": "PASS"},
+                                                                           {"id": "TC-2", "status": "NOT_RUN", "notes": "time"}]}))
+        r = self.explorer_stop(d)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+
 
 if __name__ == "__main__":
     unittest.main()
