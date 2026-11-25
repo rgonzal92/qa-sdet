@@ -241,6 +241,21 @@ class Docs(unittest.TestCase):
 
     def test_frontmatter(self):
         fm = lambda p: dict(re.findall(r"^([\w-]+): (.*)$", p.read_text().split("---\n")[1], re.M))
+    def test_the_batch_eval_recipe_and_the_link_harvester_keep_their_fixes(self):
+        tips = text("references/playwright-cli-tips.md")
+        recipe = tips.split("Many values in one eval")[1].split("```")[1]
+        for want in ("HTMLTextAreaElement", "HTMLSelectElement", "el.tagName", "checkValidity()", "requestSubmit()"):
+            self.assertIn(want, recipe)  # the native setter of each tag; a form the browser blocks is never submitted
+        self.assertNotIn("setTimeout(r, 300)", recipe)  # a bounded wait for the answer, not a fixed 300 ms
+        self.assertLess(recipe.index("checkValidity()"), recipe.index("requestSubmit()"))
+        harvester = tips.split("## Map the page's states and links")[1].split("```")[1]
+        self.assertNotIn("u.search", harvester)  # one path is one page: ?page=2 and ?sort=x are not new pages
+        self.assertIn("query string", text("agents/qa-crawler.md"))
+
+    def test_no_doc_passes_cursor_to_video_show_actions(self):  # 0.1.24 reads `--cursor none` as a boolean plus an argument
+        for f in ALL:
+            self.assertNotRegex(f.read_text(), r"video-show-actions[^\n`]*--cursor", f.name)
+
         for path in SKILLS:
             meta, body = fm(path), path.read_text().split("---\n", 2)[2]
             self.assertEqual(meta["name"], path.parent.name)

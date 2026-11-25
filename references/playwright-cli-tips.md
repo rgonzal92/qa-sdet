@@ -15,23 +15,29 @@ Every command starts `playwright-cli -s=qa <cmd>` (the allow rules match that sh
 Many values in one eval; repeat a suspicious one with real `fill` / `click` before calling it a bug (the recording needs them; its code goes into the repro spec):
 ```
 playwright-cli -s=qa --raw eval "(async () => { const el = document.querySelector('[name=speed]'), out = {};
-  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;  // React inputs too
-  for (const v of ['129', '131']) { set.call(el, v); el.dispatchEvent(new Event('input', {bubbles: true}));
-    el.form.requestSubmit(); await new Promise(r => setTimeout(r, 300)); out[v] = document.querySelector('[role=status]')?.textContent; }
+  const proto = {INPUT: HTMLInputElement, TEXTAREA: HTMLTextAreaElement, SELECT: HTMLSelectElement}[el.tagName].prototype;
+  const set = Object.getOwnPropertyDescriptor(proto, 'value').set;  // the native setter of this tag: React inputs too
+  const status = () => document.querySelector('[role=status]')?.textContent;
+  for (const v of ['129', '131']) { const before = status(); set.call(el, v); el.dispatchEvent(new Event('input', {bubbles: true}));
+    if (!el.form.checkValidity()) { const bad = el.form.querySelector(':invalid'); out[v] = 'blocked by the browser: ' + bad.name + ' ' + bad.validationMessage; continue; }  // never submitted
+    el.form.requestSubmit();
+    for (let i = 0; i < 20 && status() === before; i++) await new Promise(r => setTimeout(r, 100));  // up to 2 s for the answer
+    out[v] = status() + (status() === before ? ' (unchanged: the earlier value\'s text, or none)' : ''); }
   return JSON.stringify(out); })()"
 ```
+A value the browser blocks (`min`, `max`, `maxlength`, `required`) is reported as blocked, not as the previous value's result; one that never changes the status text shows as unchanged: repeat it with real `fill` / `click`.
 
 ## Bug video (the clean-state repro)
 ```
 playwright-cli -s=qa recording-start && playwright-cli -s=qa video-start '<out>/evidence/BUG-<n>.webm'
-playwright-cli -s=qa video-show-actions --cursor none --highlight-style 'outline: 3px solid red' --position top-right
+playwright-cli -s=qa video-show-actions --highlight-style 'outline: 3px solid red' --position top-right
 playwright-cli -s=qa reload
 playwright-cli -s=qa video-hide-actions; playwright-cli -s=qa video-stop && playwright-cli -s=qa recording-stop
 ```
 - `video-show-actions` names each action in the video and boxes its element, so the developer sees what was clicked and typed; if it fails (an older playwright-cli), go on without it.
 - Between `reload` (or a `goto` to the start page) and `video-stop`: the repro steps with real `fill` / `click`. n = the number this bug will get (the highest in `<out>/bugs/` + 1).
 - The bug didn't show again (SUSPECTED): keep the video and say in the draft that it shows the attempt that didn't hit.
-- Always `--cursor none` (the pointer slows every action by 800 ms). No videos for cases.
+- No `--cursor` option: `--cursor none` fails on 0.1.24 (`too many arguments`; `--no-cursor` fails too), so the pointer animation stays and slows each action by about 800 ms: keep the repro to a few steps. No videos for cases.
 
 ## Network evidence (a bug in an API call)
 A call that failed, or that the server wrongly accepted: save what was sent and returned, while the browser is open, before step 9 (never for login, session, token or profile calls):
@@ -41,11 +47,11 @@ playwright-cli -s=qa requests --filter '<path regexp>' > '<out>/evidence/BUG-<n>
 `<#>` is the call's number in `requests`. The file is scrubbed before the report links it and the filing command attaches it.
 
 ## Map the page's states and links (one call, read-only)
-Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES; never follow logout or delete links.
+Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES; never follow logout or delete links. A link's query string is dropped: `/list?page=2` and `/list?sort=name` are the page `/list` (a query view that shows other content is an in-page state, not a page).
 ```
 playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, seen = new Set();
   for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim();
-    if (u.host === location.host && !/logout|sign-?out|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname + u.search)) { seen.add(u.pathname + u.search); out.links.push([u.pathname + u.search, t.slice(0, 40)]); } } catch (e) {} }
+    if (u.host === location.host && !/logout|sign-?out|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
   for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
     out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"
