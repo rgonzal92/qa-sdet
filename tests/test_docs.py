@@ -419,6 +419,14 @@ class Docs(unittest.TestCase):
         self.assertIn("up to 2 more pages", skill)  # the settled cap on adaptive expansion
         self.assertIn('"leads"', text("references/run-json.md"))
 
+    def test_the_graph_surfaces_are_documented(self):
+        for doc in ("README.md", "skills/qa-memory/SKILL.md"):
+            self.assertIn("impact <route|", text(doc))
+        self.assertIn("impact", cli.COMMANDS)
+        for doc in ("skills/qa-plan/SKILL.md", "skills/qa-ticket/SKILL.md"):
+            self.assertIn("impacted_routes", text(doc))
+        self.assertIn("impacted_routes", text("lib/qa_sdet/memory.py"))  # the key prep's context carries
+
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)

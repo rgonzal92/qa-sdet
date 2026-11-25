@@ -218,7 +218,8 @@ def wrapper_cmd(cmd, args):
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
     "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
     "patterns": "[--min-pages N] [--json]", "signals": "[route] [--status ACTIVE|IGNORED|ALL]",
-    "signal-ignore": "<id>", "signal-unignore": "<id>", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "signal-ignore": "<id>", "signal-unignore": "<id>", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']",
+    "impact": "<route|page name|METHOD /path> [--json]", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
@@ -421,6 +422,11 @@ def run_cmd(con, cmd, args):
         if len(o["_"]) < 2:
             return usage_error(cmd)
         print(memory.bug_match(con, o["_"][0], " ".join(o["_"][1:]), o.get("--endpoint")))
+    elif cmd == "impact":
+        o = _opts(args, flags=("--json",))
+        if not o["_"]:
+            return usage_error(cmd)
+        print(memory.impact(con, " ".join(o["_"]), o.get("--json", False)))
     elif cmd == "history":
         o = _opts(args, flags=("--json",), valued=("--builds",))
         if len(o["_"]) > 1:

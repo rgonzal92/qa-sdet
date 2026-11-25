@@ -663,10 +663,20 @@ def card(con, q, focus=None, ids=False):
     differ = _client_server_differ(con, r)
     if differ:
         out.append("CLIENT/SERVER RULES DIFFER (a hint to verify through the page, not an oracle): " + "; ".join(differ[:4]))
+    cross = _cross_page_rules_differ(con, r)
+    if cross:
+        out.append("CROSS-PAGE RULES DIFFER (a page writing the same resource states them otherwise: a hint to verify on both "
+                   "pages, not an oracle): " + "; ".join(cross[:3]))
+    related = _related(con, r)
+    if related:
+        out.append("RELATED PAGES (a change here may show there; from the code map): "
+                   + "; ".join(f"{p} ({core.short(why, 70)})" for p, why in related[:4])
+                   + (f"; +{len(related) - 4} more (qa-mem impact '{r}')" if len(related) > 4 else ""))
     out.append(bug_lines(con, r, b))
     shared = _shared_bugs(con, r)
     if shared:
-        out += ["BUGS ON PAGES SHARING AN ENDPOINT (re-check here; seen here = put its hash in run.json, no new draft):"] \
+        out += ["BUGS ON PAGES SHARING AN ENDPOINT OR COMPONENT (re-check here; seen here = put its hash in run.json, no new "
+                "draft):"] \
             + [_bug_line(x, True, 60) + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "") for x in shared]
     noisy = con.execute("SELECT sig_key, seen_runs, first_build FROM signals WHERE page=? AND status='ACTIVE' AND "
                         "seen_runs >= 2 ORDER BY seen_runs DESC, last_seen DESC LIMIT 3", (r,)).fetchall()
@@ -761,19 +771,19 @@ def _only(mine, other):
     return out + (["one of " + ", ".join(mine["enum"])] if mine["enum"] and not other["enum"] else [])
 
 
-def _rule_pair_hint(c, x):
-    """The ways a client rule and a server rule of one field disagree, as text parts (none: they agree)."""
+def _rule_pair_hint(c, x, who=("client", "server")):
+    """The ways two rules of one field disagree (`who` names the sides), as text parts (none: they agree)."""
     a, b = _rule_traits(c["value"]), _rule_traits(x["value"])
     both = [k for k in ("min", "max") if k in a["bounds"] and k in b["bounds"] and a["bounds"][k] != b["bounds"][k]]
     n = lambda t, k: f"{k} {int(t['bounds'][k]) if t['bounds'][k] == int(t['bounds'][k]) else t['bounds'][k]}"
     parts = []
     if both:
-        parts.append("client " + ", ".join(n(a, k) for k in both) + " vs server " + ", ".join(n(b, k) for k in both))
+        parts.append(f"{who[0]} " + ", ".join(n(a, k) for k in both) + f" vs {who[1]} " + ", ".join(n(b, k) for k in both))
     elif not a["bounds"] and not b["bounds"] and a["nums"] and b["nums"] and a["nums"] != b["nums"]:  # numbers, no min/max word
-        parts.append(f"client {core.short(a['text'], 40)} vs server {core.short(b['text'], 40)}")
+        parts.append(f"{who[0]} {core.short(a['text'], 40)} vs {who[1]} {core.short(b['text'], 40)}")
     if a["enum"] and b["enum"] and set(a["enum"]) != set(b["enum"]):
-        parts.append(f"options client {', '.join(a['enum'])} vs server {', '.join(b['enum'])}")
-    parts += [f"{who} only: {', '.join(items)}" for who, items in (("client", _only(a, b)), ("server", _only(b, a))) if items]
+        parts.append(f"options {who[0]} {', '.join(a['enum'])} vs {who[1]} {', '.join(b['enum'])}")
+    parts += [f"{side} only: {', '.join(items)}" for side, items in ((who[0], _only(a, b)), (who[1], _only(b, a))) if items]
     return parts
 
 
@@ -803,6 +813,39 @@ def _client_server_differ(con, route):
     return list(dict.fromkeys(out))
 
 
+def _cross_page_rules_differ(con, route):
+    """Hints where a page rule and the rule of the same field (same words, camelCase or not) on a sibling page that
+    writes the same resource (create and edit) don't agree: another limit or `one of` options, a trait or bound only
+    one page states. Only the pages' own rules, not the backend's. Hints to verify on both pages, not oracles."""
+    own = lambda r: [x for x in codemap._codemap_rows(con, r) if x["kind"] == "rule" and x["page"] != "*"]
+    mine = own(route)
+    out = []
+    for sib in codemap.resource_neighbors(con, route)["siblings"][:5] if mine else []:
+        for c in mine:
+            words = _field_words(c["label"])
+            for x in own(sib["route"]) if words else []:
+                if words == _field_words(x["label"]) and (parts := _rule_pair_hint(c, x, ("here", sib["route"]))):
+                    out.append(f"{c['label']}: " + "; ".join(parts))
+    out.sort(key=lambda t: " vs " not in t)  # a limit that differs first, then what one page lacks
+    return list(dict.fromkeys(out))
+
+
+ROLE_TEXT = {"siblings": "also writes", "consumers": "reads", "producers": "writes"}
+
+
+def _related(con, route):
+    """[(route, why)] for the pages a change on `route` may reach, the nearest first: the pages writing the same
+    resource, the pages reading what it writes, the pages writing what it reads, the pages sharing a component file."""
+    links = codemap.resource_neighbors(con, route)
+    found = {}
+    for kind in ("siblings", "consumers", "producers"):
+        for x in links[kind]:
+            found.setdefault(x["route"], f"{ROLE_TEXT[kind]} {x['why']}")
+    for x in codemap.component_neighbors(con, route):
+        found.setdefault(x["route"], f"shares {x['why']}")
+    return list(found.items())
+
+
 # coverage that counts on a build (params: build, a week ago): runs that couldn't read the build count for a week
 ON_BUILD = "((build=? AND build!='unknown') OR (build='unknown' AND ts >= ?))"
 
@@ -817,11 +860,15 @@ def _rechecked(con, route, build):
                                       f"AND result!='blocked' AND {ON_BUILD}", (route, build, _week_ago()))}
 
 
+def _near_pages(con, route):
+    """The pages a bug without an endpoint may also show on: those sharing a call, and those sharing a component file."""
+    return sorted(set(codemap.sharing_pages(con, route)) | {x["route"] for x in codemap.component_neighbors(con, route)})
+
+
 def _shared_bugs(con, route, limit=3):
     """Bugs on other pages that this page may show too: bugs recorded with an endpoint this page calls (any number of
-    callers: only bugs of that endpoint match), and for bugs without one the pages sharing a call (sharing_pages)."""
-    mine = codemap._called(con.execute("SELECT kind,label,value FROM codemap WHERE page=? AND kind='api'", (route,))) \
-        if route != "*" else set()
+    callers: only bugs of that endpoint match), and for bugs without one the pages sharing a call or a component file."""
+    mine = codemap._group_calls(con, codemap.page_group(con, route)) if route != "*" else set()
     found = {}
     cols = f"{BUG_COLS},endpoint,last_seen"
     if mine:
@@ -829,7 +876,7 @@ def _shared_bugs(con, route, limit=3):
                              (route, *core.VISIBLE)):
             if any(codemap._same_call(_endpoint_ref(x["endpoint"]), c) for c in mine):
                 found[x["hash"]] = x
-    sharing = codemap.sharing_pages(con, route)
+    sharing = _near_pages(con, route)
     if sharing:
         for x in con.execute(f"SELECT {cols} FROM bugs WHERE endpoint IS NULL AND status IN (?,?,?,'FIXED') AND page IN "
                              f"({','.join('?' * len(sharing))})", [*core.VISIBLE, *sharing]):
@@ -1002,9 +1049,10 @@ fixed issue ticket story bug bugs test tests when after before while""".split())
 
 
 def ticket_context(con, text, n=8):
-    """What memory knows that a ticket's text points at: {terms, candidate_routes: [{route, name, why}], relevant_facts,
-    relevant_bugs (status kept)}. Routes the text names count most, then routes whose facts, bugs or code-map rows
-    match its words (stemmed); capped, so a plan starts from a short list instead of every route and bug."""
+    """What memory knows that a ticket's text points at: {terms, candidate_routes: [{route, name, why}], impacted_routes
+    (the pages the top candidates reach, at most 6), relevant_facts, relevant_bugs (status kept)}. Routes the text names
+    count most, then routes whose facts, bugs or code-map rows match its words (stemmed); capped, so a plan starts from
+    a short list instead of every route and bug."""
     words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", str(text))]
     counts = {}
     for w in words:
@@ -1035,6 +1083,11 @@ def ticket_context(con, text, n=8):
         if {w.rstrip("s") for w in core.norm(row["label"] + " " + row["value"]).split()} & stems:
             add(row["page"], 1, "code map")
     ranked = sorted(score, key=lambda r: (-score[r], r))[:n]
+    impacted = {}  # what the top candidates reach: sibling writers, readers, shared components (one hop)
+    for r in ranked[:3]:
+        for p, reason in _related(con, r):
+            if p not in ranked and p in names:
+                impacted.setdefault(p, f"{reason} (via {r})")
     if terms and ranked:  # on the routes the ticket points at, one of its words is enough
         one = _fts_query([[w] for w in terms], [])
         top = ranked[:3]
@@ -1050,8 +1103,53 @@ def ticket_context(con, text, n=8):
             "decisions": [f"{x['text']} → {x['answer'] or '(answered)'}" + (f" ({x['ticket']})" if x["ticket"] else "")
                           for x in decisions],
             "candidate_routes": [{"route": r, "name": names[r], "why": ", ".join(why[r])} for r in ranked],
+            "impacted_routes": [{"route": p, "name": names[p], "why": reason} for p, reason in list(impacted.items())[:6]],
             "relevant_facts": [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in facts[:15]],
             "relevant_bugs": [_bug_line(x, True) for x in bug_rows[:15]]}
+
+
+IMPACT_TITLES = (("resource_siblings", "SIBLING WRITERS (write the same resource: compare their rules)"),
+                 ("resource_consumers", "CONSUMERS (read what this writes: check they show it right)"),
+                 ("resource_producers", "PRODUCERS (write what this reads: their bugs show here)"),
+                 ("shared_components", "SHARED COMPONENTS (one file renders them: a bug there shows on each)"))
+
+
+def impact(con, target, as_json=False):
+    """The pages a change reaches, from the code map: for a route or page name, the module it mounts, the pages
+    writing the same resource, reading what it writes, writing what it reads and sharing a component file, and the
+    rules of a field that differ between sibling writers; for `METHOD /path`, the pages calling it and the same around
+    its resource. Hints from source, never proof."""
+    target = " ".join(str(target).split())
+    if re.match(rf"(?i)({codemap.HTTP_METHODS})\s", target):
+        ref = codemap._api_ref(target)
+        if not ref[1]:
+            raise core.BadInput(f"impact: no path in {target!r}: use METHOD /path (POST /api/zones)")
+        calling = codemap.callers(con, ref)
+        links = codemap.resource_links(con, {ref}, calling)
+        data = {"endpoint": f"{ref[0]} {ref[1]}".strip(), "callers": codemap.shown(con, calling),
+                "resource_siblings": links["siblings"], "resource_consumers": links["consumers"],
+                "resource_producers": links["producers"]}
+        head = f"IMPACT of {data['endpoint']} (callers: {', '.join(data['callers']) or 'no page'}; hints from the code map, not proof):"
+    else:
+        pg = codemap.find_page(con, target)
+        if not pg:
+            return f"no page matches '{target}': qa-mem code lists the mapped pages (or give METHOD /path)"
+        route = pg["route"]
+        links, bound = codemap.resource_neighbors(con, route), codemap.module_bindings(con).get(route)
+        data = {"route": route, "module": f"{bound[0] or '?'} at {bound[1]}" if bound else None,
+                "resource_siblings": links["siblings"], "resource_consumers": links["consumers"],
+                "resource_producers": links["producers"], "shared_components": codemap.component_neighbors(con, route),
+                "cross_page_rules": _cross_page_rules_differ(con, route)}
+        head = f"IMPACT of {route} (hints from the code map, not proof):"
+    if as_json:
+        return json.dumps(data, indent=1)
+    out = [head] + ([f"MODULE: {data['module']}"] if data.get("module") else [])
+    for key, title in IMPACT_TITLES:
+        if data.get(key):
+            out.append(f"{title}: " + "; ".join(f"{x['route']} ({x['why']})" for x in data[key]))
+    if data.get("cross_page_rules"):
+        out.append("CROSS-PAGE RULES DIFFER (a hint to verify on both pages, not an oracle): " + "; ".join(data["cross_page_rules"]))
+    return "\n".join(out) if len(out) > 1 else head + " no related pages (the code map has none for it: /qa-sdet:qa-init)"
 
 
 def _stems(text):
@@ -1078,7 +1176,7 @@ def bug_match(con, route, symptom, endpoint=None, limit=3):
     and a fixed one are named too). Candidates for the explorer to judge, never merged by themselves."""
     page, words = core.norm_route(route), _stems(symptom)
     ep = codemap._api_ref(endpoint) if endpoint else ("", "")
-    near = {page} | set(codemap.sharing_pages(con, page))
+    near = {page} | set(_near_pages(con, page))
     sighted = {h for (h,) in con.execute("SELECT hash FROM sightings WHERE page=?", (page,))}
     scored = []
     for x in con.execute(f"SELECT {BUG_COLS},endpoint FROM bugs"):

@@ -342,6 +342,17 @@ def sharing_pages(con, route):
     return _with_aliases(out, bound)
 
 
+def callers(con, ref):
+    """Every page whose frontend calls this exact endpoint ((METHOD or '', path)), however many do: the pages a bug of
+    that endpoint may show on."""
+    return {page for page, refs in _calls_by_page(con).items() if any(_same_call(ref, c) for c in refs)}
+
+
+def shown(con, pages):
+    """The routes users open for `pages`: a module page is its shell route."""
+    return _shown(pages, module_bindings(con))
+
+
 def _shown(pages, bound):
     """The routes users open for `pages`: a module page is its shell route."""
     shell = {}

@@ -75,6 +75,13 @@ class ShellModules(GraphCase):
         self.assertIn("CLIENT/SERVER RULES DIFFER", card)
         self.assertNotIn("MODULE:", memory.card(self.con, "/m/daily"))
 
+    def test_a_bug_on_an_endpoint_the_module_calls_shows_on_the_shell_card(self):
+        self.calls("/zones/new", "POST /api/zones")
+        memory.ingest(self.con, {"run_id": "r1", "build": "1", "pages": [{"route": "/zones/new"}], "bugs": [
+            {"route": "/zones/new", "title": "speed 131 saved", "symptom": "speed 131 saved", "severity": "HIGH",
+             "classification": "CONFIRMED", "endpoint": "POST /api/zones"}]})
+        self.assertIn(core.bug_hash("/zones/new", "speed 131 saved"), memory.card(self.con, "/reports/daily"))
+
     def test_the_module_page_is_hidden_from_gaps_and_the_shell_route_stands_for_both(self):
         out = memory.gaps(self.con)
         self.assertNotIn("/m/daily", out)
@@ -194,6 +201,152 @@ class Components(GraphCase):
         n = codemap.component_neighbors(self.con, "/traffic/incidents")
         self.assertEqual([x["route"] for x in n], ["/incidents", "/schedules"])
         self.assertIn("/traffic/incidents", [x["route"] for x in codemap.component_neighbors(self.con, "/schedules")])
+
+
+class CrossPageRules(GraphCase):
+    """Pages that write one resource may state its field's rules differently: a hint, never an oracle."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls("/zones/new", "POST /api/zones")
+        self.calls("/zones/:id", "PUT /api/zones/:id")
+        self.calls("/zones", "GET /api/zones")
+        self.row("/zones/new", "rule", "Speed limit", "min 0, max 130", "src/New.jsx")
+        self.row("/zones/:id", "rule", "speedLimit", "min 0, max 150", "src/Edit.jsx")
+        self.row("/zones", "rule", "speed limit", "max 999", "src/List.jsx")  # a reader: not compared
+
+    def test_the_same_field_with_another_limit_on_the_edit_page_is_a_hint(self):
+        hints = memory._cross_page_rules_differ(self.con, "/zones/new")
+        self.assertEqual(hints, ["Speed limit: here max 130 vs /zones/:id max 150"])
+        self.assertEqual(memory._cross_page_rules_differ(self.con, "/zones/:id"),
+                         ["speedLimit: here max 150 vs /zones/new max 130"])
+
+    def test_a_flag_one_page_lacks_is_named(self):
+        self.row("/zones/new", "rule", "name", "required, max 40", "src/New.jsx")
+        self.row("/zones/:id", "rule", "Name", "max 40", "src/Edit.jsx")
+        self.assertIn("name: here only: required", memory._cross_page_rules_differ(self.con, "/zones/new"))
+
+    def test_agreeing_rules_fields_on_one_page_only_and_other_resources_say_nothing(self):
+        self.row("/zones/new", "rule", "color", "required", "src/New.jsx")  # no counterpart on the edit page
+        self.row("/zones/:id", "rule", "Speed limit", "min 0, max 130", "src/Edit.jsx")  # the same rule, a second label
+        self.assertEqual(memory._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"])
+        self.calls("/closures/new", "POST /api/closures")
+        self.row("/closures/new", "rule", "speed limit", "max 5", "src/Closure.jsx")
+        self.assertEqual(len(memory._cross_page_rules_differ(self.con, "/zones/new")), 1)
+        self.assertEqual(memory._cross_page_rules_differ(self.con, "/closures/new"), [])
+
+    def test_the_backend_rules_are_not_compared_here(self):
+        self.row("*", "rule", "POST /api/zones speed", "max 1", "routes/zones.js", area="backend")
+        self.assertEqual(len(memory._cross_page_rules_differ(self.con, "/zones/new")), 1)
+
+    def test_the_card_names_them_as_a_hint(self):
+        card = memory.card(self.con, "/zones/new")
+        line = next(x for x in card.splitlines() if x.startswith("CROSS-PAGE RULES DIFFER"))
+        self.assertIn("not an oracle", line)
+        self.assertIn("max 130 vs /zones/:id max 150", line)
+        self.assertNotIn("CROSS-PAGE", memory.card(self.con, "/zones"))
+
+    def test_the_card_shows_three_hints_at_most(self):
+        for i in range(5):
+            self.row("/zones/new", "rule", f"field{i}", "max 1", "src/New.jsx")
+            self.row("/zones/:id", "rule", f"field{i}", "max 2", "src/Edit.jsx")
+        line = next(x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("CROSS-PAGE"))
+        self.assertEqual(line.count(" vs /zones/:id"), 3)
+
+
+class Related(GraphCase):
+    """Cards, `prep` and `qa-mem impact` name the pages a change here may reach."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls("/zones/new", "POST /api/areas")
+        self.calls("/zones", "GET /api/areas")
+        self.calls("/zones/:id", "GET /api/areas/:id", "PUT /api/areas/:id")
+        self.calls("/map", "GET /api/areas")
+        for page in ("/incidents", "/schedules", "/zones"):
+            self.row(page, "locator", "Date range", "getByLabel('Range')", "src/components/DateRangePicker.tsx")
+
+    def line(self, route):
+        return next((x for x in memory.card(self.con, route).splitlines() if x.startswith("RELATED PAGES")), "")
+
+    def test_the_card_lists_the_related_pages_with_why(self):
+        line = self.line("/zones/new")
+        for want in ("/zones/:id (also writes PUT api/areas/:id)", "/map (reads GET api/areas)",
+                     "/zones (reads GET api/areas)"):
+            self.assertIn(want, line)
+        self.assertIn("a change here may show there", line)
+        self.assertEqual(self.line("/schedules"), "RELATED PAGES (a change here may show there; from the code map): "
+                         "/incidents (shares src/components/DateRangePicker.tsx); /zones (shares "
+                         "src/components/DateRangePicker.tsx)")
+        self.assertEqual(self.line("/closures"), "")
+
+    def test_the_card_caps_the_list_at_four(self):
+        for i in range(6):
+            self.calls(f"/more{i}", "GET /api/areas")
+        line = self.line("/zones/new")
+        self.assertEqual(line.count(" (reads "), 3)  # the sibling writer first, then three readers
+        self.assertIn("; +5 more (qa-mem impact '/zones/new')", line)
+        self.assertIn("qa-mem impact '/zones/new'", line)
+
+    def test_an_open_bug_on_a_page_sharing_a_component_shows_on_the_card_and_in_bug_match(self):
+        h = self.bug("/incidents", "range picker drops the end date")
+        card = memory.card(self.con, "/schedules")
+        self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT OR COMPONENT", card)
+        self.assertIn(h, card.split("BUGS ON PAGES SHARING", 1)[1])
+        self.assertIn(h, memory.bug_match(self.con, "/schedules", "the range picker drops the end date"))
+
+    def test_a_layout_shared_by_many_pages_carries_no_bug_across(self):
+        for i in range(20):
+            self.row(f"/p{i}", "locator", "Menu", "getByRole('navigation')", "src/AppLayout.tsx")
+        self.bug("/p0", "menu overlaps the title")
+        self.assertNotIn("BUGS ON PAGES SHARING", memory.card(self.con, "/p1"))
+
+    def test_prep_context_names_the_impacted_routes(self):
+        ctx = memory.ticket_context(self.con, "Speed limit can be a decimal on /zones/new")
+        self.assertEqual([x["route"] for x in ctx["candidate_routes"]][:1], ["/zones/new"])
+        impacted = {x["route"]: x["why"] for x in ctx["impacted_routes"]}
+        self.assertEqual(set(impacted), {"/zones", "/zones/:id", "/map"})
+        self.assertEqual(impacted["/zones"], "reads GET api/areas (via /zones/new)")
+        self.assertNotIn("/zones/new", impacted)
+
+    def test_impacted_routes_are_capped_at_six(self):
+        for i in range(7):
+            self.calls(f"/more{i}", "GET /api/areas")
+        ctx = memory.ticket_context(self.con, "Speed limit on /zones/new")
+        self.assertEqual(len(ctx["impacted_routes"]), 6)
+        self.assertEqual(memory.ticket_context(self.con, "nothing known")["impacted_routes"], [])
+
+    def test_impact_of_a_route_json_and_text(self):
+        code, out, _ = cli("impact", "/zones/new", "--json")
+        data = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(data["route"], "/zones/new")
+        self.assertEqual([x["route"] for x in data["resource_siblings"]], ["/zones/:id"])
+        self.assertEqual([x["route"] for x in data["resource_consumers"]], ["/map", "/zones"])
+        self.assertEqual(data["shared_components"], [])
+        code, out, _ = cli("impact", "/schedules")
+        self.assertIn("SHARED COMPONENTS", out)
+        self.assertIn("/incidents (src/components/DateRangePicker.tsx)", out)
+
+    def test_impact_of_an_endpoint_lists_its_callers_and_the_resource_around_it(self):
+        code, out, _ = cli("impact", "PUT", "/api/areas/42", "--json")
+        data = json.loads(out)
+        self.assertEqual(data["endpoint"], "PUT api/areas/:id")
+        self.assertEqual(data["callers"], ["/zones/:id"])
+        self.assertEqual([x["route"] for x in data["resource_siblings"]], ["/zones/new"])
+        self.assertEqual([x["route"] for x in data["resource_consumers"]], ["/map", "/zones"])
+
+    def test_impact_names_a_page_it_does_not_know_and_wants_a_target(self):
+        self.assertIn("no page matches", cli("impact", "/nowhere")[1])
+        self.assertEqual(cli("impact")[0], 2)
+        self.assertEqual(cli("impact", "/zones", "--bogus")[0], 2)
+
+    def test_impact_of_a_module_page_is_its_shell_routes(self):
+        self.mount("/reports/zones", "/m/zones")
+        self.calls("/m/zones", "PUT /api/areas/:id")
+        out = json.loads(cli("impact", "/reports/zones", "--json")[1])
+        self.assertEqual(out["module"], "m1 at /m/zones")
+        self.assertIn("/zones/new", [x["route"] for x in out["resource_siblings"]])
 
 
 if __name__ == "__main__":
