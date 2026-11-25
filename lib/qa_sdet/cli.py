@@ -154,7 +154,7 @@ def wrapper_cmd(cmd, args):
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
     "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>] [--ids]",
-    "patterns": "[--min-pages N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
+    "patterns": "[--min-pages N] [--json]", "history": "[route] [--builds N] [--json]", "hotspots": "[--top N] [--json]", "bug-match": "<route> <symptom> [--endpoint '<METHOD /path>']", "questions": "[open|resolved|all]", "answer": "<question id> <answer>",
     "remember": "<route|*> <rule|flow|api|validation|note> <text> [--build-scoped] [--source <src>]",
     "forget": "fact <id> | forget page <route> [--force]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
@@ -356,6 +356,16 @@ def run_cmd(con, cmd, args):
         if len(o["_"]) < 2:
             return usage_error(cmd)
         print(memory.bug_match(con, o["_"][0], " ".join(o["_"][1:]), o.get("--endpoint")))
+    elif cmd == "history":
+        o = _opts(args, flags=("--json",), valued=("--builds",))
+        if len(o["_"]) > 1:
+            return usage_error(cmd)
+        print(memory.history(con, o["_"][0] if o["_"] else None, _count(o, "--builds") or 5, o.get("--json", False)))
+    elif cmd == "hotspots":
+        o = _opts(args, flags=("--json",), valued=("--top",))
+        if o["_"]:
+            return usage_error(cmd)
+        print(memory.hotspots(con, _count(o, "--top") or 10, o.get("--json", False)))
     elif cmd == "patterns":
         o = _opts(args, flags=("--json",), valued=("--min-pages",))
         if o["_"]:
@@ -469,7 +479,8 @@ def run_cmd(con, cmd, args):
             else:
                 con.execute("UPDATE bugs SET status=? WHERE hash=?", (status, hits[0]))
             if status == "FIXED":  # a run that finished before this, ingested later, is no regression
-                con.execute("UPDATE bugs SET fixed_ts=? WHERE hash=?", (core.now(), hits[0]))
+                con.execute("UPDATE bugs SET fixed_ts=?, fixed_build=? WHERE hash=?",
+                            (core.now(), core.meta(con, "build"), hits[0]))
             # reopened, but its run files no longer list it (they were rewritten without it): it is no bug to track
             gone = con.execute("DELETE FROM bugs WHERE hash=? AND status='OPEN' AND seen_count=0 AND NOT EXISTS "
                                "(SELECT 1 FROM sightings WHERE hash=?)", (hits[0], hits[0])).rowcount

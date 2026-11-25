@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS coverage_page ON coverage(page, build);
 CREATE TABLE IF NOT EXISTS bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, severity TEXT,
   classification TEXT, status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT,
   seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT, jira_key TEXT, fixed_ts TEXT, heuristic TEXT, endpoint TEXT,
-  pattern TEXT, ticket TEXT);
+  pattern TEXT, ticket TEXT, first_build TEXT, last_build TEXT, fixed_build TEXT, regressed_count INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS bugs_page ON bugs(page, status);
 CREATE VIRTUAL TABLE IF NOT EXISTS bugs_fts USING fts5(title, symptom, page, jira_key, status, content='bugs',
   content_rowid='rowid', tokenize='porter unicode61');
@@ -67,7 +67,8 @@ CREATE TRIGGER IF NOT EXISTS bugs_au AFTER UPDATE ON bugs BEGIN
   VALUES (new.rowid, new.title, new.symptom, new.page, new.jira_key, new.status); END;
 CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, page TEXT, build TEXT, PRIMARY KEY(run_id, src, hash));
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
-  summary TEXT, ts TEXT);
+  summary TEXT, ts TEXT, cases_pass INTEGER DEFAULT 0, cases_fail INTEGER DEFAULT 0, cases_blocked INTEGER DEFAULT 0,
+  bugs_found INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY, page TEXT NOT NULL, ticket TEXT, text TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open', answer TEXT, first_seen TEXT, last_seen TEXT, UNIQUE(page, text));
@@ -135,13 +136,17 @@ def connect():
         con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE facts_fts;")
     con.executescript(SCHEMA)
     have = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
-    for table, cols in (("bugs", ("jira_key", "fixed_ts", "heuristic", "endpoint", "pattern", "ticket")),
-                        ("sightings", ("page", "build"))):  # columns added within 0.4: added in place
-        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    for table, cols in (("bugs", ("jira_key", "fixed_ts", "heuristic", "endpoint", "pattern", "ticket", "first_build",
+                                  "last_build", "fixed_build", "regressed_count:INTEGER DEFAULT 0")),
+                        ("sightings", ("page", "build")),
+                        ("runs", ("cases_pass:INTEGER DEFAULT 0", "cases_fail:INTEGER DEFAULT 0",
+                                  "cases_blocked:INTEGER DEFAULT 0", "bugs_found:INTEGER DEFAULT 0"))):
+        have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}  # columns added within 0.4: added in place
         for col in cols:
-            if col not in have:
+            name, _, kind = col.partition(":")
+            if name not in have:
                 with con:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind or 'TEXT'}")
     if "pinned" not in {r[1] for r in con.execute("PRAGMA table_info(facts)")}:
         with con:
             con.execute("ALTER TABLE facts ADD COLUMN pinned INTEGER DEFAULT 0")

@@ -83,9 +83,12 @@ def check_run(run):
 
 def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
     with con:
-        con.execute("INSERT OR REPLACE INTO runs VALUES(?,?,?,?,?,?,?)",
+        statuses = [core.case_status(c.get("status")) for c in core.dicts(run, "cases")]
+        con.execute("INSERT OR REPLACE INTO runs(id,mode,target,build,status,summary,ts,cases_pass,cases_fail,cases_blocked,"
+                    "bugs_found) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (rid, core.cap(run.get("mode")) or None, core.cap(run.get("target")), build, core.cap(run.get("status")) or None,
-                     core.cap(run.get("summary")), ts))
+                     core.cap(run.get("summary")), ts, statuses.count("PASS"), statuses.count("FAIL"),
+                     statuses.count("BLOCKED"), len(bug_list)))
         # The deployed build only moves forward in time: an old run.json ingested late must not roll it back.
         if known and (core.meta(con, "build_ts") or "") <= ts:
             core.set_meta(con, "build", build)
@@ -175,8 +178,13 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                         (rid, src, h, b["route"], build))  # where it showed: a shared-endpoint bug on another page too
             # a FIXED bug seen again by another run becomes REGRESSED.
             con.execute("INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
-                        "last_seen,last_run,symptom,heuristic,endpoint,pattern,ticket) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                        "ON CONFLICT(hash) DO UPDATE SET "
+                        "last_seen,last_run,symptom,heuristic,endpoint,pattern,ticket,first_build,last_build) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
+                        "first_build=coalesce(first_build, excluded.first_build), "
+                        "last_build=CASE WHEN excluded.last_build IS NOT NULL AND excluded.last_seen >= coalesce(last_seen, '') "
+                        "THEN excluded.last_build ELSE last_build END, "
+                        "regressed_count=coalesce(regressed_count, 0) + CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= "
+                        "coalesce(last_seen, '') AND excluded.last_seen >= coalesce(fixed_ts, '') THEN 1 ELSE 0 END, "
                         "heuristic=coalesce(excluded.heuristic, heuristic), endpoint=coalesce(excluded.endpoint, endpoint), "
                         "pattern=coalesce(excluded.pattern, pattern), ticket=coalesce(excluded.ticket, ticket), "
                         "seen_count=seen_count + ?, "
@@ -195,7 +203,8 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                          resolve_draft(b.get("draft_path"), run_dir), ts, ts, rid, symptom,
                          core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
                          _endpoint(b.get("endpoint")), _pattern(b.get("pattern")),
-                         core.cap(b.get("ticket"))[:30] or None, fresh, fresh))
+                         core.cap(b.get("ticket"))[:30] or None, build if known else None, build if known else None,
+                         fresh, fresh, fresh))
         for h in before - now_seen:  # listed by an earlier version of this run.json only
             con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
             if ran(h):
@@ -1025,7 +1034,8 @@ def bug_sync(con, data):
                     triage.append(f"- {b['hash']} {key} ({b['page']}) closed as {res_name} -> qa-mem bug-status {b['hash']} INVALID")
                 continue
             for b in filed[key]:
-                con.execute("UPDATE bugs SET status='FIXED', fixed_ts=? WHERE hash=? AND status='FILED'", (core.now(), b["hash"]))
+                con.execute("UPDATE bugs SET status='FIXED', fixed_ts=?, fixed_build=? WHERE hash=? AND status='FILED'",
+                            (core.now(), core.meta(con, "build"), b["hash"]))
                 fixed.append(f"- {b['hash']} {key} -> FIXED ({b['page']}): {core.short(b['title'], 80)}")
     out = []
     if fixed:
@@ -1142,12 +1152,67 @@ def _hotspots(con):
     """{page: score} from its bug history: each bug by severity (CRITICAL 4 … LOW 1; INVALID never), +4 for a bug that
     regressed, +1 per build a check failed on. Deterministic, and shown as is (gaps, hotspots)."""
     score = {}
-    for x in con.execute("SELECT page, severity, status FROM bugs WHERE status != 'INVALID'"):
-        w = SEVERITY_WEIGHT.get((core.norm(x["severity"]).split() or [""])[0], 1) + 4 * (x["status"] == "REGRESSED")
+    for x in con.execute("SELECT page, severity, status, regressed_count FROM bugs WHERE status != 'INVALID'"):
+        regressions = max(x["regressed_count"] or 0, int(x["status"] == "REGRESSED"))
+        w = SEVERITY_WEIGHT.get((core.norm(x["severity"]).split() or [""])[0], 1) + 4 * regressions
         score[x["page"]] = score.get(x["page"], 0) + w
     for page, n in con.execute("SELECT page, count(DISTINCT build) FROM coverage WHERE result='fail' GROUP BY page"):
         score[page] = score.get(page, 0) + n
     return score
+
+
+def hotspots(con, top=10, as_json=False):
+    """Pages ranked by bug history (the score gaps breaks ties with), with what makes it up."""
+    score, rows = _hotspots(con), []
+    fails = dict(con.execute("SELECT page, count(DISTINCT build) FROM coverage WHERE result='fail' GROUP BY page").fetchall())
+    for page in sorted(score, key=lambda p: (-score[p], p))[:top]:
+        sev = {}
+        reg = 0
+        for x in con.execute("SELECT severity, status, regressed_count FROM bugs WHERE page=? AND status != 'INVALID'", (page,)):
+            k = (core.norm(x["severity"]).split() or ["unrated"])[0]
+            sev[k] = sev.get(k, 0) + 1
+            reg += max(x["regressed_count"] or 0, int(x["status"] == "REGRESSED"))
+        rows.append({"page": page, "score": score[page], "bugs": sev, "regressions": reg, "failed_builds": fails.get(page, 0)})
+    if as_json:
+        return json.dumps(rows, indent=1)
+    if not rows:
+        return "no bug history yet"
+    return "\n".join(["HOTSPOTS (bug history: severity CRITICAL 4 ... LOW 1, +4 per regression, +1 per build a check failed):"]
+                     + [f"- {r['page']}: {r['score']} (bugs {', '.join(f'{n} {k}' for k, n in sorted(r['bugs'].items())) or 'none'}"
+                        f"; {r['regressions']} regressed; failed on {r['failed_builds']} build(s))" for r in rows])
+
+
+def history(con, route=None, builds=5, as_json=False):
+    """Build over build (newest first: runs, pages, cases, bugs new / fixed / regressed), or one page's run timeline."""
+    plural = lambda n, w: f"{n} {w}{'s' * (n != 1)}"
+    if route:
+        page = core.norm_route(route)
+        runs = sorted((x for x in con.execute("SELECT * FROM runs") if core.norm_route(x["target"]) == page),
+                      key=lambda x: x["ts"] or "", reverse=True)[:20]
+        if as_json:
+            return json.dumps({"page": page, "runs": [dict(x) for x in runs]}, indent=1)
+        return "\n".join([f"HISTORY of {page} (newest first):"] + [
+            f"- {str(x['ts'])[:10]} build {x['build']} {x['mode'] or ''} {x['status'] or '?'}: cases {x['cases_pass']} pass / "
+            f"{x['cases_fail']} fail / {x['cases_blocked']} blocked, {plural(x['bugs_found'], 'bug')}"
+            + (f" — {core.short(x['summary'], 80)}" if x["summary"] else "") for x in runs]) if runs else f"no runs on {page} yet"
+    out = []
+    for b, last in con.execute("SELECT build, max(ts) FROM runs GROUP BY build ORDER BY max(ts) DESC LIMIT ?", (builds,)):
+        rs = con.execute("SELECT target, cases_pass, cases_fail, cases_blocked FROM runs WHERE build=?", (b,)).fetchall()
+        n = lambda sql: con.execute(sql, (b,)).fetchone()[0]
+        out.append({"build": b, "last_run": last, "runs": len(rs), "pages": len({core.norm_route(x["target"]) for x in rs}),
+                    "cases_pass": sum(x["cases_pass"] or 0 for x in rs), "cases_fail": sum(x["cases_fail"] or 0 for x in rs),
+                    "cases_blocked": sum(x["cases_blocked"] or 0 for x in rs),
+                    "new_bugs": n("SELECT count(*) FROM bugs WHERE first_build=? AND status != 'INVALID'"),
+                    "fixed": n("SELECT count(*) FROM bugs WHERE fixed_build=?"),
+                    "regressed": n("SELECT count(*) FROM bugs WHERE last_build=? AND status='REGRESSED'")})
+    if as_json:
+        return json.dumps({"builds": out}, indent=1)
+    if not out:
+        return "no runs yet"
+    return "\n".join(["BUILD OVER BUILD (newest first):"] + [
+        f"- build {x['build']}: {plural(x['runs'], 'run')} on {plural(x['pages'], 'page')}; cases {x['cases_pass']} pass / "
+        f"{x['cases_fail']} fail / {x['cases_blocked']} blocked; {plural(x['new_bugs'], 'new bug')}, {x['fixed']} fixed, "
+        f"{x['regressed']} regressed" for x in out])
 
 
 def _source_changes(con, verified):

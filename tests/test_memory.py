@@ -1144,6 +1144,45 @@ class BugMatch(MemBase):
         self.assertIn("no likely duplicate", memory.bug_match(self.con, "/zones/new", "speed 131 saved"))
 
 
+class History(MemBase):
+    """Bug build lifecycle, run counters, `qa-mem history` (build over build, a page's timeline) and `qa-mem hotspots`."""
+
+    def go(self, build, ts, cases=(), bugs=(), route="/form", status="COMPLETED"):
+        memory.ingest(self.con, {"run_id": f"r-{route}-{ts}", "mode": "ticket", "target": route, "build": build,
+                                 "status": status, "summary": "s", "pages": [{"route": route}], "cases": list(cases),
+                                 "bugs": list(bugs)}, ts)
+
+    def test_a_bug_knows_its_builds_and_regressions_and_runs_their_counts(self):
+        bug = {"route": "/form", "title": "t", "symptom": "s", "severity": "HIGH"}
+        self.go("1.0", "2026-01-01T00:00:00Z", [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"},
+                                                {"id": "TC-3", "status": "BLOCKED"}], [bug])
+        h = core.bug_hash("/form", "s")
+        with mock.patch.object(core, "now", return_value="2026-01-02T00:00:00Z"):
+            cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+        self.go("1.1", "2026-01-03T00:00:00Z", bugs=[{**bug, "hash": h}])
+        row = self.con.execute("SELECT first_build, last_build, fixed_build, regressed_count, status FROM bugs").fetchone()
+        self.assertEqual(tuple(row), ("1.0", "1.1", "1.0", 1, "REGRESSED"))
+        counts = self.con.execute("SELECT cases_pass, cases_fail, cases_blocked, bugs_found FROM runs WHERE build='1.0'").fetchone()
+        self.assertEqual(tuple(counts), (1, 1, 1, 1))
+
+    def test_history_by_build_and_by_page_and_hotspots(self):
+        self.go("1.0", "2026-01-01T00:00:00Z", [{"id": "TC-1", "status": "PASS"}],
+                [{"route": "/form", "title": "a", "symptom": "a", "severity": "HIGH"}])
+        self.go("1.1", "2026-01-05T00:00:00Z", [{"id": "TC-1", "status": "FAIL"}],
+                [{"route": "/form", "title": "b", "symptom": "b", "severity": "LOW"}])
+        self.go("1.1", "2026-01-05T01:00:00Z", route="/list")
+        out = memory.history(self.con)
+        lines = [x for x in out.splitlines() if x.startswith("- build")]
+        self.assertTrue(lines[0].startswith("- build 1.1: 2 runs on 2 pages; cases 0 pass / 1 fail / 0 blocked; 1 new bug"), out)
+        self.assertTrue(lines[1].startswith("- build 1.0: 1 run on 1 page"), out)
+        page = memory.history(self.con, "/form")
+        self.assertLess(page.index("build 1.1"), page.index("build 1.0"))  # newest first
+        self.assertEqual(json.loads(qa_mem("history", "--json")[1])["builds"][0]["build"], "1.1")
+        hot = memory.hotspots(self.con)
+        self.assertTrue(hot.splitlines()[1].startswith("- /form: 4"), hot)  # HIGH 3 + LOW 1
+        self.assertEqual(json.loads(qa_mem("hotspots", "--json")[1])[0]["page"], "/form")
+
+
 class Database(MemBase):
     """core.connect."""
 
