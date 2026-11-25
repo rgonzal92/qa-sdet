@@ -664,10 +664,12 @@ def run_cmd(con, cmd, args):
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
             return usage_error(cmd)
         from . import ops
-        print(json.dumps(ops.dispatch(con, o["_"][0], o["--route"], o.get("--mode"), o.get("--focus"), _count(o, "--budget"),
-                                      _count(o, "--minutes", ops.MARKER_HOURS * 60), o.get("--faults", False),
-                                      o.get("--known-bugs") or "", o.get("--open-record", False), o.get("--api-writes", False),
-                                      o.get("--hypothesis"), o.get("--target-route"), _count(o, "--max-turns", 1000))))
+        print(json.dumps(ops.dispatch(
+            con, o["_"][0], o["--route"], mode=o.get("--mode"), focus=o.get("--focus"), budget=_count(o, "--budget"),
+            minutes=_count(o, "--minutes", ops.MARKER_HOURS * 60), faults=o.get("--faults", False),
+            known_bugs=o.get("--known-bugs") or "", open_record=o.get("--open-record", False),
+            api_writes=o.get("--api-writes", False), hypothesis=o.get("--hypothesis"), target_route=o.get("--target-route"),
+            max_turns=_count(o, "--max-turns", 1000))))
     elif cmd == "search" and args:
         print(memory.search(con, " ".join(args)))
     elif cmd == "bugs" and len(args) <= 1:
