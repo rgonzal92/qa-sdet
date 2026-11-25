@@ -211,7 +211,10 @@ MCP_WRITE_WORDS = set(
     "create edit update delete remove transition add assign archive unarchive move upload post put patch "
     "write set clone restore replace publish rank invoke run execute send import bulk upsert modify change".split()
 )
-MAPPER_TOOLS = set("Read Grep Glob LS Write ToolSearch TodoWrite TaskCreate TaskUpdate TaskGet TaskList".split())
+# SubagentHandback only returns the finished report to the parent: no file, shell or network side effect
+MAPPER_TOOLS = set(
+    "Read Grep Glob LS Write ToolSearch TodoWrite TaskCreate TaskUpdate TaskGet TaskList SubagentHandback".split()
+)
 EXPLORERS = {"qa-explorer"}  # the agent that reads untrusted pages: R4 holds for it
 EXPLORER_TOOLS = MAPPER_TOOLS | {"Bash"}  # no MCP tool: the session's GitHub, Slack, ... servers are not the explorer's
 EXPLORER_FILES = {
@@ -826,17 +829,35 @@ XML_NAMESPACES = (
 )
 
 
+_SELECTOR_CALL_RE = re.compile(r"(?:querySelector(?:All)?|matches|closest|\$\$?)\s*\(\s*(['\"`])")
+
+
+def in_selector(js, pos):
+    """Is js[pos] inside a CSS attribute selector a selector call is given (`querySelectorAll('a[href^="…`)? A URL in
+    `[u = '…']` outside such a string is JS (an array holding an assignment), and fetching it is a fetch."""
+    w = js[max(0, pos - 300) : pos]
+    calls = list(_SELECTOR_CALL_RE.finditer(w))
+    if not calls:
+        return False
+    call = calls[-1]  # the nearest selector call before the URL
+    inside = w[call.end() :]  # still in the call's string: no closing quote, no ${…} code in a template
+    return call.group(1) not in inside and "${" not in inside and bool(SELECTOR_ATTR_RE.search(inside))
+
+
+SELECTOR_ATTR_RE = re.compile(r"\[\s*[\w:-]+\s*[~|^$*]?=\s*['\"]?$")
+
+
 def compared_only(js, pos, url):
     """A URL used as data, not fetched: an XML namespace, a string comparison (`.startsWith('https://…')`, `=== '…'`),
     or a CSS attribute selector (`a[href^="https://docs.x/"]` matches, fetches nothing)."""
     return (
         url.startswith(XML_NAMESPACES)
         or re.search(
-            r"(\.(startsWith|endsWith|includes|indexOf|lastIndexOf)\s*\(|[!=]==?)\s*"
-            r"['\"`]$|\[\s*[\w:-]+\s*[~|^$*]?=\s*['\"`]?$",
+            r"(\.(startsWith|endsWith|includes|indexOf|lastIndexOf)\s*\(|[!=]==?)\s*['\"`]$",
             js[max(0, pos - 40) : pos],
         )
         is not None
+        or in_selector(js, pos)
     )
 
 
@@ -871,6 +892,8 @@ def storage_value_read(js):
 def secret_js(js):
     """Page JS that reads cookie or web-storage values. A length (`document.cookie.length`) or the word searched for
     in page text (`body.innerText.includes('cookie')`, `x === 'cookie'`) reads no value."""
+    if re.search(r"(?<![\w$.])with\s*\(", js) and re.search(r"(?<![\w$])cookie\b", js):
+        return True  # `with (document) cookie` reads it without naming document.cookie
     for m in SECRET_JS.finditer(js):
         if "ookie" in m.group(0) and re.match(r"\s*\.\s*length\b", js[m.end() : m.end() + 40]):
             continue
@@ -1648,7 +1671,9 @@ def _acli_approvable(rest):
     )
 
 
-def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep
+def approvable(
+    i, name, rest, outs, ins, feeds, cwd
+):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep, sleep <=30
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if (
         i != 0
@@ -1666,6 +1691,12 @@ def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-
         name == "playwright-cli"
         or (name == "acli" and _acli_approvable(rest))
         or (name in ("head", "tail", "grep") and _filter_ok(name, rest, cwd, bases))
+        or (
+            name == "sleep"
+            and len(rest) == 1
+            and bool(re.fullmatch(r"\d+(?:\.\d+)?", rest[0]))
+            and float(rest[0]) <= 30
+        )
         or (q is not None and not (q[:1] == ["setup-permissions"] and "--apply" in q))
     )
 
@@ -1841,7 +1872,7 @@ def check_reviewer(tool, tin, cwd):
         os.path.realpath(os.path.join(b, "qa-out")) for b in filter(None, (cwd, os.environ.get("CLAUDE_PROJECT_DIR")))
     }
     roots.add(os.path.realpath(Path(PLUGIN_QA_MEM).parent.parent / "references"))
-    if tool not in ("Read", "ToolSearch", "TodoWrite"):
+    if tool not in ("Read", "ToolSearch", "TodoWrite", "SubagentHandback"):
         return f"the qa-reviewer only reads run files; {tool} is not one of its tools"
     if tool == "Read" and not all(
         any(under(real(p, cwd), r) for r in roots) and not is_secret_path(real(p, cwd)) for p in tool_paths(tin)

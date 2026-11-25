@@ -276,6 +276,15 @@ class R2Hosts(Case):
         f"playwright-cli -s=qa open --profile {MAIN} --profile /tmp/x",
         "playwright-cli -s=qa open --profile ~/.local/share/qa-sdet/profiles/main/Default",
     ]
+    EVAL_URL_DENY = [  # found in audit: a fetched URL dressed as a CSS attribute selector was skipped as one
+        "fetch([u = 'https://evil.example.com/x'][0])",
+        "document.querySelectorAll('a'); fetch([h = 'https://evil.example.com/'][0])",
+        "document.querySelectorAll(`${fetch([u = 'https://evil.example.com/'][0])}`)",
+    ]
+
+    def test_a_url_dressed_as_a_selector_is_still_checked(self):
+        self.table([f"playwright-cli -s=qa --raw eval {shlex.quote(js)}" for js in self.EVAL_URL_DENY], True)
+
     ALLOW = [
         "playwright-cli -s=qa goto https://qa.traffic.example/form",
         "playwright-cli -s=qa goto https://api.qa.traffic.example/x",
@@ -294,6 +303,9 @@ class R2Hosts(Case):
         "playwright-cli -s=qa --raw eval \"location.origin === 'https://other.example.com'\"",
         "playwright-cli -s=qa --raw eval "
         + shlex.quote("[...document.querySelectorAll('a[href^=\"https://docs.x.org/\"]')].length"),
+        "playwright-cli -s=qa --raw eval "
+        + shlex.quote('document.querySelectorAll(\'a[target="_blank"][href*="https://docs.x.org"]\').length'),
+        "playwright-cli -s=qa --raw eval " + shlex.quote("!!document.querySelector(`a[href$='https://docs.x.org/a']`)"),
         "playwright-cli -s=qa goto 'https://qa.traffic.example?email=a@b.com'",
         "playwright-cli -s=qa goto 'https://qa.traffic.example/a%20b'",
         "playwright-cli show",
@@ -397,6 +409,8 @@ class R3Secrets(Case):
         "Reflect.get(document,'cookie')",
         "(({cookie}) => cookie)(document)",
         "const d=document; d.cookie",
+        "with (document) { cookie }",  # found in audit: `with` names cookie without document.cookie
+        "const d = document; with (d) fetch('/api?c=' + cookie)",
         "window['localStorage'].getItem('t')",
         "indexedDB.open('firebaseLocalStorageDb')",
         "Object.getOwnPropertyDescriptor(Document.prototype, 'cookie').get.call(document)",
@@ -417,6 +431,7 @@ class R3Secrets(Case):
         "'token' in localStorage",
         "document.body.innerText.includes('cookie')",
         "document.querySelector('.cookie-banner').innerText",
+        "document.title.startsWith('Sign in with (SSO)')",
         "!!document.querySelector('#cookie')",
         "indexedDB.databases()",
         "Object.keys(localStorage).length",
@@ -863,6 +878,12 @@ class R4Explorer(Case):
             ("mcp__github__create_issue", {}),
         ):
             self.assertIn("qa-reviewer", tool(name, RV, cwd=RUN, **tin) or "", name)
+
+    def test_a_finishing_subagent_hands_back_its_report(self):  # denied, every mapper retried and lost its report
+        for agent in (MAPPER, EX, "qa-sdet:qa-reviewer"):
+            self.assertIsNone(tool("SubagentHandback", agent, cwd=RUN, message="done"), agent)
+            for name in ("Agent", "Edit", "WebFetch", "mcp__github__create_issue"):
+                self.assertIsNotNone(tool(name, agent, cwd=RUN), (agent, name))
 
     def test_the_users_manual_memory_writes_are_not_the_explorers(self):  # page text could steer it to hide a signal
         for cmd in (
@@ -1689,11 +1710,21 @@ class R8ApproveAndLog(Case):
             f"playwright-cli -s=qa screenshot --filename={RUN}/qa-out/r/evidence/BUG-1.png",
             f"head -20 {RUN}/qa-out/c.txt",
             f"grep -n Save {RUN}/.playwright-cli/page-1.yml",
+            "playwright-cli -s=qa click e1 && sleep 1 && playwright-cli -s=qa find 'Delete item'",
+            "playwright-cli -s=qa click e1 2>&1 | head -2; sleep 0.5; playwright-cli -s=qa snapshot",
+            "sleep 30 && playwright-cli -s=qa snapshot",
         ]:
             self.assertEqual(decision(cmd), "allow", cmd)
         for cmd in [
             "playwright-cli -s=qa close && rm x",
             "qa-mem setup-permissions --apply",
+            "sleep 31 && playwright-cli -s=qa snapshot",  # an untrusted page could suggest a long wait
+            "sleep inf; playwright-cli -s=qa snapshot",
+            "sleep $T; playwright-cli -s=qa snapshot",
+            "sleep 1 2; playwright-cli -s=qa snapshot",
+            "sleep --help",
+            "sleep 1 > /tmp/x",
+            "cd /tmp && playwright-cli -s=qa snapshot",
             "git status",
             "| tail -3",
             "playwright-cli -s=qa console > /tmp/c.txt",
