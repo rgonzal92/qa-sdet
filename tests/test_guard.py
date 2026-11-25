@@ -984,6 +984,29 @@ class Plumbing(Case):
         self.assertLess((time.time() - t) / 50, 0.05)
 
 
+class LibMirrorsGuard(Case):
+    """The guard imports nothing from lib (it is the trust root and starts fast); lib's copy of its host rules, used by
+    `session-check` and `doctor`, must decide exactly as it does."""
+    def test_lib_reads_hosts_and_urls_by_the_guards_rules(self):  # session-check took user@host and a backslash host
+        from qa_sdet import core
+        lists = [["qa.example.com"], ["QA.Example.com.", "*.api.example.com"], ["localhost"], [" ", 7], "qa.example.com"]
+        urls = ["https://qa.example.com/x", "http://sub.qa.example.com", "HTTPS://QA.EXAMPLE.COM", "https://evilqa.example.com/",
+                "https://evil.com\\.qa.example.com/", "https://qa.example.com@evil.com/", "https://user@qa.example.com/",
+                "https://a%2f.qa.example.com/", "javascript://qa.example.com/%0Aalert(1)", "ftp://qa.example.com/",
+                "qa.example.com/x", "http://127.0.0.1:8765/", "http://[::1]:8765/", "https://api.example.com/v1",
+                "http://[bad/", "not a url", ""]
+        mirror = TMP / "mirror.json"
+        for listed in lists:
+            mirror.write_text(json.dumps({"allowedHosts": listed}))
+            with mock.patch.object(g, "CONFIG", mirror):
+                hosts = g.allowed_hosts()
+            self.assertEqual(core.allowed_hosts({"allowedHosts": listed}), hosts, listed)
+            for url in urls:  # lib takes http(s) only (a QA URL to open or fetch); the guard also lets ws:// and about:blank
+                with self.subTest(listed=listed, url=url):
+                    want = g.host_ok(url, hosts) and url.lower().startswith(("http://", "https://"))
+                    self.assertEqual(core.url_allowed(url, hosts), want)
+
+
 class KnownLimits(Case):
     """Given up on purpose (README Safety, known limits): pinned so a change here is a decision, not an accident."""
     def test_known_limits(self):

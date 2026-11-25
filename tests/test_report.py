@@ -963,6 +963,49 @@ class PlanFindAndRetest(Rendering):
         self.assertIn("| PROJ-1 | ⛔ BLOCKED |", (d / "REPORT.md").read_text())
         self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
 
+    def test_retest_trusts_a_pass_exactly_when_the_verdict_does(self):  # one rule for "a run that ended BLOCKED"
+        blocked = lambda **kw: {"status": "BLOCKED", "summary": "session expired", "cases": [], **kw}
+        rows = [  # (case route, blocked run): does the run cover the case?
+            ("/form", blocked(target="/form")),  # its page
+            ("/form", blocked(target="https://qa.example/form?x=1")),  # same page, other spelling
+            ("/list", blocked(target="/form", cases=[{"id": "TC-1", "status": "PASS"}])),  # it reported the case
+            ("/list", blocked(target="/form")),  # another page: no
+            ("http://[bad", blocked()),  # an unparseable route and a run with no target
+        ]
+        for route, run in rows:
+            with self.subTest(route=route, run=run):
+                plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1"}],
+                        "cases": [{"id": "TC-1", "ticket": "PROJ-1", "title": "t", "route": route}]}
+                ok = {"target": route, "status": "COMPLETED", "cases": [{"id": "TC-1", "status": "PASS"}]}
+                d = self.rundir("2026-11-20-PROJ-1", plan=plan, runs=[("a", ok), ("b", run)])
+                cases = report.merged_cases(plan, report.load_run(d)["runs"])
+                v = report.verdict({"key": "PROJ-1"}, cases, [], runs=report.load_run(d)["runs"])[0]
+                retested = [c["id"] for c in report._run_state(d)["retest_cases"]]
+                self.assertEqual((v, retested), ("BLOCKED", ["TC-1"]) if v == "BLOCKED" else ("PASS", []))
+
+    def test_report_index_and_inbox_give_the_same_verdicts(self):  # one place feeds verdict(), not three
+        case = lambda cid, t, route: {"id": cid, "ticket": t, "ac": "AC-1", "title": cid, "route": route}
+        plan = {"kind": "ticket", "title": "QA-1, QA-2, QA-3, QA-4", "retest_of": "2026-11-20-x",
+                "tickets": [{"key": k, "acs": [{"id": "AC-1"}]} for k in ("QA-1", "QA-2", "QA-3", "QA-4")],
+                "cases": [case("TC-1", "QA-1", "/a"), case("TC-2", "QA-2", "/b"), case("TC-4", "QA-4", "/d")],
+                "prior_passed": [{**case("TC-3", "QA-3", "/c"), "build": "1.0"}],  # QA-3: only a prior-build pass
+                "questions": [{"text": "Q1 [BLOCKING] Which role?", "ticket": "QA-1"}]}  # QA-1: an open blocking question
+        ran = lambda t, s, c: {"target": t, "build": "1.1", "status": s, "cases": [{"id": c, "status": "PASS"}]}
+        d = self.rundir("2026-11-24-QA-1+QA-2+QA-3+QA-4", plan=plan,  # QA-2: its run ended BLOCKED; QA-4: a plain pass
+                        runs=[("a", ran("/a", "COMPLETED", "TC-1")), ("b", ran("/b", "BLOCKED", "TC-2")),
+                              ("d", ran("/d", "COMPLETED", "TC-4"))])
+        report.write_report(d)
+        want = {"QA-1": "⚠️ PASS WITH NOTES", "QA-2": "⛔ BLOCKED", "QA-3": "⚠️ PASS WITH NOTES", "QA-4": "✅ PASS"}
+        r = (d / "REPORT.md").read_text()
+        self.assertEqual({k: re.search(rf"^\| {k} \| ([^|]+) \|", r, re.M).group(1) for k in want}, want)
+        self.assertIn(", ".join(f"{k} {v}" for k, v in want.items()), (d.parent / "README.md").read_text())
+        con = core.connect()
+        try:
+            inbox = report.inbox(con, self.proj, [{"key": k, "fields": {"summary": "s"}} for k in want])
+        finally:
+            con.close()
+        self.assertEqual({k: re.search(rf"\| {k} \|.*\| ([^|]+) \|$", inbox, re.M).group(1) for k in want}, want)
+
     def test_partial_retest_verdict_is_pass_with_notes_and_honest_draft(self):
         plan = {**PLAN1, "retest_of": "2026-11-23-PROJ-1",
                 "cases": [PLAN1["cases"][1]],  # only TC-2 retested

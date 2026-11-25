@@ -163,6 +163,32 @@ def cap(s):
     return " ".join(_s(s).split())[:MAX_TEXT]
 
 
+LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def allowed_hosts(cfg):
+    """The config's allowedHosts as the guard reads them (hooks/guard.py allowed_hosts, which imports nothing from here):
+    lower case, no trailing dot or '*.'; one loopback name allows all three. tests/test_guard.py pins the two together."""
+    listed = cfg.get("allowedHosts") if isinstance(cfg, dict) else None
+    hosts = {h.lower().strip().rstrip(".").removeprefix("*.") for h in listed if isinstance(h, str) and h.strip()} \
+        if isinstance(listed, list) else set()
+    return hosts | LOOPBACK if hosts & LOOPBACK else hosts
+
+
+def url_allowed(url, hosts):
+    """An http(s) URL on one of `hosts` (or under one), refused wherever the guard's host_ok refuses: a backslash,
+    user@host or a %-escaped host, which browsers resolve to another host than urlsplit reads."""
+    url = _s(url).strip()
+    if "\\" in url or "@" in re.split(r"[/?#]", url.split("://", 1)[-1])[0]:
+        return False
+    try:
+        u = urlsplit(url)
+        host = (u.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return u.scheme in ("http", "https") and bool(host) and "%" not in host and any(host == h or host.endswith("." + h) for h in hosts)
+
+
 def norm_build(v):
     """Same build text however the page laid it out; empty, N/A, undefined or unknown* -> UNKNOWN."""
     build = cap(v)

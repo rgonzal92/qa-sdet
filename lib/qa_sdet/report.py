@@ -239,6 +239,14 @@ def _case_acs(c):
     return {a.strip() for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
 
 
+def _blocked_runs(cases, runs):
+    """[(file name, run)] of the runs that ended BLOCKED on one of these cases' pages or reporting one of them: their
+    PASS results can't be trusted. The one rule for verdict() and for what a partial --retest must re-run."""
+    ids, routes = {c["id"] for c in cases}, {core.norm_route(c.get("route")) for c in cases if c.get("route")}
+    return [(name, r) for name, r in runs if _first_word(r.get("status")) == "blocked"
+            and (core.norm_route(r.get("target")) in routes or any(str(x.get("id")) in ids for x in _list(r, "cases")))]
+
+
 def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(), questions=()):
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
@@ -276,12 +284,8 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     for c in mine:
         if st(c) in ("BLOCKED", "NOT_RUN") and c not in unsure:
             stuck.setdefault(f"{'blocked' if st(c) == 'BLOCKED' else 'not run'}{why(c)}", []).append(c["id"])
-    # a run on one of its pages (or reporting one of its cases) ended BLOCKED: its PASS results can't be trusted
-    case_ids, routes = {c["id"] for c in mine}, {core.norm_route(c.get("route")) for c in mine if c.get("route")}
     ended = [f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
-             + (f": {_clip(r.get('summary'), 60)}" if r.get("summary") else "")
-             for name, r in runs if _first_word(r.get("status")) == "blocked"
-             and (core.norm_route(r.get("target")) in routes or any(str(x.get("id")) in case_ids for x in _list(r, "cases")))]
+             + (f": {_clip(r.get('summary'), 60)}" if r.get("summary") else "") for name, r in _blocked_runs(mine, runs)]
     if stuck or ended:
         return "BLOCKED", _some([(f"{ids[0]}" if len(ids) == 1 else f"{len(ids)} cases ({ids[0]}–{ids[-1]})") + f" {r}"
                                  for r, ids in stuck.items()] + ended, 2)
@@ -302,6 +306,16 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     if notes:
         return "PASS WITH NOTES", _some(notes)
     return "PASS", f"all {len(mine)} cases passed"
+
+
+def _verdicts(plan, runs, cases, bugs):
+    """{ticket key: (verdict, reason)} for every plan ticket: the one place verdict() gets its inputs, so REPORT.md,
+    the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
+    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    keys = [t["key"] for t in tickets]
+    prior_all, questions = _prior_passed(plan, keys), _q_items(plan, "test plan")
+    return {t["key"]: verdict(t, cases, bugs, bool(runs), keys, runs, [c for c in prior_all if c.get("ticket") == t["key"]],
+                              questions) for t in tickets}
 
 
 def cell(v):
@@ -733,12 +747,11 @@ def render_report_parts(run_dir, cfg=None):
     retest_of = str(plan.get("retest_of") or "").strip() if isinstance(plan.get("retest_of"), str) else ""
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
-    drafts, vmap = {}, {}
-    if tickets and with_status:
+    drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs) if tickets and with_status else {})
+    if vmap:
         for t in tickets:
             prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-            v, why = verdict(t, cases, bugs, bool(runs), keys, runs, prior_mine, _q_items(plan, "test plan"))
-            vmap[t["key"]] = (v, why)
+            v, why = vmap[t["key"]]
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
             builds = sorted({core.norm_build(r.get("build")) for _, r in runs
@@ -876,10 +889,8 @@ def run_summary(run_dir):
     if kind == "plan":
         verdicts = f"plan only ({len(cases)} cases)"
     elif tickets:
-        prior_all = _prior_passed(plan, [x["key"] for x in tickets])
-        verdicts = ", ".join(
-            f"{t['key']} {VERDICT_ICON[verdict(t, cases, bugs, bool(runs), [x['key'] for x in tickets], runs, [c for c in prior_all if c.get('ticket') == t['key']], _q_items(plan, ''))[0]]}"
-            for t in tickets)
+        vmap = _verdicts(plan, runs, cases, bugs)
+        verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[vmap[t['key']][0]]}" for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
     m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
@@ -974,17 +985,15 @@ def _run_state(run_dir):
     # verdict()'s rules per case: a PASS that a run ended BLOCKED reported (or ran on its page), or on the page of (or
     # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
     # not make it a prior pass and drop the reason the ticket didn't pass
-    bugs, blocked = run_bugs(runs), [r for _, r in runs if _first_word(r.get("status")) == "blocked"]
+    bugs = run_bugs(runs)
     rechecked = set().union(*(_case_bugs(c) for c in cases if c["status"] != "PASS"))
     serious = {t: [b for b in ticket_bugs(t, cases, bugs, tickets) if _serious(b) and not _bug_refs(b) & rechecked]
                for t in {c.get("ticket") for c in cases}}
 
     def trusted(c):
         rt = core.norm_route(c.get("route"))
-        return c["status"] == "PASS" and not any(
-            rt and core.norm_route(r.get("target")) == rt or any(str(x.get("id")) == c["id"] for x in _list(r, "cases"))
-            for r in blocked) and not any(rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c)
-                                          for b in serious[c.get("ticket")])
+        return c["status"] == "PASS" and not _blocked_runs([c], runs) and not any(
+            rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c) for b in serious[c.get("ticket")])
     retest = [{"id": c["id"], "ticket": c.get("ticket") or "", "ac": c.get("ac") or "",
                "route": core.norm_route(c.get("route")) or "", "status": c["status"], "title": c.get("title") or ""}
               for c in cases if not trusted(c)]
@@ -1091,21 +1100,13 @@ def _qa_verdicts_by_key(qa_out, keys):
         d = load_run(p)
         plan, runs = d["plan"], d["runs"]
         tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
-        tkeys = [t["key"] for t in tickets]
         matching = [t for t in tickets if t["key"].strip().upper() in keys and t["key"].strip().upper() not in found]
         if not matching:
             continue
         kind = str(plan.get("kind") or "")
-        cases, bugs = merged_cases(plan, runs), run_bugs(runs)
-        prior_all = _prior_passed(plan, tkeys)
+        vmap = {} if kind == "plan" else _verdicts(plan, runs, merged_cases(plan, runs), run_bugs(runs))
         for t in matching:
-            uk = t["key"].strip().upper()
-            if kind == "plan":
-                found[uk] = "plan"
-            else:
-                prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-                v, _ = verdict(t, cases, bugs, bool(runs), tkeys, runs, prior_mine, _q_items(plan, ""))
-                found[uk] = VERDICT_ICON[v]
+            found[t["key"].strip().upper()] = "plan" if kind == "plan" else VERDICT_ICON[vmap[t["key"]][0]]
         if len(found) == len(keys):
             break
     return found

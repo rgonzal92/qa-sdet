@@ -220,22 +220,6 @@ def browser_open(args):
     return code_
 
 
-def _allowed_hosts(cfg):
-    listed = cfg.get("allowedHosts")
-    hosts = {h.lower().strip().rstrip(".").removeprefix("*.") for h in listed if isinstance(h, str) and h.strip()} \
-        if isinstance(listed, list) else set()
-    return hosts | {"localhost", "127.0.0.1", "::1"} if hosts & {"localhost", "127.0.0.1", "::1"} else hosts
-
-
-def _url_allowed(url, hosts):
-    try:
-        u = urlsplit(str(url or ""))
-    except ValueError:
-        return False
-    host = (u.hostname or "").lower().rstrip(".")
-    return u.scheme in ("http", "https") and bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
-
-
 def _norm_host(raw):
     s = str(raw or "").strip().lower()
     if not s:
@@ -266,8 +250,8 @@ def session_check(record=False, read_build=False):
     except (OSError, ValueError) as e:
         raise core.BadInput(f"session-check: unreadable {core.CONFIG} ({e})")
     base_url = str(cfg.get("qaBaseUrl") or "").strip()
-    hosts = _allowed_hosts(cfg)
-    if not _url_allowed(base_url, hosts):
+    hosts = core.allowed_hosts(cfg)
+    if not core.url_allowed(base_url, hosts):
         raise core.BadInput(f"session-check: qaBaseUrl {base_url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
     sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
     with contextlib.redirect_stdout(io.StringIO()):
@@ -305,7 +289,7 @@ def session_check(record=False, read_build=False):
             bjs = None
             if btype == "selector" and bval:
                 bjs = f"document.querySelector({json.dumps(bval)})?.textContent || ''"
-            elif btype == "url" and bval and (bval.startswith("/") or _url_allowed(bval, hosts)):
+            elif btype == "url" and bval and (bval.startswith("/") or core.url_allowed(bval, hosts)):
                 bjs = f"fetch({json.dumps(bval)}).then(r => r.text())"
             elif btype == "header" and bval:
                 bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"

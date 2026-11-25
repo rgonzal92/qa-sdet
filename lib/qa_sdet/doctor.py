@@ -113,11 +113,7 @@ def doctor():
         hosts = cfg.get("allowedHosts")
         line(isinstance(hosts, list) and all(isinstance(h, str) for h in hosts), "allowedHosts is a list of hosts",
              'e.g. "allowedHosts": ["qa.example.com"]')
-        norm_hosts = [h.lower().strip().rstrip(".").removeprefix("*.") for h in hosts
-                      if isinstance(h, str) and h.strip()] if isinstance(hosts, list) else []  # same rules as the guard
-        odd = [h for h in norm_hosts if h and not re.fullmatch(r"[a-z0-9._-]+|::1", h)]  # the guard matches host names only
-        if {"localhost", "127.0.0.1", "::1"} & set(norm_hosts):  # loopback aliases, as in the guard
-            norm_hosts += ["localhost", "127.0.0.1", "::1"]
+        odd = sorted(h for h in core.allowed_hosts(cfg) if not re.fullmatch(r"[a-z0-9._-]+|::1", h))  # the guard matches host names only
         if odd:
             line(False, f"allowedHosts entries are host names ({', '.join(core.short(h, 40) for h in odd[:3])} can never match)",
                  'just the host, no https://, port or path: "https://qa.example.com:8443/app" -> "qa.example.com"')
@@ -129,7 +125,7 @@ def doctor():
         if cfg.get("qaBaseUrl") and not (base and str(cfg["qaBaseUrl"]).lower().startswith(("http://", "https://"))):
             line(False, "qaBaseUrl is a full URL", 'e.g. "qaBaseUrl": "https://qa.example.com"')
         elif base:
-            line(any(base == h or base.endswith("." + h) for h in norm_hosts),
+            line(core.url_allowed(cfg["qaBaseUrl"], core.allowed_hosts(cfg)),  # the guard's rules: what it will let open
                  "qaBaseUrl host is in allowedHosts", "add the qaBaseUrl host to allowedHosts")
         sso = cfg.get("ssoHost")
         if sso and not (isinstance(sso, str) and re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?\.?", sso.strip())):
