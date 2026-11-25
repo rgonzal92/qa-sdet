@@ -18,6 +18,7 @@ PLAN1 = {"kind": "ticket", "title": "PROJ-1", "created": "2026-11-23T18:00:00Z",
 RUN1 = {"mode": "ticket", "target": "/form", "build": "1.42", "status": "COMPLETED", "notes": "Explored.",
         "cases": [{"id": "TC-1", "status": "PASS", "actual": "Saved"}, {"id": "TC-2", "status": "PASS", "actual": "Error shown"}],
         "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h, as the label says."}]}
+PLAN1_ANSWERED = {**PLAN1, "questions": [{"text": "Q1 [BLOCKING] Is 0 a valid speed?", "status": "resolved", "answer": "Yes"}]}
 TEMPLATES = ["Release-A-{version}", "Release-B-{version}"]
 
 
@@ -49,6 +50,27 @@ class Verdict(unittest.TestCase):
         self.assertEqual(v("T-1", [self.case("TC-1", "PASS")],
                            [{"id": "BUG-9", "route": "/other", "ticket": "T-2", "severity": "HIGH",
                              "classification": "CONFIRMED"}])[0], "PASS")  # another ticket's bug
+
+    def test_an_open_blocking_question_keeps_its_ticket_from_a_plain_pass(self):  # all cases passed, the rule undecided
+        cases = [self.case("TC-1", "PASS"), self.case("TC-2", "PASS", ticket="T-2", route="/list")]
+        v = lambda key, *qs, cs=cases: report.verdict(key, cs, [], known=["T-1", "T-2"],
+                                                     questions=report._q_items({"questions": list(qs)}, "test plan"))
+        both = "Q1 [BLOCKING] Is 130 itself allowed?"  # untagged (a string can't name a ticket): every ticket's
+        self.assertEqual([v(k, both) for k in ("T-1", "T-2")], [("PASS WITH NOTES", "Q1 open blocking question")] * 2)
+        mine = {"text": "Q2 [BLOCKING] Which role may edit?", "ticket": " t-2"}
+        self.assertEqual((v("T-1", mine)[0], v("T-2", mine)), ("PASS", ("PASS WITH NOTES", "Q2 open blocking question")))
+        unknown = {**mine, "ticket": "OTHER-9"}  # a key outside the plan is no tag, as for bugs
+        self.assertEqual(v("T-1", unknown)[0], "PASS WITH NOTES")
+        for not_blocking in ({"text": both, "status": "Resolved", "answer": "Yes"}, "Q3 [HIGH] Units?", "Q4 [LOW] x"):
+            self.assertEqual(v("T-1", not_blocking)[0], "PASS", not_blocking)
+        self.assertEqual(v("T-1", "[blocking] no number here"),
+                         ("PASS WITH NOTES", "open blocking question: [blocking] no number here"))
+        # it is named first, so the pass draft's Notes line never cuts it off
+        busy = [self.case(f"TC-{i}", "QUESTION") for i in range(1, 5)]
+        self.assertTrue(v("T-1", both, cs=busy)[1].startswith("Q1 open blocking question; TC-1 open question"))
+        self.assertEqual(v("T-1", both, cs=[self.case("TC-1", "FAIL")])[0], "FAIL")  # worse verdicts still win
+        self.assertEqual(report.verdict("T-1", cases, [], started=False,
+                                        questions=report._q_items({"questions": [both]}, ""))[0], "NOT STARTED")
 
     def test_known_bug_named_by_hash_belongs_to_that_ticket_only(self):
         cases = [{"id": "TC-1", "ticket": "A-1", "route": "/list", "status": "PASS"},
@@ -184,6 +206,32 @@ class MergedCases(Base):
         self.assertIn("- plan.json: case 'Reject 131' repeats id TC-1; it is left out of this report: give it an id "
                       "of its own (e.g. TC-99)", r)
         self.assertIn("- plan.json: case 'Reject 0' has no id;", r)
+
+    def test_a_repeated_case_id_blocks_every_ticket_using_it(self):  # B-1's FAIL showed under A-1 and B-1 got a pass draft
+        case = lambda cid, t, route: {"id": cid, "ticket": t, "ac": "AC-1", "title": f"{t} {cid}", "route": route}
+        plan = {"kind": "ticket", "title": "A-1, B-1", "tickets": [{"key": "A-1", "acs": [{"id": "AC-1"}]},
+                                                                  {"key": "B-1", "acs": [{"id": "AC-1"}]},
+                                                                  {"key": "C-1", "acs": [{"id": "AC-1"}]}],
+                "cases": [case("TC-1", "A-1", "/a"), case("TC-1", "B-1", "/b"), case("TC-2", "B-1", "/b"),
+                          case("TC-3", "C-1", "/c")]}
+        ran = lambda target, *cases: {"target": target, "build": "1", "status": "COMPLETED",
+                                      "cases": [{"id": c, "status": s, "actual": "x"} for c, s in cases]}
+        d = self.rundir("2026-11-23-A-1+B-1", plan=plan, runs=[("a", ran("/a", ("TC-1", "PASS"))),
+                                                               ("b", ran("/b", ("TC-1", "FAIL"), ("TC-2", "PASS"))),
+                                                               ("c", ran("/c", ("TC-3", "PASS")))])
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        why = "TC-1 repeats an id in plan.json: its result can't be told apart"
+        self.assertIn(f"| A-1 | ⛔ BLOCKED | {why} |", r)
+        self.assertIn(f"| B-1 | ⛔ BLOCKED | {why} |", r)
+        self.assertIn("| C-1 | ✅ PASS |", r)  # a ticket with ids of its own is untouched
+        self.assertEqual(sorted(p.name for p in d.glob("jira-comment-*.md")), ["jira-comment-C-1.md"])
+        self.assertIn("A-1 ⛔ BLOCKED, B-1 ⛔ BLOCKED, C-1 ✅ PASS", (d.parent / "README.md").read_text())  # index agrees
+        # a real FAIL of the ticket still wins
+        d2 = self.rundir("2026-11-24-A-1+B-1", plan={**plan, "cases": plan["cases"] + [case("TC-4", "B-1", "/b")]},
+                         runs=[("b", ran("/b", ("TC-1", "PASS"), ("TC-2", "PASS"), ("TC-4", "FAIL")))])
+        report.write_report(d2)
+        self.assertIn("| B-1 | ❌ FAIL | TC-4 failed (AC-1): x |", (d2 / "REPORT.md").read_text())
 
     def test_numeric_id_zero_is_an_id(self):
         warnings = []
@@ -409,7 +457,7 @@ class Layout(Rendering):
     """The report layout: the verdict block, what needs action, folds, questions, not-tested groups, case images."""
 
     def test_verdict_block_action_and_draft_for_a_pass(self):
-        d, r = self.render_run([("form", RUN1)])
+        d, r = self.render_run([("form", RUN1)], plan=PLAN1_ANSWERED)
         self.assertIn("**Verdict: ✅ PASS** — all 2 cases passed\n", r)
         self.assertIn("Jira comment draft: [jira-comment-PROJ-1.md](jira-comment-PROJ-1.md)", r)
         self.assertNotIn("## Summary", r)  # one ticket: no table
@@ -507,6 +555,29 @@ class Layout(Rendering):
                                                                       "status": "COMPLETED", "bugs": bugs})]))
         self.assertIn("| b1 |", r)
         self.assertNotIn("[image](evidence/", r)
+
+    def test_a_draft_no_run_file_lists_stays_in_the_action_block(self):  # --resume replaced the run file that found it
+        found = {**RUN1, "status": "INCOMPLETE", "bugs": [{"route": "/form", "title": "Save drops data", "severity": "HIGH",
+                                                           "classification": "CONFIRMED", "draft_path": "bugs/BUG-1.md"}]}
+        d, r = self.render_run([("form", found)], plan=PLAN1_ANSWERED)
+        self.assertIn("**Verdict: ❌ FAIL**", r)
+        (d / "bugs/BUG-1.md").write_text("# Save drops data on /form\n\nbody\n")
+        (d / "bugs/BUG-3.md").write_text("# Named by a case\n")
+        (d / "bugs/notes.md").write_text("# not a draft\n")
+        (d / ".data/run-form.json").write_text(json.dumps({**found, "cases": [{**RUN1["cases"][0], "bug": "see BUG-3"},
+                                                                             RUN1["cases"][1]]}))
+        report.write_report(d)
+        self.assertNotIn("no run file lists", (d / "REPORT.md").read_text())  # its bugs or a case name both: not repeated
+        (d / "bugs/BUG-3.md").unlink()
+        (d / "bugs/BUG-2.md").write_text("# Toast <b>overlaps</b> Save\n")
+        (d / ".data/run-form.json").write_text(json.dumps(RUN1))  # the resumed explorer didn't see it again
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("**Verdict: ✅ PASS**", r)  # drafts alone never change a verdict
+        self.assertIn("### Bug drafts no run file lists (2)\n", r)
+        self.assertIn("- [BUG-1](bugs/BUG-1.md) Save drops data on /form\n- [BUG-2](bugs/BUG-2.md) Toast &lt;b>overlaps&lt;/b> Save\n", r)
+        self.assertNotIn("not a draft", r)
+        self.assertNotIn("Nothing needs your action.", r)
 
     def test_bug_video_is_linked_only_when_the_file_exists(self):
         run = {"mode": "explore", "target": "/f", "status": "COMPLETED", "bugs": [
@@ -606,7 +677,8 @@ class Signals(Rendering):
                                                               None, ["GET /api/closures.json → 404"])):
             r = self.signals_run(requests=requests, console=console, drafts=drafts)
             self.assertNotIn("Browser signals", r)
-            self.assertIn("Nothing needs your action.", r)
+            # a draft no run file lists is still something to act on (the signal it explains is not)
+            self.assertIn("### Bug drafts no run file lists (1)" if drafts else "Nothing needs your action.", r)
             self.assertNotIn("Problems reading this folder", r)
 
     def test_page_text_in_a_message_stays_text(self):
@@ -784,7 +856,7 @@ class JiraDraft(Rendering):
         self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
         draft = (d / "jira-comment-PROJ-1.md").read_text()
         self.assertIn("TC-2 - QUESTION: Reject 131", draft)
-        self.assertIn("Notes: TC-2 open question", draft)
+        self.assertIn("Notes: Q1 open blocking question; TC-2 open question\n", draft)  # PLAN1's Q1 is still open
 
     def test_release_names_fill_the_version(self):
         self.assertEqual(report._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
@@ -794,7 +866,7 @@ class JiraDraft(Rendering):
 
     def test_round2_report_resilience_types_and_prefixes(self):
         # M2: broken symlink and deeply nested run JSON do not crash report or index
-        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", RUN1)])
         (d / ".data/run-broken.json").symlink_to(self.t / "missing-target.json")
         (d / ".data/run-deep.json").write_text("[" * 3000 + "]" * 3000)
         r = report.render_report(d)
@@ -861,6 +933,35 @@ class PlanFindAndRetest(Rendering):
         self.assertEqual(cli("plan-find", str(self.proj))[0], 2)
         self.assertEqual(cli("plan-find", str(self.proj), "--keys", "PROJ-1", "--run", str(d))[0], 2)
         self.assertEqual(cli("plan-find", str(self.proj), "--run", str(self.proj / "qa-out/missing"))[0], 2)
+
+    def test_retest_reruns_passes_the_prior_verdict_did_not_trust(self):
+        # a partial retest turned a run that ended BLOCKED, or a route's CONFIRMED HIGH bug, into "passed on prior build"
+        case = lambda cid, t, route: {"id": cid, "ticket": t, "ac": "AC-1", "title": cid, "route": route}
+        plan = {"kind": "ticket", "tickets": [{"key": "PROJ-1", "acs": [{"id": "AC-1"}]}, {"key": "PROJ-2"}],
+                "cases": [case("TC-1", "PROJ-1", "/form"), case("TC-2", "PROJ-1", "/list"), case("TC-3", "PROJ-1", "/other"),
+                          case("TC-4", "PROJ-1", "/zones"), case("TC-5", "PROJ-1", "/fail"), case("TC-6", "PROJ-2", "/list")]}
+        ran = lambda target, status, *cases, bugs=(): {"target": target, "build": "1.0", "status": status, "bugs": list(bugs),
+                                                       "cases": [{"id": c, "status": s} for c, s in cases]}
+        bug = lambda sev: {"route": "/x", "title": f"{sev} bug", "severity": sev, "classification": "CONFIRMED"}
+        prior = self.rundir("2026-11-20-PROJ-1+PROJ-2", plan=plan, runs=[
+            ("form", ran("/form", "BLOCKED", ("TC-1", "PASS"))),  # session expired after TC-1: its PASS can't be trusted
+            ("list", ran("/list", "COMPLETED", ("TC-2", "PASS"), ("TC-6", "PASS"),
+                         bugs=[{**bug("HIGH"), "route": "/list", "ticket": "PROJ-1"}])),  # PROJ-1's bug, not PROJ-2's
+            ("other", ran("/other", "COMPLETED", ("TC-3", "PASS"), bugs=[{**bug("MEDIUM"), "route": "/other"}])),
+            ("zones", ran("/zones", "INCOMPLETE", ("TC-4", "PASS"))),  # budget ran out after the cases: they stand
+            ("fail", ran("/fail", "COMPLETED", ("TC-5", "FAIL")))])
+        report.write_report(prior)
+        self.assertIn("**Verdict: ❌ FAIL**", (prior / "REPORT.md").read_text())
+        lr = json.loads(cli("plan-find", str(self.proj), "--run", str(prior))[1])["latest_run"]
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-1", "TC-2", "TC-5"])
+        self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-3", "TC-4", "TC-6"])
+        # the retest the skill builds from it: fixing TC-5 alone is no pass while TC-1 and TC-2 wait for a run
+        retest = {**plan, "retest_of": prior.name, "cases": [c for c in plan["cases"] if c["id"] in ("TC-1", "TC-2", "TC-5")],
+                  "prior_passed": lr["passed_cases"]}
+        d = self.rundir("2026-11-21-PROJ-1+PROJ-2", plan=retest, runs=[("fail", ran("/fail", "COMPLETED", ("TC-5", "PASS")))])
+        report.write_report(d)
+        self.assertIn("| PROJ-1 | ⛔ BLOCKED |", (d / "REPORT.md").read_text())
+        self.assertFalse((d / "jira-comment-PROJ-1.md").exists())
 
     def test_partial_retest_verdict_is_pass_with_notes_and_honest_draft(self):
         plan = {**PLAN1, "retest_of": "2026-11-23-PROJ-1",

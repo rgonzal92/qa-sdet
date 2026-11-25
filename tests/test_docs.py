@@ -98,6 +98,8 @@ class Docs(unittest.TestCase):
         self.assertEqual(report.verdict(t, [case("FAIL"), case("BLOCKED")], [])[0], "FAIL")
         self.assertEqual(report.verdict(t, [case("BLOCKED"), case("QUESTION")], [])[0], "BLOCKED")
         self.assertEqual(report.verdict(t, [case("QUESTION")], [])[0], "PASS WITH NOTES")
+        blocking = report._q_items({"questions": ["Q1 [BLOCKING] x"]}, "test plan")  # rule 3's plan question
+        self.assertEqual(report.verdict(t, [case("PASS")], [], questions=blocking)[0], "PASS WITH NOTES")
         block = readme.split("adds these allow rules", 1)[1].split("```", 2)[1]
         self.assertEqual(block.strip().splitlines(), doctor.PERMISSION_RULES)
 

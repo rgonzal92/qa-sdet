@@ -109,7 +109,8 @@ def merged_cases(plan, runs, warnings=None):
     Each gets status, actual, notes, bug. When several runs report one case, the most decisive result wins (FAIL over
     QUESTION over PASS over BLOCKED over NOT_RUN; the newest run on a tie), so another route listing a case as
     "not run" never hides its FAIL. A plan case with no id or a repeated one can't get a result: it is left out and
-    named in `warnings`."""
+    named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
+    blocks them)."""
     warnings = [] if warnings is None else warnings
     valid_id = lambda v: isinstance(v, (str, int, float)) and not isinstance(v, bool) and v != ""  # as core.txt
     results = {}
@@ -125,28 +126,34 @@ def merged_cases(plan, runs, warnings=None):
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
     keys = [t["key"] for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
     canon = {k.strip().upper(): k for k in keys}
+    repeated = {}  # id -> the tickets of every plan case under it: which one a result belongs to can't be told
     for n, c in enumerate(plan_cases + [c for c in results.values() if str(c["id"]) not in plan_ids]):
         cid = str(c["id"]) if valid_id(c.get("id")) else ""  # a numeric id 0 is still an id; bool/list is not
-        if not cid or cid in seen:
-            what = one_line(core.short(c.get("title") or c.get("expected") or "untitled", 60))
-            warnings.append(f"plan.json: case '{what}' " + (f"repeats id {cid}" if cid else "has no id")
-                            + "; it is left out of this report: give it an id of its own (e.g. TC-99)")
-            continue
-        seen.add(cid)
-        res = results.get(cid, {})
-        ac = c.get("ac")  # a case may cover several AC: "AC-1, AC-2" or a list
-        ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int)) and not isinstance(a, bool)) if isinstance(ac, list) else ac
         tk = c.get("ticket")  # its plan ticket, however the key is written; every verdict matches on the exact key
         if isinstance(tk, str) and tk.strip():
             tk = canon.get(tk.strip().upper(), tk)
         elif n < len(plan_cases) and len(keys) == 1 and not str(tk or "").strip():
             tk = keys[0]  # a one-ticket plan: a case naming no ticket is that ticket's (an explorer's own case isn't)
+        if not cid or cid in seen:
+            what = one_line(core.short(c.get("title") or c.get("expected") or "untitled", 60))
+            warnings.append(f"plan.json: case '{what}' " + (f"repeats id {cid}" if cid else "has no id")
+                            + "; it is left out of this report: give it an id of its own (e.g. TC-99)")
+            if cid:
+                repeated.setdefault(cid, set()).add(tk)
+            continue
+        seen.add(cid)
+        res = results.get(cid, {})
+        ac = c.get("ac")  # a case may cover several AC: "AC-1, AC-2" or a list
+        ac = ", ".join(str(a) for a in ac if isinstance(a, (str, int)) and not isinstance(a, bool)) if isinstance(ac, list) else ac
         merged = {**c, "id": cid, "ac": ac, "ticket": tk, "status": core.case_status(res.get("status")) or "NOT_RUN",
                   "actual": core._s(res.get("actual")), "notes": core._s(res.get("notes")),
                   "bug": core._s(res.get("bug"))}
         if "annotated" in res:
             merged["annotated"] = res["annotated"]
         out.append(merged)
+    for m in out:
+        if m["id"] in repeated:
+            m["id_tickets"] = repeated[m["id"]] | {m["ticket"]}
     return out
 
 
@@ -232,10 +239,11 @@ def _case_acs(c):
     return {a.strip() for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
 
 
-def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=()):
+def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(), questions=()):
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
-    prior_passed: cases from an earlier build not re-run in this partial retest."""
+    prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as _q_items gives
+    them: an open [BLOCKING] one tagged with this ticket, or with no plan ticket, is a note."""
     if not started:
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
@@ -245,7 +253,8 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     st = lambda c: c.get("status") or "NOT_RUN"
     why = lambda c: f": {_clip(c.get('actual') or c.get('notes'), 60)}" if c.get("notes") or c.get("actual") else \
         f": no result reported for {core.norm_route(c['route'])}" if st(c) == "NOT_RUN" and c.get("route") else ""
-    fails = [c for c in mine if st(c) == "FAIL"]
+    unsure = [c for c in cases if key in c.get("id_tickets", ())]  # its result may be another plan case's
+    fails = [c for c in mine if st(c) == "FAIL" and c not in unsure]
     if len(fails) == 1:  # one failure: say what happened (cut at a word, never mid-number: "at 1…" for 131)
         c = fails[0]
         failed = [f"{c['id']} failed" + (f" ({c['ac']})" if c.get("ac") else "") +
@@ -262,8 +271,10 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
     if not mine and not prior_mine:
         return "BLOCKED", "no test cases"
     stuck = {}  # same reason → one entry naming all its cases, so 12 blocked cases don't repeat one error 12 times
+    for c in unsure:
+        stuck.setdefault("repeats an id in plan.json: its result can't be told apart", []).append(c["id"])
     for c in mine:
-        if st(c) in ("BLOCKED", "NOT_RUN"):
+        if st(c) in ("BLOCKED", "NOT_RUN") and c not in unsure:
             stuck.setdefault(f"{'blocked' if st(c) == 'BLOCKED' else 'not run'}{why(c)}", []).append(c["id"])
     # a run on one of its pages (or reporting one of its cases) ended BLOCKED: its PASS results can't be trusted
     case_ids, routes = {c["id"] for c in mine}, {core.norm_route(c.get("route")) for c in mine if c.get("route")}
@@ -275,7 +286,14 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
         return "BLOCKED", _some([(f"{ids[0]}" if len(ids) == 1 else f"{len(ids)} cases ({ids[0]}–{ids[-1]})") + f" {r}"
                                  for r, ids in stuck.items()] + ended, 2)
     covered = {a for c in mine for a in _case_acs(c)} | {a for c in prior_mine for a in _case_acs(c)}
-    notes = [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"] + \
+    me = str(key).strip().upper()
+    plan_keys = {str(k).strip().upper() for k in known} | {me}
+    owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
+    qid = lambda q: re.match(r"\s*(Q\d+)\b", q["text"])
+    notes = [f"{qid(q).group(1)} open blocking question" if qid(q) else f"open blocking question: {_clip(q['text'], 40)}"
+             for q in questions if not q["resolved"] and "[BLOCKING]" in q["text"].upper()
+             and (owner(q) == me or owner(q) not in plan_keys)] + \
+        [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"] + \
             [_bug_word(b) for b in its_bugs] + \
             [f"{_ac_id(a)} has no test case" for a in _list(ticket, "acs") if _ac_id(a) and _ac_id(a) not in covered]
     if prior_mine:
@@ -602,15 +620,15 @@ def _q_items(obj, label):
     raw = obj.get("questions") if isinstance(obj, dict) else None
     for x in raw if isinstance(raw, list) else []:
         if isinstance(x, dict):
-            text, status, ans = str(x.get("text") or ""), x.get("status"), str(x.get("answer") or "")
+            text, status, ans, tk = str(x.get("text") or ""), x.get("status"), str(x.get("answer") or ""), x.get("ticket")
         elif isinstance(x, (str, int, float)) and not isinstance(x, bool):
-            text, status, ans = str(x), None, ""
+            text, status, ans, tk = str(x), None, "", None
         else:
             continue
         text = " ".join(text.split())
         if text:
             out.append({"text": text, "resolved": str(status or "").lower() == "resolved",
-                        "answer": " ".join(ans.split()), "where": label})
+                        "answer": " ".join(ans.split()), "where": label, "ticket": tk})
     return out
 
 
@@ -631,7 +649,7 @@ def _merge_questions(items):
 
 
 def _q_rank(q):
-    return 0 if "[BLOCKING]" in q["text"] else 1 if "[HIGH]" in q["text"] else 2
+    return 0 if "[BLOCKING]" in q["text"].upper() else 1 if "[HIGH]" in q["text"].upper() else 2
 
 
 def _q_bullet(q, show_from=True):
@@ -717,7 +735,7 @@ def render_report_parts(run_dir, cfg=None):
     if tickets and with_status:
         for t in tickets:
             prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-            v, why = verdict(t, cases, bugs, bool(runs), keys, runs, prior_mine)
+            v, why = verdict(t, cases, bugs, bool(runs), keys, runs, prior_mine, _q_items(plan, "test plan"))
             vmap[t["key"]] = (v, why)
             mine = [c for c in cases if c.get("ticket") == t["key"]]
             ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
@@ -774,6 +792,16 @@ def render_report_parts(run_dir, cfg=None):
         action = []
         if bugs:
             action += _bug_section(bugs, cases, keys, run_dir, heading=f"### Bugs to file ({len(bugs)})", cfg=cfg) + [""]
+        # a draft whose run file a later one replaced (--resume): still shown, but no verdict counts it
+        listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
+        orphans = sorted((p for p in (run_dir / "bugs").glob("BUG-*.md")
+                          if re.fullmatch(r"BUG-\d+", p.stem) and p.stem not in listed and p.is_file()),
+                         key=lambda p: int(p.stem[4:]))
+        if orphans:
+            action += [f"### Bug drafts no run file lists ({len(orphans)})",
+                       "A later run file replaced the one that found them (`--resume`), so no verdict counts them: "
+                       "check each and file it if it still applies.",
+                       *[f"- {_bug_link(p.stem, run_dir)} {one_line(_draft_title(p, ''))}" for p in orphans], ""]
         if open_qs:
             action += [f"### Open questions ({len(open_qs)})"] + [_q_bullet(q) for q in open_qs] + [""]
         if attention:
@@ -848,7 +876,7 @@ def run_summary(run_dir):
     elif tickets:
         prior_all = _prior_passed(plan, [x["key"] for x in tickets])
         verdicts = ", ".join(
-            f"{t['key']} {VERDICT_ICON[verdict(t, cases, bugs, bool(runs), [x['key'] for x in tickets], runs, [c for c in prior_all if c.get('ticket') == t['key']])[0]]}"
+            f"{t['key']} {VERDICT_ICON[verdict(t, cases, bugs, bool(runs), [x['key'] for x in tickets], runs, [c for c in prior_all if c.get('ticket') == t['key']], _q_items(plan, ''))[0]]}"
             for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
@@ -941,13 +969,27 @@ def _run_state(run_dir):
         if run_status_by_route.get(rt) in ("blocked", "incomplete") or any(c["status"] in ("BLOCKED", "NOT_RUN") for c in rcases):
             incomplete.append(rt)
     completed = [rt for rt in routes_order if rt not in incomplete]
+    # verdict()'s rules per case: a PASS that a run ended BLOCKED reported (or ran on its page), or on the page of (or
+    # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
+    # not make it a prior pass and drop the reason the ticket didn't pass
+    bugs, blocked = run_bugs(runs), [r for _, r in runs if _first_word(r.get("status")) == "blocked"]
+    rechecked = set().union(*(_case_bugs(c) for c in cases if c["status"] != "PASS"))
+    serious = {t: [b for b in ticket_bugs(t, cases, bugs, tickets) if _serious(b) and not _bug_refs(b) & rechecked]
+               for t in {c.get("ticket") for c in cases}}
+
+    def trusted(c):
+        rt = core.norm_route(c.get("route"))
+        return c["status"] == "PASS" and not any(
+            rt and core.norm_route(r.get("target")) == rt or any(str(x.get("id")) == c["id"] for x in _list(r, "cases"))
+            for r in blocked) and not any(rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c)
+                                          for b in serious[c.get("ticket")])
     retest = [{"id": c["id"], "ticket": c.get("ticket") or "", "ac": c.get("ac") or "",
                "route": core.norm_route(c.get("route")) or "", "status": c["status"], "title": c.get("title") or ""}
-              for c in cases if c["status"] != "PASS"]
+              for c in cases if not trusted(c)]
     passed = [{"id": c["id"], "ticket": c.get("ticket") or "", "ac": c.get("ac") or "",
                "route": core.norm_route(c.get("route")) or "", "title": c.get("title") or "",
                "build": case_build.get(c["id"]) or (builds[-1] if builds else core.UNKNOWN)}
-              for c in cases if c["status"] == "PASS"]
+              for c in cases if trusted(c)]
     zero_exec = bool(runs) and all(c["status"] in ("BLOCKED", "NOT_RUN") for c in cases) and \
         all(_first_word(r.get("status")) == "blocked" for _, r in runs)
     kind = str(plan.get("kind") or "")
@@ -1060,7 +1102,7 @@ def _qa_verdicts_by_key(qa_out, keys):
                 found[uk] = "plan"
             else:
                 prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-                v, _ = verdict(t, cases, bugs, bool(runs), tkeys, runs, prior_mine)
+                v, _ = verdict(t, cases, bugs, bool(runs), tkeys, runs, prior_mine, _q_items(plan, ""))
                 found[uk] = VERDICT_ICON[v]
         if len(found) == len(keys):
             break

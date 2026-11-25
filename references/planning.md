@@ -18,13 +18,14 @@ The skill writes `<run>/.data/plan.json`; `qa-mem report '<run>'` renders it.
   "cases": [{"id": "TC-1", "ticket": "PROJ-1234", "ac": "AC-1", "title": "Speed 131 is rejected", "route": "/form",
              "priority": "P1", "technique": "BVA", "steps": ["Type 131 in Speed limit", "Click Save"],
              "expected": "Error 'Max 130' shown; nothing saved"}],
-  "questions": ["Q1 [BLOCKING] Is 130 itself allowed?", {"text": "…", "status": "resolved", "answer": "…"}]
+  "questions": ["Q1 [BLOCKING] Is 130 itself allowed?", {"text": "Q2 [HIGH] …", "ticket": "PROJ-1234"},
+                {"text": "…", "status": "resolved", "answer": "…"}]
 }
 ```
 `kind` is `ticket` (qa-ticket), `plan` (qa-plan) or `explore` (qa-explore). `created` is `date -u +%Y-%m-%dT%H:%M:%SZ`. `fix_version` and `fixed_note` are optional and fill the Jira pass-comment draft. For a partial `--retest`, set optional `"retest_of": "<prior run folder name>"` and `"prior_passed": [{"id", "ticket", "ac", "title", "route", "build"}]` for cases that passed on an earlier build and are not re-run here (the renderer flags them honestly as `PASS WITH NOTES` and notes them in the pass-comment draft's `CHECK BEFORE POSTING` block).
 
 ## Ticket and plan
-- `acs`: only what the ticket states. A missing rule, an ambiguous word, an unclear role or state is a question: `Q1 [BLOCKING]`, `[HIGH]` or `[LOW]`. Done when every AC and question is numbered.
+- `acs`: only what the ticket states. A missing rule, an ambiguous word, an unclear role or state is a question: `Q1 [BLOCKING]`, `[HIGH]` or `[LOW]`. Done when every AC and question is numbered. With several tickets, write each question as an object with its `ticket`. While a `[BLOCKING]` one is open, that ticket (untagged: every ticket) gets `PASS WITH NOTES` at best; once answered, set `"status": "resolved"` and the `answer`.
 - `plan`: scope by AC id; approach (levels, roles, pages, P1 first); risks with impact and covering cases; test_data (roles, `qa-sdet-` records, flags).
 - `out_of_scope`: checks only an API or unit test can prove (test at the cheapest level), and failures this run can't cause. Provoking an API error or an empty response needs `--faults`: write `Provoking a closures API error (needs --faults)`, not `API errors`; with `--faults` they are cases. It limits what the run causes, never what it judges: a failure the app shows on its own is still tested.
 
