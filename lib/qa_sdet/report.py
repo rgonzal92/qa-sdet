@@ -143,8 +143,8 @@ def merged_cases(plan, runs, warnings=None):
             what = one_line(core.short(c.get("title") or c.get("expected") or "untitled", 60))
             warnings.append(f"plan.json: case '{what}' " + (f"repeats id {cid}" if cid else "has no id")
                             + "; it is left out of this report: give it an id of its own (e.g. TC-99)")
-            if cid:
-                repeated.setdefault(cid, set()).add(tk)
+            if cid:  # a ticket that isn't text (a list) is no plan ticket's: None, so the set can hold it
+                repeated.setdefault(cid, set()).add(tk if isinstance(tk, str) else None)
             continue
         seen.add(cid)
         res = results.get(cid, {})
@@ -158,7 +158,7 @@ def merged_cases(plan, runs, warnings=None):
         out.append(merged)
     for m in out:
         if m["id"] in repeated:
-            m["id_tickets"] = repeated[m["id"]] | {m["ticket"]}
+            m["id_tickets"] = repeated[m["id"]] | {m["ticket"] if isinstance(m["ticket"], str) else None}
     return out
 
 
@@ -1004,13 +1004,14 @@ def _run_state(run_dir):
     # not make it a prior pass and drop the reason the ticket didn't pass
     bugs = run_bugs(runs)
     rechecked = set().union(*(_case_bugs(c) for c in cases if c["status"] != "PASS"))
+    tkey = lambda c: c.get("ticket") if isinstance(c.get("ticket"), str) else None  # a list ticket is no plan ticket's
     serious = {t: [b for b in ticket_bugs(t, cases, bugs, tickets) if _serious(b) and not _bug_refs(b) & rechecked]
-               for t in {c.get("ticket") for c in cases}}
+               for t in {tkey(c) for c in cases}}
 
     def trusted(c):
         rt = core.norm_route(c.get("route"))
         return c["status"] == "PASS" and not _blocked_runs([c], runs) and not any(
-            rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c) for b in serious[c.get("ticket")])
+            rt and rt in (b.get("route"), b.get("target")) or _bug_refs(b) & _case_bugs(c) for b in serious[tkey(c)])
     retest = [{"id": c["id"], "ticket": c.get("ticket") or "", "ac": c.get("ac") or "",
                "route": core.norm_route(c.get("route")) or "", "status": c["status"], "title": c.get("title") or ""}
               for c in cases if not trusted(c)]

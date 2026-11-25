@@ -352,7 +352,9 @@ class Report(Base):
                  {"kind": "ticket", "tickets": t, "cases": c, "env": {"url": ["x"], "browser": {"a": 1}}},
                  {"kind": "ticket", "tickets": [{"key": ["a"]}, {"key": 12}], "cases": [{"id": ["x"], "ticket": 12}]},
                  {"kind": "plan", "created": 2026, "title": ["x"], "tickets": t, "cases": {"a": 1}, "questions": "q"},
-                 {"kind": ["x"], "tickets": "x", "cases": [{**c[0], "steps": "do | it\nnow", "ac": ["x"]}]}]
+                 {"kind": ["x"], "tickets": "x", "cases": [{**c[0], "steps": "do | it\nnow", "ac": ["x"]}]},
+                 {"kind": "ticket", "tickets": t, "cases": [{**c[0], "ticket": ["PROJ-1"]}, {**c[0], "ticket": {"k": 1}},
+                                                            {**c[0], "id": "TC-2", "ticket": ["x"]}]}]  # TC-1 twice
         runs = [{"env": {"url": 7, "browser": 3}, "target": 5, "status": ["x"], "build": {"b": 1}},
                 {"bugs": [{"ticket": ["x"], "title": {"a": 1}, "route": "/f", "hash": 5}]},
                 {"cases": [{"id": ["x"], "status": "PASS"}, {"id": {"a": 1}, "status": 3}, {"id": "TC-1", "bug": 9}]},
@@ -363,7 +365,14 @@ class Report(Base):
             self.assertEqual((code, err), (0, ""), plan)
             self.assertTrue((d / "REPORT.md").read_text().startswith("# QA report: "), plan)
             self.assertNotIn("Could not render", (d / "REPORT.md").read_text(), plan)  # rendered, not the fallback
+            self.assertEqual(cli("plan-find", str(self.proj), "--run", str(d))[0], 0, plan)  # --resume/--retest state
         self.assertEqual((self.proj / "qa-out/README.md").read_text().count("| 2026-11-23 |"), len(plans))
+        self.assertEqual(cli("plan-find", str(self.proj), "--keys", "PROJ-1")[0], 0)  # prep reads every folder like this
+        con = core.connect()
+        try:
+            self.assertIn("| PROJ-1 |", report.inbox(con, self.proj, [{"key": "PROJ-1", "fields": {"summary": "s"}}]))
+        finally:
+            con.close()
 
     def test_odd_ac_ids_do_not_lose_the_report(self):
         plan = json.loads(json.dumps(PLAN))
