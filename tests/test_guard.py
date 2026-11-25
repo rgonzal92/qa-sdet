@@ -876,6 +876,43 @@ class R4Explorer(Case):
             self.assertIn("the user's", bash(cmd, RUN, explorer=True) or "", cmd)
             self.assertIsNone(bash(cmd, RUN), cmd)  # the main session (the user's request) may
 
+    def test_text_filters_that_write_a_file_cannot_rewrite_the_marker_the_config_or_the_db(self):  # found in audit
+        m = "qa-out/.active"
+        for cmd in (
+            f"sed 's/false/true/' {m} | sort -o {m}",
+            f"sort -o{m} /tmp/x",
+            f"sort --output={m} /tmp/x",
+            f"sort -uo {m} /tmp/x",
+            f"shuf -o {m} /tmp/x",
+            f"uniq /tmp/x {m}",
+            f"awk '{{print > FILENAME}}' {m}",
+            f'awk \'BEGIN {{ print "x" > "{m}" }}\'',
+            f"sed -n 'w {m}' /tmp/x",
+            f"sed 's/a/b/w {m}' /tmp/x",
+        ):
+            self.assertIn("coordinator", bash(cmd, RUN, explorer=True) or "", cmd)
+        for cmd in (f"sort -o {CFG} /tmp/x", f"uniq /tmp/x {CFG}", f"awk '{{print > FILENAME}}' {CFG}"):
+            self.assertIsNotNone(bash(cmd, RUN, explorer=True), cmd)
+        for cmd in (
+            f"sort -o {DB} /dev/null",
+            f"uniq /dev/null {DB}",
+            f"split -b1G /dev/null {DB}",
+            f"csplit -f {D}/x /tmp/x 1",
+            f"sed -n 'w {DB}' /tmp/x",
+        ):
+            for explorer in (False, True):
+                self.assertIsNotNone(bash(cmd, PROJ, explorer), cmd)
+        for cmd in (  # reads, and writes elsewhere, stay allowed
+            "sort -o out.txt in.txt",
+            "uniq a.txt b.txt",
+            "split -l 10 big.txt part-",
+            f"sort {m}",
+            f"sed -n 1p {m}",
+            f"awk '{{print $1}}' {m}",
+            "awk '$1 > 5' data.txt",
+        ):
+            self.assertIsNone(bash(cmd, RUN, explorer=True), cmd)
+
     def test_the_run_marker_is_the_coordinators(self):  # a steered explorer could turn on faults or API writes
         for cmd in (
             f"qa-mem dispatch '{RUN}/qa-out/r' --route /x --faults",
@@ -1130,6 +1167,17 @@ class OddForms(Case):
                 timeout=10,
             )  # the backtracking regexes took 16 s at 40k characters, 4x more each time the length doubled
             self.assertIn('"permissionDecision": "deny"', r.stdout, r.stderr)
+
+    def test_a_cd_dash_chain_is_read_in_linear_time(self):  # found in audit: 300 `cd a; cd -;` took over 10 s
+        start = time.perf_counter()
+        self.assertIsNotNone(bash("cd a; cd -; " * 2000 + ACLI_W, RUN, True))
+        self.assertLess(time.perf_counter() - start, 3)  # each pair grew the folder set and every path in it
+        for cmd in (  # `cd -` still returns to where the call was before its last cd
+            "cd /tmp; cd -; rm -f qa-out/.active",
+            "cd qa-out; cd /tmp; cd -; rm -f .active",
+            "cd -; rm -f qa-out/.active",  # the folder before this call is unknown: this one, as before
+        ):
+            self.assertIn("coordinator", bash(cmd, RUN, True) or "", cmd)
 
     DENY = [
         "P=playwright-cli; $P goto x",

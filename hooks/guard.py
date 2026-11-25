@@ -1287,6 +1287,39 @@ def _pos_args(rest, val_opts):
     return out
 
 
+SED_WRITES = re.compile(r"(?:^|[\s;{}/!$\d])[wWe]\s*\S|/[gpiImM\d]*[we]\b")  # w/W/e commands, s///w and s///e
+AWK_WRITES = re.compile(r"\bprintf?\b[^;{}\n]*>|\bsystem\s*\(|\|")  # print > file, a command run, a pipe
+
+
+def filter_writes(name, rest):
+    """Files a text filter writes besides stdout: sort/shuf -o, uniq's second operand, split's prefix, csplit -f; for a
+    sed or awk program that can write a file or run a command, every word it names, its input files too (FILENAME)."""
+    if name in ("sort", "shuf"):
+        return opt_values(rest, "--output") + [
+            m.group(1) or (rest[k + 1 : k + 2] or [""])[0]
+            for k, a in enumerate(rest)
+            if (m := re.fullmatch(r"-[a-zA-Z]*o(.*)", a, re.S))
+        ]
+    if name == "uniq":
+        return _pos_args(rest, {"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"})[1:2]
+    if name == "split":
+        vals = {"-a", "-b", "-C", "-l", "-n", "-t", "--bytes", "--line-bytes", "--lines", "--number", "--separator"}
+        return _pos_args(rest, vals | {"--suffix-length", "--additional-suffix", "--filter"})[1:2]
+    if name == "csplit":
+        return opt_values(rest, "-f", "--prefix") + [a[2:] for a in rest if re.fullmatch(r"-f.+", a, re.S)]
+    words = [unmark(a) for a in rest]  # a quoted `>` is marked: here it is the program's own redirection
+    if re.fullmatch(r"g?sed", name):  # its script: the -e values, else the first operand (the rest are files)
+        prog = SED_WRITES
+        code = opt_values(words, "-e", "--expression") or _pos_args(words, {"-f", "--file", "-l", "--line-length"})[:1]
+    elif re.fullmatch(r"[gmn]?awk", name):
+        prog, code = AWK_WRITES, _pos_args(words, {"-F", "-v", "-f", "-W", "--file", "--assign"})[:1]
+    else:
+        return []
+    if any(prog.search(c) for c in code):
+        return [w.strip("\"'{}();") for a in words for w in (a, *re.split(r"[\s>|]+", a))]
+    return []
+
+
 def changes(name, rest, outs, cwds, root):
     """R5/R4: does it change root (the data folder, a config file) or remove a folder above it? Reads and copies don't."""
 
@@ -1294,7 +1327,7 @@ def changes(name, rest, outs, cwds, root):
         return any(under(p, root) or (up and ancestor(p, root)) for c in cwds for p in path_hits(w, c))
 
     opts, pos = [a for a in rest if a.startswith("-")], [a for a in rest if not a.startswith("-")]
-    if any(hit(o) for o in outs):
+    if any(hit(o) for o in outs) or any(hit(w) for w in filter_writes(name, rest) if w):
         return True
     if name in HTTP_CLIENTS and any(hit(w) for w in http_writes(rest, cwds)):
         return True
@@ -1548,7 +1581,7 @@ def _check(cmd, cwd, ctx, depth, carried=()):
     except ValueError:
         ctx.approve = False
         return ODD.format("text the shell can't parse (an unclosed quote)") if ctx.guarded else None
-    cwds, stack, seg = {cwd}, [], []
+    cwds, stack, seg = Dirs({cwd}), [], []
     for tok in toks + [";"]:  # sentinel flushes the last segment
         if not tok or not set(tok) <= set(PUNCT):
             seg.append(tok)
@@ -1562,7 +1595,7 @@ def _check(cmd, cwd, ctx, depth, carried=()):
             seg = []
         for ch in tok:  # subshells: a cd inside ( ) doesn't leak out
             if ch == "(":
-                stack.append(set(cwds))
+                stack.append(cwds.snapshot())
             elif ch == ")" and stack:
                 cwds = stack.pop()
 
@@ -1637,6 +1670,19 @@ def approvable(i, name, rest, outs, ins, feeds, cwd):  # R8: playwright-cli, qa-
     )
 
 
+class Dirs(set):
+    """The folders a call's later commands may run in, and the ones `cd -` returns to after a cd (None: unknown, as
+    the shell's OLDPWD before this call). Without it `cd a; cd -` grew the set, and every path in it, pair by pair."""
+
+    old: "set[str] | None" = None
+
+    def snapshot(self):
+        """A copy for a subshell's `( … )`: a cd inside it doesn't leak out."""
+        d = Dirs(self)
+        d.old = self.old
+        return d
+
+
 def check_segment(seg, cwds, start, ctx, depth, docs):
     """Check one simple command. Mutates cwds on cd."""
     words, outs, ins, here, ndocs = split_redirects(seg)
@@ -1656,11 +1702,16 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     if name in ("cd", "pushd", "popd"):  # where the later commands run
         ctx.approve = False
         target = next((a for a in rest if a not in ("-L", "-P", "-e", "-@", "--")), "~")
+        old = getattr(cwds, "old", None)  # where `cd -` goes, once a cd in this call set it
         new = (
-            {start} | (cwds if target == "-" else set())
+            old
+            if target == "-" and old is not None
+            else {start} | (cwds if target == "-" else set())
             if target == "-" or name == "popd"
             else {real(target, c) for c in cwds}
         )
+        if isinstance(cwds, Dirs):
+            cwds.old = set(cwds)
         return cwds.clear() or cwds.update(new)
     here_cwd = next(iter(local))  # `bash -c '…'` and `eval '…'`: their text is a command
     r = (
