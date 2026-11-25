@@ -68,6 +68,11 @@ def _list(obj, key):
     return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
 
+def _plan_tickets(plan):
+    """The plan's tickets that can get a verdict: those with a text key."""
+    return [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+
+
 # Not tested items are grouped in this order. A plain string (older runs) goes under "other".
 NOT_TESTED_CATEGORIES = [
     ("safety", "Safety rules (not done on purpose)"),
@@ -124,7 +129,7 @@ def merged_cases(plan, runs, warnings=None):
     out, seen = [], set()
     plan_cases = _list(plan, "cases")
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
-    keys = [t["key"] for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    keys = [t["key"] for t in _plan_tickets(plan)]
     canon = {k.strip().upper(): k for k in keys}
     repeated = {}  # id -> the tickets of every plan case under it: which one a result belongs to can't be told
     for n, c in enumerate(plan_cases + [c for c in results.values() if str(c["id"]) not in plan_ids]):
@@ -197,6 +202,12 @@ def ticket_bugs(key, cases, bugs, known=()):
     return [b for b in bugs if tag(b) == str(key).strip().upper() or (_bug_refs(b) & refs)
             or (tag(b) not in tickets and (b.get("route") in routes or b.get("target") in routes)
                 and not (_bug_refs(b) & named))]
+
+
+def _bug_owners(b, cases, tickets):
+    """The plan tickets a bug counts for (as their verdicts count it), else the ticket it names (not 'none')."""
+    return [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)] or (
+        [str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else [])
 
 
 def _first_word(v):
@@ -311,7 +322,7 @@ def verdict(ticket, cases, bugs, started=True, known=(), runs=(), prior_passed=(
 def _verdicts(plan, runs, cases, bugs):
     """{ticket key: (verdict, reason)} for every plan ticket: the one place verdict() gets its inputs, so REPORT.md,
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
-    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    tickets = _plan_tickets(plan)
     keys = [t["key"] for t in tickets]
     prior_all, questions = _prior_passed(plan, keys), _q_items(plan, "test plan")
     return {t["key"]: verdict(t, cases, bugs, bool(runs), keys, runs, [c for c in prior_all if c.get("ticket") == t["key"]],
@@ -525,8 +536,7 @@ def _filing_block(bugs, cases, tickets, run_dir, cfg):
         draft = run_dir / "bugs" / f"{bid}.md"
         if not draft.is_file():
             continue
-        owners = [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)] or (
-            [str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else [])
+        owners = _bug_owners(b, cases, tickets)
         proj = next((o.split("-", 1)[0] for o in owners if ops.KEY_RE.fullmatch(o.upper())), default_proj)
         title = _draft_title(draft, b.get("title") or bid)
         cmd = (f"acli jira workitem create --project {shlex.quote(proj)} --type Bug "
@@ -552,8 +562,7 @@ def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=
     out = [heading, row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"), "|---|---|---|---|---|---|---|"]
     for b in bugs:
         bid = b.get("id") or ""
-        owners = [str(t) for t in tickets if b in ticket_bugs(t, cases, [b], tickets)] or (
-            [str(b["ticket"])] if b.get("ticket") and str(b["ticket"]).strip().lower() != "none" else [])
+        owners = _bug_owners(b, cases, tickets)
         png = Path(run_dir) / "evidence" / f"{bid}.png"
         ev = Path(str(b.get("evidence") or ""))
         img = f"evidence/{quote(png.name)}" if bid and png.is_file() else \
@@ -740,7 +749,7 @@ def render_report_parts(run_dir, cfg=None):
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
-    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    tickets = _plan_tickets(plan)
     keys = [t["key"] for t in tickets]
     cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs)
     prior_all = _prior_passed(plan, keys)
@@ -885,7 +894,7 @@ def run_summary(run_dir):
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
     cases, bugs = merged_cases(plan, runs), run_bugs(runs)
-    tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    tickets = _plan_tickets(plan)
     if kind == "plan":
         verdicts = f"plan only ({len(cases)} cases)"
     elif tickets:
@@ -946,6 +955,14 @@ def write_report(run_dir):
 
 
 # ---------- plan-find: deterministic plan reuse, --resume and --retest state ----------
+def _plan_folders(qa_out):
+    """Run folders with a plan.json, the most recently changed first (folder, plan or a run file): plan-find's latest
+    run and the inbox's Last QA come from the same order."""
+    dirs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink() and (p / ".data" / "plan.json").is_file()]
+    when = lambda p: max((_mtime(x) for x in [p, p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()), default=0.0)
+    return sorted(dirs, key=lambda p: (when(p), p.name), reverse=True)
+
+
 def _run_state(run_dir):
     """Per-route and per-case state of one run folder, or None if plan.json is missing/unreadable."""
     run_dir = Path(run_dir).resolve()
@@ -956,7 +973,7 @@ def _run_state(run_dir):
     plan, runs = d["plan"], d["runs"]
     if not plan:
         return None
-    tickets = [t["key"] for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    tickets = [t["key"] for t in _plan_tickets(plan)]
     cases = merged_cases(plan, runs)
     counts = {s: sum(c["status"] == s for c in cases) for s in core.CASE_STATUSES}
     builds = sorted({core.norm_build(r.get("build")) for _, r in runs if core.norm_build(r.get("build")) != core.UNKNOWN})
@@ -1033,9 +1050,7 @@ def plan_find(project, keys=None, run_dir=None):
     qa_out = proj / "qa-out"
     if not qa_out.is_dir():
         return {"reusable_plan": None, "latest_run": None}
-    dirs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink() and (p / ".data" / "plan.json").is_file()]
-    when = lambda p: max((_mtime(x) for x in [p, p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()), default=0.0)
-    dirs.sort(key=lambda p: (when(p), p.name), reverse=True)
+    dirs = _plan_folders(qa_out)
     reusable, latest = None, None
     for p in dirs:
         st = _run_state(p)
@@ -1092,14 +1107,12 @@ def _qa_verdicts_by_key(qa_out, keys):
     """Newest local QA status/verdict per ticket key from `<project>/qa-out/`."""
     if not keys or not qa_out.is_dir():
         return {}
-    dirs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink() and (p / ".data" / "plan.json").is_file()]
-    when = lambda p: max((_mtime(x) for x in [p, p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()), default=0.0)
-    dirs.sort(key=lambda p: (when(p), p.name), reverse=True)
+    dirs = _plan_folders(qa_out)
     found = {}
     for p in dirs:
         d = load_run(p)
         plan, runs = d["plan"], d["runs"]
-        tickets = [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+        tickets = _plan_tickets(plan)
         matching = [t for t in tickets if t["key"].strip().upper() in keys and t["key"].strip().upper() not in found]
         if not matching:
             continue
