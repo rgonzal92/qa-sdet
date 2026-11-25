@@ -100,6 +100,8 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
         if known and (core.meta(con, "build_ts") or "") <= ts:
             core.set_meta(con, "build", build)
             core.set_meta(con, "build_ts", ts)
+        # the crawler's read-only map (qa-init --crawl, qa-explore --discover) and a blocked start test nothing
+        explored = core.norm(run.get("mode")) != "map" and core.norm(run.get("status")) != "blocked"
         for pg in pages:
             route = pg["route"]
             old = con.execute("SELECT build, last_verified FROM pages WHERE route=?", (route,)).fetchone()
@@ -114,7 +116,7 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             if late:
                 con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
             elif known:
-                con.execute("INSERT INTO pages VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
+                con.execute("INSERT INTO pages(route, name, build, last_verified) VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
                             "name=coalesce(excluded.name, name), build=excluded.build, "
                             "last_verified=excluded.last_verified",
                             (route, core.cap(pg.get("name")) or None, build, ts))
@@ -122,6 +124,8 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                 con.execute("INSERT INTO pages(route, name, build) VALUES(?,?,?) ON CONFLICT(route) DO UPDATE "
                             "SET name=coalesce(name, excluded.name), build=coalesce(build, excluded.build)",
                             (route, core.cap(pg.get("name")) or None, core.UNKNOWN))
+            if explored:
+                con.execute("UPDATE pages SET explored=max(coalesce(explored, ''), ?) WHERE route=?", (ts, route))
             for f in pg.get("facts") or []:
                 text = core.cap(f.get("text"))
                 if text:
@@ -199,6 +203,8 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                         # a run older than the last sighting or than the fix (ingested late) predates it: no regression
                         "status=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
                         "AND excluded.last_seen >= coalesce(fixed_ts, '') THEN 'REGRESSED' ELSE status END, "
+                        "regressed_by=CASE WHEN status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
+                        "AND excluded.last_seen >= coalesce(fixed_ts, '') THEN excluded.last_run ELSE regressed_by END, "
                         "last_run=CASE WHEN excluded.last_seen >= coalesce(last_seen, '') THEN excluded.last_run ELSE last_run END, "
                         "last_seen=max(coalesce(last_seen, ''), excluded.last_seen), "
                         "first_seen=min(coalesce(first_seen, excluded.first_seen), excluded.first_seen), "
@@ -212,13 +218,16 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                          core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
                          _endpoint(b.get("endpoint")), _pattern(b.get("pattern")),
                          core.cap(b.get("ticket"))[:30] or None, build if known else None, build if known else None,
-                         fresh, fresh, fresh))
+                         fresh, fresh, fresh, fresh))
         for h in before - now_seen:  # listed by an earlier version of this run.json only
             con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
             if ran(h):
                 continue  # another file of the same run id still lists it
             con.execute("UPDATE bugs SET seen_count=max(seen_count - 1, 0), "
                         "last_run=CASE WHEN last_run=? THEN NULL ELSE last_run END WHERE hash=?", (rid, h))
+            # the sighting that made a FIXED bug REGRESSED is gone (a checkpoint listed it, the final file didn't)
+            con.execute("UPDATE bugs SET status='FIXED', regressed_count=max(coalesce(regressed_count, 0) - 1, 0), "
+                        "regressed_by=NULL WHERE hash=? AND status='REGRESSED' AND regressed_by=?", (h, rid))
             # only this run ever saw it and the user hasn't triaged it: it was never a bug
             con.execute("DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
                         "(SELECT 1 FROM sightings WHERE hash=?)", (h, h))
@@ -538,6 +547,8 @@ def _ingest_files(con, pending):
                 ingest(con, doc, ts, f.parent, f.resolve())  # also files the mtime-based scrub skipped
                 try:  # the run's browser signals no bug explains: a baseline across runs (never parks the run)
                     _store_signals(con, doc, f, ts)
+                except sqlite3.OperationalError:
+                    raise  # locked: the whole file is retried on the next hook run (ingest is idempotent)
                 except (OSError, ValueError, sqlite3.DatabaseError) as e:
                     print(f"qa-mem: signals of {f.name} not kept: {e}", file=sys.stderr)
             core._write(done, f"{digest}\n{core.now()}\n{note}")
@@ -1190,7 +1201,7 @@ def _unrechecked_fixed(con, route, build):
 def gaps(con, changed_only=False, top=None, as_json=False):
     """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
     verified on an older build, un-rechecked FIXED bugs, then the most untried heuristics and untested fields, then open bugs."""
-    pages = con.execute("SELECT route, name, build, last_verified FROM pages WHERE route != '*'").fetchall()
+    pages = con.execute("SELECT route, name, build, last_verified, explored FROM pages WHERE route != '*'").fetchall()
     current = core.meta(con, "build")
     if not pages:
         if as_json:
@@ -1214,7 +1225,7 @@ def gaps(con, changed_only=False, top=None, as_json=False):
     ranked = []
     for pg in pages:
         r, b = pg["route"], current or pg["build"]
-        never, unread = pg["build"] is None, pg["build"] == core.UNKNOWN
+        never, unread = pg["explored"] is None, pg["build"] == core.UNKNOWN
         old = not never and not unread and pg["build"] != b
         _, tried, targets = _coverage(con, r, b)
         untried, untested = sum(h not in tried for h in core.HEURISTICS), len(_untested_rules(con, r, targets))

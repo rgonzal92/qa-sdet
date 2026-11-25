@@ -1277,6 +1277,58 @@ class Database(MemBase):
             self.assertIn("from before qa-sdet 0.4", err.getvalue())
 
 
+class AuditFollowUps(MemBase):
+    """Bug state, gaps tiers and upgrades the audit of the 0.4 features found wrong."""
+
+    def test_a_regression_its_run_no_longer_lists_is_undone(self):  # a checkpoint listed it, the final file dropped it
+        bug = {"route": "/form", "title": "t", "symptom": "s"}
+        memory.ingest(self.con, run(bugs=[bug]), "2026-01-01T00:00:00Z")
+        h = core.bug_hash("/form", "s")
+        with mock.patch.object(core, "now", return_value="2026-01-02T00:00:00Z"):
+            cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
+        later = {**run("1.1", bugs=[{**bug, "hash": h}]), "run_id": "r-later", "status": "INCOMPLETE"}
+        memory.ingest(self.con, later, "2026-01-03T00:00:00Z")
+        self.assertEqual(self.con.execute("SELECT status FROM bugs").fetchone()[0], "REGRESSED")
+        memory.ingest(self.con, {**later, "status": "COMPLETED", "bugs": []}, "2026-01-03T00:05:00Z")
+        self.assertEqual(tuple(self.con.execute("SELECT status, regressed_count FROM bugs").fetchone()), ("FIXED", 0))
+
+    def test_a_page_only_the_crawler_mapped_is_still_never_explored(self):  # --discover / qa-init --crawl test nothing
+        self.con.execute("INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                         ("/zones", "rule", "speed max 130", "", "a.js:1", "/repo", "frontend", core.now(), "a.js"))
+        memory.ingest(self.con, {"run_id": "map-1", "mode": "map", "target": "http://qa", "build": "1.0", "status": "COMPLETED",
+                                 "pages": [{"route": "/zones"}]}, "2026-01-01T00:00:00Z")
+        page = lambda: next(p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/zones")
+        self.assertEqual((page()["never_explored"], page()["tier"]), (True, "new, with forms"))
+        memory.ingest(self.con, {**run(), "target": "/zones", "pages": [{"route": "/zones"}]}, "2026-01-02T00:00:00Z")
+        self.assertFalse(page()["never_explored"])
+
+    def test_bugs_from_before_build_tracking_are_not_new_on_a_later_build(self):
+        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-01T00:00:00Z")
+        self.con.execute("ALTER TABLE bugs DROP COLUMN first_build")  # as a database from before the column
+        self.con.commit()
+        self.con.close()
+        self.con = core.connect()
+        memory.ingest(self.con, run("2.0", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-05T00:00:00Z")
+        b2 = next(x for x in json.loads(memory.history(self.con, as_json=True))["builds"] if x["build"] == "2.0")
+        self.assertEqual(b2["new_bugs"], 0)  # it was found before 2.0
+
+    def test_a_locked_database_while_keeping_signals_retries_the_whole_file(self):
+        import sqlite3
+        out = Path(self.tmp.name) / "qa-out"
+        f = runfile(out / "a")
+        f.write_text(json.dumps(run()))
+        (f.parent / "requests-x.log").write_text("1. [POST] http://localhost/api/z => [500] err\n")
+        with mock.patch.object(memory, "_store_signals", side_effect=sqlite3.OperationalError("database is locked")):
+            self.assertEqual(memory.ingest_pending(out), 0)
+        self.assertFalse(f.with_name(f.name + ".ingested").exists())  # not marked: the next hook run keeps its signals
+        self.assertEqual(memory.ingest_pending(out), 1)
+
+    def test_adding_a_column_twice_is_harmless(self):  # two processes upgrading one database at once
+        core._add_column(self.con, "bugs", "x_test_col", "TEXT")
+        core._add_column(self.con, "bugs", "x_test_col", "TEXT")
+        self.assertIn("x_test_col", {r[1] for r in self.con.execute("PRAGMA table_info(bugs)")})
+
+
 class IngestPending(MemBase):
     """`qa-mem ingest-pending`: the run files under qa-out/<run>/.data."""
 

@@ -140,20 +140,23 @@ def connect():
                            "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again")
     old_fts = con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()
     if old_fts and "porter" not in old_fts[0]:  # 0.4 indexed whole words only: rebuild with stemming ('date' finds 'dates')
-        con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE facts_fts;")
+        con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE IF EXISTS facts_fts;")
     con.executescript(SCHEMA)
     have = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
+    backfill = {  # what rows from before a column get, instead of a later run's value
+        "first_build": "UPDATE bugs SET first_build=''",  # found on a build nobody recorded: never "new" on a later one
+        "explored": "UPDATE pages SET explored=coalesce(last_verified, '') WHERE build IS NOT NULL"}
+    todo = []  # run after the search index is rebuilt: an UPDATE of bugs fires its triggers
     for table, cols in (("bugs", ("jira_key", "fixed_ts", "heuristic", "endpoint", "pattern", "ticket", "first_build",
-                                  "last_build", "fixed_build", "regressed_count:INTEGER DEFAULT 0")),
-                        ("sightings", ("page", "build")),
+                                  "last_build", "fixed_build", "regressed_count:INTEGER DEFAULT 0", "regressed_by")),
+                        ("sightings", ("page", "build")), ("pages", ("explored",)),
                         ("runs", ("cases_pass:INTEGER DEFAULT 0", "cases_fail:INTEGER DEFAULT 0",
                                   "cases_blocked:INTEGER DEFAULT 0", "bugs_found:INTEGER DEFAULT 0"))):
         have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}  # columns added within 0.4: added in place
         for col in cols:
             name, _, kind = col.partition(":")
-            if name not in have:
-                with con:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind or 'TEXT'}")
+            if name not in have and _add_column(con, table, name, kind or "TEXT") and name in backfill:
+                todo.append(backfill[name])
     if "pinned" not in {r[1] for r in con.execute("PRAGMA table_info(facts)")}:
         with con:
             con.execute("ALTER TABLE facts ADD COLUMN pinned INTEGER DEFAULT 0")
@@ -162,10 +165,25 @@ def connect():
             con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
             con.execute("INSERT INTO bugs_fts(bugs_fts) VALUES('rebuild')")
             set_meta(con, "fts", FTS_VERSION)
+    for sql in todo:
+        with con:
+            con.execute(sql)
     if con.execute(f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1").fetchone():  # one-time clean-up (read first: no write lock)
         with con:
             con.execute(f"DELETE FROM meta WHERE {STALE_META}")
     return con
+
+
+def _add_column(con, table, name, kind):
+    """ALTER TABLE ... ADD COLUMN; False when another process added it first (two qa-mem upgrading one database)."""
+    try:
+        with con:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+        return True
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e):
+            raise
+        return False
 
 
 def txt(v, field):
