@@ -218,6 +218,32 @@ class Prep(Base):
         self.assertEqual(fields["description"], "Owner @Ann see https://wiki.example/x\nIN REVIEW due 2026-11-24\nField | Max")
         self.assertEqual(fields["customfield_10042"], "- Saves 130\n- Rejects 131")
 
+    def test_prep_context_matches_the_ticket_text(self):
+        """Not 70 routes and every bug: the routes, facts and bugs the ticket's words point at, status kept."""
+        import subprocess
+        from support import done, run
+        from qa_sdet import core, memory
+        self.config(jiraKeyPrefix="PROJ")
+        con = core.connect()
+        r = lambda route, **page: {**run(**page), "target": route, "pages": [{"route": route, **page}]}
+        memory.ingest(con, {**r("/zones", facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]),
+                            "bugs": [{"route": "/zones", "title": "Date filter drops the last day", "symptom": "filter end date excluded"}]})
+        memory.ingest(con, {**r("/form", facts=[{"kind": "rule", "text": "Speed max 130"}]),
+                            "bugs": [{"route": "/form", "title": "Speed accepts 131", "symptom": "131 saved"}]})
+        con.close()
+        view = json.dumps({"key": "PROJ-1", "fields": {"summary": "Date filter timezone rollover on speed zones",
+                                                        "description": "On /zones the end date filter is off by one day."}})
+        with mock.patch("shutil.which", return_value="/usr/bin/acli"), \
+                mock.patch.object(subprocess, "run", side_effect=[done(0), done(0, out=view), done(0, out="[]")]):
+            code, out, err = cli("prep", str(self.proj), "1")
+        self.assertEqual((code, err), (0, ""))
+        ctx = json.loads(out)["context"]
+        self.assertEqual(ctx["candidate_routes"][0]["route"], "/zones")
+        self.assertTrue(any("Corridor dates" in x for x in ctx["relevant_facts"]))
+        self.assertTrue(any("OPEN" in x and "Date filter drops" in x for x in ctx["relevant_bugs"]))
+        self.assertFalse(any("Speed accepts 131" in x for x in ctx["relevant_bugs"]))
+        self.assertIn("bugs_open", json.loads(out))  # the full lists stay for callers that read them
+
 
 if __name__ == "__main__":
     unittest.main()

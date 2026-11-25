@@ -1475,6 +1475,14 @@ def prep(con, project, key_args):
             rules = rules_path.read_text(encoding="utf-8", errors="replace")[:4000]
         except OSError:
             rules = ""
+    said = []  # the tickets' own words: what memory should look up for this plan
+    for t in tickets:
+        f = t.get("fields") if isinstance(t.get("fields"), dict) else {}
+        for k in ("summary", "description", ac_field):
+            if k and isinstance(f.get(k), str):
+                said.append(f[k])
+        said += [str(x.get("name") if isinstance(x, dict) else x) for k in ("components", "labels")
+                 for x in (f.get(k) if isinstance(f.get(k), list) else [])]
     open_bugs = [memory.bugs(con, st) for st in core.VISIBLE]
     open_bugs = [b for b in open_bugs if not b.startswith("no ")]
     bundle = {
@@ -1488,5 +1496,6 @@ def prep(con, project, key_args):
         "routes": codemap.code(con),
         "bugs_open": "\n".join(open_bugs) or "no OPEN bugs",
         "bugs_fixed": memory.bugs(con, "FIXED"),
+        "context": memory.ticket_context(con, "\n".join(said)) if said else {},
     }
     return scrub.redact_json(bundle)

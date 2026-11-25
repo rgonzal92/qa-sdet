@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS pages(route TEXT PRIMARY KEY, name TEXT, build TEXT, 
 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, page TEXT NOT NULL, kind TEXT NOT NULL,
   text TEXT NOT NULL, source TEXT, build TEXT, ts TEXT, stale INTEGER DEFAULT 0, UNIQUE(page, kind, text));
 CREATE INDEX IF NOT EXISTS facts_page ON facts(page, kind);
-CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, content='facts', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, content='facts', content_rowid='id',
+  tokenize='porter unicode61');
 CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
   INSERT INTO facts_fts(rowid, text) VALUES (new.id, new.text); END;
 CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
@@ -49,6 +50,19 @@ CREATE TABLE IF NOT EXISTS bugs(hash TEXT PRIMARY KEY, page TEXT, title TEXT, se
   classification TEXT, status TEXT DEFAULT 'OPEN', draft_path TEXT, first_seen TEXT, last_seen TEXT,
   seen_count INTEGER DEFAULT 1, last_run TEXT, symptom TEXT, jira_key TEXT, fixed_ts TEXT);
 CREATE INDEX IF NOT EXISTS bugs_page ON bugs(page, status);
+CREATE VIRTUAL TABLE IF NOT EXISTS bugs_fts USING fts5(title, symptom, page, jira_key, status, content='bugs',
+  content_rowid='rowid', tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS bugs_ai AFTER INSERT ON bugs BEGIN
+  INSERT INTO bugs_fts(rowid, title, symptom, page, jira_key, status)
+  VALUES (new.rowid, new.title, new.symptom, new.page, new.jira_key, new.status); END;
+CREATE TRIGGER IF NOT EXISTS bugs_ad AFTER DELETE ON bugs BEGIN
+  INSERT INTO bugs_fts(bugs_fts, rowid, title, symptom, page, jira_key, status)
+  VALUES ('delete', old.rowid, old.title, old.symptom, old.page, old.jira_key, old.status); END;
+CREATE TRIGGER IF NOT EXISTS bugs_au AFTER UPDATE ON bugs BEGIN
+  INSERT INTO bugs_fts(bugs_fts, rowid, title, symptom, page, jira_key, status)
+  VALUES ('delete', old.rowid, old.title, old.symptom, old.page, old.jira_key, old.status);
+  INSERT INTO bugs_fts(rowid, title, symptom, page, jira_key, status)
+  VALUES (new.rowid, new.title, new.symptom, new.page, new.jira_key, new.status); END;
 CREATE TABLE IF NOT EXISTS sightings(run_id TEXT, src TEXT, hash TEXT, PRIMARY KEY(run_id, src, hash));
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, mode TEXT, target TEXT, build TEXT, status TEXT,
   summary TEXT, ts TEXT);
@@ -59,6 +73,8 @@ CREATE TABLE IF NOT EXISTS codemap(page TEXT NOT NULL, kind TEXT NOT NULL, label
 CREATE INDEX IF NOT EXISTS codemap_page ON codemap(page, kind);
 """
 
+
+FTS_VERSION = "2"  # porter-stemmed facts_fts, and bugs_fts
 
 # meta keys of the removed orphan-route bookkeeping of the code map
 STALE_META = ("(key IN ('codemap_routes_at_scan', 'codemap_lost', 'codemap_scan_repos') "
@@ -110,12 +126,20 @@ def connect():
             con.close()
             raise BadInput(f"{p} is from before qa-sdet 0.4 ({table} lacks {', '.join(sorted(cols - have))}): move it "
                            "away; qa-mem starts a new one and /qa-sdet:qa-init maps the code again")
+    old_fts = con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()
+    if old_fts and "porter" not in old_fts[0]:  # 0.4 indexed whole words only: rebuild with stemming ('date' finds 'dates')
+        con.executescript("DROP TRIGGER IF EXISTS facts_ai; DROP TRIGGER IF EXISTS facts_ad; DROP TABLE facts_fts;")
     con.executescript(SCHEMA)
     have = {r[1] for r in con.execute("PRAGMA table_info(bugs)")}
     for col in ("jira_key", "fixed_ts"):  # columns added within 0.4: added in place
         if col not in have:
             with con:
                 con.execute(f"ALTER TABLE bugs ADD COLUMN {col} TEXT")
+    if (meta(con, "fts") or "") != FTS_VERSION:  # a new or changed index: fill it from the tables once
+        with con:
+            con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+            con.execute("INSERT INTO bugs_fts(bugs_fts) VALUES('rebuild')")
+            set_meta(con, "fts", FTS_VERSION)
     if con.execute(f"SELECT 1 FROM meta WHERE {STALE_META} LIMIT 1").fetchone():  # one-time clean-up (read first: no write lock)
         with con:
             con.execute(f"DELETE FROM meta WHERE {STALE_META}")

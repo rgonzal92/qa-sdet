@@ -916,6 +916,52 @@ class Search(MemBase):
         self.assertIn("speed chart", memory.search(self.con, "speed -/api/zones"))
 
 
+class Retrieval(MemBase):
+    """Stemmed search over facts and bugs, a relaxed match when nothing matches all words, and card ranking/focus."""
+
+    def test_word_forms_match_and_bugs_are_searched(self):
+        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}],
+                                    bugs=[{"route": "/form", "title": "Zone validation skipped", "symptom": "zones saved unvalidated"}]))
+        self.assertIn("Corridor dates", memory.search(self.con, "date"))  # 'date' finds 'dates'
+        out = memory.search(self.con, "zone validate")
+        self.assertIn("[bug:OPEN]", out)
+        self.assertIn("Zone validation skipped", out)
+        h = core.bug_hash("/form", "zones saved unvalidated")
+        cli.run_cmd(self.con, "bug-status", [h, "FILED", "PROJ-9"])
+        self.assertIn("[bug:FILED PROJ-9]", memory.search(self.con, "proj-9"))  # the update reached the index
+
+    def test_no_match_of_all_words_relaxes_to_two_of_them_and_says_so(self):
+        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC instead of local time"}]))
+        out = memory.search(self.con, "date filter timezone UTC")
+        self.assertIn("Corridor dates", out)
+        self.assertIn("relaxed", out)
+        self.assertIn("no facts match", memory.search(self.con, "date filter"))  # two words: no relaxing
+        self.assertIn("no facts match", memory.search(self.con, "date filter UTC -corridor"))  # exclusions still hold
+
+    def test_an_old_database_index_is_upgraded_in_place(self):
+        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]))
+        self.con.executescript("DROP TRIGGER facts_ai; DROP TRIGGER facts_ad; DROP TABLE facts_fts; "
+                               "CREATE VIRTUAL TABLE facts_fts USING fts5(text, content='facts', content_rowid='id'); "
+                               "INSERT INTO facts_fts(facts_fts) VALUES('rebuild'); DELETE FROM meta WHERE key='fts';")
+        self.con.close()
+        self.con = core.connect()
+        self.assertIn("porter", self.con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()[0])
+        self.assertIn("Corridor dates", memory.search(self.con, "date"))
+
+    def test_rules_outrank_newer_notes_and_a_focus_comes_first(self):
+        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "date filter uses UTC"}]), "2026-01-01T00:00:00Z")
+        memory.ingest(self.con, run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
+                      "2026-01-02T00:00:00Z")
+        facts = lambda c: c.split("FACTS", 1)[1].split("\n")[1:]
+        self.assertTrue(any("date filter uses UTC" in x for x in facts(memory.card(self.con, "/form"))))  # not evicted by notes
+        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": f"rule {i} {'y' * i}"} for i in range(20)]),
+                      "2026-01-03T00:00:00Z")
+        self.assertIn("date filter uses UTC", facts(memory.card(self.con, "/form", focus="date filters"))[0])
+        code, out, _ = qa_mem("card", "/form", "--focus", "date filters")
+        self.assertEqual(code, 0)
+        self.assertIn("date filter uses UTC", out)
+
+
 class Database(MemBase):
     """core.connect."""
 

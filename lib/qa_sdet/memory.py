@@ -1,6 +1,7 @@
 """Ingest of run JSON, and the `card`, `search` and `bugs` readers."""
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -377,7 +378,7 @@ def _ingest_files(con, pending):
     return n
 
 
-def card(con, q):
+def card(con, q, focus=None):
     pg = codemap.find_page(con, q)
     if not pg:
         tip = "" if con.execute("SELECT 1 FROM codemap LIMIT 1").fetchone() else \
@@ -398,8 +399,16 @@ def card(con, q):
     elif unknown_page and b != core.UNKNOWN:
         out.append(f"NOTE: this page's build was never readable; its knowledge may predate build {b}.")
     facts, seen = [], []
-    for f in con.execute("SELECT kind,text,stale,source FROM facts WHERE page=? ORDER BY stale, ts DESC LIMIT 60",
-                         (r,)):
+    focus_words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w+", str(focus or ""))))[:8]
+    # the charter's facts first (stemmed match on any of its words), then rules, flows, validations, API facts and
+    # ticket-stated ones before plain notes: 15 recent notes must not push the page's rules off the card
+    on_focus = con.execute("SELECT f.id,f.kind,f.text,f.stale,f.source FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
+                           "WHERE facts_fts MATCH ? AND f.page=? ORDER BY rank LIMIT 15",
+                           (_fts_query([[w] for w in focus_words], []), r)).fetchall() if focus_words else []
+    rest = con.execute("SELECT id,kind,text,stale,source FROM facts WHERE page=? ORDER BY stale, CASE WHEN kind IN "
+                       "('rule','validation','flow','api') OR lower(coalesce(source,'')) NOT IN ('','observed') THEN 0 "
+                       "ELSE 1 END, ts DESC LIMIT 60", (r,)).fetchall()
+    for f in list({x["id"]: x for x in on_focus + rest}.values()):
         words = set(core.norm(f["text"]).split())
         # Runs restate facts in new words; show only the freshest of near-duplicates.
         if any(k == f["kind"] and len(words & w) >= 0.8 * max(len(words | w), 1)
@@ -436,6 +445,9 @@ def card(con, q):
             f"{h}({', '.join(t[:4])}{f', +{len(t) - 4} more' if len(t) > 4 else ''})" for h, t in cov.items()))
     out.append("UNTRIED: " + (", ".join(h for h in core.HEURISTICS if h not in tried) or "none"))
     untested = _untested_rules(con, r, targets)
+    if focus_words:  # the charter's fields first ('date filters' puts 'Date' and 'Filter' ahead)
+        stems = {w.rstrip("s") for w in focus_words}
+        untested.sort(key=lambda label: not ({w.rstrip("s") for w in core.norm(label).split()} & stems))
     if untested:  # labels stay whole (the explorer copies them as coverage targets), so the line stops at ~400 chars
         shown_n = next((n for n in range(len(untested), 0, -1) if len("; ".join(untested[:n])) <= 400), 1)
         more = f"; +{len(untested) - shown_n} more (qa-mem code '{r}')" if len(untested) > shown_n else ""
@@ -537,16 +549,31 @@ def bug_lines(con, route, build=None):
     return "\n".join(out)
 
 
+def _fts_query(groups, nots):
+    """An FTS5 query: any group of words, every word of a group (each a quoted string, so typed operators are words)."""
+    body = " OR ".join("(" + " ".join(f'"{w}"' for w in g) + ")" for g in groups)
+    return (f"({body})" if len(groups) > 1 else body) + "".join(f' NOT "{p}"' for p in nots)
+
+
 def search(con, q):
-    """Plain words, all required; `-word` excludes. Built here as an FTS query, so FTS operators typed in the terms
-    (NEAR, AND, a leading -) can't change what is matched."""
+    """Plain words, all required, stemmed ('date' finds 'dates'); `-word` excludes. Facts, bugs and the code map. When
+    nothing matches all of 3+ words, the facts and bugs matching any 2 of them are shown, marked relaxed. Built here as an
+    FTS query, so FTS operators typed in the terms (NEAR, AND, a leading -) can't change what is matched."""
     terms = [t for t in str(q).split() if t not in ("AND", "OR", "NOT", "NEAR") and re.search(r"\w", t)]
     pos, neg = [t for t in terms if not t.startswith("-")], [t[1:] for t in terms if t.startswith("-")]
     # '/api/zones', 'speed-limit', 'form.html': every word in a term counts; multi-word exclusions match as one phrase
-    words = [w for t in pos for w in re.findall(r"\w+", t)]
+    words = list(dict.fromkeys(w for t in pos for w in re.findall(r"\w+", t)))[:8]
     nots = [" ".join(ws) for t in neg if (ws := re.findall(r"\w+", t))]
-    rows = _search(con, " ".join(f'"{w}"' for w in words) + "".join(f' NOT "{p}"' for p in nots)) if words else []
+    found = lambda groups: (_search(con, _fts_query(groups, nots)), _search_bugs(con, _fts_query(groups, nots)))
+    rows, bug_rows = found([words]) if words else ([], [])
+    relaxed = not rows and not bug_rows and len(words) >= 3
+    if relaxed:
+        rows, bug_rows = found(list(itertools.combinations(words, 2)))
     lines = [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in rows]
+    lines += [f"{x['page']} [bug:{x['status']}{' ' + x['jira_key'] if x['jira_key'] else ''}] {x['title']} | {x['hash']}"
+              for x in bug_rows]
+    if relaxed and lines:
+        lines.insert(0, f"(relaxed: nothing matched all of '{' '.join(words)}'; these match at least 2 of the words)")
     if words:  # the code map too (incl. backend endpoints no page calls, page '*')
         cond = " AND ".join(["(label || ' ' || coalesce(value, '')) LIKE ? ESCAPE '\\'"] * len(pos)
                             + ["(label || ' ' || coalesce(value, '')) NOT LIKE ? ESCAPE '\\'"] * len(neg))
@@ -558,9 +585,65 @@ def search(con, q):
     return "\n".join(lines) or f"no facts match '{q}'"
 
 
-def _search(con, q):
-    return con.execute("SELECT f.page,f.kind,f.text,f.stale FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
-                       "WHERE facts_fts MATCH ? ORDER BY rank LIMIT 20", (q,)).fetchall()
+STOP_WORDS = set("""the and for with without from into onto that this these those are was were been being have has had not
+can could should would must will when then than but its it's their there here what which who how why all any each per via
+also only just more most less such page pages field fields value values show shown shows user users click button new fix
+fixed issue ticket story bug bugs test tests when after before while""".split())
+
+
+def ticket_context(con, text, n=8):
+    """What memory knows that a ticket's text points at: {terms, candidate_routes: [{route, name, why}], relevant_facts,
+    relevant_bugs (status kept)}. Routes the text names count most, then routes whose facts, bugs or code-map rows
+    match its words (stemmed); capped, so a plan starts from a short list instead of every route and bug."""
+    words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", str(text))]
+    counts = {}
+    for w in words:
+        if w not in STOP_WORDS:
+            counts[w] = counts.get(w, 0) + 1
+    terms = sorted(counts, key=lambda w: -counts[w])[:12]
+    names = {x["route"]: x["name"] or "" for x in con.execute("SELECT route, name FROM pages WHERE route != '*'")}
+    named = {core.norm_route(m) for m in re.findall(r"(?<![\w.])/[\w#!/.-]+", str(text))} & set(names)
+    pairs = _fts_query(list(itertools.combinations(terms, 2)), []) if len(terms) > 1 else None
+    facts, bug_rows = (_search(con, pairs), _search_bugs(con, pairs)) if pairs else ([], [])  # 2+ of the ticket's words
+    score, why = {}, {}
+    def add(route, points, reason):
+        if route in names:
+            score[route] = score.get(route, 0) + points
+            why.setdefault(route, [])
+            if reason not in why[route]:
+                why[route].append(reason)
+    for r in named:
+        add(r, 10, "named in the ticket")
+    for f in facts:
+        add(f["page"], 2, "facts")
+    for b in bug_rows:
+        add(b["page"], 2, "bugs")
+    stems = {t.rstrip("s") for t in terms}
+    for row in con.execute("SELECT page, label, coalesce(value, '') AS value FROM codemap WHERE page != '*'"):
+        if {w.rstrip("s") for w in core.norm(row["label"] + " " + row["value"]).split()} & stems:
+            add(row["page"], 1, "code map")
+    ranked = sorted(score, key=lambda r: (-score[r], r))[:n]
+    if terms and ranked:  # on the routes the ticket points at, one of its words is enough
+        one = _fts_query([[w] for w in terms], [])
+        top = ranked[:3]
+        facts += [x for x in _search(con, one) if x["page"] in top and x["id"] not in {f["id"] for f in facts}]
+        bug_rows += [x for x in _search_bugs(con, one) if x["page"] in top and x["hash"] not in {b["hash"] for b in bug_rows}]
+    return {"terms": terms,
+            "candidate_routes": [{"route": r, "name": names[r], "why": ", ".join(why[r])} for r in ranked],
+            "relevant_facts": [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in facts[:15]],
+            "relevant_bugs": [_bug_line(x, True) for x in bug_rows[:15]]}
+
+
+def _search(con, q, page=None):
+    return con.execute("SELECT f.id,f.page,f.kind,f.text,f.stale FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
+                       "WHERE facts_fts MATCH ?" + (" AND f.page=?" if page else "") + " ORDER BY rank LIMIT 20",
+                       (q, page) if page else (q,)).fetchall()
+
+
+def _search_bugs(con, q):
+    cols = ",".join(f"b.{c}" for c in BUG_COLS.split(","))  # bugs_fts has columns of the same names
+    return con.execute(f"SELECT {cols} FROM bugs_fts JOIN bugs b ON b.rowid=bugs_fts.rowid "
+                       "WHERE bugs_fts MATCH ? ORDER BY rank LIMIT 15", (q,)).fetchall()
 
 
 def bugs(con, status="OPEN"):

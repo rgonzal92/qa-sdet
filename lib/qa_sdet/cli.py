@@ -153,7 +153,7 @@ def wrapper_cmd(cmd, args):
 
 
 COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help` and bad input
-    "doctor": "", "browsers": "", "where": "", "card": "<route|page name>", "gaps": "[--changed] [--top N] [--json]",
+    "doctor": "", "browsers": "", "where": "", "card": "<route|page name> [--focus <terms>]", "gaps": "[--changed] [--top N] [--json]",
     "search": "<words> [-word to exclude]",
     "bugs": "[STATUS]", "hash": "<route> <symptom>",
     "bug-status": "<hash-prefix> <" + "|".join(sorted(core.STATUSES)) + "> [--jira KEY]",
@@ -344,7 +344,10 @@ def _main(argv):
 
 def run_cmd(con, cmd, args):
     if cmd == "card" and args:
-        print(memory.card(con, " ".join(args)))
+        o = _opts(args, valued=("--focus",))
+        if not o["_"]:
+            return usage_error(cmd)
+        print(memory.card(con, " ".join(o["_"]), o.get("--focus")))
     elif cmd == "code":
         o = _opts(args, flags=("--repos",))
         if o.get("--repos") and o["_"]:

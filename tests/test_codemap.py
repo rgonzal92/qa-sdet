@@ -261,7 +261,7 @@ class Apply(CodeMapCase):
                 core.set_meta(self.con, k, "x")
         self.con.close()
         self.con = core.connect()
-        self.assertEqual(sorted(r[0] for r in self.con.execute("SELECT key FROM meta")), sorted(keep))
+        self.assertEqual(sorted(r[0] for r in self.con.execute("SELECT key FROM meta")), sorted(keep + ("fts",)))  # + core's own
 
 
 class Card(CodeMapCase):

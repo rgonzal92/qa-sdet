@@ -190,7 +190,7 @@ def dispatch(con, run, route, mode=None, focus=None, budget=0, minutes=0, faults
     rules = run.parent.parent / "qa-rules.md"
     if rules.is_file() and not rules.is_symlink():
         out += ["", "RULES:", rules.read_text(encoding="utf-8", errors="replace").strip()[:4000]]
-    out += ["", "## Card", memory.card(con, route)]
+    out += ["", "## Card", memory.card(con, route, focus=focus)]
     if cases:
         out += ["", "## Given cases (run them first, in priority order)"]
         for c in cases:
