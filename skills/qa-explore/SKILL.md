@@ -1,7 +1,7 @@
 ---
 name: qa-explore
 description: Exploratory bug hunt on one or more pages of the QA web app (or changed/top pages from memory gaps), no ticket needed, with annotated bug images, repro specs and a readable report. Use when asked to explore or find bugs on a page, URL, changed pages or feature, or what to explore next.
-argument-hint: <url | route | page name>... | --changed | --top N [--faults] [--budget N] [--minutes M] [--focus '<charter>'] [--verify]
+argument-hint: <url | route | page name>... | --changed | --top N | --discover [<url>] [--depth D] [--faults] [--budget N] [--minutes M] [--focus '<charter>'] [--verify]
 ---
 
 Explore and find bugs: $ARGUMENTS
@@ -18,4 +18,5 @@ Plugin root: `${CLAUDE_SKILL_DIR}/../..`. Project: `${CLAUDE_PROJECT_DIR}`. Firs
 3. **Run folder and plan:** create ONE run folder: `qa-mem rundir '${CLAUDE_PROJECT_DIR}' --route '<route>'` for one page, `qa-mem rundir '${CLAUDE_PROJECT_DIR}' --label '<changed-Npages or explore-Npages>'` for 2+ pages. Write `<run>/.data/plan.json`: `{"kind": "explore", "title": "<route or comma-separated routes>", "created": "<date -u +%Y-%m-%dT%H:%M:%SZ>", "env": {"url": "<first target>", "browser": "<config browser>"}, "tickets": [], "cases": [], "questions": []}`; with `--focus` append `, focus: <charter>` to `title`. When the user listed checks to run, they are `cases` (fields in `${CLAUDE_SKILL_DIR}/../../references/planning.md`).
 4. **Explore:** for each target page, sequentially (one explorer at a time; dispatch gives each route its own slug): `qa-mem dispatch '<run>' --route '<route>' --mode explore` (run-setup's Setup; plus `--focus '<charter>'` and the limits), delegate with its brief, teardown. If an explorer returns `BLOCKED`, skip remaining pages and keep its summary.
 With `--verify`: after the last teardown, run-setup's Second opinion (a `qa-sdet:qa-reviewer` read-only check of the serious drafts; its reply saved as `<run>/.data/review.json`).
+**`--discover [<url>] [--depth D]`** (read-only mapping instead of testing; no page needed): after steps 1-2, `qa-mem rundir '${CLAUDE_PROJECT_DIR}' --label discover; qa-mem marker start '${CLAUDE_PROJECT_DIR}'` (plus `--budget N` / `--minutes M` when given), then the Agent tool, subagent type `qa-sdet:qa-crawler`, with, as literal text: `discover`, `target=<url or qaBaseUrl>` (its host in `allowedHosts`), `out=<run>`, `slug=discover`, `refs=${CLAUDE_SKILL_DIR}/../../references`, `depth=<D or 2>`, `max_pages=25`, budget and minutes. Then the teardown call; reply with the pages it found and their unvisited states (`qa-mem gaps`), and as next step `/qa-sdet:qa-explore --top 5`.
 5. **Reply** (run-setup).

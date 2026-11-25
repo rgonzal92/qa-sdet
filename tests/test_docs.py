@@ -326,7 +326,9 @@ class Docs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             g, _ = load_guard(os.path.realpath(d))
         self.assertLessEqual({t.strip() for t in meta["tools"].split(",")}, g.EXPLORER_TOOLS)
-        self.assertLess(len(crawler.encode()), 3500)
+        self.assertLess(len(crawler.encode()), 4500)  # two short read-only modes: still a third of the explorer's prompt
+        self.assertIn("## Discover", crawler)
+        self.assertIn("--discover", text("skills/qa-explore/SKILL.md"))
         self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
         self.assertIn("qa-sdet:qa-crawler", text("skills/qa-init/SKILL.md"))
         hooks = json.loads(text("hooks/hooks.json"))["hooks"]
