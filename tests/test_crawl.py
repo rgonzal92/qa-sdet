@@ -227,6 +227,17 @@ class Crawl(Base):
             err,
         )
 
+    def test_what_a_crawl_confirmed_is_in_memory_when_it_ends(self):
+        """Found live: a crawl runs in the background, so the session's Stop hook read its run file after 3 of 18
+        routes and nothing read the finished file: memory held 19 of 252 confirmed locators when the skill replied."""
+        code, out, _, _, err = self.crawl()
+        self.assertEqual(code, 0, err)
+        con = core.connect()
+        saved = dict(con.execute("SELECT page || ' ' || name, locator FROM locators"))
+        con.close()
+        self.assertEqual(saved["/alarms Ack"], "getByTestId('ack')")  # the last route's too, with no hook fired
+        self.assertEqual(saved["/zones Name"], f"{FRAME_0}getByRole('textbox', {{ name: 'Name' }})")
+
     def test_sign_in_and_sign_out_routes_are_never_opened(self):  # found in audit: /logout ends the session
         con = core.connect()
         with con:
@@ -471,6 +482,14 @@ class Discover(Base):
             code, out, err = cli("discover", str(self.run_dir), *args)
         f = self.run_dir / ".data/run-discover.json"
         return code, (json.loads(f.read_text()) if f.exists() else None), b, err
+
+    def test_what_discover_found_is_in_memory_when_it_ends(self):
+        code, _, _, err = self.discover({BASE: page(links=[["/app/zones", "Zones"]]), f"{BASE}/zones": page()})
+        self.assertEqual(code, 0, err)
+        con = core.connect()
+        routes = {r for (r,) in con.execute("SELECT route FROM pages")}
+        con.close()
+        self.assertLessEqual({"/", "/zones"}, routes)  # as for a crawl: no Stop hook reads a background run's file
 
     def test_discover_is_breadth_first_to_depth(self):
         pages = {

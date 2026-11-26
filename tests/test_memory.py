@@ -618,6 +618,66 @@ class Builds(MemBase):
         ingest("c", "2.0", page("/zones"), page("/alarms"))  # a new build: their locators are stale until seen again
         self.assertIn(hint.format("1 other page loads", widget), memory.card(self.con, "/map").splitlines())
 
+    def test_a_page_whose_framed_locators_sit_in_a_second_frame_gets_the_apps_frame_first(self):
+        """Found live: a page of an app shell opened a panel in a second iframe, a run saved the panel's locators with
+        that frame, and the card said to put the panel's frame in front of the page's other locators, which sit in
+        the frame every page loads in: none of them matched."""
+        frame, panel = "locator('#module').contentFrame().", "locator('#panel').contentFrame()."
+        page = lambda route, *pairs: {"route": route, "locators": [{"name": n, "locator": v} for n, v in pairs]}
+        ingest = lambda rid, *pages: memory.ingest(self.con, {"run_id": rid, "build": "1.0", "pages": list(pages)})
+        line = lambda route: next(x for x in memory.card(self.con, route).splitlines() if x.startswith("FRAME:"))
+        own = "FRAME: this page loads in a frame: put `{}` in front of a locator that lacks it (a FROM CODE one too)"
+        billing = "locator('#billing').contentFrame()."
+        ingest(
+            "a",
+            page("/billing", ("Pay", f"{billing}getByTestId('pay')")),
+            page("/users", ("Add", "locator('#users').contentFrame().getByTestId('add')")),
+        )
+        self.assertEqual(line("/billing"), own.format(billing))  # no frame is the app's: the page's own stands
+        ingest(
+            "b",
+            page("/zones", ("Save", f"{frame}getByTestId('save')")),
+            page("/alarms", ("Ack", f"{frame}getByTestId('ack')")),
+            page("/signals", ("Detail", "getByTestId('detail')"), ("Variant", f"{panel}getByTestId('variant')")),
+        )
+        self.assertEqual(
+            line("/signals"),
+            f"FRAME: 2 other pages load in a frame: try `{frame}` in front of a locator that lacks it (a FROM CODE one "
+            f"too); only if that matches nothing, `{panel}`, which locators of this page name",
+        )
+        ingest("c", page("/signals", ("Tab", f"{frame}getByText('Configuration')")))
+        self.assertEqual(line("/signals"), own.format(frame))  # a locator of its own names the app's frame: no guess
+
+    def test_a_locator_saved_with_its_frame_replaces_the_one_saved_without(self):
+        """Found live: a crawl saved 124 locators behind their frame beside the same ones an earlier run had saved
+        without it under other names. Both stayed fresh, and the one without matches nothing as written."""
+        frame = "locator('iframe:visible').nth(0).contentFrame()."
+        named = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
+        memory.ingest(
+            self.con,
+            run(
+                locators=named(
+                    ("Ack all (not History)", "getByTestId('ack-all')"),
+                    ("Ack all, page object", "this.page.getByTestId('ack-all')"),
+                    ("Message", "#msg"),
+                    ("Other", "getByTestId('other')"),
+                    ("A class, not the tag", "div.msg"),
+                )
+            ),
+        )
+        memory.ingest(
+            self.con,
+            run(
+                locators=named(
+                    ("Ack all", f"{frame}getByTestId('ack-all')"),
+                    ("Msg", f"{frame}locator('#msg')"),
+                    ("Tag", f"{frame}locator('msg')"),
+                )
+            ),
+        )
+        names = {n for (n,) in self.con.execute("SELECT name FROM locators WHERE page='/form'")}
+        self.assertEqual(names, {"Ack all", "Msg", "Tag", "Other", "A class, not the tag"})
+
     def test_the_card_says_how_to_reach_the_locators_it_has_no_room_for(self):
         many = [{"name": f"Row {n}", "locator": f"getByTestId('row-{n}')"} for n in range(25)]
         memory.ingest(self.con, run("1.0", locators=many))
