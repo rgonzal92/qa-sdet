@@ -2,7 +2,7 @@
 Markdown digest exporter.
 
 Automatic hooks and qa-mem append scrubbed JSONL events (denials, hook errors, nudges, failed tool calls, stop-hook
-bounces, CLI errors, and 1-line run summaries). Users add manual notes via `qa-mem plugin-log note` or
+bounces, CLI errors, notices, and 1-line run summaries). Users add manual notes via `qa-mem plugin-log note` or
 `/qa-sdet:qa-feedback`. Setting `"pluginLog": false` in ~/.config/qa-sdet/config.json disables all writes.
 """
 
@@ -37,7 +37,18 @@ TRIM_BYTES = 150_000
 READ_CAP = 8 << 20
 NOTE_KINDS = ("bug", "nuisance", "idea")
 SEVERITIES = ("low", "med", "high")
-EVENT_TYPES = ("denial", "hook_error", "nudge", "tool_fail", "stop_bounce", "cli_error", "run_summary", "user_note")
+# notice: a change the plugin made on its own that nobody would see otherwise (an unreadable build, a dropped bug)
+EVENT_TYPES = (
+    "denial",
+    "hook_error",
+    "nudge",
+    "tool_fail",
+    "stop_bounce",
+    "cli_error",
+    "notice",
+    "run_summary",
+    "user_note",
+)
 _PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 
 # The secret forms hooks/guard.py mask() covers and scrub.py doesn't, so tool_fail and cli_error calls stay as clean as
@@ -682,6 +693,19 @@ def render_digest(events, anon, bad_lines=0):
             sec.append(f"- {k} (×{cnt})" + (f" — {samples[k]}" if samples[k] else ""))
         sections.append("\n".join(sec))
 
+    if by_type["notice"]:
+        ranked, samples = _group_counts(
+            by_type["notice"],
+            lambda e: f"`{e.get('kind', '?')}`",
+            lambda e: anon.text(e.get("detail") or " ".join(str(e[k]) for k in ("hash", "route") if e.get(k)) or "")[
+                :160
+            ],
+        )
+        sec = [f"### Notices ({len(by_type['notice'])})"]
+        for k, cnt in ranked[:15]:
+            sec.append(f"- {k} (×{cnt})" + (f" — {samples[k]}" if samples[k] else ""))
+        sections.append("\n".join(sec))
+
     lines.append("\n\n".join(sections) if sections else "- No friction or failure events in this window.")
 
     # 3. Run Health Summary
@@ -716,6 +740,20 @@ def render_digest(events, anon, bad_lines=0):
             f"- **Stats:** avg turns {avg_t}, avg duration {avg_d}, bugs found {total_bugs}, "
             f"runs with `audit-bugs` issues {audit_runs}, missing run files {missing_files}"
         )
+        traced = [r for r in runs if isinstance(r.get("calls"), int)]  # the hooks' call trace (ops._trace_totals)
+        if traced:
+            tot = lambda k: sum(r.get(k) or 0 for r in traced if isinstance(r.get(k), (int, float)))
+            by = lambda k: sum((Counter(r[k]) for r in traced if isinstance(r.get(k), dict)), Counter())
+            words = lambda c: ", ".join(f"`{anon.text(w)[:40]}` {n}" for w, n in c.most_common(10))
+            lines.append(
+                f"- **Calls:** {tot('calls')} in {len(traced)} runs: {tot('approved')} approved "
+                f"({tot('approved_s'):.0f}s), {tot('unapproved')} unapproved ({tot('unapproved_s'):.0f}s), "
+                f"{tot('denied')} denied; model {tot('model_s'):.0f}s; after the cases {tot('after_cases_s'):.0f}s"
+            )
+            if blockers := by("blockers"):
+                lines.append(f"- **Unapproved by:** {words(blockers)}")
+            if denials := by("denials"):
+                lines.append(f"- **Denied by:** {words(denials)}")
         notable = [
             r
             for r in runs

@@ -346,11 +346,14 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                 (h, rid),
             )
             # only this run ever saw it and the user hasn't triaged it: it was never a bug
-            con.execute(
+            page = con.execute("SELECT page FROM bugs WHERE hash=?", (h,)).fetchone()
+            gone = con.execute(
                 "DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
                 "(SELECT 1 FROM sightings WHERE hash=?)",
                 (h, h),
-            )
+            ).rowcount
+            if gone:
+                _bug_dropped(src, h, page[0] if page else None, rid)
         target = (
             core.norm_route(core.cap(run.get("target")))
             if str(run.get("target") or "").startswith(("/", "http", "#"))
@@ -361,6 +364,19 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             _store_blind_spots(con, run, target, rid, build, ts)
         con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
         con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
+
+
+def _bug_dropped(src, h, page, rid):
+    """A `bug_dropped` notice in the plugin log of the qa-out the run file sits in: memory deleted a bug on its own (a
+    checkpoint of the run listed it, the final file didn't). Best effort; no qa-out folder, no notice."""
+    try:
+        qa_out = next((p for p in Path(src).parents if p.name == "qa-out"), None) if src else None
+        if qa_out is not None:
+            from . import plugin_log
+
+            plugin_log.append_event(qa_out, "notice", {"kind": "bug_dropped", "hash": h, "route": page, "run": rid})
+    except Exception:  # noqa: BLE001, S110 - a notice must never fail an ingest
+        pass
 
 
 BLIND_SPOTS_PER_PAGE = 50

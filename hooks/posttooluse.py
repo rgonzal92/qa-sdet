@@ -7,7 +7,7 @@ A failed Bash call fires only PostToolUseFailure.
   that looks like a NOT A BUG or an already fixed bug in memory says so (a read-only lookup; it never blocks the write).
 - An explorer's Bash and Write calls are counted in qa-out/.active.progress: one whose same playwright-cli command failed
   3 times since its last real progress hears to change approach, and 8 browser calls in a row without progress (a spin)
-  get one nudge.
+  get one nudge. Each line has the time the call ended: with the guard's request line it is the run's trace.
 Feedback is best effort: any problem here means no feedback, never a failed tool call."""
 
 import contextlib
@@ -16,7 +16,9 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CODE_MAP = re.compile(r"code-map-(frontend|backend|tests)(-\d+)?\.json")
@@ -237,11 +239,10 @@ def classify(data, recs):
     cmd = " ".join(str(tin.get("command") or "").split())
     ok = data.get("hook_event_name") != "PostToolUseFailure"
     calls = PW_CALL.findall(cmd)
+    # never the text: it can hold a typed value (guard.call_key: the request line's key, so the trace pairs the two)
+    key = hashlib.sha1(cmd.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
     if not calls:  # qa-mem and the rest: a turn, but not a browser call; an evidence image is a new file
-        return {"t": "o", "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd)))}
-    key = hashlib.sha1(cmd.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[
-        :12
-    ]  # never the text: it can hold a typed value
+        return {"t": "o", "k": key, "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd)))}
     seen = {r.get("k") for r in [r for r in recs if r.get("t") == "pw"][-NOVELTY_WINDOW:]}
     interacts = any(verb not in OBSERVE for verb, _ in calls)
     return {
@@ -258,6 +259,8 @@ def replay(recs):
     spin = 0
     fails, given = {}, set()
     for r in recs:
+        if r.get("t") == "q":  # the guard's request line: the trace's, never a turn of its own
+            continue
         if r.get("t") == "n":
             if r.get("n") == "stuck":
                 fails.pop(r.get("s"), None)
@@ -284,7 +287,18 @@ def slow_word(guard, data):
     ctx = guard.Ctx(cwd, True, cmd)
     if guard.check(cmd, cwd, ctx) or (ctx.approve and ctx.segments) or not ctx.blocker:
         return None
-    return re.sub(r"[^\w .()$&-]", "?", str(ctx.blocker))[:24]  # a name the model typed: never more than a word
+    return guard.blocker_word(ctx.blocker)
+
+
+def cases_done(guard, data, m):
+    """The explorer wrote this run's <run>/.data/run-<slug>.json: it does so once its given cases are done, so the
+    trace's time after this line is what the run spent beyond them."""
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    f = tin.get("file_path")
+    if data.get("tool_name") != "Write" or not isinstance(f, str) or not (m.get("run_dir") and m.get("slug")):
+        return False
+    want = os.path.join(str(m["run_dir"]), ".data", f"run-{m['slug']}.json")
+    return os.path.realpath(os.path.join(guard._cwd(data), guard.clean(f))) == os.path.realpath(want)
 
 
 def run_feedback(data, who):
@@ -297,7 +311,11 @@ def run_feedback(data, who):
         return None
     state, expires = path.with_name(".active.progress"), m.get("expires")
     recs = read_progress(state, expires)
-    rec = classify(data, recs)
+    rec = classify(data, recs) | {"ts": round(time.time(), 3)}
+    if data.get("tool_use_id"):
+        rec["id"] = guard.clean(data["tool_use_id"])[:64]
+    if cases_done(guard, data, m):
+        rec["f"] = "run"
     append_progress(state, expires, rec)
     spin, fails, given = replay(recs + [rec])
     notes, sig = [], rec.get("s")
@@ -350,12 +368,35 @@ def run_feedback(data, who):
     return " ".join(x for x in notes if x) or None
 
 
+def empty_search(raw, err):
+    """grep found nothing: exit 1 with no other text, and grep is the last command of the call's last pipeline (whose
+    exit the shell reports for the whole call). An answer, not a failure."""
+    if not isinstance(err, str) or not re.fullmatch(r"(?i)\s*(?:exit(?: code)?:?\s*1)?\s*", err):
+        return False
+    try:
+        lex = shlex.shlex(raw.replace("\n", ";"), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:  # an unclosed quote: whatever failed, it wasn't only a search
+        return False
+    last, start = None, True
+    for w in words:
+        if w and set(w) <= set(";&|()"):  # a list or pipeline operator: the next word runs a command
+            start = True
+        elif start:
+            last, start = w, False
+    return os.path.basename(last or "") in ("grep", "egrep", "fgrep")
+
+
 def _log_tool_failure(data, who):
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    cmd = " ".join(str(tin.get("command") or "").split())
+    raw = str(tin.get("command") or "")
+    cmd = " ".join(raw.split())
     if who not in ("qa-explorer", "qa-mapper") and not QA_TOOL_RE.search(cmd):
         return
     err = data.get("error") or data.get("tool_response") or ""
+    if empty_search(raw, err):
+        return
     if isinstance(err, (dict, list)):
         err = json.dumps(err, ensure_ascii=False, default=str)
     _log_event(_qa_out(data), "tool_fail", {"agent": who or "main", "cmd": cmd, "error": str(err)})

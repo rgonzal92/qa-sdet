@@ -10,7 +10,7 @@ Project: `${CLAUDE_PROJECT_DIR}`. All reads and writes go through `qa-mem plugin
 
 1. **Choose action** from `$ARGUMENTS` (or the user's plain-English request):
    - **Export** (`export`, "share logs", "export plugin logs", "make a digest"): run `qa-mem plugin-log export --project '${CLAUDE_PROJECT_DIR}'` plus any flags the user asked for (`--all` for full history, `--since <YYYY-MM-DD|7d|24h>` for a time window, `--preview` to print without writing a file or advancing the cursor, `--stdout` to print and advance the cursor). By default this writes a dated anonymized Markdown digest under `${CLAUDE_PROJECT_DIR}/qa-out/` and advances the export cursor so the next export includes only new events.
-   - **Show** (`show`, "show recent plugin logs", "check denials/errors"): run `qa-mem plugin-log show --project '${CLAUDE_PROJECT_DIR}'` with optional `--limit N` and `--type denial|hook_error|nudge|tool_fail|stop_bounce|cli_error|run_summary|user_note`.
+   - **Show** (`show`, "show recent plugin logs", "check denials/errors"): run `qa-mem plugin-log show --project '${CLAUDE_PROJECT_DIR}'` with optional `--limit N` and `--type denial|hook_error|nudge|tool_fail|stop_bounce|cli_error|notice|run_summary|user_note`.
    - **Clear** (`clear`, "reset plugin log"): confirm with the user if they did not explicitly ask to clear, then run `qa-mem plugin-log clear --project '${CLAUDE_PROJECT_DIR}'`.
    - **Note** (`note ...`, or any plain-English bug/nuisance/idea description when no other action matches): pick `--kind` (`bug`, `nuisance`, or `idea`; default `nuisance`) and optional `--severity` (`low`, `med`, or `high`) from what the user said, then run:
      `qa-mem plugin-log note --project '${CLAUDE_PROJECT_DIR}' --kind <kind> [--severity <sev>] '<text>'`

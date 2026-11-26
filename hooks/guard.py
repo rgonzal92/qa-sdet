@@ -16,6 +16,7 @@ shell, inline code, xargs, a command string handed to another program, a compute
 
 import functools
 import glob
+import hashlib
 import json
 import math
 import os
@@ -2050,23 +2051,28 @@ def _cwd(data):
 
 def evaluate(data):
     """(deny reason or None, approve) for one tool call."""
+    return verdict(data)[:2]
+
+
+def verdict(data):
+    """(deny reason or None, approve, blocker): the blocker is what kept a Bash call from being approved (Ctx.block)."""
     tool, tin, role = clean(data.get("tool_name") or ""), data.get("tool_input"), agent_role(data)
     tin, cwd = {} if tin is None else tin, _cwd(data)
     if not isinstance(tin, dict):
-        return "malformed tool input (not an object)", False
+        return "malformed tool input (not an object)", False, None
     if role == "qa-mapper" and (r := check_mapper(tool, tin, cwd)):
-        return r, False
+        return r, False, None
     if role in EXPLORERS and (r := check_explorer(tool, tin, cwd, role)):
-        return r, False
+        return r, False, None
     if role == "qa-reviewer" and (r := check_reviewer(tool, tin, cwd)):
-        return r, False
+        return r, False, None
     if tool == "Bash":
         ctx = Ctx(cwd, role in EXPLORERS, clean(tin.get("command") or ""))
         r = check(ctx.raw, cwd, ctx)
-        return r, not r and ctx.approve and ctx.segments > 0
+        return r, not r and ctx.approve and ctx.segments > 0, ctx.blocker
     if tool in WRITE_TOOLS | {"Read", "Grep", "Glob", "LS"}:
-        return check_files(tool, tin, cwd, role in EXPLORERS), False
-    return check_jira_mcp(tool), False
+        return check_files(tool, tin, cwd, role in EXPLORERS), False, None
+    return check_jira_mcp(tool), False, None
 
 
 def decide(data):
@@ -2189,6 +2195,49 @@ def log_denial(data, reason, layer="guard"):
         pass
 
 
+def blocker_word(what):
+    """A word or shape the model typed, safe to show and to count: never more than a word."""
+    return re.sub(r"[^\w .()$&-]", "?", str(what))[:24]
+
+
+def call_key(cmd):
+    """The 12-hex key of a Bash command (posttooluse.classify puts the same one on the result line): never the text,
+    which can hold a typed value."""
+    return hashlib.sha1(" ".join(str(cmd).split()).encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
+
+
+def trace_request(data, reason, approve, blocker):
+    """One request line in qa-out/.active.progress for an explorer's Bash call in a live run: when the guard saw it and
+    what it decided (a approved, d denied, c left to Claude Code's own check). PostToolUse adds the result line; the
+    time between the two is what a call waited. A rule or a word and a hash only: no command, host, path or page text.
+    Best effort: a trace that can't be written never changes the decision."""
+    try:
+        if clean(data.get("tool_name") or "") != "Bash" or agent_role(data) not in EXPLORERS:
+            return
+        path, m = read_marker(_cwd(data))
+        if not path:
+            return
+        tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        rec = {
+            "e": m.get("expires"),
+            "t": "q",
+            "ts": round(time.time(), 3),
+            "d": "d" if reason else "a" if approve else "c",
+        }
+        if reason:
+            rec["w"] = str(reason).split(":", 1)[0][:40]
+        elif not approve and blocker:
+            rec["w"] = blocker_word(blocker)
+        rec["k"] = call_key(tin.get("command") or "")
+        if data.get("tool_use_id"):
+            rec["id"] = clean(data["tool_use_id"])[:64]
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(path.with_name(".active.progress"), flags, 0o600), "w") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except Exception:  # noqa: BLE001, S110 - the trace is best effort
+        pass
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -2196,8 +2245,9 @@ def main():
         data = None
     if not isinstance(data, dict):
         return 0
+    blocker = None
     try:
-        reason, approve = evaluate(data)
+        reason, approve, blocker = verdict(data)
     except Exception as e:  # noqa: BLE001 - a crashing guard must not mean "allowed" for anything guarded (or the mapper)
         role, text = agent_role(data), json.dumps(data.get("tool_input"), ensure_ascii=False, default=str)
         guarded = mentions_guarded(text, role in EXPLORERS) or role == "qa-mapper"
@@ -2229,6 +2279,7 @@ def main():
         )
     if reason:
         log_denial(data, reason)
+    trace_request(data, reason, approve, blocker)
     return 0
 
 

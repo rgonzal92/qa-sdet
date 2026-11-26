@@ -410,6 +410,94 @@ class Hooks(Base):
         self.assertEqual(self.pw("playwright-cli -s=qa goto https://evil.example"), "")  # a denial has its own message
         self.assertEqual(self.pw("git status | jq .", agent=""), "")  # the main session isn't the explorer
 
+    def progress(self):
+        return [json.loads(x) for x in (self.proj / "qa-out/.active.progress").read_text().splitlines()]
+
+    def test_each_result_line_carries_its_time_its_call_id_and_the_key_of_its_command(self):
+        """The other half of the guard's request line: the trace pairs the two by id (else by key) to time each call."""
+        import hashlib
+        import time
+
+        d = self.rundir("2026-11-25-PROJ-1")
+        self.default_run(run_dir=str(d), slug="form")
+        base = {"agent_type": "qa-sdet:qa-explorer", "cwd": str(self.proj), "hook_event_name": "PostToolUse"}
+        t = time.time()
+        for cmd, n in (("playwright-cli -s=qa click e1", 1), ("qa-mem card  /x", 2)):
+            self.post({**base, "tool_name": "Bash", "tool_input": {"command": cmd}, "tool_use_id": f"toolu_{n}"})
+        self.pw("playwright-cli -s=qa snapshot")  # no id in the input: none on the line
+        pw, other, look = self.progress()
+        key = lambda c: hashlib.sha1(" ".join(c.split()).encode(), usedforsecurity=False).hexdigest()[:12]
+        self.assertEqual((pw["t"], pw["id"], pw["k"]), ("pw", "toolu_1", key("playwright-cli -s=qa click e1")))
+        self.assertEqual((other["t"], other["id"], other["k"]), ("o", "toolu_2", key("qa-mem card /x")))
+        self.assertNotIn("id", look)
+        for r in (pw, other, look):
+            self.assertTrue(t <= r["ts"] <= time.time() and round(r["ts"], 3) == r["ts"])
+            self.assertNotIn("f", r)
+
+    def test_the_guards_request_lines_count_for_no_spin_and_no_failure(self):
+        marker = self.default_run()
+        e = json.loads(marker.read_text())["expires"]
+        seen = []
+        for _ in range(8):
+            with (self.proj / "qa-out/.active.progress").open("a") as f:
+                f.write(json.dumps({"e": e, "t": "q", "ts": 1.0, "d": "c", "w": "jq", "k": "k", "p": 1}) + "\n")
+            seen.append(self.pw("playwright-cli -s=qa click e5", failed=True))
+        self.assertEqual(seen[:2], ["", ""])
+        self.assertIn("failed 3 times", seen[2])  # a request line is no progress, even one that says p
+        self.assertIn("8 browser calls", seen[7])
+
+    def test_the_write_of_the_run_json_marks_when_the_cases_were_done(self):
+        d = self.rundir("2026-11-25-PROJ-1")
+        self.default_run(run_dir=str(d), slug="form")
+        write = lambda f: self.post(
+            {
+                "tool_name": "Write",
+                "agent_type": "qa-sdet:qa-explorer",
+                "cwd": str(self.proj),
+                "tool_input": {"file_path": str(f), "content": "{}"},
+            }
+        )
+        write(d / "bugs/BUG-1.md")
+        write(d / ".data/run-other.json")  # another page's run file: not this run's checkpoint
+        write(Path("qa-out", d.name, ".data/run-form.json"))  # relative to the cwd: the same file
+        self.assertEqual([r.get("f") for r in self.progress()], [None, None, "run"])
+        self.assertEqual({r["t"] for r in self.progress()}, {"w"})
+
+    def test_an_empty_search_is_not_a_failed_tool_call(self):
+        """grep exits 1 when it finds nothing: an answer, not a failure worth a plugin-log line."""
+        (self.proj / "qa-out").mkdir(exist_ok=True)
+        fail = lambda cmd, err="Exit code 1": self.post(
+            {
+                "tool_name": "Bash",
+                "agent_type": "qa-sdet:qa-explorer",
+                "cwd": str(self.proj),
+                "hook_event_name": "PostToolUseFailure",
+                "tool_input": {"command": cmd},
+                "error": err,
+            }
+        )
+        quiet = [
+            "playwright-cli -s=qa snapshot | grep -n Save",
+            ("playwright-cli -s=qa snapshot | grep -c 'Save|Cancel'", ""),
+            "playwright-cli -s=qa click e1 && playwright-cli -s=qa snapshot | egrep -i 'saved'",
+            "fgrep -q x qa-out/r/.data/requests-form.log",
+            ("grep Save qa-out/r/scratch/page.yml", "Exit code 1\n"),
+        ]
+        logged = [
+            "playwright-cli -s=qa snapshot | grep -n Save | head -3",  # not grep's exit
+            "grep -n Save page.yml; playwright-cli -s=qa click e1",  # the browser call failed
+            ("playwright-cli -s=qa snapshot | grep Save", "Exit code 2\ngrep: bad regex"),
+            ("playwright-cli -s=qa snapshot | grep Save", "Exit code 1\nError: the browser is closed"),
+            "playwright-cli -s=qa find 'grep'",
+            "grep 'unclosed",
+        ]
+        for c in quiet + logged:
+            fail(*(c if isinstance(c, tuple) else (c,)))
+        cmds = [r["cmd"] for r in self._read_plugin_log() if r["type"] == "tool_fail"]
+        self.assertEqual(len(cmds), len(logged), cmds)
+        for c in logged:
+            self.assertIn(" ".join((c if isinstance(c, tuple) else (c,))[0].split()), cmds)
+
     def test_a_new_interaction_or_a_file_written_is_progress(self):
         self.default_run()
         for n in range(1, 31):  # 30 different clicks, each looked at: never a spin

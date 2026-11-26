@@ -64,6 +64,29 @@ class Bugs(MemBase):
         memory.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [x]}, src="qa-out/r/.data/run-b.json")
         self.assertEqual(bugs(), [("X", 3), ("Y", 1)])
 
+    def test_a_bug_dropped_because_no_run_lists_it_leaves_a_notice(self):
+        """Memory deletes it on its own (a checkpoint listed it, the final run file didn't): the plugin log says so."""
+        src = self.proj / "qa-out/2026-11-25-PROJ-1/.data/run-form.json"
+        src.parent.mkdir(parents=True)
+        log = self.proj / "qa-out/plugin-log.jsonl"
+        notices = lambda: [r for r in map(json.loads, log.read_text().splitlines()) if r["type"] == "notice"]
+        x, y = {"route": "/form/7", "title": "X", "symptom": "x"}, {"route": "/form", "title": "Y", "symptom": "y"}
+        a = lambda *b: {"run_id": "explore-f-1", "build": "1", "bugs": list(b)}
+        memory.ingest(self.con, a(x, y), src=src)
+        memory.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [y]}, src="other")
+        memory.ingest(self.con, a(x, y), src=src)
+        self.assertFalse(log.exists())
+        memory.ingest(self.con, a(), src=src)  # X was only this run's: dropped; Y another run still lists
+        (n,) = notices()
+        self.assertEqual(
+            (n["kind"], n["hash"], n["route"], n["run"]),
+            ("bug_dropped", core.bug_hash("/form/:id", "x"), "/form/:id", "explore-f-1"),
+        )
+        memory.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": [x]}, src="nowhere/run-x.json")
+        memory.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": []}, src="nowhere/run-x.json")
+        self.assertEqual(len(notices()), 1)  # no qa-out folder to tell: dropped all the same
+        self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)
+
     def test_late_run_keeps_newer_coverage_and_bug_dates(self):
         cov = lambda r: [{"target": "speed", "heuristic": "boundary", "result": r}]
         bug = {"route": "/form", "title": "t", "symptom": "s"}

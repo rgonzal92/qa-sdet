@@ -130,6 +130,95 @@ class Marker(Base):
         self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
         self.assertEqual(cli("marker", "stop", str(self.proj))[0], 0)  # already gone: fine
 
+    def start_run(self, slug="form"):
+        d = self.proj / "qa-out/2026-11-25-PROJ-1"
+        (d / ".data").mkdir(parents=True, exist_ok=True)
+        return d, ops.marker_start(self.proj, run_dir=d, slug=slug)["expires"]
+
+    def lines(self, e, *recs):
+        with (self.proj / "qa-out/.active.progress").open("a") as f:
+            f.writelines(json.dumps({"e": e, **r}) + "\n" for r in recs)
+
+    def summaries(self):
+        log = self.proj / "qa-out/plugin-log.jsonl"
+        return [r for r in map(json.loads, log.read_text().splitlines()) if r["type"] == "run_summary"]
+
+    def test_stop_keeps_the_runs_trace_beside_its_run_file(self):
+        """The hooks' lines of this run move to <run>/.data/trace-<slug>.jsonl: a resumed route adds to them."""
+        d, e = self.start_run()
+        self.lines(e - 1, {"t": "pw", "ts": 1})  # an older run's line
+        self.lines(e, {"t": "q", "ts": 2, "d": "a", "k": "k1"}, {"t": "pw", "ts": 3, "k": "k1"})
+        with (self.proj / "qa-out/.active.progress").open("a") as f:
+            f.write("{oops\n")
+        ops.marker_stop(self.proj)
+        trace = d / ".data/trace-form.jsonl"
+        self.assertEqual([r["ts"] for r in map(json.loads, trace.read_text().splitlines())], [2, 3])
+        self.assertEqual(stat.S_IMODE(trace.stat().st_mode), 0o600)
+        self.assertEqual(sorted(p.name for p in (self.proj / "qa-out").iterdir()), [d.name, "plugin-log.jsonl"])
+        _, e2 = self.start_run()  # the route resumed
+        self.lines(e2 + 1, {"t": "q", "ts": 4})
+        self.lines(e2, {"t": "q", "ts": 5})
+        ops.marker_stop(self.proj)
+        self.assertEqual([r["ts"] for r in map(json.loads, trace.read_text().splitlines())], [2, 3, 5])
+
+    def test_a_crawl_or_a_planted_link_leaves_no_trace(self):
+        ops.marker_start(self.proj)  # crawl and discover: no run file to keep it beside
+        self.lines(1, {"t": "o"})
+        ops.marker_stop(self.proj)
+        self.assertEqual(list((self.proj / "qa-out").iterdir()), [])
+        victim = self.t / "victim.txt"
+        victim.write_text('{"e": 1}\n')
+        d, e = self.start_run()
+        (self.proj / "qa-out/.active.progress").symlink_to(victim)
+        ops.marker_stop(self.proj)
+        self.assertFalse((d / ".data/trace-form.jsonl").exists())
+        self.assertFalse((self.proj / "qa-out/.active.progress").is_symlink())
+        _, e = self.start_run()
+        self.lines(e, {"t": "o", "ts": 1})
+        (d / ".data/trace-form.jsonl").symlink_to(victim)  # never written through
+        ops.marker_stop(self.proj)
+        self.assertEqual(victim.read_text(), '{"e": 1}\n')
+        self.assertFalse((self.proj / "qa-out/.active.progress").exists())
+
+    def test_the_run_summary_has_the_traces_totals(self):
+        """Where a run's time went: the guard's approvals, Claude Code's own check, the model, and after the cases."""
+        _, e = self.start_run()
+        self.lines(
+            e,
+            {"t": "q", "ts": 100.0, "d": "a", "k": "k1", "id": "i1"},
+            {"t": "q", "ts": 100.25, "d": "c", "w": "jq", "k": "k5", "id": "i5"},  # in parallel with i1
+            {"t": "pw", "ts": 100.5, "k": "k1", "id": "i1", "ok": 1, "p": 1},
+            {"t": "o", "ts": 101.0, "k": "k5", "id": "i5", "p": 0},
+            {"t": "q", "ts": 102.0, "d": "c", "w": "jq", "k": "k2"},  # no ids: paired by key
+            {"t": "n", "n": "slow:jq"},
+            {"t": "o", "ts": 107.5, "k": "k2", "p": 0},
+            {"t": "q", "ts": 108.0, "d": "d", "w": "playwright-cli goto to non-allowlisted host", "k": "k3"},
+            {"t": "w", "ts": 110.0, "p": 1, "f": "run"},  # the cases are done
+            {"t": "q", "ts": 111.0, "d": "c", "w": "a loop", "k": "k4", "id": "i4"},
+            {"t": "pw", "ts": 116.0, "k": "k4", "id": "i4", "ok": 1, "p": 0},
+        )
+        ops.marker_stop(self.proj)
+        (s,) = self.summaries()
+        self.assertEqual(s["turns"], 5)  # the results, never the request lines or nudges
+        self.assertEqual(
+            {k: s[k] for k in ("calls", "approved", "unapproved", "denied", "approved_s", "unapproved_s")},
+            {"calls": 5, "approved": 1, "unapproved": 3, "denied": 1, "approved_s": 0.5, "unapproved_s": 11.25},
+        )
+        self.assertEqual(s["model_s"], 1.0 + 0.5 + 1.0)  # each request after the last result; parallel ones add none
+        self.assertEqual(s["denials"], {"playwright-cli goto to non-allowlisted host": 1})
+        self.assertEqual(s["blockers"], {"jq": 2, "a loop": 1})
+        self.assertEqual(s["after_cases_s"], 6.0)
+
+    def test_a_run_without_a_trace_or_a_checkpoint_has_zero_totals(self):
+        self.start_run()
+        ops.marker_stop(self.proj)
+        (s,) = self.summaries()
+        self.assertEqual(
+            {k: s[k] for k in ("calls", "approved_s", "unapproved_s", "model_s", "after_cases_s")},
+            {"calls": 0, "approved_s": 0, "unapproved_s": 0, "model_s": 0, "after_cases_s": 0},
+        )
+        self.assertEqual((s["denials"], s["blockers"]), ({}, {}))
+
     def test_api_writes_is_a_flag_of_the_run_and_off_by_default(self):
         cli("marker", "start", str(self.proj))
         self.assertIs(json.loads((self.proj / "qa-out/.active").read_text())["api_writes"], False)
@@ -503,6 +592,32 @@ class PageStart(Base):
         self.assertEqual((code, out["build"]), (0, "1.43.0"))
         code, out, _ = self.start([*signed_in, done(1, err="boom")])
         self.assertEqual((code, out["build"]), (0, "unknown"))
+
+    def test_a_build_source_that_cant_be_read_leaves_a_notice_in_the_plugin_log(self):
+        """The run goes on with build `unknown`; the notice keeps why, so a broken buildSource gets fixed."""
+        self.config(**self.CFG)
+        (self.proj / "qa-out").mkdir()
+        os.environ["CLAUDE_PROJECT_DIR"] = str(self.proj)
+        log = self.proj / "qa-out/plugin-log.jsonl"
+        notices = lambda: [r for r in map(json.loads, log.read_text().splitlines()) if r["type"] == "notice"]
+        signed_in = [done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}')]
+        self.start([*signed_in, done(0, out="1.43.0\n")])
+        self.assertFalse(log.exists())  # read: nothing to say
+        err = "Error: no element at https://qa.example.com/x?token=s3cr3tvalue " + "x" * 300 + "\n    at stack line"
+        code, out, _ = self.start([*signed_in, done(1, err=err)])
+        self.assertEqual((code, out["build"]), (0, "unknown"))
+        (n,) = notices()
+        self.assertEqual((n["kind"], n["source"]), ("build_unreadable", "selector"))
+        self.assertTrue(n["detail"].startswith("Error: no element at"))
+        self.assertLessEqual(len(n["detail"]), 200)
+        for leak in ("s3cr3tvalue", "stack line"):
+            self.assertNotIn(leak, n["detail"])
+        self.start([*signed_in, done(0, out="\n")])  # read, but empty: the selector found nothing
+        self.assertEqual(notices()[-1]["kind"], "build_unreadable")
+        self.assertIn("empty", notices()[-1]["detail"])
+        with mock.patch.object(ops.subprocess, "run", side_effect=[*signed_in, subprocess.TimeoutExpired("x", 20)]):
+            cli("page-start", "https://qa.example.com/app/form")
+        self.assertEqual(len(notices()), 3)
 
     def test_a_list_of_build_sources_is_one_build_that_any_part_changes(self):  # a shell and its own modules
         sources = [

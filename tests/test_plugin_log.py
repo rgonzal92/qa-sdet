@@ -349,6 +349,47 @@ class PluginLogAnonymizerAndExport(Base):
         md = pl.export_digest(self.proj, preview=True)["markdown"]
         self.assertIn("**Build detection:** 0/2 known (2 `unknown`)", md)
 
+    def test_the_digest_shows_where_run_time_went_and_the_notices(self):
+        pl = self._mod()
+        self.config(qaBaseUrl="https://qa.corp.example", allowedHosts=["qa.corp.example"])
+        qa_out = self.proj / "qa-out"
+        qa_out.mkdir()
+        self.assertIn("notice", pl.EVENT_TYPES)
+        totals = lambda **kw: {
+            "calls": 40,
+            "approved": 30,
+            "unapproved": 8,
+            "denied": 2,
+            "approved_s": 21.0,
+            "unapproved_s": 44.5,
+            "model_s": 300.25,
+            "after_cases_s": 0,
+            "denials": {"playwright-cli goto to non-allowlisted": 2},
+            "blockers": {"jq": 5, "a loop": 3},
+            **kw,
+        }
+        for slug, kw in (("a", {}), ("b", {"after_cases_s": 90.0, "blockers": {"jq": 1}})):
+            pl.append_event(qa_out, "run_summary", {"run": "r", "slug": slug, "status": "COMPLETED", **totals(**kw)})
+        pl.append_event(qa_out, "run_summary", {"run": "init", "slug": "code-map-1", "mode": "map"})  # no trace
+        for detail in ("selector not found", "selector not found at https://qa.corp.example/x"):
+            pl.append_event(qa_out, "notice", {"kind": "build_unreadable", "detail": detail})
+        pl.append_event(qa_out, "notice", {"kind": "bug_dropped", "hash": "abc123def456", "route": "/form/7"})
+        rec = json.loads((qa_out / pl.LOG_NAME).read_text().splitlines()[0])
+        self.assertEqual((rec["blockers"], rec["model_s"]), ({"jq": 5, "a loop": 3}, 300.25))  # through the scrubber
+        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        self.assertIn("### Notices (3)", md)
+        self.assertIn("`build_unreadable` (×2)", md)
+        self.assertIn("`bug_dropped` (×1)", md)
+        self.assertIn("/form/:id", md)
+        self.assertNotIn("qa.corp.example", md)
+        self.assertIn(
+            "- **Calls:** 80 in 2 runs: 60 approved (42s), 16 unapproved (89s), 4 denied; model 600s; "
+            "after the cases 90s",
+            md,
+        )
+        self.assertIn("- **Unapproved by:** `jq` 6, `a loop` 3", md)
+        self.assertIn("- **Denied by:** `playwright-cli goto to non-allowlisted` 4", md)
+
     def test_show_and_clear(self):
         pl = self._mod()
         qa_out = self.proj / "qa-out"

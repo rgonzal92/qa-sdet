@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -321,35 +322,119 @@ def dispatch(
     return {"slug": slug, "target": target, "brief": str(brief), "mode": mode, "case_count": len(cases)}
 
 
-def _log_run_summary(root):
-    """Emit a 1-line run_summary event to <root>/plugin-log.jsonl before marker_stop clears .active/.active.progress."""
+def _run_of(root):
+    """(marker, run folder, slug) of the explorer run the marker names, or None (crawl, discover, a malformed marker)."""
     try:
         m = json.loads((root / ".active").read_text())
-        if not isinstance(m, dict) or not (m.get("run_dir") and m.get("slug")):
-            return
-        rdir = Path(m["run_dir"])
-        if rdir.parent != root:
-            return
-        slug = str(m["slug"])
-        turns = 0
+    except (OSError, ValueError):
+        return None
+    if not isinstance(m, dict) or not (m.get("run_dir") and m.get("slug")):
+        return None
+    rdir = Path(str(m["run_dir"]))
+    return (m, rdir, str(m["slug"])) if rdir.parent == root else None
+
+
+def _trace_lines(root, expires):
+    """[(raw line, record)] of this marker in qa-out/.active.progress: the hooks' lines, read through no link or FIFO."""
+    out = []
+    try:
+        fd = os.open(root / ".active.progress", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return out
+            text = fh.read(1 << 20).decode("utf-8", "replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
         try:
-            fd = os.open(root / ".active.progress", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as fh:
-                for raw in fh.read(1 << 20).decode("utf-8", "replace").splitlines():
-                    try:
-                        r = json.loads(raw)
-                        if isinstance(r, dict) and r.get("e") == m.get("expires") and r.get("t") != "n":
-                            turns += 1
-                    except ValueError:
-                        continue
-        except OSError:
-            pass
+            r = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("e") == expires:
+            out.append((raw, r))
+    return out
+
+
+def _trace_totals(recs):
+    """Where the run's time went, from the guard's request lines (t q) and PostToolUse's result lines (pw, w, o): a
+    request pairs with its result by tool_use_id, else by command key in order (a denied call never runs). model_s is
+    the time from the last result to the next request (the model thinking); after_cases_s the time after the run file
+    was first written (the cases were done)."""
+    num = lambda r: r.get("ts") if isinstance(r.get("ts"), (int, float)) and not isinstance(r.get("ts"), bool) else None
+    counts = {"a": 0, "c": 0, "d": 0}
+    secs = {"a": 0.0, "c": 0.0}
+    model, last_result, cases_at, last_ts = 0.0, None, None, None
+    denials, blockers, pending = Counter(), Counter(), []
+    for r in recs:
+        ts = num(r)
+        if ts is None:
+            continue
+        last_ts = ts if last_ts is None else max(last_ts, ts)
+        if r.get("t") == "q" and r.get("d") in counts:
+            counts[r["d"]] += 1
+            if last_result is not None:
+                model += max(0.0, ts - last_result)
+            if r["d"] == "d":
+                denials[str(r.get("w") or "?")] += 1
+                continue
+            if r["d"] == "c" and r.get("w"):
+                blockers[str(r["w"])] += 1
+            pending.append(r)
+        elif r.get("t") in ("pw", "w", "o"):
+            last_result = ts if last_result is None else max(last_result, ts)
+            if r.get("f") == "run" and cases_at is None:
+                cases_at = ts
+            q = next((x for x in pending if r.get("id") and x.get("id") == r["id"]), None) or next(
+                (x for x in pending if r.get("k") and x.get("k") == r["k"]), None
+            )
+            if q is not None:
+                pending.remove(q)
+                secs[q["d"]] += max(0.0, ts - q["ts"])
+    return {
+        "calls": sum(counts.values()),
+        "approved": counts["a"],
+        "unapproved": counts["c"],
+        "denied": counts["d"],
+        "approved_s": round(secs["a"], 2),
+        "unapproved_s": round(secs["c"], 2),
+        "model_s": round(model, 2),
+        "denials": dict(denials.most_common(10)),
+        "blockers": dict(blockers.most_common(10)),
+        "after_cases_s": round(last_ts - cases_at, 2) if cases_at is not None else 0,
+    }
+
+
+def _keep_trace(rdir, slug, lines):
+    """Append this run's lines to <run>/.data/trace-<slug>.jsonl (a resumed route keeps its earlier ones). Not the
+    explorer's to write (guard EXPLORER_FILES); never through a link. Best effort."""
+    data = rdir / ".data"
+    if not lines or not re.fullmatch(r"[\w-][\w.-]*", slug) or data.is_symlink() or not data.is_dir():
+        return  # the slug names a file in .data: never a path
+    try:
+        fd = os.open(
+            data / f"trace-{slug}.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                fh.write("".join(raw + "\n" for raw, _ in lines))
+    except OSError:
+        pass
+
+
+def _log_run_summary(root, run, lines):
+    """Emit a 1-line run_summary event to <root>/plugin-log.jsonl before marker_stop clears .active/.active.progress."""
+    try:
+        if run is None:
+            return
+        m, rdir, slug = run
+        recs = [r for _, r in lines]
         started = float(m.get("expires") or 0) - MARKER_HOURS * 3600
         fields = {
             "run": rdir.name,
             "slug": slug,
-            "turns": turns,
+            "turns": sum(1 for r in recs if r.get("t") not in ("n", "q")),  # results: not nudges or request lines
             "duration_s": max(0, int(time.time() - started)) if started > 0 else 0,
+            **_trace_totals(recs),
         }
         run_file = rdir / ".data" / f"run-{slug}.json"
         doc = None
@@ -397,7 +482,11 @@ def _log_run_summary(root):
 
 def marker_stop(project: str | Path) -> None:
     root = _project(project) / "qa-out"
-    _log_run_summary(root)
+    run = _run_of(root)
+    lines = _trace_lines(root, run[0].get("expires")) if run else []
+    _log_run_summary(root, run, lines)
+    if run:
+        _keep_trace(run[1], run[2], lines)
     for name in (".active", ".active.progress"):
         (root / name).unlink(missing_ok=True)
 
@@ -615,6 +704,22 @@ def _build_js(bs, hosts):
     return None
 
 
+def _build_notice(bs, error):
+    """A `build_unreadable` notice in the project's plugin log: the run goes on with build `unknown`, which hides
+    nothing on the page but makes every page look stale; the eval's first line says why. Best effort."""
+    try:
+        from . import plugin_log
+
+        first = next((x.strip() for x in str(error).splitlines() if x.strip()), "")
+        plugin_log.append_event(
+            plugin_log.resolve_project() / "qa-out",
+            "notice",
+            {"kind": "build_unreadable", "source": str(bs.get("type")), "detail": plugin_log.scrub_text(first, 200)},
+        )
+    except Exception:  # noqa: BLE001, S110 - a notice must never break the page start
+        pass
+
+
 def _read_build(cfg, hosts, env):
     """The build per config buildSource (selector, url or header), or core.UNKNOWN. With no buildSource, the build
     recorded by `qa-mem stale`; with one, only the live read, so a broken buildSource isn't hidden by an old build.
@@ -627,7 +732,7 @@ def _read_build(cfg, hosts, env):
     if not scripts or not all(scripts):
         return _stored_build() or core.UNKNOWN
     parts = []
-    for bjs in scripts:
+    for bs, bjs in zip(listed if isinstance(listed, list) else [listed], scripts):
         try:
             br = subprocess.run(
                 ["playwright-cli", "-s=qa", "--raw", "eval", bjs],
@@ -637,12 +742,16 @@ def _read_build(cfg, hosts, env):
                 errors="replace",
                 timeout=20,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as e:
+            _build_notice(bs, str(e))
             return core.UNKNOWN
         if br.returncode != 0:
+            _build_notice(bs, br.stderr or br.stdout or f"the eval exited {br.returncode}")
             return None
         raw_b = _unwrap_raw(br.stdout)
         parts.append(core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout))
+        if parts[-1] == core.UNKNOWN:
+            _build_notice(bs, "the source read as empty (no such element, or no text)")
     if len(parts) == 1 or core.UNKNOWN in parts:
         return parts[0] if len(parts) == 1 else core.UNKNOWN
     digest = lambda p: hashlib.sha1(p.encode(), usedforsecurity=False).hexdigest()[:10]
