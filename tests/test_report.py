@@ -1099,6 +1099,30 @@ class Layout(Rendering):
             "1. Delete the test data left in the app on /form: qa-sdet-zone-1 (delete refused: budget used up)\n", sec
         )
 
+    def test_nothing_left_in_the_app_is_nothing_to_do(self):  # a live run wrote "Left in the app: none."
+        for none in ("none", "None.", "nothing", "n/a", "-"):
+            run = {**RUN1, "notes": f"Explored the form.\nLeft in the app: {none}"}
+            _, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+            self.assertNotIn("Delete the test data", r, none)
+
+    def test_a_known_bug_seen_again_is_not_an_earlier_bug_this_run_did_not_see(self):
+        # a full re-run names the earlier bug by its memory hash, with the title the card gave it: its draft stays
+        known = {
+            "hash": "f1ba5beb8c76",
+            "title": "Speed accepts  131",
+            "severity": "HIGH",
+            "classification": "CONFIRMED",
+        }
+        run = {**RUN1, "bugs": [known]}
+        d, _ = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        (d / "bugs/BUG-1.md").write_text("# Speed accepts 131\n\nbody\n")
+        (d / "bugs/BUG-2.md").write_text("# Another earlier bug\n")
+        report.write_report(d)
+        r = (d / "REPORT.md").read_text()
+        tail = r[r.index("did not see") :]
+        self.assertNotIn("BUG-1", tail)
+        self.assertIn("- [BUG-2](bugs/BUG-2.md) Another earlier bug\n", tail)
+
     def test_bug_video_is_linked_only_when_the_file_exists(self):
         run = {
             "mode": "explore",

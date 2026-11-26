@@ -642,6 +642,8 @@ class Docs(unittest.TestCase):
             self.assertIn(f'"{field}"', state)
         self.assertIn("## Retest from an older folder", text("references/planning.md"))
         self.assertIn('planning.md, "Retest from an older folder"', skill)
+        # a build that can't be read is not a new build: a live run re-ran every case of an interrupted ticket
+        self.assertIn("the live build is known (not `unknown`) and not in `latest_run.builds`", table)
 
     def test_batch_explore_skips_routes_that_need_a_record_id(self):
         """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""

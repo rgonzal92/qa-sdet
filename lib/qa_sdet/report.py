@@ -2073,6 +2073,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
                 f"Delete the test data left in the app on {one_line(r.get('target') or name)}: {cell(m.group(1).strip())}"
                 for name, r in runs
                 for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))
+                if not re.fullmatch(r"(none|nothing|n/a|-)\.?", m.group(1).strip(), re.I)
             ]  # step 9 couldn't delete them: they stay in the shared QA app
             severe = [k for _, (sig, _) in triaged for k, _ in sig if signal_severity(k) == "severe"]
             if severe:
@@ -2159,11 +2160,17 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
         blocks += _notes_blocks(plan, runs)
     history = [_history_table(run_dir, keys[0])] if single else []
     listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
+    # shortcut: a known bug (named by its memory hash) is matched to its earlier draft by title, as the card gives
+    # it; read the draft path from memory if explorers start rewording titles
+    seen_again = {" ".join(core._s(b.get("title")).split()) for b in bugs if b.get("hash") and not b.get("id")}
     orphans = sorted(
         (
             p
             for p in (run_dir / "bugs").glob("BUG-*.md")
-            if re.fullmatch(r"BUG-\d+", p.stem) and p.stem not in listed and p.is_file()
+            if re.fullmatch(r"BUG-\d+", p.stem)
+            and p.stem not in listed
+            and p.is_file()
+            and " ".join(_draft_title(p, "").split()) not in seen_again
         ),
         key=lambda p: int(p.stem[4:]),
     )

@@ -26,7 +26,7 @@ Done when the ticket has numbered AC and every AC has a route: the page where it
 
   | When | Routes | Each dispatch gets |
   |---|---|---|
-  | `--all`, or the live build is not in `latest_run.builds` | every route with a case | `--all` |
+  | `--all`, or the live build is known (not `unknown`) and not in `latest_run.builds` | every route with a case | `--all` |
   | `--retest` | the routes of `latest_run.retest_cases` | `--cases <that route's ids in retest_cases>` |
   | `latest_run.incomplete_routes` is not empty (`--resume`, or no flag) | `incomplete_routes` | nothing more: it gives the open cases |
   | none of these | none | nothing runs: reply with the verdict `<run>/REPORT.md` shows, say the ticket is already tested on this build, name `--retest` and `--all`, and go on with the next ticket |
