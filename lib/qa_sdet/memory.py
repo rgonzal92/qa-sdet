@@ -667,7 +667,7 @@ def check_report_fields(run):
     env = {} if env is None else env
     if not isinstance(env, dict):
         raise ValueError("'env' must be an object")
-    for f in ("url", "browser"):
+    for f in ("url", "browser", "context"):
         core.txt(env.get(f), f"env.{f}")
 
 
@@ -918,7 +918,7 @@ def card(con, q, focus=None, ids=False):
     ).fetchall()  # the user's own (qa-mem remember), app-wide ones included
     rest = con.execute(
         "SELECT id,kind,text,stale,source FROM facts WHERE page=? ORDER BY stale, CASE WHEN kind IN "
-        "('rule','validation','flow','api') OR lower(coalesce(source,'')) NOT IN ('','observed') THEN 0 "
+        "('rule','validation','flow','api','precondition') OR lower(coalesce(source,'')) NOT IN ('','observed') THEN 0 "
         "ELSE 1 END, ts DESC LIMIT 60",
         (r,),
     ).fetchall()

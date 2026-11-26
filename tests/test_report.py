@@ -818,6 +818,19 @@ class Report(Base):
         )
         self.assertTrue(report._header("/x/qa-out/2026-11-23-T", "ticket", plan, [])[1].endswith("browser chrome"))
 
+    def test_header_says_what_the_runs_ran_as(self):  # a tenant or role changes what a page shows
+        runs = [
+            ("run-a.json", {"env": {"url": "https://qa/a", "browser": "chrome", "context": "site North; role editor"}}),
+            ("run-b.json", {"env": {"url": "https://qa/b", "browser": "chrome", "context": "site North; role editor"}}),
+            (
+                "run-c.json",
+                {"env": {"url": "https://qa/c", "browser": "chrome", "context": "site South;\nrole viewer"}},
+            ),
+        ]
+        head = report._header("/x/qa-out/2026-11-23-T", "explore", {}, runs)[1]
+        self.assertTrue(head.endswith("browser chrome · as site North; role editor / site South; role viewer"), head)
+        self.assertNotIn(" as ", report._header("/x/qa-out/2026-11-23-T", "explore", {}, runs[:0])[1])
+
     def test_index_write_waits_for_another_report(self):
 
         d = self.rundir(runs=[("x", {"target": "/x"})])

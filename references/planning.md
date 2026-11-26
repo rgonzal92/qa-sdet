@@ -26,7 +26,7 @@ The skill writes `<run>/.data/plan.json`; `qa-mem report '<run>'` renders it.
 
 ## Ticket and plan
 - `acs`: only what the ticket states. A missing rule, an ambiguous word, an unclear role or state is a question: `Q1 [BLOCKING]`, `[HIGH]` or `[LOW]`. Done when every AC and question is numbered. With several tickets, write each question as an object with its `ticket`. While a `[BLOCKING]` one is open, that ticket (untagged: every ticket) gets `PASS WITH NOTES` at best; once answered, set `"status": "resolved"` and the `answer`.
-- `plan`: scope by AC id; approach (levels, roles, pages, P1 first); risks with impact and covering cases; test_data (roles, `qa-sdet-` records, flags).
+- `plan`: scope by AC id; approach (levels, roles, pages, P1 first); risks with impact and covering cases; test_data (the tenant or site, roles, licenses, `qa-sdet-` records, flags: what a case needs before its first step).
 - `out_of_scope`: checks only an API or unit test can prove (test at the cheapest level), and failures this run can't cause. Provoking an API error or an empty response needs `--faults`: write `Provoking a closures API error (needs --faults)`, not `API errors`; with `--faults` they are cases. It limits what the run causes, never what it judges: a failure the app shows on its own is still tested.
 
 ## Cases

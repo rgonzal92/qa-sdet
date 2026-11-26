@@ -13,7 +13,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
   "leads": [{"route": "/zones/:id", "kind": "shared-endpoint|sibling-field|child-route|signal|state", "target": "…",
              "reason": "…", "priority": "HIGH|MEDIUM"}],
   "summary": "one line",
-  "env": {"url": "<target URL>", "browser": "<config browser>"},
+  "env": {"url": "<target URL>", "browser": "<config browser>", "context": "site North; role editor; fresh start"},
   "cases": [{"id": "TC-1", "status": "PASS | FAIL | BLOCKED | NOT_RUN | QUESTION",
              "actual": "what you saw", "notes": "", "bug": "BUG-2 or empty", "annotated": true}],
   "questions": [{"text": "for the product owner or a dev", "status": "open | resolved", "answer": "when resolved"}],
@@ -21,7 +21,7 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
   "notes": "what you explored, in plain words (at most 1500 chars)",
   "pages": [{
     "route": "/form", "name": "Signal timing form",
-    "facts": [{"kind": "rule|flow|api|validation|note", "text": "verified", "source": "observed|AC|PROJ-1234"}],
+    "facts": [{"kind": "rule|flow|api|validation|precondition|note", "text": "verified", "source": "observed|AC|PROJ-1234"}],
     "locators": [{"name": "Save button", "locator": "getByRole('button', { name: 'Save' })"}],
     "coverage": [{"target": "Speed limit field", "heuristic": "boundary", "result": "pass|fail|blocked"}],
     "states": [{"key": "tab: Scheduled", "kind": "tab|dialog|drawer|wizard-step|query-view", "trigger": "<locator>",
@@ -37,7 +37,8 @@ Your last file: `<out>/.data/run-<slug>.json`. The plugin's hook ingests it (the
 - `target`: the route explored, never a ticket key. `build`: exactly the text read via `buildSource`, or `unknown` (other text counts as a new build). `run_id`: `<mode>-<slug>-<UTC yyyymmdd-hhmm>`, new for each run.
 - `cases`: one per given case, ids as given; none given: empty. NOT_RUN (the run ended before you reached it) says why in `notes`; one you reached but couldn't do is `BLOCKED`. A PASS or FAIL says what you saw in `actual`. A FAIL names its bug in `bug`: `BUG-<n>`, a KNOWN BUG's hash, or a Jira key (the stop check sends a case without these back).
 - `not_tested.category`: `safety` held back by the run's rules; `out_of_scope` outside this ticket; `not_reached` the route or the run ended first; `needs_setup` needs a fault, account or data this run lacks; `heuristic` an UNTRIED heuristic you skipped; `other`.
-- Facts are verified (seen, or stated in a ticket); guesses are `questions`. Locators: only ones that worked, in role, label or test-id form; inside a frame, the form `generate-locator` prints (`locator('iframe[name="module"]').contentFrame().getByTestId('save')`), never a snapshot ref.
+- `env.context` (optional, one line): what the page ran as, where the page shows it: the tenant or site, the role, and anything kept from an earlier visit that changes what it shows (a saved view, a filter still applied). The report's first line prints it.
+- Facts are verified (seen, or stated in a ticket); guesses are `questions`. A `precondition` fact says what a page needs before it can be judged, so the next run doesn't report it as a bug: `Edit is off for records another system owns`, `The Export menu needs the reporting license`, `Opens only after a row is picked on /zones`. Locators: only ones that worked, in role, label or test-id form; inside a frame, the form `generate-locator` prints (`locator('iframe[name="module"]').contentFrame().getByTestId('save')`), never a snapshot ref.
 - `states` and `transitions` are optional: the page's in-page states the harvester (tips file) found, `visited` once you opened and checked one, and the app pages it links to (a detail page's `sample_path`: a record you opened, ideally a `qa-sdet-` one). Cards then list UNVISITED STATES and how to reach a detail page, and batch runs open `:id` pages from their entry page.
 - `stop_reason` (optional; any other value parks the file): why you stopped. `saturated`: every UNTRIED heuristic and UNTESTED TARGET is covered or in `not_tested`; `charter_complete`: the `FOCUS:` charter is done; `diminishing_returns`: you stopped early (agents/qa-explorer.md, "The loop is done when"); `blocked`: status `BLOCKED`. REPORT.md shows it in the Exploration notes, and the coordinator reads it to decide whether to run more pages.
 - `leads` (optional, at most 10): pages worth exploring next because of what you found here; REPORT.md lists them and `qa-explore --continue` picks them up.

@@ -1478,6 +1478,16 @@ class Retrieval(MemBase):
         self.assertIn("porter", self.con.execute("SELECT sql FROM sqlite_master WHERE name='facts_fts'").fetchone()[0])
         self.assertIn("Corridor dates", memory.search(self.con, "date"))
 
+    def test_a_precondition_outranks_newer_notes(self):  # what a page needs before it can be judged
+        need = "Edit is off for records another system owns: a limit of the record, not a bug"
+        memory.ingest(self.con, run(facts=[{"kind": "precondition", "text": need}]), "2026-01-01T00:00:00Z")
+        memory.ingest(
+            self.con,
+            run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
+            "2026-01-02T00:00:00Z",
+        )
+        self.assertIn(f"- [precondition] {need}", memory.card(self.con, "/form"))
+
     def test_rules_outrank_newer_notes_and_a_focus_comes_first(self):
         memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "date filter uses UTC"}]), "2026-01-01T00:00:00Z")
         memory.ingest(
@@ -2392,6 +2402,7 @@ class IngestPending(MemBase):
             {"not_tested": [{"category": "safety", "text": 3}]},
             {"env": "chrome"},
             {"env": {"url": ["x"]}},
+            {"env": {"context": {"role": "editor"}}},
             {"bugs": [{"route": "/x", "title": "t", "annotated": "yes"}]},
         ):
             d = self.rundir("bad")

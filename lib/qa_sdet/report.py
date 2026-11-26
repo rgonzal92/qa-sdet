@@ -707,6 +707,7 @@ def _header(run_dir, kind, plan, runs):
     m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
     date = str(plan.get("created") or "")[:10] or (m.group(0) if m else "")
     builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")})
+    ran_as = sorted({" ".join(scrub.redact(str(e["context"])).split()) for e in renvs if e.get("context")})
     bits = [
         kind,
         date,
@@ -716,6 +717,7 @@ def _header(run_dir, kind, plan, runs):
         f"retest of {plan['retest_of']}"
         if isinstance(plan.get("retest_of"), str) and plan["retest_of"].strip()
         else "",
+        "as " + " / ".join(core.short(x, 120) for x in ran_as[:3]) if ran_as else "",  # the tenant and role
     ]
     return [
         f"# QA report: {one_line(plan.get('title') or Path(run_dir).name)}",
