@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -592,35 +593,54 @@ def _stored_build():
     return None if build == core.UNKNOWN else build
 
 
+BUILD_PART = 60  # characters of one buildSource's text kept in a joined build; a longer one goes in as its digest
+
+
+def _build_js(bs, hosts):
+    """The eval that reads one buildSource ({type: selector|url|header, value}), or None for anything else."""
+    bs = bs if isinstance(bs, dict) else {}
+    btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
+    if btype == "selector" and bval:
+        return f"document.querySelector({json.dumps(bval)})?.textContent || ''"
+    if btype == "url" and bval and (bval.startswith("/") or core.url_allowed(bval, hosts)):
+        return f"fetch({json.dumps(bval)}).then(r => r.text())"
+    if btype == "header" and bval:
+        return f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
+    return None
+
+
 def _read_build(cfg, hosts, env):
     """The build per config buildSource (selector, url or header), or core.UNKNOWN. With no buildSource, the build
-    recorded by `qa-mem stale`; with one, only the live read, so a broken buildSource isn't hidden by an old build."""
-    bs = cfg.get("buildSource") if isinstance(cfg.get("buildSource"), dict) else {}
-    btype, bval = bs.get("type"), str(bs.get("value") or "").strip()
-    bjs = None
-    if btype == "selector" and bval:
-        bjs = f"document.querySelector({json.dumps(bval)})?.textContent || ''"
-    elif btype == "url" and bval and (bval.startswith("/") or core.url_allowed(bval, hosts)):
-        bjs = f"fetch({json.dumps(bval)}).then(r => r.text())"
-    elif btype == "header" and bval:
-        bjs = f"fetch(location.href).then(r => r.headers.get({json.dumps(bval)}) || '')"
-    if not bjs:
+    recorded by `qa-mem stale`; with one, only the live read, so a broken buildSource isn't hidden by an old build.
+    A list of sources (an app shell and the modules deployed on their own) is read in order and joined with '+': a
+    deploy of any part is a new build, and a part that can't be read leaves the build unknown.
+    shortcut: one build for the whole app, so a module's deploy marks every page stale; keep a build per module
+    (compared per page in memory) when re-verifying the other modules costs too much."""
+    listed = cfg.get("buildSource")
+    scripts = [_build_js(bs, hosts) for bs in (listed if isinstance(listed, list) else [listed])]
+    if not scripts or not all(scripts):
         return _stored_build() or core.UNKNOWN
-    try:
-        br = subprocess.run(
-            ["playwright-cli", "-s=qa", "--raw", "eval", bjs],
-            env=env,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return core.UNKNOWN
-    if br.returncode != 0:
-        return None
-    raw_b = _unwrap_raw(br.stdout)
-    return core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout)
+    parts = []
+    for bjs in scripts:
+        try:
+            br = subprocess.run(
+                ["playwright-cli", "-s=qa", "--raw", "eval", bjs],
+                env=env,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return core.UNKNOWN
+        if br.returncode != 0:
+            return None
+        raw_b = _unwrap_raw(br.stdout)
+        parts.append(core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout))
+    if len(parts) == 1 or core.UNKNOWN in parts:
+        return parts[0] if len(parts) == 1 else core.UNKNOWN
+    digest = lambda p: hashlib.sha1(p.encode(), usedforsecurity=False).hexdigest()[:10]
+    return "+".join(p if len(p) <= BUILD_PART else digest(p) for p in parts)
 
 
 def _qa_config(what):

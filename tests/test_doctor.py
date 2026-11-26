@@ -160,9 +160,17 @@ class Doctor(Base):
             ),
             (dict(ssoHost="qa.example.com:8443"), "FIX  ssoHost differs from the qaBaseUrl host"),
             (dict(buildSource={"type": "selector", "value": ["x"]}), "FIX  buildSource is"),
+            (dict(buildSource=[]), "FIX  buildSource is"),
+            (
+                dict(buildSource=[{"type": "selector", "value": "footer"}, {"type": "file", "value": "x"}]),
+                "FIX  buildSource is",
+            ),
         ]:
             self.config(**{**good, **bad})
             self.assertIn(want, self.doctor_out(), bad)
+        both = [{"type": "selector", "value": "footer"}, {"type": "url", "value": "/modules/a/version.txt"}]
+        self.config(**{**good, "buildSource": both})  # a shell and a module deployed on its own
+        self.assertNotIn("FIX  buildSource", self.doctor_out())
 
     def test_odd_config_values_get_a_fix_line_not_a_crash(self):
         good = dict(

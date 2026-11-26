@@ -79,6 +79,11 @@ class PlaywrightCli(BrowserBase):
         self.assertEqual(self.open("/index.html")["build"], "1.0.0")
         self.assertIn(str(self.t), self.pw("list"))  # the profile is the sandbox's, never the real one
 
+    def test_a_shell_version_and_a_module_version_make_one_build(self):
+        sources = [{"type": "selector", "value": "#build"}, {"type": "url", "value": "/modules/version.txt"}]
+        self.config(**{**json.loads(core.CONFIG.read_text()), "buildSource": sources})
+        self.assertEqual(self.open("/console/schedules")["build"], "1.0.0+schedules-1.0")
+
     def test_a_response_body_is_printed_alone(self):  # the explorer pipes it into `qa-mem body-check`
         self.open("/gql.html")
         calls = [x for x in self.pw("requests", "--all").splitlines() if "/graphql" in x]

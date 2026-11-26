@@ -149,11 +149,15 @@ def doctor():
         line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost, buildSource", f"add {missing}")
         bs = cfg.get("buildSource")
         line(
-            isinstance(bs, dict)
-            and bs.get("type") in ("selector", "url", "header")
-            and isinstance(bs.get("value"), str)
-            and bool(bs["value"].strip()),
-            "buildSource is {type: selector|url|header, value}",
+            bool(bs)
+            and all(
+                isinstance(x, dict)
+                and x.get("type") in ("selector", "url", "header")
+                and isinstance(x.get("value"), str)
+                and bool(x["value"].strip())
+                for x in (bs if isinstance(bs, list) else [bs])
+            ),
+            "buildSource is {type: selector|url|header, value}, or a list of them",
             'e.g. {"type": "selector", "value": "footer .version"}',
         )
         hosts = cfg.get("allowedHosts")

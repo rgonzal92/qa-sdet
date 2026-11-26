@@ -492,6 +492,29 @@ class PageStart(Base):
         code, out, _ = self.start([*signed_in, done(1, err="boom")])
         self.assertEqual((code, out["build"]), (0, "unknown"))
 
+    def test_a_list_of_build_sources_is_one_build_that_any_part_changes(self):  # a shell and its own modules
+        sources = [
+            {"type": "selector", "value": "footer .version"},
+            {"type": "url", "value": "/modules/schedules/version.txt"},
+        ]
+        self.config(**{**self.CFG, "buildSource": sources})
+        signed_in = [done(0), done(0, out="opened"), done(0, out='{"host":"qa.example.com","hasPassword":false}')]
+        code, out, mrun = self.start([*signed_in, done(0, out="1.43.0\n"), done(0, out="mod-1.0\n")])
+        self.assertEqual((code, out["build"]), (0, "1.43.0+mod-1.0"))
+        evals = [c[0][0][-1] for c in mrun.call_args_list if "eval" in c[0][0]][1:]  # after the sign-in check
+        self.assertEqual(["footer .version" in evals[0], "version.txt" in evals[1]], [True, True])
+        code, out, _ = self.start([*signed_in, done(0, out="1.43.0\n"), done(0, out="mod-1.1\n")])
+        self.assertEqual(out["build"], "1.43.0+mod-1.1")  # the module was deployed alone: a new build
+        long = "window.__version = " + "x" * 80
+        code, out, _ = self.start([*signed_in, done(0, out="1.43.0\n"), done(0, out=long)])
+        self.assertRegex(out["build"], r"^1\.43\.0\+[0-9a-f]{10}$")  # a long part goes in as its digest
+        for unreadable in (done(0, out="\n"), done(1, err="boom")):  # a part that can't be read: no build is claimed
+            code, out, _ = self.start([*signed_in, done(0, out="1.43.0\n"), unreadable])
+            self.assertEqual((code, out["build"]), (0, "unknown"))
+        self.config(**{**self.CFG, "buildSource": [sources[0], {"type": "nope", "value": "x"}]})
+        code, out, mrun = self.start(list(signed_in))
+        self.assertEqual(out["build"], "unknown")  # a source that can't be read as configured: none is read
+
     def test_sign_in_page_is_a_session_blocker_and_closes(self):
         self.config(**self.CFG)
         code, out, mrun = self.start(

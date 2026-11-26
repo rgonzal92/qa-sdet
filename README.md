@@ -131,7 +131,7 @@ The first run (or `/qa-sdet:qa-setup`) prompts for these if the file is missing:
 - `inboxJql` (optional): custom read-only JQL query for `/qa-sdet:qa-inbox` (e.g. a shared QA queue instead of `assignee = currentUser()`).
 - `browser`: `chrome` or `msedge` (installed system Chrome/Edge), or `firefox` / `webkit` (Playwright's own builds via `playwright-cli install-browser firefox`). Leave unset on first run to choose from `qa-mem browsers`.
 - `releaseTemplates` (optional): release name patterns for Jira pass comments, e.g. `["Release-A-{version}", "Release-B-{version}"]`. Local config only.
-- `buildSource.type`: `selector` (element text), `url` (version endpoint), or `header` (response header). Used to mark older memory stale after deploys.
+- `buildSource.type`: `selector` (element text), `url` (version endpoint), or `header` (response header). Used to mark older memory stale after deploys. An app shell whose modules are deployed on their own takes a list, the shell's source and one per module (`[{"type": "selector", "value": "footer .version"}, {"type": "url", "value": "/modules/reports/version.txt"}]`): the parts are joined into one build (`1.43.0+2.7.1`), so a deploy of any part marks all memory stale, not only that module's pages.
 - `pluginLog` (optional, default `true`): set `"pluginLog": false` to disable all writes to `<project>/qa-out/plugin-log.jsonl` (including denials, hook/CLI errors, nudges, run summaries, and manual notes).
 
 `qa-mem doctor` checks every tool and config field and prints `FIX <what> -> <fix>` for gaps. `/qa-sdet:qa-setup` runs it automatically; other skills run it only after config edits or tool failures and ask before applying config fixes.
