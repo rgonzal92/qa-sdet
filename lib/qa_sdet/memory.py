@@ -953,7 +953,7 @@ def card(con, q, focus=None, ids=False):
         )
     r = pg["route"]
     b = core.meta(con, "build") or pg["build"]  # coverage only counts on the build deployed now
-    unknown_page = pg["build"] == core.UNKNOWN  # its build was never readable (e.g. a map page without the footer)
+    unknown_page = pg["build"] == core.UNKNOWN  # no run read its build (a map page without the footer, a planned page)
     code_only = pg["build"] is None  # known from the code map only: nothing observed yet, nothing to re-verify
     current = pg["build"] == b or unknown_page or code_only
     out = [
@@ -965,7 +965,8 @@ def card(con, q, focus=None, ids=False):
     elif not current:
         out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
     elif unknown_page and b != core.UNKNOWN:
-        out.append(f"NOTE: this page's build was never readable; its knowledge may predate build {b}.")
+        # a plan lists a page with no build too: "never readable" was wrong for a page no run had opened
+        out.append(f"NOTE: no run verified this page on a build it could read; its knowledge may predate build {b}.")
     module = codemap.module_bindings(con).get(r)
     if module:  # an app-shell route: its module page's rows (code, rules, endpoints, changes) are read as this page's
         out.append(f"MODULE: {module[0] or '?'} at {module[1]} (its code-map rows below are this page's)")

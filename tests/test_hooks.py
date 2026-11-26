@@ -413,6 +413,21 @@ class Hooks(Base):
     def progress(self):
         return [json.loads(x) for x in (self.proj / "qa-out/.active.progress").read_text().splitlines()]
 
+    def test_each_result_line_names_the_verbs_its_call_ran(self):
+        """Found live: a chain's line named its first browser verb only and a qa-mem call none, so a run's `find`,
+        `snapshot` and `generate-locator` calls could not be counted without the transcript. Verbs only, never an
+        argument: that can be a word of page text or a typed value."""
+        self.default_run()
+        self.pw("playwright-cli -s=qa click e1 2>&1 | head -2; sleep 1; playwright-cli -s=qa find 'Delete Variant'")
+        self.pw(
+            "python3 \"/p/bin/qa-mem\" evidence x.png --label 'Saved 131'; playwright-cli -s=qa --raw generate-locator e1"
+        )
+        self.pw("grep -c Saved qa-out/x.log")
+        chain, mixed, other = self.progress()
+        self.assertEqual(chain["v"], "click find")
+        self.assertEqual(mixed["v"], "qa-mem:evidence generate-locator")
+        self.assertNotIn("v", other)
+
     def test_each_result_line_carries_its_time_its_call_id_and_the_key_of_its_command(self):
         """The other half of the guard's request line: the trace pairs the two by id (else by key) to time each call."""
         import hashlib

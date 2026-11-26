@@ -30,6 +30,10 @@ AGENTS = ("qa-explorer",)
 OBSERVE = {"snapshot", "find", "eval", "requests", "console", "screenshot", "tab-list", "network", "pdf"}
 PROGRESS_CAP = 1 << 20
 PW_CALL = re.compile(r"playwright-cli\s+(?:-s=\S+\s+)?(?:--raw\s+)?([\w-]+)(?:\s+(\S+))?")
+# every verb a call ran, for the trace: a browser verb as it is, a qa-mem one as qa-mem:<verb>; never an argument
+VERBS = re.compile(
+    r"playwright-cli\s+(?:-s=\S+\s+)?(?:--raw\s+)?([a-z][a-z-]*)|(?<![\w.-])qa-mem[\"']?\s+([a-z][a-z-]*)"
+)
 QA_TOOL_RE = re.compile(r"(?<![.\w])playwright-cli|\bacli\b|(?<![\w.-])qa-mem(?![\w-])")
 
 
@@ -241,8 +245,15 @@ def classify(data, recs):
     calls = PW_CALL.findall(cmd)
     # never the text: it can hold a typed value (guard.call_key: the request line's key, so the trace pairs the two)
     key = hashlib.sha1(cmd.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
+    ran = " ".join(pw or f"qa-mem:{mem}" for pw, mem in VERBS.findall(cmd)[:12])
+    verbs = {"v": ran} if ran else {}
     if not calls:  # qa-mem and the rest: a turn, but not a browser call; an evidence image is a new file
-        return {"t": "o", "k": key, "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd)))}
+        return {
+            "t": "o",
+            "k": key,
+            "p": int(ok and bool(re.search(r"\bqa-mem\s+(evidence|annotate)\b", cmd))),
+            **verbs,
+        }
     seen = {r.get("k") for r in [r for r in recs if r.get("t") == "pw"][-NOVELTY_WINDOW:]}
     interacts = any(verb not in OBSERVE for verb, _ in calls)
     return {
@@ -251,6 +262,7 @@ def classify(data, recs):
         "k": key,
         "ok": int(ok),
         "p": int(ok and interacts and key not in seen),
+        **verbs,
     }
 
 

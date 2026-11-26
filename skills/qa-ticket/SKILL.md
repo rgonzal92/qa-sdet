@@ -29,7 +29,7 @@ Done when the ticket has numbered AC and every AC has a route: the page where it
   | `--all`, or the live build is known (not `unknown`) and not in `latest_run.builds` | every route with a case | `--all` |
   | `--retest` | the routes of `latest_run.retest_cases` | `--cases <that route's ids in retest_cases>` |
   | `latest_run.incomplete_routes` is not empty (`--resume`, or no flag) | `incomplete_routes` | nothing more: it gives the open cases |
-  | none of these | none | nothing runs: reply with the verdict `<run>/REPORT.md` shows, say the ticket is already tested on this build, name `--retest` and `--all`, and go on with the next ticket |
+  | none of these | none | nothing runs, and the reply says so in these words: `<KEY>: already tested on build <build>, nothing was run`, then the verdict `<run>/REPORT.md` shows, then `--retest` with the case ids it would run again (`latest_run.retest_cases`, when it has any) and `--all` for every case; go on with the next ticket |
 
   The tool keeps the result of every case a run does not get, with the build it ran on.
 - **A plan waits** (`reusable_plan`: from `qa-plan`, a `--review`, or a run where no case executed): make it `<run>/.data/plan.json` (kind `ticket`, new `created` and env; fill empty `route`s from step 1).

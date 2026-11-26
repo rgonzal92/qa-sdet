@@ -708,7 +708,10 @@ class Builds(MemBase):
         c = memory.card(self.con, "/map")
         self.assertIn("LOCATORS (fresh): Layer=getByLabel('Layer')", c)
         self.assertIn("- [rule] layers switch\n", c + "\n")  # not marked stale
-        self.assertIn("never readable", c)
+        # found live: "this page's build was never readable" on a page a plan had listed and no run had opened
+        self.assertIn(
+            "NOTE: no run verified this page on a build it could read; its knowledge may predate build 1.42.0.", c
+        )
 
 
 class Facts(MemBase):
