@@ -63,8 +63,9 @@ def _mtime(path):
 
 
 def load_run(run_dir: str | Path) -> dict[str, Any]:
-    """{'plan': {...}, 'runs': [(file name, run dict)], 'warnings': [...]}; missing pieces are simply absent."""
-    data, warnings = Path(run_dir) / ".data", []
+    """{'plan': {...}, 'runs': [(file name, run dict)], 'warnings': [...], 'unread': [run file names that couldn't be
+    read: verdict() blocks on them]}; missing pieces are simply absent."""
+    data, warnings, unread = Path(run_dir) / ".data", [], []
     plan = _load_json(data / "plan.json", warnings)
     if plan is not None and not isinstance(plan, dict):
         warnings.append("plan.json is not an object")
@@ -73,8 +74,11 @@ def load_run(run_dir: str | Path) -> dict[str, Any]:
     for f in sorted(data.glob("run-*.json"), key=lambda x: (_mtime(x), x.name)):
         if f.is_symlink() and not f.exists():
             warnings.append(f"{f.name} unreadable (FileNotFoundError)")
+            unread.append(f.name)
             continue
         r = _load_json(f, warnings)
+        if not isinstance(r, dict):  # the file is there, its results are not
+            unread.append(f.name)
         if isinstance(r, dict):
             runs.append((f.name, r))
             for key in ("cases", "bugs", "pages", "questions", "not_tested"):  # dropped below: say so, don't hide it
@@ -85,7 +89,7 @@ def load_run(run_dir: str | Path) -> dict[str, Any]:
                     )
         elif r is not None:
             warnings.append(f"{f.name} is not an object")
-    return {"plan": plan or {}, "runs": runs, "warnings": warnings}
+    return {"plan": plan or {}, "runs": runs, "warnings": warnings, "unread": unread}
 
 
 def _list(obj, key):
@@ -343,11 +347,13 @@ def verdict(
     runs: Sequence[tuple[str, JsonObj]] = (),
     prior_passed: Sequence[JsonObj] = (),
     questions: Sequence[JsonObj] = (),
+    unread: Sequence[str] = (),
 ) -> tuple[Verdict, str]:
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
     prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as _q_items gives
-    them: an open [BLOCKING] one tagged with this ticket, or with no plan ticket, is a note."""
+    them: an open [BLOCKING] one tagged with this ticket, or with no plan ticket, is a note. unread: run files that
+    couldn't be read (load_run): what they held, and for which ticket, is unknown, so nothing passes."""
     if not started:
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
@@ -388,6 +394,8 @@ def verdict(
     serious = [_bug_word(b) for b in its_bugs if _serious(b)]
     if failed or serious:
         return "FAIL", _some(failed + serious)
+    if unread:
+        return "BLOCKED", _some([f"{n} unreadable: its results are not counted" for n in unread], 2)
     if not mine and not prior_mine:
         return "BLOCKED", "no test cases"
     stuck = {}  # same reason → one entry naming all its cases, so 12 blocked cases don't repeat one error 12 times
@@ -444,7 +452,11 @@ def verdict(
 
 
 def _verdicts(
-    plan: JsonObj, runs: Sequence[tuple[str, JsonObj]], cases: list[JsonObj], bugs: list[JsonObj]
+    plan: JsonObj,
+    runs: Sequence[tuple[str, JsonObj]],
+    cases: list[JsonObj],
+    bugs: list[JsonObj],
+    unread: Sequence[str] = (),
 ) -> dict[str, tuple[Verdict, str]]:
     """{ticket key: (verdict, reason)} for every plan ticket: the one place verdict() gets its inputs, so REPORT.md,
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
@@ -453,7 +465,15 @@ def _verdicts(
     prior_all, questions = _prior_passed(plan, keys), _q_items(plan, "test plan")
     return {
         t["key"]: verdict(
-            t, cases, bugs, bool(runs), keys, runs, [c for c in prior_all if c.get("ticket") == t["key"]], questions
+            t,
+            cases,
+            bugs,
+            bool(runs or unread),
+            keys,
+            runs,
+            [c for c in prior_all if c.get("ticket") == t["key"]],
+            questions,
+            unread,
         )
         for t in tickets
     }
@@ -1648,7 +1668,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     retest_of = str(plan.get("retest_of") or "").strip() if isinstance(plan.get("retest_of"), str) else ""
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
-    drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs) if tickets and with_status else {})
+    drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs, d["unread"]) if tickets and with_status else {})
     hosts, baseline = core.allowed_hosts(cfg), _signal_baseline()
     triaged = [
         (r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs
@@ -1907,7 +1927,7 @@ def run_summary(run_dir: str | Path) -> tuple[str, str, str, int]:
     if kind == "plan":
         verdicts = f"plan only ({len(cases)} cases)"
     elif tickets:
-        vmap = _verdicts(plan, runs, cases, bugs)
+        vmap = _verdicts(plan, runs, cases, bugs, d["unread"])
         verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[vmap[t['key']][0]]}" for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
@@ -1976,19 +1996,19 @@ def write_report(run_dir: str | Path) -> Path:
         text, drafts = (
             (
                 f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
-                f"{one_line(core.short(e, 200))}. Check the files in .data/._\n"
+                f"{one_line(core.short(e, 200))}. Check the files in .data/. Jira comment drafts from an earlier "
+                "render were removed: no verdict stands behind them._\n"
             ),
-            None,
+            {},
         )
     core._write(run_dir / "REPORT.md", text)
-    if (
-        drafts is not None
-    ):  # Jira drafts: written with the report; a draft no longer due is removed (a failed render keeps them)
-        for name, body in drafts.items():
-            core._write(run_dir / name, body)
-        for old in [*run_dir.glob("jira-comment-*.md"), *run_dir.glob("jira-comment-*.txt")]:
-            if old.name not in drafts and (old.is_symlink() or old.is_file()):
-                old.unlink(missing_ok=True)
+    # Jira drafts: written with the report; a draft no longer due is removed. A failed render removes them all: an
+    # earlier "Passed on …" would stay postable after the run turned FAIL.
+    for name, body in drafts.items():
+        core._write(run_dir / name, body)
+    for old in [*run_dir.glob("jira-comment-*.md"), *run_dir.glob("jira-comment-*.txt")]:
+        if old.name not in drafts and (old.is_symlink() or old.is_file()):
+            old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one
     # rendered before the other run's REPORT.md existed, and that run would vanish from the index.
     fd = os.open(run_dir.parent, os.O_RDONLY)  # the qa-out folder itself: no lock file left behind
@@ -2072,6 +2092,7 @@ def _run_state(run_dir):
         rt = core.norm_route(c.get("route"))
         return (
             c["status"] == "PASS"
+            and not d["unread"]
             and not _blocked_runs([c], runs)
             and not any(
                 (rt and rt in (b.get("route"), b.get("target"))) or _bug_refs(b) & _case_bugs(c)
@@ -2575,7 +2596,7 @@ def _qa_verdicts_by_key(qa_out, keys):
         if not matching:
             continue
         kind = str(plan.get("kind") or "")
-        vmap = {} if kind == "plan" else _verdicts(plan, runs, merged_cases(plan, runs), run_bugs(runs))
+        vmap = {} if kind == "plan" else _verdicts(plan, runs, merged_cases(plan, runs), run_bugs(runs), d["unread"])
         for t in matching:
             found[t["key"].strip().upper()] = "plan" if kind == "plan" else VERDICT_ICON[vmap[t["key"]][0]]
         if len(found) == len(keys):
@@ -2808,7 +2829,7 @@ def trace(project, keys=None, fix_version=None):
         if not runs or str(plan.get("kind")) == "plan":
             continue
         cases, bugs = merged_cases(plan, runs), run_bugs(runs)
-        vmap = _verdicts(plan, runs, cases, bugs)
+        vmap = _verdicts(plan, runs, cases, bugs, d["unread"])
         prior = _prior_passed(plan, [t["key"] for t in _plan_tickets(plan)])
         builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
         for t in _plan_tickets(plan):

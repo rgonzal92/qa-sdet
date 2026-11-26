@@ -1600,6 +1600,39 @@ class JiraDraft(Rendering):
         r = (d / "REPORT.md").read_text()
         self.assertIn("**Verdict: ❌ FAIL**", r)
 
+    def test_a_failed_render_leaves_no_earlier_pass_draft(self):  # "Passed on …" stayed postable after a FAIL
+        d, _ = self.render_run([("form", RUN1)])
+        self.assertIn("Passed on", (d / "jira-comment-PROJ-1.txt").read_text())
+        failed = {**RUN1, "cases": [RUN1["cases"][0], {"id": "TC-2", "status": "FAIL", "actual": "131 saved"}]}
+        (d / ".data/run-form.json").write_text(json.dumps(failed))
+        with mock.patch.object(report, "render_report_parts", side_effect=TypeError("boom")):
+            report.write_report(d)
+        self.assertEqual(sorted(p.name for p in d.glob("jira-comment-*")), [])  # no verdict vouches for them now
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("Could not render this report: TypeError: boom", r)
+        self.assertIn("Jira comment drafts", r)  # says they are gone and why
+
+    def test_an_unreadable_run_file_blocks_the_ticket(self):  # its FAIL and its bug were dropped: a pass draft
+        cut = json.dumps({**RUN1, "cases": [{"id": "TC-2", "status": "FAIL"}]})[:-20]  # cut off mid-write
+        for runs, why in (([("form", RUN1)], "all cases passed elsewhere"), ([], "the only run file")):
+            with self.subTest(why):
+                d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=runs)
+                (d / ".data/run-form-resume.json").write_text(cut)
+                report.write_report(d)
+                r = (d / "REPORT.md").read_text()
+                self.assertIn("**Verdict: ⛔ BLOCKED** — run-form-resume.json unreadable", r)
+                self.assertIn("QA: BLOCKED", (d / "jira-comment-PROJ-1.txt").read_text())  # never "Passed on"
+                self.assertIn("PROJ-1 ⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
+                # a partial --retest must not carry a pass this verdict didn't trust
+                self.assertEqual(report._run_state(d)["passed_cases"], [])
+                for f in (d / ".data").glob("run-*.json"):
+                    f.unlink()
+        failed = {**RUN1, "cases": [RUN1["cases"][0], {"id": "TC-2", "status": "FAIL", "actual": "131 saved"}]}
+        d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", failed)])
+        (d / ".data/run-form-resume.json").write_text(cut)
+        report.write_report(d)
+        self.assertIn("**Verdict: ❌ FAIL**", (d / "REPORT.md").read_text())  # a failure it did read still wins
+
     def test_a_blocked_run_gets_no_pass_draft(self):  # its cases said PASS; the run said BLOCKED
         d, r = self.render_run([("form", {**RUN1, "status": "BLOCKED", "summary": "session expired"})])
         self.assertIn("**Verdict: ⛔ BLOCKED** — the run on /form ended BLOCKED: session expired", r)
@@ -1729,7 +1762,7 @@ class JiraDraft(Rendering):
         (d / ".data/run-broken.json").symlink_to(self.t / "missing-target.json")
         (d / ".data/run-deep.json").write_text("[" * 3000 + "]" * 3000)
         r = report.render_report(d)
-        self.assertIn("**Verdict: ✅ PASS**", r)
+        self.assertIn("**Verdict: ⛔ BLOCKED** — run-broken.json unreadable", r)  # rendered; what they held is unknown
         self.assertIn("run-broken.json unreadable", r)
         self.assertIn("run-deep.json unreadable", r)
         # M5: bool/list case IDs warned & dropped, numeric 0 actual kept, non-string ticket keys ignored in run_summary
