@@ -366,10 +366,13 @@ def run_feedback(data, who):
     word = slow_word(guard, data)
     if word and f"slow:{word}" not in given:
         notes.append(
-            f"qa-sdet: `{word}` sent that call to Claude Code's own permission check (about 5 s, against under 1 for an "
-            "approved call). Approved at once: `playwright-cli`, `qa-mem` and `sleep` up to 30, joined by `;` or `&&` "
-            "and piped into `grep`, `head`, `tail`, `sed -n 'N,Mp'`, `cut`, `sort`, `uniq`, `wc`, `tr` or `awk`, with "
-            "no variable, loop, `$(…)` or `cd` to another folder."
+            "qa-sdet: a click on a control named Delete or Remove is never approved at once: Claude Code's own "
+            "permission check decides it (about 5 s)."
+            if word == guard.RISKY_WORD
+            else f"qa-sdet: `{word}` sent that call to Claude Code's own permission check (about 5 s, against under 1 "
+            "for an approved call). Approved at once: `playwright-cli`, `qa-mem` and `sleep` up to 30, joined by `;` or "
+            "`&&` and piped into `grep`, `head`, `tail`, `sed -n 'N,Mp'`, `cut`, `sort`, `uniq`, `wc`, `tr` or `awk`, "
+            "with no variable, loop, `$(…)` or `cd` to another folder."
         )
         append_progress(state, expires, {"t": "n", "n": f"slow:{word}"})
         _log_event(

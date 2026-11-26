@@ -410,6 +410,13 @@ class Hooks(Base):
         self.assertEqual(self.pw("playwright-cli -s=qa goto https://evil.example"), "")  # a denial has its own message
         self.assertEqual(self.pw("git status | jq .", agent=""), "")  # the main session isn't the explorer
 
+    def test_a_click_on_delete_or_remove_says_why_it_waited(self):
+        self.default_run()
+        note = self.pw("playwright-cli -s=qa click \"getByRole('button', { name: 'Delete' })\"")
+        self.assertIn("a click on a control named Delete or Remove is never approved at once", note)
+        self.assertNotIn("Approved at once:", note)  # nothing to rewrite: the call's form was fine
+        self.assertEqual(self.pw("playwright-cli -s=qa click \"getByTestId('row-remove')\""), "")  # said once
+
     def progress(self):
         return [json.loads(x) for x in (self.proj / "qa-out/.active.progress").read_text().splitlines()]
 

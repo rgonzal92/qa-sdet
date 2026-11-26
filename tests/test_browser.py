@@ -4,6 +4,7 @@ Chrome or Edge, and it must not run beside a real QA run (a machine has one `qa`
 
 import json
 import os
+import re
 import shlex
 import shutil
 import threading
@@ -119,6 +120,23 @@ class PlaywrightCli(BrowserBase):
         self.assertEqual(self.js("document.getElementById('h').textContent"), "Devices")
         self.pw("goto", self.base + "/spa.html#/items/42")
         self.assertEqual(self.js("document.getElementById('h').textContent"), "Device 42")
+
+    def test_the_snapshot_the_browser_tool_saves_names_a_ref_for_the_guard(self):
+        """The guard holds back a click on a ref a saved snapshot names Delete or Remove (guard.ref_label): this is the
+        file it reads and the line it expects, as the browser tool writes them."""
+        guard = load_hook("guard_browser")
+        self.open("/notes.html")
+        self.pw("click", "getByRole('button', { name: 'Add note' })")
+        self.pw("fill", "getByLabel('Name')", "qa-sdet-n1")
+        out = self.pw("click", "getByRole('button', { name: 'Save' })")
+        self.assertTrue(list((self.proj / ".playwright-cli").glob("page-*.yml")), out)  # an action saves one itself
+        out = self.pw("snapshot")  # the row is drawn by now
+        saved = sorted((self.proj / ".playwright-cli").glob("page-*.yml"), key=lambda f: f.stat().st_mtime)
+        ref = re.search(r'button "Delete[^"]*" \[ref=((?:f\d+)?e\d+)\]', saved[-1].read_text())
+        self.assertTrue(ref, saved[-1].read_text()[:2000])
+        self.assertIn("Delete", guard.ref_label(ref.group(1), str(self.proj)))
+        self.assertTrue(guard.risky_click(["-s=qa", "click", ref.group(1)], str(self.proj)))
+        self.assertFalse(guard.risky_click(["-s=qa", "click", "e1"], str(self.proj)))
 
     def test_role_locators_match_as_the_crawl_assumes(self):
         self.open("/spa.html")

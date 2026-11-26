@@ -1784,6 +1784,52 @@ def _acli_approvable(rest):
     )
 
 
+RISKY_CLICK = re.compile(r"\b(?:delete|remove)\b", re.I)
+RISKY_WORD = "Delete or Remove click"  # Ctx.block's word for it: PostToolUse tells the explorer, the trace counts it
+SNAPSHOTS, SNAPSHOT_CAP = 5, 2 << 20  # the newest page-*.yml files read for a ref's name, and how much of each
+
+
+def ref_label(ref, cwd):
+    """The line the newest snapshot playwright-cli saved (.playwright-cli/page-*.yml, under the call's folder or the
+    project's) has for `ref`, up to the ref, or "". After another page loads the refs start again, so the newest file
+    that holds the ref stands. Never through a link, never more than SNAPSHOT_CAP of a file; any trouble is no line."""
+    files = []
+    for base in dict.fromkeys(b for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b):
+        try:
+            with os.scandir(os.path.join(base, ".playwright-cli")) as found:
+                files += [
+                    (e.stat(follow_symlinks=False).st_mtime, e.path)
+                    for e in found
+                    if e.name.startswith("page-") and e.name.endswith(".yml") and e.is_file(follow_symlinks=False)
+                ]
+        except OSError:
+            continue
+    mark = f"[ref={ref}]"
+    for _, path in sorted(files, reverse=True)[:SNAPSHOTS]:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                text = f.read(SNAPSHOT_CAP).decode("utf-8", "replace")
+        except OSError:
+            continue
+        line = next((x for x in text.splitlines() if mark in x), "")
+        if line:
+            return line.split(mark)[0]
+    return ""
+
+
+def risky_click(rest, cwd):
+    """Whether a playwright-cli click or dblclick is on a control named Delete or Remove: its locator says so, or a
+    saved snapshot gives its ref that name (ref_label). Such a call is never approved, so Claude Code's own permission
+    check decides it (found live: an approved click opened a Delete dialog on another user's record). A ref no saved
+    snapshot holds is not held back: `find` prints refs and saves none."""
+    args = pw_args(rest)
+    if len(args) < 2 or args[0] not in ("click", "dblclick"):
+        return False
+    target = unmark(args[1])
+    return bool(RISKY_CLICK.search(ref_label(target, cwd) if re.fullmatch(r"(?:f\d+)?e\d+", target) else target))
+
+
 def approvable(
     i, name, rest, outs, ins, feeds, cwd, explorer=False
 ):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep, sleep <=30; for the explorer also _read_only
@@ -1878,6 +1924,8 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
         if q is not None
         else None
     ) or (explorer_net(name, rest, ctx.raw) if ctx.explorer and name in NET_CLIS else None)
+    if name == "playwright-cli" and risky_click(rest, start):
+        ctx.block(RISKY_WORD)
     if not approvable(i, name, rest, outs, ins, feeds or ndocs, start, ctx.explorer):
         ctx.block(name if i == 0 and name else "a prefix or wrapper")
     return (

@@ -1726,6 +1726,55 @@ class R8ApproveAndLog(Case):
         ):
             self.assertEqual(decision(f'playwright-cli -s=qa click "{loc}"'), "allow", loc)
 
+    def test_a_click_on_delete_or_remove_is_left_to_claude_codes_own_check(self):
+        """Found live: the guard approved an explorer's click on a ref, the control was Delete on another user's record,
+        and an approved call skips Claude Code's own permission check. A locator names its control; a ref is named by
+        the newest snapshot the browser tool saved that holds it. A ref no saved snapshot holds is approved as before."""
+        snaps = RUN / ".playwright-cli"
+        snaps.mkdir(exist_ok=True)
+        old, new = snaps / "page-2026-11-26T10-00-00-000Z.yml", snaps / "page-2026-11-26T10-05-00-000Z.yml"
+        trap = RUN / "trap.yml"
+        old.write_text(
+            '- generic [ref=e1]:\n  - button "Save" [ref=e12] [cursor=pointer]\n'
+            '  - button "Delete Variant" [ref=f8e16904] [cursor=pointer]\n  - link "Removed items" [ref=e13]\n'
+            '  - menuitem "Remove" [ref=e120]\n  - button "Delete" [ref=e14]\n'
+        )
+        os.utime(old, (time.time() - 60, time.time() - 60))
+        try:
+            held = (
+                "playwright-cli -s=qa click f8e16904",
+                "playwright-cli -s=qa click f8e16904 2>&1 | head -2; sleep 1; playwright-cli -s=qa find 'Delete Variant'",
+                "playwright-cli -s=qa dblclick e120",
+                """playwright-cli -s=qa click "getByRole('button', { name: 'Delete' })\"""",
+                """playwright-cli -s=qa click "locator('#module').contentFrame().getByTestId('zone-remove-button')\"""",
+            )
+            for cmd in held:
+                self.assertIsNone(decision(cmd), cmd)
+                self.assertIsNone(decision(cmd, agent_type="qa-sdet:qa-explorer"), cmd)
+            for cmd in (
+                "playwright-cli -s=qa click e12",
+                "playwright-cli -s=qa click e1",  # its own line, not e12's or e120's
+                "playwright-cli -s=qa click e13",  # "Removed items" is another word
+                "playwright-cli -s=qa click e999",  # no saved snapshot holds it: `find` prints refs and saves none
+                "playwright-cli -s=qa find 'Delete Variant'",  # looking is not clicking
+                "playwright-cli -s=qa fill e12 'Delete me'",
+                """playwright-cli -s=qa click "getByRole('button', { name: 'Save' })\"""",
+            ):
+                self.assertEqual(decision(cmd), "allow", cmd)
+            new.write_text(
+                '- button "Delete" [ref=e12]\n- button "Edit" [ref=e14]\n'
+            )  # another page since: refs restart
+            self.assertIsNone(decision("playwright-cli -s=qa click e12"))
+            self.assertEqual(decision("playwright-cli -s=qa click e14"), "allow")  # the newest snapshot that holds it
+            self.assertIsNone(decision("playwright-cli -s=qa click e120"))  # only the older one holds it
+            new.unlink()
+            trap.write_text('- button "Delete" [ref=e12]\n')
+            new.symlink_to(trap)  # a link is never read: the older file, a real one, names e12
+            self.assertEqual(decision("playwright-cli -s=qa click e12"), "allow")
+        finally:
+            shutil.rmtree(snaps)
+            trap.unlink(missing_ok=True)
+
     def test_checked_calls_are_approved(self):
         outside = TMP / "outside.txt"
         outside.write_text("secret\n")
