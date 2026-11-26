@@ -619,10 +619,29 @@ class Docs(unittest.TestCase):
         self.assertFalse(
             {"steps", "expected"} & set(entry)
         )  # copying these verbatim would drop what the explorer checks
-        retest = next(x for x in text("skills/qa-ticket/SKILL.md").splitlines() if x.startswith("- **`--retest"))
+        retest = text("references/planning.md").split("## Retest from an older folder")[1]  # the skill points here
         self.assertIn(
             "the prior plan's case objects (steps and expected included) whose ids are in `retest_cases`", retest
         )
+
+    def test_the_ticket_skill_runs_each_ticket_in_its_own_folder_with_what_the_cli_gives(self):
+        """One folder per ticket, re-run in place: the skill's rundir call, its dispatch flags and the plan_state fields it
+        reads are the CLI's and plan-find's."""
+        skill, plan = text("skills/qa-ticket/SKILL.md"), text("skills/qa-plan/SKILL.md")
+        for doc in (skill, plan):
+            self.assertIn("rundir '${CLAUDE_PROJECT_DIR}' --keys <KEY>", doc)
+            self.assertNotRegex(doc, r"--keys K1,K2")  # the CLI refuses several keys: one folder per ticket
+        self.assertIn("--keys KEY", cli.COMMANDS["rundir"])
+        table = skill.split("## 2. Plan and cases")[1].split("## 3. Test")[0]
+        for flag in ("--all", "--cases"):
+            self.assertIn(flag, cli.COMMANDS["dispatch"])
+            self.assertIn(f"| `{flag}", table)
+        state = text("lib/qa_sdet/report.py")
+        for field in ("has_runs", "builds", "retest_cases", "incomplete_routes", "run_dir", "subset_of"):
+            self.assertIn("`subset_of`" if field == "subset_of" else f"`latest_run.{field}`", skill)
+            self.assertIn(f'"{field}"', state)
+        self.assertIn("## Retest from an older folder", text("references/planning.md"))
+        self.assertIn('planning.md, "Retest from an older folder"', skill)
 
     def test_batch_explore_skips_routes_that_need_a_record_id(self):
         """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""

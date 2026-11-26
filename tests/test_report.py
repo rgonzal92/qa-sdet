@@ -2471,7 +2471,9 @@ class NewestRun(Rendering):
         lr = report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
         self.assertEqual((lr["name"], lr["subset_of"]), ("2026-11-23-PROJ-1+PROJ-2", ["PROJ-1", "PROJ-2"]))
         self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
-        skill = (Path(report.__file__).parents[2] / "skills/qa-ticket/SKILL.md").read_text()
+        skill = (
+            Path(report.__file__).parents[2] / "references/planning.md"
+        ).read_text()  # where the skill sends a retest from an older folder
         self.assertIn("keeps only `latest_run.tickets`", skill)  # not the other ticket of that run: it'd render BLOCKED
 
     def test_re_rendering_an_older_run_does_not_make_it_the_newest(self):  # nor a vim swap file beside its REPORT.md
