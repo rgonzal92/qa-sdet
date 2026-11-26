@@ -478,7 +478,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "api-probe": "<GET|HEAD|OPTIONS|POST|PUT|PATCH|DELETE> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]",
     "dispatch": "<run dir> --route <route> [--mode ticket|explore] [--focus <charter>] "
     "[--faults] [--api-writes] [--known-bugs <text>] [--open-record [--target-route <detail route>]] "
-    "[--hypothesis '<why this page>']",
+    "[--hypothesis '<why this page>'] [--cases TC-2,TC-5 | --all]",
     "evidence": "<png> (--selector <css> | --ref <ref>) --label <text>",
     "prune": "<project> [<run dir>]",
     "annotate": "<png> [--box x,y,w,h ...] --label <text>",
@@ -647,6 +647,23 @@ def _main(argv: list[str]) -> int:
 
         memory.PARKED.clear()
         roots = list(dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a))  # cwd + project dir
+        marker = _run_marker(roots)  # an explorer's run (dispatch wrote run_dir and slug)
+        hin = hook_input() if marker else None
+        role = str((hin or {}).get("agent_type") or "").strip().lower().split(":")[-1].strip()
+        explorer_stops = marker and (hin or {}).get("hook_event_name") == "SubagentStop" and role == "qa-explorer"
+        # the earlier attempt's results back in its run file before memory and the stop check read it
+        if explorer_stops:
+            from . import report
+
+            try:  # the copy stays: a bounced explorer may write its file again (the report or next dispatch removes it)
+                report.carry_prior(marker["run_dir"], str(marker["slug"]), keep=True)
+            except Exception as e:  # noqa: BLE001
+                plugin_log.append_event(
+                    Path(marker["run_dir"]).parent,
+                    "hook_error",
+                    {"hook": "ingest-pending", "error_type": type(e).__name__, "detail": str(e)},
+                    create=False,
+                )
         for root in roots:
             try:
                 memory.ingest_pending(root)
@@ -665,18 +682,13 @@ def _main(argv: list[str]) -> int:
             for x in memory.parked_codemaps(root)
             if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)
         ]
-        marker = _run_marker(roots)  # an explorer's run (dispatch wrote run_dir and slug)
-        hin = hook_input() if memory.PARKED or stale or marker else {}
-        role = str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip()
+        if hin is None:  # stdin is read once: above when a marker is active
+            hin = hook_input() if memory.PARKED or stale else {}
+            role = str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip()
         if stale and hin.get("hook_event_name") == "SubagentStop" and role == "qa-mapper":
             memory.PARKED.extend(stale)
         todo = []
-        if (
-            marker
-            and hin.get("hook_event_name") == "SubagentStop"
-            and role == "qa-explorer"
-            and not hin.get("stop_hook_active")
-        ):
+        if explorer_stops and not hin.get("stop_hook_active"):
             from . import ops, report  # the marker was started MARKER_HOURS before it expires
 
             todo = report.verify_run(
@@ -940,7 +952,7 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
     elif cmd == "dispatch":
         o = _opts(
             args,
-            flags=("--faults", "--open-record", "--api-writes"),
+            flags=("--faults", "--open-record", "--api-writes", "--all"),
             valued=(
                 "--route",
                 "--mode",
@@ -948,10 +960,14 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
                 "--known-bugs",
                 "--target-route",
                 "--hypothesis",
+                "--cases",
             ),
         )
         if len(o["_"]) != 1 or not o.get("--route") or o.get("--mode", "ticket") not in ("ticket", "explore"):
             return usage_error(cmd)
+        if "--cases" in o and o.get("--all"):
+            return usage_error(cmd, "--cases and --all can't go together")
+        ids = [x for x in re.split(r"[,\s]+", o["--cases"]) if x] if "--cases" in o else None
         from . import ops
 
         print(
@@ -968,6 +984,8 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
                     api_writes=o.get("--api-writes", False),
                     hypothesis=o.get("--hypothesis"),
                     target_route=o.get("--target-route"),
+                    case_ids=ids,
+                    all_cases=o.get("--all", False),
                 )
             )
         )

@@ -654,6 +654,9 @@ def check_report_fields(run):
             raise ValueError("every case needs an 'id' (TC-n from the plan)")
         for f in ("status", "actual", "notes", "bug"):
             core.txt(c.get(f), f"cases.{f}")
+        for f in ("build", "ran"):  # on a result report.carry_prior kept: its own text, compared with the run's build
+            if c.get(f) is not None and not isinstance(c[f], str):
+                raise ValueError(f"'cases.{f}' must be a string")
         if c.get("annotated") is not None and not isinstance(c["annotated"], bool):
             raise ValueError("'cases.annotated' must be true or false")
         if not core.case_status(c.get("status")):

@@ -144,19 +144,20 @@ def merged_cases(
     """Plan cases with their result from the run JSONs (missing -> NOT_RUN); cases only a run knows are appended.
     Each gets status, actual, notes, bug. When several runs report one case, the most decisive result wins (FAIL over
     QUESTION over PASS over BLOCKED over NOT_RUN; the newest run on a tie), so another route listing a case as
-    "not run" never hides its FAIL. A plan case with no id or a repeated one can't get a result: it is left out and
-    named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
-    blocks them)."""
+    "not run" never hides its FAIL. A plan ticket's PASS whose own `build` is not its run file's (carry_prior kept it
+    from an earlier attempt) gets that build and `prior`: _prior_passed lists it as a pass not re-run here. A plan case
+    with no id or a repeated one can't get a result: it is left out and named in `warnings`, and the case kept under
+    that id gets `id_tickets` (every ticket using the id: verdict() blocks them)."""
     warnings = [] if warnings is None else warnings
     valid_id = lambda v: isinstance(v, (str, int, float)) and not isinstance(v, bool) and v != ""  # as core.txt
-    results = {}
+    results, run_build = {}, {}
     rank = lambda c: MERGE_RANK.index(core.case_status(c.get("status")) or "NOT_RUN")
     for _, r in runs:
         for c in _list(r, "cases"):
             if valid_id(c.get("id")):
                 cid = str(c["id"])
                 if cid not in results or rank(c) >= rank(results[cid]):
-                    results[cid] = c
+                    results[cid], run_build[cid] = c, r.get("build")
     out, seen = [], set()
     plan_cases = _list(plan, "cases")
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
@@ -200,6 +201,13 @@ def merged_cases(
         }
         if "annotated" in res:
             merged["annotated"] = res["annotated"]
+        if (
+            tk in keys
+            and merged["status"] == "PASS"
+            and isinstance(res.get("build"), str)
+            and core.norm_build(res["build"]) != core.norm_build(run_build.get(cid))
+        ):
+            merged.update(build=res["build"], prior=True)
         out.append(merged)
     for m in out:
         if m["id"] in repeated:
@@ -357,7 +365,7 @@ def verdict(
     if not started:
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
-    mine = [c for c in cases if c.get("ticket") == key]
+    mine = [c for c in cases if c.get("ticket") == key and not c.get("prior")]  # a prior pass is in prior_passed
     prior_mine = [c for c in prior_passed if c.get("ticket") == key]
     its_bugs = ticket_bugs(key, cases, bugs, known)
     st = lambda c: c.get("status") or "NOT_RUN"
@@ -462,7 +470,7 @@ def _verdicts(
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
     tickets = _plan_tickets(plan)
     keys = [t["key"] for t in tickets]
-    prior_all, questions = _prior_passed(plan, keys), _q_items(plan, "test plan")
+    prior_all, questions = _prior_passed(plan, keys, cases), _q_items(plan, "test plan")
     return {
         t["key"]: verdict(
             t,
@@ -563,11 +571,15 @@ def _ac_lines(t, cases, with_status, prior_passed=()):
     return out
 
 
-def _prior_passed(plan, keys):
-    """Normalized prior_passed entries from a partial --retest plan.json."""
+def _prior_passed(plan, keys, cases=()):
+    """Normalized prior_passed entries from a partial --retest plan.json, then the merged `cases` marked `prior` (a pass
+    carry_prior kept from an earlier build): both are passes not re-run here."""
     canon = {k.strip().upper(): k for k in keys}
-    out = []
+    kept = [c for c in cases if c.get("prior")]
+    ids, out = {c["id"] for c in kept}, []
     for c in _list(plan, "prior_passed"):
+        if str(c.get("id")) in ids:
+            continue
         tk = c.get("ticket")
         if isinstance(tk, str) and tk.strip():
             tk = canon.get(tk.strip().upper(), tk)
@@ -580,7 +592,7 @@ def _prior_passed(plan, keys):
             else ac
         )
         out.append({**c, "ticket": tk, "ac": ac})
-    return out
+    return out + kept
 
 
 def _prior_block(prior_mine):
@@ -815,6 +827,72 @@ def audit_bugs(run_dir):
         if issues:
             out[bid] = sorted(issues, key=lambda x: not x[0])
     return out
+
+
+def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
+    """Merge .data/prior-<slug>.json (the earlier run file, the date it was written and the case ids given since, saved
+    by dispatch) into run-<slug>.json: an explorer dispatched again writes only what it ran, and a rewrite must not lose
+    what the earlier attempt found. A given case takes its new result unless that is NOT_RUN; any other case keeps its
+    earlier result (even one the explorer copied), stamped with the `build` and `ran` it came from. An earlier bug the
+    new file doesn't list (by BUG-n, else hash) stays when a case names it, or when no case ever named it and the build
+    is the same (a continuation): a bug whose cases ran again and no longer name it is not carried. Questions are joined
+    by text; everything else is the new file's. Idempotent and best effort: an unreadable run file is left as it is,
+    with its copy. The copy is removed unless `keep` (the stop hook: a bounced explorer may write its file again)."""
+    data = Path(run_dir) / ".data"
+    pf, rf = data / f"prior-{slug}.json", data / f"run-{slug}.json"
+    try:
+        prior = json.loads(pf.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, RecursionError):
+        prior = None  # nothing in it can be merged
+    old = prior.get("run") if isinstance(prior, dict) else None
+    if isinstance(old, dict):
+        try:
+            new = json.loads(rf.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            new = old  # the run file is gone: the earlier one is put back
+        except (OSError, ValueError, RecursionError):
+            return  # the explorer's file can't be read: the stop check sends it back; the copy waits
+        if not isinstance(new, dict):
+            return
+        out = dict(new)
+        if new != old:  # equal: the explorer wrote nothing, and the earlier file stands as it is
+            ids = prior.get("given") if isinstance(prior.get("given"), list) else []
+            given = {str(x) for x in ids if isinstance(x, (str, int))}
+            stamp = {"build": core.norm_build(old.get("build"))}
+            if isinstance(prior.get("ran"), str):
+                stamp["ran"] = prior["ran"]
+            news = {str(c.get("id")): c for c in _list(new, "cases")}
+            olds = {str(c.get("id")): c for c in _list(old, "cases")}
+            ran_again = lambda cid: cid in given and core.case_status(news[cid].get("status")) not in (None, "NOT_RUN")
+            cases = [news[cid] if cid in news and ran_again(cid) else {**stamp, **c} for cid, c in olds.items()]
+            cases += [c for c in _list(new, "cases") if str(c.get("id")) not in olds]
+            if olds:
+                out["cases"] = cases
+            hash_of = lambda b: _bug_refs({"hash": b.get("hash")})
+            listed = {bug_id(b) for b in _list(new, "bugs")} - {""}
+            hashes = set().union(*map(hash_of, _list(new, "bugs")))
+            named = lambda b, cs: any(_case_bugs(c) & _bug_refs({**b, "id": bug_id(b)}) for c in cs)
+            same_build = core.norm_build(new.get("build")) == core.norm_build(old.get("build"))
+            carried = [
+                b
+                for b in _list(old, "bugs")
+                if bug_id(b) not in listed
+                and not hash_of(b) & hashes
+                and (named(b, cases) or (same_build and not named(b, olds.values())))
+            ]
+            if carried:
+                out["bugs"] = _list(new, "bugs") + carried
+            text = lambda q: str(q.get("text") if isinstance(q, dict) else q)
+            qs = lambda r: r["questions"] if isinstance(r.get("questions"), list) else []
+            asked = set(map(text, qs(new)))
+            if more := [q for q in qs(old) if text(q) not in asked]:
+                out["questions"] = qs(new) + more
+        if out != new or not rf.exists():
+            core._write(rf, json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+    if not keep:
+        pf.unlink(missing_ok=True)
 
 
 def verify_run(run_dir, slug, since=0):
@@ -1816,7 +1894,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     tickets = _plan_tickets(plan)
     keys = [t["key"] for t in tickets]
     cases, bugs = merged_cases(plan, runs, d["warnings"]), run_bugs(runs, d["warnings"])
-    prior_all = _prior_passed(plan, keys)
+    prior_all = _prior_passed(plan, keys, cases)
     for t in tickets:  # a case naming an AC its ticket doesn't list covers nothing: say so
         have = {_ac_key(_ac_id(a)) for a in _list(t, "acs") if _ac_id(a)}
         for c in (c for c in cases if have and c.get("ticket") == t["key"]):
@@ -1828,6 +1906,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
     drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs, d["unread"]) if tickets and with_status else {})
+    cases = [c for c in cases if not c.get("prior")]  # from here on in prior_all, as a plan's prior_passed
     hosts, baseline = core.allowed_hosts(cfg), _signal_baseline()
     triaged = [
         (r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs
@@ -2148,6 +2227,11 @@ def write_report(run_dir: str | Path) -> Path:
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
         raise core.BadInput(f"report: not a run folder (qa-out/<run>/): {run_dir}")
+    for p in sorted((run_dir / ".data").glob("prior-*.json")):  # an explorer that crashed never reached the stop hook
+        try:
+            carry_prior(run_dir, p.name[len("prior-") : -len(".json")])
+        except OSError:
+            pass  # the copy stays: the next report or dispatch merges it
     _scrub_run(run_dir)
     try:
         text, drafts = render_report_parts(run_dir)
@@ -2212,8 +2296,8 @@ def _run_state(run_dir):
     for _, r in runs:
         b = core.norm_build(r.get("build"))
         for x in _list(r, "cases"):
-            if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):
-                case_build[str(x["id"])] = b
+            if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):  # a kept result: its own build
+                case_build[str(x["id"])] = core.norm_build(x["build"]) if isinstance(x.get("build"), str) else b
     # routes as dispatch keys them (path and query: /list?a=1 and /list?a=2 are two briefs and run files), spelled so a
     # --resume dispatch of one finds its brief, cases and run file again
     routes_order = []
@@ -2989,7 +3073,7 @@ def trace(project, keys=None, fix_version=None):
             continue
         cases, bugs = merged_cases(plan, runs), run_bugs(runs)
         vmap = _verdicts(plan, runs, cases, bugs, d["unread"])
-        prior = _prior_passed(plan, [t["key"] for t in _plan_tickets(plan)])
+        prior = _prior_passed(plan, [t["key"] for t in _plan_tickets(plan)], cases)
         builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
         for t in _plan_tickets(plan):
             k = t["key"].upper()

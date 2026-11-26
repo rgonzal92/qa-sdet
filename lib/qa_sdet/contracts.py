@@ -23,6 +23,8 @@ class Case(TypedDict, total=False):  # a run file's case result
     notes: str
     bug: str
     annotated: bool
+    build: str  # build and ran: written by report.carry_prior on a result kept from an earlier run, never the agent
+    ran: str
 
 
 class Question(TypedDict, total=False):

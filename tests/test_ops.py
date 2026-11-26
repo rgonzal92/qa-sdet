@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -1157,6 +1158,87 @@ class Dispatch(Base):
         out = self.dispatch(routes[0])[1]
         self.assertEqual((out["slug"], out["case_count"]), ("list", 1))  # rewrites run-list.json, with its case
         self.assertEqual(self.dispatch("/list/?a=1")[1]["slug"], "list")  # the same route written another way
+
+    def form_run(self, status=None, **results):
+        """Three plan cases on /form, dispatched once; then the run file that explorer left (none: status None)."""
+        from support import PLAN
+
+        plan = {**PLAN, "cases": [{**c, "ticket": "PROJ-1", "route": "/form"} for c in PLAN["cases"][:3]]}
+        (self.run_dir / ".data/plan.json").write_text(json.dumps(plan))
+        self.assertEqual(self.dispatch("/form")[1]["slug"], "form")
+        if status:
+            cases = [{"id": k.replace("_", "-"), "status": v, "actual": "seen"} for k, v in results.items()]
+            run = {"run_id": "r1", "target": "/form", "build": "1.0", "status": status, "cases": cases}
+            (self.run_dir / ".data/run-form.json").write_text(json.dumps(run))
+        return self.run_dir / ".data/prior-form.json"
+
+    def given(self, out):
+        """The case ids under the brief's Given cases, and its RESUME: line (or None)."""
+        brief = Path(out["brief"]).read_text()
+        part = brief.split("## Given cases", 1)[1].split("\n## ", 1)[0] if "## Given cases" in brief else ""
+        resume = next((x for x in brief.splitlines() if x.startswith("RESUME:")), None)
+        return [x.split()[1] for x in part.splitlines() if x.startswith("- ")], resume
+
+    def test_a_route_dispatched_again_gets_only_the_cases_without_a_result(self):  # a 12-case page ran 4 times
+        prior = self.form_run("INCOMPLETE", TC_1="PASS", TC_2="NOT_RUN", TC_3="BLOCKED")
+        earlier = json.loads((self.run_dir / ".data/run-form.json").read_text())
+        out = self.dispatch("/form")[1]
+        self.assertEqual((out["case_count"], out["held"]), (2, 1))
+        ids, resume = self.given(out)
+        self.assertEqual(ids, ["TC-2", "TC-3"])
+        self.assertIn("TC-1 PASS", resume)
+        self.assertNotIn("TC-2", resume)
+        for words in ("the tool keeps", "earlier bugs", "run only the cases below", "list only what you ran"):
+            self.assertIn(words, resume)
+        self.assertEqual(
+            {k: v for k, v in json.loads(prior.read_text()).items() if k != "ran"},
+            {"given": ["TC-2", "TC-3"], "run": earlier},
+        )
+        notice = [
+            json.loads(x) for x in (self.proj / "qa-out/plugin-log.jsonl").read_text().splitlines() if '"notice"' in x
+        ][-1]
+        self.assertEqual(
+            {k: notice[k] for k in ("kind", "run", "slug", "given", "held")},
+            {"kind": "cases_held", "run": self.run_dir.name, "slug": "form", "given": 2, "held": 1},
+        )
+
+    def test_a_blocked_run_file_or_none_gives_every_case(self):  # a BLOCKED run's PASS is not trusted
+        prior = self.form_run()
+        out = self.dispatch("/form")[1]
+        self.assertEqual((out["case_count"], out["held"], self.given(out)[1]), (3, 0, None))
+        self.assertFalse(prior.exists())
+        self.form_run("BLOCKED", TC_1="PASS", TC_2="NOT_RUN", TC_3="NOT_RUN")
+        out = self.dispatch("/form")[1]
+        self.assertEqual((out["case_count"], out["held"], self.given(out)), (3, 0, (["TC-1", "TC-2", "TC-3"], None)))
+        self.assertEqual(json.loads(prior.read_text())["given"], ["TC-1", "TC-2", "TC-3"])
+
+    def test_a_completed_run_file_gives_only_its_blocked_case(self):
+        self.form_run("COMPLETED", TC_1="PASS", TC_2="QUESTION", TC_3="BLOCKED")
+        out = self.dispatch("/form")[1]
+        ids, resume = self.given(out)
+        self.assertEqual((ids, out["case_count"], out["held"]), (["TC-3"], 1, 2))
+        self.assertIn("TC-1 PASS, TC-2 QUESTION", resume)
+
+    def test_cases_gives_exactly_those_and_all_gives_every_one(self):
+        prior = self.form_run("COMPLETED", TC_1="PASS", TC_2="FAIL", TC_3="PASS")
+        out = self.dispatch("/form", "--cases", "TC-3,TC-1")[1]
+        self.assertEqual((self.given(out)[0], out["held"]), (["TC-1", "TC-3"], 1))
+        self.assertEqual(json.loads(prior.read_text())["given"], ["TC-1", "TC-3"])
+        for bad in (["--cases", "TC-9"], ["--cases", "TC-4"], ["--cases", ""], ["--cases", "TC-1", "--all"]):
+            code, _, err = self.dispatch("/form", *bad)  # TC-4 is a plan case of another route
+            self.assertEqual(code, 2, (bad, err))
+        self.assertIn("TC-9", self.dispatch("/form", "--cases", "TC-9")[2])
+        out = self.dispatch("/form", "--all")[1]
+        self.assertEqual((self.given(out), out["case_count"]), ((["TC-1", "TC-2", "TC-3"], None), 3))
+
+    def test_each_dispatch_gives_the_brief_a_new_run_id(self):  # a reused id un-lists the earlier attempt's bugs
+        self.form_run()
+        ids = [
+            re.search(r"^run_id: (\S+)$", Path(self.dispatch("/form")[1]["brief"]).read_text(), re.M).group(1)
+            for _ in range(3)
+        ]
+        self.assertRegex(ids[0], r"^ticket-form-\d{8}-\d{4}")
+        self.assertEqual(len(set(ids)), 3, ids)
 
     def seed_list_and_detail(self):
         from qa_sdet import memory

@@ -576,6 +576,39 @@ class Hooks(Base):
         r = self.explorer_stop(d)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
 
+    def test_a_re_run_that_lists_only_its_case_is_merged_before_the_stop_check_and_memory(self):
+        """The resumed explorer writes only what it ran: the tool puts the earlier results and bug back first."""
+        import sqlite3
+        import time
+
+        from support import PLAN
+
+        d = self.rundir("2026-11-25-PROJ-1", plan={**PLAN, "cases": PLAN["cases"][:2]})
+        (d / ".data/brief-form.md").write_text("# Explorer brief: /form\nroute: /form\n")
+        for kind in ("requests", "console"):
+            (d / f".data/{kind}-form.log").write_text("")
+        bug = {"route": "/form", "title": "Saves 131", "symptom": "saves 131", "draft_path": "bugs/BUG-1.md"}
+        earlier = {**run(), "run_id": "r1", "status": "INCOMPLETE", "bugs": [bug]}
+        earlier["cases"] = [
+            {"id": "TC-1", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
+            {"id": "TC-2", "status": "NOT_RUN", "notes": "time"},
+        ]
+        (d / ".data/prior-form.json").write_text(json.dumps({"given": ["TC-2"], "run": earlier}))
+        cases = [{"id": "TC-2", "status": "PASS", "actual": "Error shown"}]
+        (d / ".data/run-form.json").write_text(json.dumps({**run(), "run_id": "r2", "cases": cases}))
+        (self.proj / "qa-out/.active").write_text(
+            json.dumps({"expires": time.time() + 8 * 3600 - 60, "run_dir": str(d), "slug": "form"})
+        )
+        r = self.explorer_stop(d)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        merged = json.loads((d / ".data/run-form.json").read_text())
+        self.assertEqual([(c["id"], c["status"]) for c in merged["cases"]], [("TC-1", "FAIL"), ("TC-2", "PASS")])
+        con = sqlite3.connect(Path(self.tmp.name) / "hook.db")
+        try:
+            self.assertEqual(con.execute("SELECT title FROM bugs").fetchall(), [("Saves 131",)])
+        finally:
+            con.close()
+
     def test_a_pass_or_fail_without_what_was_seen_and_a_fail_without_a_bug_are_sent_back(self):
         import time
 

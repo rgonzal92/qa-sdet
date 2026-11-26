@@ -64,6 +64,25 @@ class Bugs(MemBase):
         memory.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [x]}, src="qa-out/r/.data/run-b.json")
         self.assertEqual(bugs(), [("X", 3), ("Y", 1)])
 
+    def test_a_re_run_under_a_new_run_id_keeps_the_bug_the_earlier_attempt_found(self):
+        """dispatch gives each attempt its own run_id: a re-run's file that doesn't list the bug is another run's file,
+        not a rewrite of the earlier one (reusing the id deleted a bug on a real machine)."""
+        src = self.proj / "qa-out/2026-11-25-PROJ-1/.data/run-form.json"
+        x = {"route": "/form", "title": "Saves 131", "symptom": "saves 131"}
+        memory.ingest(self.con, {"run_id": "ticket-form-20261125-1000", "build": "1", "bugs": [x]}, src=src)
+        memory.ingest(self.con, {"run_id": "ticket-form-20261125-1100", "build": "1", "bugs": []}, src=src)
+        self.con.commit()
+        code, out, _ = qa_mem("bugs")
+        self.assertEqual(code, 0)
+        self.assertIn("Saves 131", out)
+
+    def test_a_case_may_carry_the_build_and_date_it_ran_on(self):  # carry_prior writes them on a kept result
+        case = lambda **kw: {"run_id": "r", "cases": [{"id": "TC-1", "status": "PASS", **kw}]}
+        memory.check_run(case(build="1.42", ran="2026-11-20"))
+        for bad in ({"build": 1.42}, {"ran": ["2026-11-20"]}):
+            with self.assertRaises(ValueError, msg=bad):
+                memory.check_run(case(**bad))
+
     def test_a_bug_dropped_because_no_run_lists_it_leaves_a_notice(self):
         """Memory deletes it on its own (a checkpoint listed it, the final run file didn't): the plugin log says so."""
         src = self.proj / "qa-out/2026-11-25-PROJ-1/.data/run-form.json"

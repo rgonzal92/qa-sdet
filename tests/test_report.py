@@ -2610,6 +2610,124 @@ class NextAction(Rendering):
         memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
 
 
+class CarryPrior(Rendering):
+    """carry_prior: a route dispatched again keeps the earlier attempt's results and bugs in its run file."""
+
+    PLAN = {**PLAN1_ANSWERED, "cases": [*PLAN1["cases"], {**PLAN1["cases"][1], "id": "TC-3", "title": "Reject -1"}]}
+    BUG = lambda self, n, **kw: {"route": "/form", "title": f"bug {n}", "draft_path": f"bugs/BUG-{n}.md", **kw}
+    KNOWN = {"route": "/form", "title": "known", "hash": "abc123def456"}
+
+    def earlier(self, given, build="1.42", **run):
+        """The run folder with the earlier attempt's run file and the prior copy dispatch saved; its run file."""
+        d = self.rundir("2026-11-25-PROJ-1", plan=self.PLAN)
+        old = {**RUN1, "run_id": "r1", "build": build, "status": "INCOMPLETE", **run}
+        (d / ".data/run-form.json").write_text(json.dumps(old))
+        prior = {"given": given, "ran": "2026-11-20", "run": old}
+        (d / ".data/prior-form.json").write_text(json.dumps(prior))
+        return d / ".data/run-form.json"
+
+    def merged(self, f, **new):
+        if new:
+            f.write_text(json.dumps({**RUN1, "run_id": "r2", "status": "COMPLETED", **new}))
+        report.carry_prior(f.parent.parent, "form")
+        self.assertFalse((f.parent / "prior-form.json").exists())
+        return json.loads(f.read_text())
+
+    def test_the_merge_keeps_a_result_and_a_bug_the_new_file_dropped(self):  # the bug a resumed explorer lost
+        f = self.earlier(
+            ["TC-3"],
+            cases=[
+                {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+                {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
+                {"id": "TC-3", "status": "NOT_RUN", "notes": "time"},
+            ],
+            bugs=[self.BUG(1), self.BUG(3), self.KNOWN],  # BUG-3: no case names it, and the build is the same
+            questions=["Units?", {"text": "Rounding?", "status": "open"}],
+        )
+        prior = (f.parent / "prior-form.json").read_text()
+        run = self.merged(
+            f,
+            cases=[{"id": "TC-3", "status": "PASS", "actual": "Error shown"}],
+            bugs=[{**self.KNOWN, "title": "known, again"}],
+            questions=["Units?", "Max?"],
+        )
+        kept = {"build": "1.42", "ran": "2026-11-20"}
+        self.assertEqual(
+            run["cases"],
+            [
+                {"id": "TC-1", "status": "PASS", "actual": "Saved", **kept},
+                {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1", **kept},
+                {"id": "TC-3", "status": "PASS", "actual": "Error shown"},
+            ],
+        )
+        self.assertEqual([b["title"] for b in run["bugs"]], ["known, again", "bug 1", "bug 3"])  # the hash matched
+        self.assertEqual(run["questions"], ["Units?", "Max?", {"text": "Rounding?", "status": "open"}])
+        self.assertEqual((run["run_id"], run["status"]), ("r2", "COMPLETED"))  # the rest: the new file's
+        before = f.read_bytes()
+        self.assertEqual(self.merged(f), run)  # no prior copy: nothing to do
+        (f.parent / "prior-form.json").write_text(prior)
+        self.assertEqual(self.merged(f), run)  # the same copy merged twice: the same file
+        self.assertEqual(f.read_bytes(), before)
+
+    def test_a_given_case_takes_its_new_result_unless_it_was_not_run(self):
+        f = self.earlier(
+            ["TC-1", "TC-2", "TC-3"],
+            cases=[
+                {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+                {"id": "TC-2", "status": "PASS", "actual": "Error shown", "build": "1.40", "ran": "2026-11-01"},
+                {"id": "TC-3", "status": "FAIL", "actual": "Saved -1", "bug": "BUG-1"},
+            ],
+            bugs=[self.BUG(1), self.BUG(3)],
+        )
+        run = self.merged(
+            f,
+            build="1.43",
+            cases=[
+                {"id": "TC-1", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-2"},
+                {"id": "TC-2", "status": "NOT_RUN", "notes": "time"},
+                {"id": "TC-3", "status": "PASS", "actual": "Error shown"},
+            ],
+            bugs=[self.BUG(2)],
+        )
+        self.assertEqual(
+            [(c["id"], c["status"], c.get("build"), c.get("ran")) for c in run["cases"]],
+            [("TC-1", "FAIL", None, None), ("TC-2", "PASS", "1.40", "2026-11-01"), ("TC-3", "PASS", None, None)],
+        )  # TC-2 keeps the build and date it first ran on
+        # BUG-1: its only case ran again and passed; BUG-3: named by no case, on another build
+        self.assertEqual([b["title"] for b in run["bugs"]], ["bug 2"])
+
+    def test_no_new_run_file_leaves_the_earlier_one_as_it_is(self):  # the explorer crashed before writing
+        f = self.earlier(["TC-2"], cases=[{"id": "TC-1", "status": "PASS", "actual": "Saved"}])
+        before, when = f.read_bytes(), f.stat().st_mtime_ns
+        self.merged(f)
+        self.assertEqual((f.read_bytes(), f.stat().st_mtime_ns), (before, when))
+
+    def test_the_report_merges_a_prior_copy_the_stop_hook_never_saw(self):
+        f = self.earlier(["TC-2", "TC-3"], cases=[{"id": "TC-1", "status": "PASS", "actual": "Saved"}])
+        f.write_text(json.dumps({**RUN1, "run_id": "r2", "cases": RUN1["cases"][1:]}))
+        report.write_report(f.parent.parent)
+        self.assertFalse((f.parent / "prior-form.json").exists())
+        self.assertEqual([c["id"] for c in json.loads(f.read_text())["cases"]], ["TC-1", "TC-2"])
+
+    def test_a_pass_kept_from_an_earlier_build_reads_like_a_plan_prior_pass(self):
+        run = {**RUN1, "build": "1.43", "cases": [{**RUN1["cases"][0], "build": "1.42", "ran": "2026-11-20"}]}
+        run["cases"].append(RUN1["cases"][1])
+        d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        draft = (d / "jira-comment-PROJ-1.md").read_text()
+        st = report._run_state(d)  # a --retest of this folder carries TC-1 on the build it passed on
+        self.assertEqual([(c["id"], c["build"]) for c in st["passed_cases"]], [("TC-1", "1.42"), ("TC-2", "1.43")])
+        plan = {**PLAN1_ANSWERED, "cases": PLAN1["cases"][1:], "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}
+        d2, r2 = self.render_run([("form", {**run, "cases": RUN1["cases"][1:]})], plan=plan)
+        verdict = lambda text: re.search(r"^\*\*Verdict: .*$", text, re.M).group(0)
+        self.assertEqual(verdict(r), verdict(r2))
+        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES** — 1 case verified on prior build 1.42; not re-run here", r)
+        self.assertIn("- AC-1 Saves 0-130 — verified on prior build 1.42 (TC-1)", r)
+        self.assertIn("<summary>Prior-build passes not re-run here (1)</summary>", r)
+        self.assertNotIn("| TC-1 |", r.split("<summary>Prior-build")[0])  # not also a current pass
+        self.assertEqual(draft, (d2 / "jira-comment-PROJ-1.md").read_text())
+        self.assertIn("TC-1 - PASS (prior build 1.42): Save 130", draft)
+
+
 class ExploreStopCheck(Base):
     """verify_run's explore-mode check: a COMPLETED page that left the card's open items unmentioned is sent back once."""
 
