@@ -160,6 +160,12 @@ playwright-cli -s=qa --raw eval "(async () => { const read = () => document.quer
 ```
 Compare values read at the same moment (the filter's own count and the list's total in one eval). A map is ready when its canvas is visible and the feature call has answered, not when its buttons show.
 
+A result that comes late (a toast, a row, a dialog): `click`, `fill`, `press` and `goto` return once the page has settled, so no `sleep` after them and no `find` in a loop. Wait for the thing itself, in the same Bash call as the action, at most 10 s:
+```
+playwright-cli -s=qa click "<locator>"; playwright-cli -s=qa --raw eval "(async () => { for (let i = 0; i < 100; i++) { const el = document.querySelector('<css of what appears>'); if (el && el.textContent.trim()) return el.textContent.trim(); await new Promise(r => setTimeout(r, 100)); } return 'timeout: not there after 10 s'; })()"
+```
+It returns the text as soon as there is one. `timeout` is a result to judge by your oracle, not a reason to wait again. In a frame: the `el => (<the script>)` wrap, with the frame's ref.
+
 ## A control that moved
 A toolbar control the card names that `find` doesn't show: before calling it missing, open the toolbar's overflow menu (`More`, `…`) and look there; toolbars move controls in and out with the window's width and with counts. Keep the card's locator (role and name); a snapshot ref is never saved. Dialogs stack: act in the top one by naming it, `getByRole('dialog', { name: 'Delete note' }).getByRole('button', { name: 'Delete' })` (a bare `Delete` matches every row's button too), and close them one at a time: Escape must close only the top layer and leave the form under it as it was.
 

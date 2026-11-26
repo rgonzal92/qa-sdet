@@ -391,7 +391,12 @@ class Docs(unittest.TestCase):
             "<locator of the first part>": "getByLabel('Hours')",
             "<css of the parts>": "#time input",
             "<css of the count>": "#range",
+            "<locator>": "getByRole('button', { name: 'Save' })",
+            "<css of what appears>": "[role=status]",
         }
+        settled = tips.split("## Settled, not just loaded")[1].split("\n## ")[0]
+        self.assertIn("no `sleep`", settled)  # explorers with no wait recipe slept after clicks and polled with `find`
+        self.assertIn("not there after 10 s", settled)
         with tempfile.TemporaryDirectory() as d:
             g, env = load_guard(os.path.realpath(d))
             with mock.patch.dict(os.environ, env):
@@ -399,7 +404,7 @@ class Docs(unittest.TestCase):
                 for title, commands in (
                     ("Second tab or popup", 2),
                     ("Type key by key", 1),
-                    ("Settled, not just loaded", 1),
+                    ("Settled, not just loaded", 2),
                     ("A control that moved", 0),
                 ):
                     self.assertIn(f'"{title}"', explorer)

@@ -412,6 +412,13 @@ class Recipes(BrowserBase):
             "Showing 1-20 of 65",
         )
 
+    def test_the_wait_recipe_returns_what_appeared(self):
+        self.open("/form.html")
+        self.pw("fill", "getByLabel('Zone name')", "qa-sdet-zone")
+        fill = {"locator": "getByRole('button', { name: 'Save' })", "css of what appears": "#msg"}
+        shown = ops._unwrap_raw(self.recipe("Settled, not just loaded", 1, **fill))
+        self.assertEqual(shown, 'Saved zone "qa-sdet-zone" at 0 km/h')
+
     def test_a_popup_tab_is_read_and_closed(self):
         self.open("/export.html")
         self.pw("click", "getByRole('button', { name: 'Open daily report' })")
