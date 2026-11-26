@@ -227,13 +227,31 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             slug, d = o["--slug"], o["_"][0]
             print(
                 "SUSPECT 200 (a 200 can still be a failure the log can't show; read each body once, while the browser is "
-                f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check {shlex.quote(d)} --slug {slug} <#>`):\n"
+                f"open: `playwright-cli -s=qa response-body <#> | qa-mem body-check {shlex.quote(d)} --slug {slug} <#>`, "
+                f"or all of them: `qa-mem body-check {shlex.quote(d)} --slug {slug} --all`):\n"
                 + "\n".join(f"- #{i} {call}" for call, i in t["suspect_200"])
             )
         if t["third_party"]:
             print(f"{t['third_party']} third-party signal(s) left out (hosts outside allowedHosts)")
     elif cmd == "body-check":
-        o = _opts(args, valued=("--slug",))
+        o = _opts(args, valued=("--slug",), flags=("--all",))
+        if o.get("--all"):
+            if len(o["_"]) != 1 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir():
+                raise core.BadInput("usage: qa-mem body-check <run dir> --slug <slug> --all   (the browser still open)")
+            from . import report
+
+            r = report.sweep_bodies(o["_"][0], o["--slug"])
+            bad = [x for x in r["checked"] if x[2]]
+            print(
+                f"body-check --all: {len(r['checked'])} bodies read, {len(bad)} with a finding"
+                + (f", {r['unread']} not read ({r['why']})" if r["unread"] else "")
+                + (f", {r['left']} left (run it again)" if r["left"] else "")
+            )
+            for index, what, findings in bad:
+                print(f"- #{index} {what}: " + "; ".join(findings))
+            if bad:
+                print("A real failure is a bug; a harmless one goes in notes by its method and path as printed here.")
+            return 0
         if (
             len(o["_"]) != 2
             or not o.get("--slug")
@@ -462,7 +480,8 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "next-action": "<run dir> <slug>",
     "explore-next": "<project> [--run DIR]",
     "signals-triage": "<run dir> --slug <slug>",
-    "body-check": "<run dir> --slug <slug> <#>   (the response body of request <#> on stdin)",
+    "body-check": "<run dir> --slug <slug> <#> | --all   (the response body of request <#> on stdin; --all reads "
+    "every unchecked one from the open browser)",
     "plan-find": "<project> (--keys K1,K2 | --run DIR)",
     "prep": "<project> <number|KEY>...",
     "inbox": "<project>",

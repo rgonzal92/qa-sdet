@@ -10,7 +10,7 @@ import unittest
 
 from support import ROOT, Base, cli, load_hook
 
-from qa_sdet import core, crawl, doctor, ops
+from qa_sdet import core, crawl, doctor, ops, report
 
 serve = load_hook("fixture_serve", ROOT / "tests/fixture/serve.py")
 # a system browser: Playwright's own builds live under the real HOME, which the sandbox replaces
@@ -184,6 +184,27 @@ class Crawl(BrowserBase):
         self.assertEqual(pages["/console/signs"]["states"], [])
         links = {t["to"] for p in run["pages"] for t in p["transitions"]}
         self.assertEqual(links, {"/console/signs", "/console/schedules", "/console/preferences"})  # no module URL
+
+
+class Signals(BrowserBase):
+    """`qa-mem body-check --all` on the fixture's GraphQL page: four calls to one endpoint, all answered 200."""
+
+    def test_body_check_all_names_each_failed_graphql_operation(self):
+        self.open("/gql.html")
+        (self.run_dir / ".data/requests-x.log").write_text(self.pw("requests", "--all"))
+        code, out, err = cli("body-check", str(self.run_dir), "--slug", "x", "--all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("4 bodies read, 3 with a finding", out)
+        t = report.triage_signals(self.run_dir, "x", {})
+        self.assertEqual(
+            [k for k, _, _ in t["app"]],
+            [
+                "POST /graphql#Zones → 200 [error body: errors: Not allowed to read zones]",
+                "POST /graphql#SaveNote → 200 [error body: data.saveNote.errors: Text is too long]",
+                "POST /graphql#BulkUpdate → 200 [partial failure: data.bulkUpdate.failed 1]",
+            ],
+        )
+        self.assertEqual(t["suspect_200"], [])
 
 
 if __name__ == "__main__":

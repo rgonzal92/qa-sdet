@@ -4,13 +4,14 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import PLAN, RUN_FORM, RUN_LIST, Base, cli
+from support import PLAN, RUN_FORM, RUN_LIST, Base, cli, done
 
 from qa_sdet import core, memory, report
 
@@ -1282,6 +1283,173 @@ class Signals(Rendering):
         self.assertEqual(
             v("at https://app.example/main.js:10:5", status=500), []
         )  # browser frames are the app's own JS
+
+    def test_body_verdict_flags_a_mutations_errors_under_data(self):
+        v = report.body_verdict  # a GraphQL mutation reports its failure inside its own payload, in a 200
+        failed = '{"data": {"saveNote": {"__typename": "SaveNotePayload", "note": null, "errors": [{"message": "Too long"}]}}}'
+        self.assertEqual(v(failed), ["error body: data.saveNote.errors: Too long"])
+        self.assertEqual(v('{"data": {"saveNote": {"errors": [{"message": "Too long"}]}}}'), v(failed))
+        self.assertEqual(
+            v('{"data": {"zoneCreate": {"zone": {"id": 1}, "userErrors": [{"field": ["name"], "message": "Taken"}]}}}'),
+            ["error body: data.zoneCreate.userErrors: Taken"],
+        )
+        self.assertEqual(v(failed, status=422), [])  # a 4xx saying so is the right answer
+        for fine in (
+            '{"data": {"importJob": {"id": 7, "status": "done", "errors": ["row 3: bad date"]}}}',  # a record's column
+            '{"data": {"saveNote": {"note": {"id": 1}, "errors": []}}}',
+            '{"data": {"saveNote": {"note": {"id": 1}, "userErrors": []}}}',
+            '{"data": {"saveNote": null}}',
+            '{"data": {"notes": [{"errors": ["x"]}]}}',
+            '{"data": [1, 2]}',
+        ):
+            self.assertEqual(v(fine), [], fine)
+
+    def test_a_partial_failure_counts_only_on_a_write(self):
+        v = report.body_verdict
+        bulk = '{"data": {"bulkUpdate": {"updated": 2, "failed": 1, "results": [{"ok": true}, {"ok": false, "reason": "Locked"}]}}}'
+        self.assertEqual(v(bulk), [])  # in a read, failed is data (a count of failed jobs)
+        self.assertEqual(v(bulk, write=True), ["partial failure: data.bulkUpdate.failed 1"])
+        self.assertEqual(
+            v('{"imported": 3, "items": [{"ok": true}, {"success": false, "message": "Duplicate"}]}', write=True),
+            ["partial failure: items: 1 of 2 failed: Duplicate"],
+        )
+        self.assertEqual(v('{"failedCount": 2}', write=True), ["partial failure: failedCount 2"])
+        for fine in (
+            '{"failed": 0, "results": [{"ok": true}]}',
+            '{"failed": true}',
+            '{"failures": [1]}',
+            '{"items": [1]}',
+        ):
+            self.assertEqual(v(fine, write=True), [], fine)
+
+    def test_a_rest_write_is_checked_for_a_partial_failure_and_a_read_is_not(self):
+        d = self.triage_dir(
+            "1. [POST] http://localhost:8765/api/zones/bulk => [200] OK\n"
+            "2. [GET] http://localhost:8765/api/jobs/stats => [200] OK\n"
+        )
+        _, out, _ = cli("body-check", str(d), "--slug", "form", "1", stdin='{"updated": 2, "failed": 1}')
+        self.assertIn("partial failure: failed 1", out)
+        _, out, _ = cli("body-check", str(d), "--slug", "form", "2", stdin='{"succeeded": 40, "failed": 3}')
+        self.assertIn("nothing suspicious", out)
+
+    GQL_LOG = "".join(f"{i}. [POST] http://localhost:8765/graphql => [200] OK\n" for i in range(1, 5))
+
+    def test_a_clean_graphql_check_clears_only_that_call(self):  # every operation shares one method and path
+        d = self.triage_dir(self.GQL_LOG)
+        cli("body-check", str(d), "--slug", "form", "1", stdin='{"data": {"notes": []}}')
+        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
+        for n in "234":
+            cli("body-check", str(d), "--slug", "form", n, stdin='{"data": {"notes": []}}')
+        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [])
+
+    def sweep(self, d, responses, requests=None):
+        """(exit code, stdout, the playwright-cli calls) of `qa-mem body-check --all` with a fake playwright-cli that
+        holds these bodies by request number."""
+        calls = []
+
+        def fake(cmd, **kw):
+            self.assertEqual(cmd[:3], ["playwright-cli", "-s=qa", "--raw"])
+            calls.append(f"{cmd[3]} {cmd[4]}")
+            held = responses if cmd[3] == "response-body" else (requests or {})
+            if cmd[4] not in held:
+                return done(1, err=f"Request #{cmd[4]} not found. Run requests to see available numbers.")
+            return done(0, out=held[cmd[4]])
+
+        with mock.patch.object(subprocess, "run", side_effect=fake):
+            code, out, err = cli("body-check", str(d), "--slug", "form", "--all")
+        return code, out + err, calls
+
+    SENT = {
+        "1": '{"operationName": "Notes", "query": "query Notes { notes { id } }"}',
+        "2": '{"operationName": "SaveNote", "query": "mutation SaveNote { saveNote { note { id } errors { message } } }"}',
+        "3": '{"query": "mutation BulkUpdate { bulkUpdate { updated failed } }"}',
+        "9": '{"operationName": "RefreshToken", "query": "mutation RefreshToken { refreshToken { jwt } }"}',
+    }
+    GOT = {
+        "1": '{"data": {"notes": []}}',
+        "2": '{"data": {"saveNote": {"note": null, "errors": [{"message": "Too long"}]}}}',
+        "3": '{"data": {"bulkUpdate": {"updated": 2, "failed": 1}}}',
+        "4": '{"access_token": "abcdefabcdefabcdef"}',
+        "5": '{"error": "a read is no candidate"}',
+        "6": '{"ok": false}',
+        "7": "PG::SyntaxError: ERROR: syntax error at or near",
+        "8": '{"error": "another host"}',
+        "9": '{"data": {"refreshToken": {"jwt": "abcdefabcdefabcdef"}}}',
+    }
+    MIXED_LOG = (
+        "1. [POST] http://localhost:8765/graphql => [200] OK\n"
+        "2. [POST] http://localhost:8765/graphql => [200] OK\n"
+        "3. [POST] http://localhost:8765/graphql => [200] OK\n"
+        "4. [POST] http://localhost:8765/api/auth/token => [200] OK\n"
+        "5. [GET] http://localhost:8765/api/zones => [200] OK\n"
+        "6. [PUT] http://localhost:8765/api/zones/7 => [200] OK\n"
+        "7. [POST] http://localhost:8765/api/zones => [500] Internal Server Error\n"
+        "8. [POST] https://cdn.example.com/rpc => [200] OK\n"
+        "9. [POST] http://localhost:8765/graphql => [200] OK\n"
+    )
+
+    def test_body_check_all_reads_every_call_triage_would_ask_for(self):
+        d = self.triage_dir(self.MIXED_LOG)
+        code, out, calls = self.sweep(d, self.GOT, self.SENT)
+        self.assertEqual(code, 0, out)
+        # never a sign-in path, a read, another host, or the response of an operation named like a sign-in
+        self.assertEqual(
+            sorted(c for c in calls if c.startswith("response-body")), [f"response-body {n}" for n in "12367"]
+        )
+        self.assertEqual(
+            sorted(c for c in calls if c.startswith("request-body")), [f"request-body {n}" for n in "1239"]
+        )
+        self.assertIn("#2 POST /graphql#SaveNote → 200: error body: data.saveNote.errors: Too long", out)
+        self.assertIn("#3 POST /graphql#BulkUpdate → 200: partial failure: data.bulkUpdate.failed 1", out)
+        t = report.triage_signals(d, "form", RUN1)
+        self.assertEqual(
+            [k for k, _, _ in t["app"]],
+            [
+                "POST /graphql#SaveNote → 200 [error body: data.saveNote.errors: Too long]",
+                "POST /graphql#BulkUpdate → 200 [partial failure: data.bulkUpdate.failed 1]",
+                "PUT /api/zones/7 → 200 [error body: ok false]",
+                "POST /api/zones → 500 [leak: SQL error]",
+            ],
+        )
+        self.assertEqual(t["suspect_200"], [])  # the sign-in operation is settled unread
+        self.assertNotIn("abcdefabcdef", (d / ".data/bodies-form.json").read_text())
+        # the baseline keeps one row per operation; a note explains the operation it names, not every GraphQL call
+        self.assertEqual(memory.signal_key(t["app"][0][0]), ("request", "POST /graphql#SaveNote 200"))
+        run = {**RUN1, "notes": "POST /graphql#SaveNote refuses a long text: expected."}
+        self.assertEqual(len(report.triage_signals(d, "form", run)["app"]), 3)
+        self.assertEqual(len(report.triage_signals(d, "form", {**RUN1, "notes": "POST /graphql is fine"})["app"]), 4)
+
+    def test_body_check_all_is_capped_and_says_what_is_left(self):
+        d = self.triage_dir("".join(f"{i}. [POST] http://localhost:8765/graphql => [200] OK\n" for i in range(1, 36)))
+        code, out, calls = self.sweep(d, {str(i): '{"data": {}}' for i in range(1, 36)})
+        self.assertEqual((code, sum(c.startswith("response-body") for c in calls)), (0, report.SWEEP_CALLS))
+        self.assertIn("5 left", out)
+        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "31")])
+
+    def test_body_check_all_leaves_a_request_the_browser_dropped_as_a_suspect(self):
+        d = self.triage_dir(self.GQL_LOG)
+        code, out, _ = self.sweep(d, {"1": '{"data": {}}', "3": '{"data": {}}', "4": '{"data": {}}'})
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 not read (Request #2 not found", out)
+        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
+
+    def test_a_binary_body_playwright_saved_to_a_file_is_removed_not_read(self):
+        dump = self.proj / ".playwright-cli" / "response-2026-11-25T10-00-00-000Z.png"
+        dump.parent.mkdir()
+        dump.write_bytes(b"\x89PNG")
+        self.assertEqual(report._saved_body(f"{dump}\n"), "")
+        self.assertFalse(dump.exists())
+        keep = self.proj / "response-notes.txt"
+        keep.write_text("x")
+        for text in ('{"data": {}}', str(keep), f"see {dump}", ""):
+            self.assertEqual(report._saved_body(text), text)
+        self.assertTrue(keep.exists())
+
+    def test_body_check_all_needs_the_requests_log(self):
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])
+        code, out, calls = self.sweep(d, {})
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("requests-form.log", out)
 
     def test_suspect_200s_are_graphql_rpc_and_writes_without_auth_paths(self):
         d = self.triage_dir(

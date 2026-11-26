@@ -249,6 +249,9 @@ class Docs(unittest.TestCase):
         self.assertTrue(all("console error --all" in c for c in chains), chains)
         self.assertTrue(any(c.endswith("playwright-cli -s=qa close") for c in chains), chains)  # save, then close
         self.assertTrue(any("qa-mem signals-triage" in c for c in chains), chains)  # triage first, browser still open
+        self.assertTrue(
+            any("qa-mem body-check '<out>' --slug <slug> --all; qa-mem signals-triage" in c for c in chains)
+        )
         with tempfile.TemporaryDirectory() as d:
             g, env = load_guard(os.path.realpath(d))
             proj = Path(os.path.realpath(d)) / "my project"

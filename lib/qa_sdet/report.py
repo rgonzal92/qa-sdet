@@ -1160,6 +1160,10 @@ def _names_request(named, method, path):
 
 STORM_CALLS = 5  # the same call this often in one page visit: a fetch loop, likely
 SUSPECT_200_SHOWN = 3  # calls triage names for a response-body check: each one costs a browser command
+# `qa-mem body-check --all`: the bodies one Bash call reads, well inside its two-minute limit
+SWEEP_CALLS, SWEEP_SECONDS, SWEEP_CALL_SECONDS = 30, 60, 15
+FAILED_COUNTS = ("failed", "failedCount", "failureCount", "failures", "errorCount")
+GQL_NAME = re.compile(r"[A-Za-z_]\w{0,59}", re.ASCII)  # a GraphQL operation name: it goes into a signal's key
 RPC_PATH = re.compile(r"graphql|/gql\b|rpc", re.I)
 API_PATH = re.compile(r"/api(?:/|$)|graphql|/gql\b|rpc|\.json$|/v\d+/", re.I)  # where a 200 HTML page is wrong
 _NOT_A_URL = (
@@ -1221,11 +1225,28 @@ def _err_text(e):
     return "" if isinstance(e, bool) else core.short(scrub.redact(" ".join(str(e).split())), 80)
 
 
-def body_verdict(text, path="", status=200):
+def _partial_failure(v, where=""):
+    """The label of a batch write that says some of its items failed (`failed: 1`, an item with `ok` false), or None."""
+    for k in FAILED_COUNTS:
+        if type(v.get(k)) is int and v[k] > 0:  # a whole number: `failed: true` and a list are something else
+            return f"partial failure: {where}{k} {v[k]}"
+    for k in ("results", "items"):
+        rows = v[k] if isinstance(v.get(k), list) else []
+        bad = [x for x in rows if isinstance(x, dict) and (x.get("ok") is False or x.get("success") is False)]
+        if bad:
+            m = _err_text(next((bad[0][f] for f in ("reason", "message", "error", "detail") if bad[0].get(f)), ""))
+            return f"partial failure: {where}{k}: {len(bad)} of {len(rows)} failed" + (f": {m}" if m else "")
+    return None
+
+
+def body_verdict(text, path="", status=200, write=False):
     """What is wrong with one response body, as short labels ([] when nothing): a leak signature (stack trace, SQL error,
     framework debug page) in any status; on a 2xx also a JSON error envelope (`error`, `errors`, GraphQL `errors`,
-    `success`/`ok` false, `status` "error") and, on an API-looking path, an HTML page (a login redirect, a proxy page).
-    A 4xx or 5xx that says so in JSON is the right answer, so only its leaks count."""
+    `success`/`ok` false, `status` "error"), a GraphQL mutation's own failure (`data.<field>.userErrors`, or
+    `data.<field>.errors` beside nothing else: a record with an `errors` column is data) and, on an API-looking path, an
+    HTML page (a login redirect, a proxy page). write: the call changes data, so a batch result with failed items is a
+    partial failure (in a read, `failed: 3` is a count the page shows). A 4xx or 5xx that says so in JSON is the right
+    answer, so only its leaks count."""
     text = str(text or "")[:200_000]
     out = []
     if 200 <= status < 300:
@@ -1248,6 +1269,15 @@ def body_verdict(text, path="", status=200):
                         f"error body: {flag + ' false' if flag else 'status ' + str(v['status']).lower()}"
                         + (f": {m}" if m else "")
                     )
+            data = v["data"] if isinstance(v.get("data"), dict) else {}
+            fields = [(f"data.{k}.", f) for k, f in list(data.items())[:20] if isinstance(f, dict)]
+            for where, f in fields:
+                alone = not any(x for k, x in f.items() if k not in ("errors", "__typename"))
+                key = "userErrors" if f.get("userErrors") else "errors" if f.get("errors") and alone else None
+                if key:
+                    out.append(f"error body: {where}{key}" + (f": {m}" if (m := _err_text(f[key])) else ""))
+            if write:
+                out += [x for x in (_partial_failure(o, where) for where, o in [("", v), *fields]) if x]
         elif re.match(r"\s*<(?:!doctype html|html)\b", text, re.I) and API_PATH.search(path):
             out.append("HTML on an API endpoint")
     out += [f"leak: {label}" for label, rx in LEAKS if rx.search(text)]
@@ -1262,23 +1292,36 @@ def signal_severity(key):
     return "client" if re.search(r"→ 4\d\d\b", key) else "other"
 
 
-def _bodies(data, slug):
-    """{request number: [finding]} qa-mem body-check recorded in .data/bodies-<slug>.json ({} without one)."""
+def _bodies_file(data, slug):
     try:
         v = json.loads((data / f"bodies-{slug}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    if not isinstance(v, dict):
-        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _bodies(data, slug):
+    """{request number: [finding]} qa-mem body-check recorded in .data/bodies-<slug>.json ({} without one)."""
     return {
-        str(k): [scrub.redact(str(f)) for f in fs if isinstance(f, str)] for k, fs in v.items() if isinstance(fs, list)
+        str(k): [scrub.redact(str(f)) for f in fs if isinstance(f, str)]
+        for k, fs in _bodies_file(data, slug).items()
+        if isinstance(fs, list)
     }
 
 
-def check_body(run_dir, slug, index, text):
+def _body_ops(data, slug):
+    """{request number: GraphQL operation name} of the calls `qa-mem body-check --all` checked (the file's `ops`)."""
+    v = _bodies_file(data, slug).get("ops")
+    return (
+        {str(k): n for k, n in v.items() if isinstance(n, str) and GQL_NAME.fullmatch(n)} if isinstance(v, dict) else {}
+    )
+
+
+def check_body(run_dir, slug, index, text, op="", mutation=False):
     """Judge the body of request `index` (the number `requests` printed) and record the verdict, clean or not, in
     .data/bodies-<slug>.json for triage_signals. The method, path and status come from .data/requests-<slug>.log when it
-    has the request. Returns (what it was, findings)."""
+    has the request. op, mutation: the GraphQL operation's name and whether it writes, when the caller read the request
+    (every operation shares one method and path, so the name tells them apart). Returns (what it was, findings)."""
     data = Path(run_dir) / ".data"
     line = next(
         (
@@ -1295,17 +1338,89 @@ def check_body(run_dir, slug, index, text):
         except ValueError:
             pass
         status = int(line.group(4)) if line.group(4).isdigit() else 0
-    findings = [scrub.redact(f) for f in body_verdict(text, path, status)]
-    recorded = _bodies(data, slug)
+    write = mutation if RPC_PATH.search(path) else line is not None and line.group(2) in ops.API_WRITES
+    findings = [scrub.redact(f) for f in body_verdict(text, path, status, write)]
+    recorded: dict[str, Any] = _bodies(data, slug)
     recorded[index] = findings
+    names = _body_ops(data, slug)
+    if GQL_NAME.fullmatch(op):
+        names[index] = op
     tmp = data / f".bodies-{slug}.tmp"
-    tmp.write_text(json.dumps(recorded, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps({**recorded, "ops": names} if names else recorded, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, data / f"bodies-{slug}.json")
-    return (f"{line.group(2)} {path} → {line.group(4)}" if line else ""), findings
+    shown = path + (f"#{names[index]}" if index in names else "")
+    return (f"{line.group(2)} {shown} → {line.group(4)}" if line else ""), findings
+
+
+def _gql_operation(text):
+    """(operation name or '', whether it is a mutation) of a GraphQL request body; ('', False) for anything else."""
+    try:
+        sent = json.loads(text)
+    except (ValueError, RecursionError):
+        return "", False
+    name, mutation = "", False
+    for o in (sent if isinstance(sent, list) else [sent])[:10]:  # a batch: named after its first operation
+        if not isinstance(o, dict):
+            continue
+        query = o["query"] if isinstance(o.get("query"), str) else ""
+        said = o["operationName"] if isinstance(o.get("operationName"), str) else ""
+        m = re.search(rf"\b(query|mutation|subscription)\s+{re.escape(said)}\b", query) if said else None
+        m = m or re.match(r"\s*(query|mutation|subscription)\b\s*(\w*)", query)
+        said = said or (m.group(2) if m and m.lastindex == 2 else "")
+        name = name or (said if GQL_NAME.fullmatch(said) else "")
+        mutation = mutation or bool(m and m.group(1) == "mutation")
+    return name, mutation
+
+
+def _sign_in_operation(name):
+    """Whether a GraphQL operation is named like a sign-in call (RefreshToken, login): its answer carries credentials."""
+    return any(w.lower() in ops.API_AUTH_SEGMENTS for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", name))
+
+
+def _saved_body(text):
+    """A response body as text: playwright-cli saves a binary one to .playwright-cli/response-*.<ext> and prints the
+    path instead, so that file is removed and the body is '' (nothing to read)."""
+    p = Path(text.strip()) if re.fullmatch(r"\S*\.playwright-cli[/\\]response-[^/\\\s]+", text.strip()) else None
+    if p is None:
+        return text
+    p.unlink(missing_ok=True)
+    return ""
+
+
+def sweep_bodies(run_dir, slug):
+    """`qa-mem body-check <run> --slug <slug> --all`: read, with the browser still open, the body of every call triage
+    would name (triage_signals' `unchecked`: GraphQL and RPC calls, writes, then failed calls; never a sign-in path) and
+    record each verdict, at most SWEEP_CALLS in SWEEP_SECONDS. A GraphQL call's request body is read first for its
+    operation name and kind, and is never stored; an operation named like a sign-in is settled without reading its
+    answer. Returns {"checked": [(request number, what it was, findings)], "unread": n, "why": the first reason one
+    could not be read, "left": calls past the cap}."""
+    from . import crawl  # the playwright-cli runner; crawl imports nothing from this module
+
+    log = Path(run_dir) / ".data" / f"requests-{slug}.log"
+    if not log.is_file():
+        raise core.BadInput(f"body-check --all: no {log}; save it first (playwright-cli -s=qa requests --all > …)")
+    todo = triage_signals(run_dir, slug, {})["unchecked"]
+    checked, unread, why, deadline = [], 0, "", time.monotonic() + SWEEP_SECONDS
+    for index, _method, path in todo[:SWEEP_CALLS]:
+        if time.monotonic() > deadline:
+            break
+        op, mutation, body = "", False, ""
+        if RPC_PATH.search(path):
+            ok, sent = crawl._pw(["--raw", "request-body", index], SWEEP_CALL_SECONDS)
+            op, mutation = _gql_operation(sent) if ok else ("", False)
+        if not _sign_in_operation(op):
+            ok, body = crawl._pw(["--raw", "response-body", index], SWEEP_CALL_SECONDS)
+            if not ok:  # the browser dropped the request, or it is closed: the call stays a suspect
+                unread, why = unread + 1, why or core.short(" ".join(body.split()), 120)
+                continue
+            body = _saved_body(body)
+        checked.append((index, *check_body(run_dir, slug, index, body[:200_000], op, mutation)))
+    return {"checked": checked, "unread": unread, "why": why, "left": len(todo) - len(checked) - unread}
 
 
 def triage_signals(run_dir, slug, run, hosts=None):
-    """{"app": [(signal, count, first request index or None)], "third_party": count, "suspect_200": [(call, index)]} from
+    """{"app": [(signal, count, first request index or None)], "third_party": count, "suspect_200": [(call, index)],
+    "unchecked": [(index, method, path)] (every call whose body nobody has read yet, for `body-check --all`)} from
     .data/requests-<slug>.log, console-<slug>.log and bodies-<slug>.json (what `qa-mem body-check` found in the bodies the
     explorer read): failed requests (4xx, 5xx, FAILED), a 2xx whose body was an error envelope, an HTML page or a leak, a
     call made STORM_CALLS+ times (a request loop), and console errors, each once, minus those the run JSON or a bug draft
@@ -1318,6 +1433,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     data, found, calls, third = Path(run_dir) / ".data", {}, {}, 0
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
+    names, unchecked = _body_ops(data, slug), []
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
@@ -1334,13 +1450,21 @@ def triage_signals(run_dir, slug, run, hosts=None):
         if method == "GET":  # a POST many times is a user (or a test) saving records, not a fetch loop
             calls.setdefault((method, shape), [0, index])[0] += 1
         notes = f" [{'; '.join(checked[index])}]" if checked.get(index) else ""  # what body-check saw in its body
-        if index in checked:
+        rpc = bool(RPC_PATH.search(path))
+        # every GraphQL operation shares one method and path: a check settles its own call, and the operation's name
+        # (when body-check read it) is part of what the call is called
+        shown = path + (f"#{names[index]}" if index in names else "")
+        if index in checked and not rpc:
             checked_shapes.add((method, shape))
+        if index not in checked and code != "FAILED" and not _credential_call(path):  # body-check --all's work list
+            turn = (2 if int(code) >= 500 else 3) if int(code) >= 400 else 0 if rpc else 1
+            if turn != 1 or method in ops.API_WRITES:
+                unchecked.append((turn, index, method, path))
         if code == "FAILED" or int(code) >= 400:
             status = code if code != "FAILED" else f"FAILED {text}".strip()
-            found.setdefault(f"{method} {path} → {status}{notes}", [(method, path), 0, index])[1] += 1
+            found.setdefault(f"{method} {shown} → {status}{notes}", [(method, shown), 0, index])[1] += 1
         elif notes:
-            found.setdefault(f"{method} {path} → {code}{notes}", [(method, path), 0, index])[1] += 1
+            found.setdefault(f"{method} {shown} → {code}{notes}", [(method, shown), 0, index])[1] += 1
         elif index not in checked:
             seen_2xx.append((method, path, shape, index))
     for (method, shape), (n, index) in calls.items():
@@ -1377,6 +1501,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
         "suspect_200": [(f"{method} {shape}", index) for (method, shape), index in suspects.items()][
             :SUSPECT_200_SHOWN
         ],
+        "unchecked": [x[1:] for x in sorted(unchecked, key=lambda x: x[0])],
     }
 
 
