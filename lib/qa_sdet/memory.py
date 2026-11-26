@@ -868,6 +868,9 @@ def _ingest_files(con, pending):
     return n
 
 
+FRAME_MARK = ".contentFrame()."  # in a locator that names its frame, as `playwright-cli generate-locator` prints it
+
+
 def card(con, q, focus=None, ids=False):
     pg = codemap.find_page(con, q)
     if not pg:
@@ -972,6 +975,12 @@ def card(con, q, focus=None, ids=False):
             "last_verified >= ?) ORDER BY last_verified DESC",
             (r, _week_ago()),
         ).fetchall()
+        # one locator saved under several names is one locator (its newest name); the ones that carry their frame
+        # come first: in an app shell a page sits in an iframe, and a locator without it fails as given
+        newest = {}
+        for x in rows:
+            newest.setdefault(x["locator"], x)
+        rows = sorted(newest.values(), key=lambda x: FRAME_MARK not in x["locator"])  # stable: newest first in each
         for x in rows:
             entry = f"{core.short(x['name'], 40)}={x['locator']}"  # locators stay whole: a cut one is useless
             if len(locs) >= 20 or size + len(entry) > 2000:
@@ -981,9 +990,20 @@ def card(con, q, focus=None, ids=False):
             size += len(entry)
         if locs:
             more = (
-                f" (+{len(rows) - len(locs)} more verified; find them with a snapshot)" if len(rows) > len(locs) else ""
+                f" (+{len(rows) - len(locs)} more verified: `find '<name>'` gives a ref)"
+                if len(rows) > len(locs)
+                else ""
             )
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
+            framed = next((x["locator"] for x in rows if FRAME_MARK in x["locator"]), "")
+            if (
+                framed
+            ):  # as `generate-locator` prints it: locator('iframe[name="module"]').contentFrame().getByTestId('save')
+                prefix = framed[: framed.rindex(FRAME_MARK) + len(FRAME_MARK)]
+                out.append(
+                    f"FRAME: this page loads in a frame: put `{prefix}` in front of a locator that lacks it "
+                    "(a FROM CODE one too)"
+                )
     cov, tried, targets = _coverage(con, r, b)
     untested = _untested_rules(con, r, targets)
     changed, in_changed = _changed_here(con, r, pg)

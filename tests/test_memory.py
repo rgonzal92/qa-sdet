@@ -502,6 +502,37 @@ class Builds(MemBase):
         )
         self.assertIn("LOCATORS (fresh): Layer=#layer", memory.card(self.con, "/map"))  # a read build: no age limit
 
+    def test_the_cards_locators_are_listed_once_and_frame_safe_ones_first(self):
+        """An app shell loads its pages in an iframe: a locator saved without the frame in front fails as given, and the
+        same locator saved under three names took three of the card's 20 places."""
+        frame = "locator('iframe[name=\"module\"]').contentFrame()."
+        locs = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
+        memory.ingest(
+            self.con, run("1.0", locators=locs(("Save", f"{frame}getByTestId('save')"))), "2026-11-20T10:00:00Z"
+        )
+        newer = locs(
+            ("Save button", "getByTestId('save')"),
+            ("Save btn", "getByTestId('save')"),
+            ("Save (toolbar)", "getByTestId('save')"),
+            ("Name field", "getByLabel('Name')"),
+        )
+        memory.ingest(self.con, run("1.0", locators=newer), "2026-11-21T10:00:00Z")
+        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
+        self.assertEqual(line.count("getByTestId('save')"), 2)  # once with the frame, once without: not four times
+        self.assertLess(line.index(frame), line.index("Name field"))  # the one that works as given comes first
+        card = memory.card(self.con, "/form")
+        self.assertIn(f"FRAME: this page loads in a frame: put `{frame}` in front of a locator that lacks it", card)
+        other = {"run_id": "m", "build": "1.0", "pages": [{"route": "/map", "locators": locs(("Layer", "#layer"))}]}
+        memory.ingest(self.con, other)
+        self.assertNotIn("FRAME:", memory.card(self.con, "/map"))  # no frame-safe locator known: nothing to say
+
+    def test_the_card_says_how_to_reach_the_locators_it_has_no_room_for(self):
+        many = [{"name": f"Row {n}", "locator": f"getByTestId('row-{n}')"} for n in range(25)]
+        memory.ingest(self.con, run("1.0", locators=many))
+        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
+        self.assertIn("(+5 more verified: `find '<name>'` gives a ref)", line)
+        self.assertNotIn("snapshot", line)
+
     def test_plan_does_not_mark_verified(self):
         memory.ingest(self.con, {"run_id": "p", "build": "unknown", "pages": [{"route": "/new"}]})
         self.assertIn("verified=never", memory.card(self.con, "/new"))
