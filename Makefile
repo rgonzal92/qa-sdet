@@ -16,7 +16,7 @@ ACTIONLINT_SHA256 := 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b34
 # make mutation: a bounded trial on the redactor, the host rules and the verdict (a few minutes)
 MUTANTS ?= qa_sdet.scrub.* qa_sdet.core.x_url_allowed__* qa_sdet.core.x_allowed_hosts__* qa_sdet.report.x_verdict__*
 
-.PHONY: setup hooks format lint typecheck test test-runtime coverage security validate architecture mutation check
+.PHONY: setup hooks format lint typecheck test test-runtime test-browser coverage security validate architecture mutation check
 
 check: lint typecheck test test-runtime validate security ## the routine local gate (CI runs the same pieces)
 
@@ -56,6 +56,9 @@ test: ## the unittest suite in .venv (property tests included)
 
 test-runtime: ## the runtime contract: the same suite on Python 3.9 with the standard library only
 	$(UV) run --no-project --python 3.9 python -m unittest discover -s tests
+
+test-browser: ## the agent-free commands against tests/fixture in a real browser (playwright-cli + Chrome or Edge; no QA run open)
+	QA_SDET_BROWSER=1 $(RUN) python -m unittest discover -s tests -p test_browser.py -v
 
 coverage: ## line and branch coverage, hooks and bin/qa-mem subprocesses included; writes coverage.xml
 	$(RUN) coverage erase

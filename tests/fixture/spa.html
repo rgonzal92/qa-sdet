@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Devices</title></head>
+<body><a id="top"></a><nav><a href="#/list">Devices</a> | <a href="#/items/42">Device 42</a> | <a href="#/items/43">Device 43</a> | <a href="#top">Back to top</a></nav>
+<h1 id="h"></h1>
+<label>Find a device <input type="search" name="q"></label>
+<button data-qa-item="close-btn">Close</button>
+<div aria-hidden="true"><button>Ghost</button></div>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const show=()=>{const r=location.hash.replace(/^#/,'')||'/list';document.getElementById('h').textContent=r.startsWith('/items/')?'Device '+r.split('/')[2]:'Devices';};
+addEventListener('hashchange',show);show();
+</script></body></html>

@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Console</title></head>
+<body><nav aria-label="Main"><a href="/console/signs">Signs</a> | <a href="/console/schedules">Schedules</a></nav>
+<nav aria-label="Account"><a href="/console/preferences">Preferences</a></nav>
+<button>Preview</button>
+<iframe data-key="signs" title="Signs" src="/modules/signs.html" width="640" height="220"></iframe>
+<iframe data-key="schedules" title="Schedules" src="/modules/schedules.html" width="640" height="220"></iframe>
+<iframe data-key="preferences" title="Preferences" src="/modules/preferences.html" width="640" height="220"></iframe>
+<iframe title="Session" src="about:blank" style="width:0;height:0;border:0;visibility:hidden"></iframe>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+// every module stays mounted; only the one the path names is shown
+const key=location.pathname.split('/').pop().replace('shell.html','')||'schedules';
+for(const f of document.querySelectorAll('iframe[data-key]'))f.hidden=f.dataset.key!==key;
+</script></body></html>

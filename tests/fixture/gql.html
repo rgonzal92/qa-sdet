@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Notes</title></head>
+<body><h1>Notes</h1><ul id="list"></ul><p id="msg" role="status"></p>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const gql=(operationName,query)=>fetch('/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operationName,query})}).then(r=>r.json());
+gql('Notes','query Notes { notes { id text } }').then(d=>{document.getElementById('list').innerHTML=(d.data.notes||[]).map(n=>'<li>'+n.text+'</li>').join('');});
+gql('Zones','query Zones { zones { id } }');
+gql('SaveNote','mutation SaveNote { saveNote(text: "x") { note { id } errors { message } } }').then(()=>{document.getElementById('msg').textContent='Saved';});
+gql('BulkUpdate','mutation BulkUpdate { bulkUpdate(ids: [1, 2, 3]) { updated failed results { id ok reason } } }').then(d=>{document.getElementById('msg').textContent='Updated '+d.data.bulkUpdate.updated+' notes';});
+fetch('/api/pixel.png');
+</script></body></html>

@@ -225,6 +225,7 @@ make check          # the routine gate: lint, typecheck, test, test-runtime, val
 | `make typecheck` | `mypy` against the Python 3.9 floor (`lib/qa_sdet/contracts.py` holds the typed JSON shapes) |
 | `make test` | the unittest suite in `.venv`, property tests (Hypothesis) included |
 | `make test-runtime` | the same suite on Python 3.9 with the standard library only: the runtime contract |
+| `make test-browser` | `qa-mem` against the fixture app in a real browser (needs playwright-cli and Chrome or Edge; not part of `make check` or CI; never beside a QA run) |
 | `make coverage` | line and branch coverage, hook and `bin/qa-mem` subprocesses included; writes `coverage.xml` |
 | `make security` | `gitleaks` over the full history and the working tree (`.gitleaks.toml` lists the reviewed exceptions), `pip-audit` of the dev dependencies |
 | `make validate` | `claude plugin validate` (manifests, skills, agents, hooks) and `tests/test_docs.py` (docs and code agree) |
@@ -237,7 +238,7 @@ Without `make` or uv, the suite still runs as before: `python3 -m unittest disco
 
 The fixture app with planted bugs, for a live run:
 ```sh
-python3 -m http.server 8765 -d tests/fixture &            # needs a config with "qaBaseUrl": "http://localhost:8765" and "localhost" in allowedHosts
+python3 tests/fixture/serve.py 8765 &   # needs a config with "qaBaseUrl": "http://localhost:8765" and "localhost" in allowedHosts
 claude --plugin-dir . -p "/qa-sdet:qa-explore http://localhost:8765/form.html"
 ```
 
