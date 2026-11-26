@@ -3000,6 +3000,25 @@ class CarryPrior(Rendering):
         self.assertIn(prior_entry + "  Saved\n", draft)  # the kept result says what it saw
         self.assertIn(prior_entry + "  Save 130\n", (d2 / "jira-comment.txt").read_text())  # a plan's: its title
 
+    def test_a_page_the_new_build_never_reached_holds_passes_not_re_run_here(self):  # found in audit: a false PASS
+        # a ticket's folder keeps every re-run's files: the 1.43 re-run stopped after /form, /list last ran on 1.42
+        plan = {**PLAN1_ANSWERED, "cases": [PLAN1["cases"][0], {**PLAN1["cases"][1], "route": "/list"}]}
+        older = {**RUN1, "target": "/list", "cases": RUN1["cases"][1:]}
+        newer = {**RUN1, "build": "1.43", "cases": RUN1["cases"][:1]}
+        d, r = self.render_run([("list", older), ("form", newer)], plan=plan)
+        self.assertEqual(
+            r.split("\n\n")[1:3],
+            [
+                "⚠️ PASS WITH NOTES · build 1.43 · 2026-11-23 · 2 of 2 cases passed (1 on an earlier build) · no bugs",
+                "1 case verified on prior build 1.42; not re-run here",
+            ],
+        )
+        draft = (d / "jira-comment.txt").read_text()
+        self.assertIn("QA result: PASSED WITH NOTES on build 1.43 (", draft)
+        self.assertIn("\nAC-2 Rejects 131: passed on build 1.42, not re-run on 1.43.\n", draft)
+        _, r = self.render_run([("list", {**older, "build": "unknown"}), ("form", newer)], plan=plan)
+        self.assertIn("\n\nall 2 cases passed\n\n", r)  # an unknown build can't be compared: What to do names it
+
 
 class ExploreStopCheck(Base):
     """verify_run's explore-mode check: a COMPLETED page that left the card's open items unmentioned is sent back once."""

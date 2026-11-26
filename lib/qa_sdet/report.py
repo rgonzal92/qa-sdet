@@ -138,9 +138,11 @@ def merged_cases(
     Each gets status, actual, notes, bug. When several runs report one case, the most decisive result wins (FAIL over
     QUESTION over PASS over BLOCKED over NOT_RUN; the newest run on a tie), so another route listing a case as
     "not run" never hides its FAIL. A plan ticket's PASS whose own `build` is not its run file's (carry_prior kept it
-    from an earlier attempt) gets that build and `prior`: _prior_passed lists it as a pass not re-run here. A plan case
-    with no id or a repeated one can't get a result: it is left out and named in `warnings`, and the case kept under
-    that id gets `id_tickets` (every ticket using the id: verdict() blocks them)."""
+    from an earlier attempt), or whose run file is from another known build than the newest run's (a ticket's folder
+    keeps every re-run's files: a page the new build's run never reached), gets that build and `prior`: _prior_passed
+    lists it as a pass not re-run here. A plan case with no id or a repeated one can't get a result: it is left out
+    and named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
+    blocks them)."""
     warnings = [] if warnings is None else warnings
     valid_id = lambda v: isinstance(v, (str, int, float)) and not isinstance(v, bool) and v != ""  # as core.txt
     results, run_build = {}, {}
@@ -151,6 +153,8 @@ def merged_cases(
                 cid = str(c["id"])
                 if cid not in results or rank(c) >= rank(results[cid]):
                     results[cid], run_build[cid] = c, r.get("build")
+    known = [b for _, r in runs if (b := core.norm_build(r.get("build"))) != core.UNKNOWN]
+    now = known[-1] if known else None  # the build of the newest run (load_run's order) that read one
     out, seen = [], set()
     plan_cases = _list(plan, "cases")
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
@@ -194,13 +198,13 @@ def merged_cases(
         }
         if "annotated" in res:
             merged["annotated"] = res["annotated"]
+        ran_on = core.norm_build(res["build"] if isinstance(res.get("build"), str) else run_build.get(cid))
         if (
             tk in keys
             and merged["status"] == "PASS"
-            and isinstance(res.get("build"), str)
-            and core.norm_build(res["build"]) != core.norm_build(run_build.get(cid))
+            and (ran_on != core.norm_build(run_build.get(cid)) or (now and ran_on not in (core.UNKNOWN, now)))
         ):
-            merged.update(build=res["build"], prior=True)
+            merged.update(build=ran_on, prior=True)
         out.append(merged)
     for m in out:
         if m["id"] in repeated:
