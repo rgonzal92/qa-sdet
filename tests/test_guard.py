@@ -838,6 +838,7 @@ class R4Explorer(Case):
             f"{RUN}/qa-out/r/.data/run-form.json.ingested",
             f"{RUN}/qa-out/r/.data/trace-form.jsonl",  # the hooks' record of its calls, not the explorer's to write
             f"{RUN}/qa-out/r/.data/prior-form.json",  # the earlier results dispatch keeps for carry_prior
+            f"{RUN}/qa-out/PROJ-1/.data/history.jsonl",  # the ticket's verdicts per date and build: the report's
             f"{RUN}/src/app.tsx",
             "/srv/app/x.ts",
             f"{PROJ}/qa-out/r/bugs/BUG-1.md",

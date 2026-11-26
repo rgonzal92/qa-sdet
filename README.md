@@ -68,12 +68,12 @@ Then restart Claude Code.
 
 ```
 qa-out/
-  README.md                       index of all runs, newest first: date, run, verdicts, bugs
+  README.md                       index, newest first: one row per ticket folder and per exploration run (date, run, verdicts, bugs)
   INBOX.md                        from qa-inbox
   plugin-log.jsonl                plugin self-improvement log: denials, hook/CLI errors, nudges, notices, run summaries, user notes (secrets masked)
   plugin-digest-YYYY-MM-DD.md     anonymized Markdown digest exported by `qa-mem plugin-log export` / `/qa-sdet:qa-feedback export`
   init/                           from qa-init: scan-<area>.json and code-map-<area>.json
-  2026-11-23-PROJ-1234+PROJ-1250/
+  PROJ-1234/                      one folder per ticket, reused and updated by every re-run
     REPORT.md                     open this: verdict, what needs action, test cases with images, not tested
     bugs/BUG-1.md                 Jira-ready bug drafts (the run reply prints the acli command to file each)
     evidence/BUG-1.png            bug screenshots, problem boxed in red (labelled when Pillow is installed)
@@ -82,10 +82,12 @@ qa-out/
     jira-comment-PROJ-1234.md     pass comment draft (PASS / PASS WITH NOTES): paste into Jira yourself
     repro/BUG-1.spec.ts           Playwright spec that fails while the bug exists
     scratch/                      the explorer's throwaway snapshots and screenshots (emptied on teardown)
-    .data/                        machine files: plan.json, run-<page>.json, requests-/console-<page>.log, trace-<page>.jsonl (temp snapshots pruned on teardown)
+    .data/                        machine files: plan.json, run-<page>.json, requests-/console-<page>.log, trace-<page>.jsonl, history.jsonl (temp snapshots pruned on teardown)
+  PROJ-1250/
+  2026-11-24-form/                an exploration run (qa-explore): a fresh dated folder each time
 ```
 
-Each run creates a fresh folder. `qa-out/` and `.playwright-cli/` are added to `.git/info/exclude` automatically so run output stays out of git.
+A ticket's folder is named by its key and reused: a re-run (`--resume`, `--retest`, a new build) runs in it and keeps the earlier results in its run files, and `.data/history.jsonl` keeps one line per date and build with the verdict, case counts and bugs. Each exploration run (`qa-explore`, `qa-init --crawl`) creates a fresh dated folder; ticket runs made before one folder per ticket stay in their dated folders, are still listed, and a ticket's first run in its own folder can retest from one. `qa-out/` and `.playwright-cli/` are added to `.git/info/exclude` automatically so run output stays out of git.
 
 ## Reading REPORT.md
 

@@ -6,8 +6,9 @@ source files deterministically, the qa-mapper agent writes qa-out/init/code-map-
 hook ingests it into the `codemap` table (hints from source, never requirements). The user's manual writes
 are `bug-status` and `stale`.
 
-v0.4 run folders (qa-out/<date>-<label>/): `rundir` makes one, explorers write .data/run-<slug>.json (ingested
-like run.json), and `report` renders REPORT.md + qa-out/README.md from .data/plan.json and those files.
+v0.4 run folders (qa-out/<KEY>/ per ticket, reused by its re-runs; qa-out/<date>-<label>/ per exploration): `rundir`
+makes one, explorers write .data/run-<slug>.json (ingested like run.json), and `report` renders REPORT.md +
+qa-out/README.md from .data/plan.json and those files.
 Wrappers (`marker`, `browser-open`, `prune`, `annotate`, `setup-permissions`) keep skill commands to one shape.
 """
 
@@ -108,13 +109,22 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
     elif cmd == "rundir":
         o = _opts(args, valued=("--keys", "--route", "--label", "--prefix"))
         if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--route", "--label")) != 1:
-            raise core.BadInput(
-                "usage: qa-mem rundir <project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]"
+            raise core.BadInput(f"usage: qa-mem rundir {COMMANDS['rundir']}")
+        if "--keys" in o:  # a ticket's folder is its key, reused by every re-run: one ticket each, a plan in it too
+            keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix"))
+            if len(keys) > 1:
+                raise core.BadInput(
+                    f"rundir: one folder per ticket; make one `qa-mem rundir --keys` call per ticket ({', '.join(keys)})"
+                )
+            if "--prefix" in o:
+                raise core.BadInput("rundir: --prefix is for --route and --label; a ticket's plan goes in its folder")
+            print(ops.ticket_rundir(o["_"][0], keys[0]))
+        else:
+            print(
+                ops.make_rundir(
+                    o["_"][0], ops.run_label(None, o.get("--route"), o.get("--label"), o.get("--prefix") or "")
+                )
             )
-        keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
-        print(
-            ops.make_rundir(o["_"][0], ops.run_label(keys, o.get("--route"), o.get("--label"), o.get("--prefix") or ""))
-        )
     elif cmd == "marker":
         o = _opts(args[1:], flags=("--faults", "--api-writes"))
         if not args or args[0] not in ("start", "stop") or len(o["_"]) != 1:
@@ -468,7 +478,7 @@ COMMANDS = {  # name -> arguments, for `qa-mem` (no args), `qa-mem <cmd> --help`
     "init-status": "<init dir>",
     "codemap-forget": "<source folder>",
     "keys": "<number|KEY>...",
-    "rundir": "<project> (--keys K1,K2 | --route <route> | --label <text>) [--prefix plan-]",
+    "rundir": "<project> (--keys KEY | --route <route> [--prefix plan-] | --label <text> [--prefix plan-])",
     "marker": "start <project> [--faults] [--api-writes] | marker stop <project>",
     "browser-open": "[--session qa|qa-login] [--headed] [<url>]",
     "session-check": "[--record] [--build]",

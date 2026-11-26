@@ -710,15 +710,34 @@ def _case_block(cases, run_dir, with_status):
     )
 
 
+def _newest_run_file(run_dir):
+    return max((_mtime(f) for f in (Path(run_dir) / ".data").glob("run-*.json")), default=0.0)
+
+
+def _run_date(run_dir, plan):
+    """A folder's date: from its name (a dated run folder), else the local day its newest run file was written (a
+    ticket's folder, qa-out/<KEY>/, holds every re-run), else the plan's `created`."""
+    m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
+    if m:
+        return m.group(0)
+    t = _newest_run_file(run_dir)
+    if t:
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d")  # noqa: DTZ006 - local, as folder names are (stored times use core.now(), UTC)
+    return str(plan.get("created") or "")[:10]
+
+
+def _run_builds(runs):
+    return sorted({str(r.get("build")) for _, r in runs if r.get("build")})
+
+
 def _header(run_dir, kind, plan, runs):
     env = plan.get("env") if isinstance(plan.get("env"), dict) else {}
     renvs = [r["env"] for _, r in runs if isinstance(r.get("env"), dict)]
     renv = renvs[0] if renvs else {}
     # plan.json is written before any browser opens: what the runs used wins
     used = sorted({str(e["browser"]) for e in renvs if e.get("browser")})
-    m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
-    date = str(plan.get("created") or "")[:10] or (m.group(0) if m else "")
-    builds = sorted({str(r.get("build")) for _, r in runs if r.get("build")})
+    date = _run_date(run_dir, plan)
+    builds = _run_builds(runs)
     ran_as = sorted({" ".join(scrub.redact(str(e["context"])).split()) for e in renvs if e.get("context")})
     bits = [
         kind,
@@ -2169,8 +2188,7 @@ def run_summary(run_dir: str | Path) -> tuple[str, str, str, int]:
         verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[vmap[t['key']][0]]}" for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
-    m = re.match(r"\d{4}-\d{2}-\d{2}", Path(run_dir).name)
-    return (m.group(0) if m else str(plan.get("created") or "")[:10]), kind, verdicts, len(bugs)
+    return _run_date(run_dir, plan), kind, verdicts, len(bugs)
 
 
 def render_index(qa_out):
@@ -2223,6 +2241,56 @@ def _scrub_run(run_dir):
                     pass  # a file it can't read or parse stays as it is; the hook's pass will try again
 
 
+def _write_history(run_dir):
+    """.data/history.jsonl of a ticket run: one line per ticket verdict, date (of the newest run file) and build. A
+    report is rendered several times per run (each page's stop, the skill): a line for the same date, build and ticket
+    replaces that ticket's last line, another date or build adds one. Best effort: never fails the report."""
+    f = run_dir / ".data" / "history.jsonl"
+    try:
+        d = load_run(run_dir)
+        plan, runs = d["plan"], d["runs"]
+        if (
+            str(plan.get("kind") or "") != "ticket"
+            or not (runs or d["unread"])
+            or f.parent.is_symlink()
+            or f.is_symlink()
+        ):
+            return  # nothing ran yet, or a link: never written through
+        cases, bugs = merged_cases(plan, runs), run_bugs(runs)
+        vmap = _verdicts(plan, runs, cases, bugs, d["unread"])
+        date = datetime.fromtimestamp(_newest_run_file(run_dir)).strftime("%Y-%m-%d")  # noqa: DTZ006 - local, as _run_date
+        build = ", ".join(_run_builds(runs)) or core.UNKNOWN
+        lines = f.read_text(encoding="utf-8").splitlines() if f.exists() else []
+
+        def parsed(line):
+            try:
+                v = json.loads(line)
+            except ValueError:
+                return {}  # a line it can't read stays as it is
+            return v if isinstance(v, dict) else {}
+
+        for t in _plan_tickets(plan):
+            mine = [c for c in cases if c.get("ticket") == t["key"] and not c.get("prior")]  # as verdict() counts
+            n = {s: sum(c["status"] == s for c in mine) for s in ("PASS", "FAIL")}
+            entry = {
+                "date": date,
+                "build": build,
+                "ticket": t["key"],
+                "verdict": vmap[t["key"]][0],
+                "cases": {"pass": n["PASS"], "fail": n["FAIL"], "other": len(mine) - n["PASS"] - n["FAIL"]},
+                "bugs": len(ticket_bugs(t["key"], cases, bugs, list(vmap))),
+            }
+            last = next((i for i in reversed(range(len(lines))) if parsed(lines[i]).get("ticket") == t["key"]), -1)
+            prev = parsed(lines[last]) if last >= 0 else {}
+            if (prev.get("date"), prev.get("build")) == (date, build):
+                lines[last] = json.dumps(entry, ensure_ascii=False)
+            else:
+                lines.append(json.dumps(entry, ensure_ascii=False))
+        core._write(f, "".join(x + "\n" for x in lines))
+    except Exception:  # noqa: BLE001, S110 - the history is a side record: REPORT.md and the index must still be written
+        pass
+
+
 def write_report(run_dir: str | Path) -> Path:
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
@@ -2262,6 +2330,7 @@ def write_report(run_dir: str | Path) -> Path:
     fd = os.open(run_dir.parent, os.O_RDONLY)  # the qa-out folder itself: no lock file left behind
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        _write_history(run_dir)  # under the lock too: two renders must not both read the old file
         core._write(run_dir.parent / "README.md", render_index(run_dir.parent))
     finally:
         os.close(fd)
@@ -2435,18 +2504,22 @@ def plan_find(project, keys=None, run_dir=None):
     qa_out = proj / "qa-out"
     if not qa_out.is_dir():
         return {"reusable_plan": None, "latest_run": None}
-    dirs = _plan_folders(qa_out)
+    key = next(iter(want)) if len(want) == 1 else ""  # several keys: a combined run, found as before
+    mine = qa_out / ops.run_label(keys=[key]) if ops.KEY_RE.fullmatch(key) else None
+    st = _run_state(mine) if mine and mine.is_dir() and not mine.is_symlink() else None
+    reusable_kind = lambda s: (
+        s["kind"] == "plan" or (s["kind"] == "ticket" and (not s["has_runs"] or s["zero_executed"]))
+    )
+    if st:  # the ticket's folder is its run, re-run in place; its plan is reusable as long as nothing ran
+        return {"reusable_plan": st if reusable_kind(st) else None, "latest_run": st}
+    dirs = _plan_folders(qa_out)  # no folder of its own (yet): an older dated or combined run, as before
     reusable, latest = None, None
     for p in dirs:
         st = _run_state(p)
         if not st:
             continue
         have = {k.strip().upper() for k in st["tickets"]}
-        if (
-            reusable is None
-            and have == want
-            and (st["kind"] == "plan" or (st["kind"] == "ticket" and (not st["has_runs"] or st["zero_executed"])))
-        ):
+        if reusable is None and have == want and reusable_kind(st):
             reusable = st
         # the newest run that tested them, alone or with other tickets (PROJ-101 of PROJ-100+101: its slice, TC ids
         # kept): an older run of the ticket alone must not hide what a newer multi-ticket run found

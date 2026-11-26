@@ -51,7 +51,7 @@ class Keys(Base):
 
 
 class RunDir(Base):
-    """`qa-mem rundir`: the qa-out/<date>-<label> folder of one run."""
+    """`qa-mem rundir`: the qa-out/<KEY> folder of one ticket, or the qa-out/<date>-<label> folder of one run."""
 
     def test_dot_leading_last_segment_keeps_its_name(self):
         self.assertEqual(
@@ -79,19 +79,54 @@ class RunDir(Base):
         subprocess.run(["git", "init", "-q", str(self.proj)], check=True)
         exclude = self.proj / ".git/info/exclude"
         exclude.write_text("# mine\nqa-out")  # one entry already there, no trailing newline
-        code, out, _ = cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")
+        code, out, _ = cli("rundir", str(self.proj), "--route", "/form.html")
         run = Path(out.strip())
         self.assertEqual(code, 0)
         self.assertTrue(run.is_absolute())
-        self.assertRegex(run.name, r"^\d{4}-\d{2}-\d{2}-AB-1\+AB-2$")
+        self.assertRegex(run.name, r"^\d{4}-\d{2}-\d{2}-form$")
         self.assertEqual(run.parent, self.proj.resolve() / "qa-out")
         self.assertEqual(sorted(p.name for p in run.iterdir()), [".data", "bugs", "evidence", "repro", "scratch"])
         self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
-        second = Path(cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")[1].strip())
-        third = Path(cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")[1].strip())
+        second = Path(cli("rundir", str(self.proj), "--route", "/form.html")[1].strip())
+        third = Path(cli("rundir", str(self.proj), "--route", "/form.html")[1].strip())
         self.assertEqual((second.name, third.name), (run.name + "-2", run.name + "-3"))
         lines = exclude.read_text().splitlines()
         self.assertEqual(lines, ["# mine", "qa-out", ".playwright-cli/"])  # added once, no dupes
+
+    def test_a_ticket_folder_is_its_key_and_reused(self):  # one folder per ticket, updated in place on every re-run
+        code, out, err = cli("rundir", str(self.proj), "--keys", "ab-1")
+        run = Path(out.strip())
+        self.assertEqual((code, err, run), (0, "", self.proj.resolve() / "qa-out" / "AB-1"))
+        self.assertEqual(sorted(p.name for p in run.iterdir()), [".data", "bugs", "evidence", "repro", "scratch"])
+        self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
+        (run / ".data/plan.json").write_text("{}")
+        (run / "scratch").rmdir()  # the teardown may have emptied it; a missing sub-folder comes back
+        code, out, _ = cli("rundir", str(self.proj), "--keys", "AB-1")
+        self.assertEqual((code, Path(out.strip())), (0, run))
+        self.assertEqual((run / ".data/plan.json").read_text(), "{}")
+        self.assertTrue((run / "scratch").is_dir())
+        self.assertEqual(sorted(p.name for p in run.parent.iterdir()), ["AB-1"])
+
+    def test_a_ticket_folder_takes_one_key_and_no_prefix(self):
+        code, out, err = cli("rundir", str(self.proj), "--keys", "AB-1,AB-2")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("one `qa-mem rundir --keys` call per ticket", err)
+        code, out, err = cli("rundir", str(self.proj), "--keys", "AB-1", "--prefix", "plan-")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("--prefix", err)
+        self.assertFalse((self.proj / "qa-out").exists())
+
+    def test_a_ticket_folder_name_that_is_no_folder_is_refused(self):  # a planted link must not take the run's files
+        (self.proj / "qa-out").mkdir()
+        (self.proj / "qa-out/AB-1").write_text("x")
+        (self.t / "elsewhere").mkdir()
+        (self.proj / "qa-out/AB-2").symlink_to(self.t / "elsewhere")
+        for key in ("AB-1", "AB-2"):
+            code, out, err = cli("rundir", str(self.proj), "--keys", key)
+            self.assertEqual((code, out), (2, ""), key)
+            self.assertIn("not a folder", err)
+        self.assertEqual((self.proj / "qa-out/AB-1").read_text(), "x")
+        self.assertEqual(list((self.t / "elsewhere").iterdir()), [])
 
     def test_non_git_and_bad_input(self):
         code, out, _ = cli("rundir", str(self.proj), "--route", "/form.html", "--prefix", "plan-")

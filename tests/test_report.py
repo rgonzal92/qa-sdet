@@ -2516,6 +2516,122 @@ class NewestRun(Rendering):
         self.assertIn("2026-11-25-PROJ-1", line)
 
 
+class TicketFolder(Rendering):
+    """qa-out/<KEY>/: one folder per ticket, its run, reused by every re-run; older dated folders keep working."""
+
+    age = NewestRun.age
+
+    ran = staticmethod(
+        lambda *cases, build="1.42", status="COMPLETED": {
+            "target": "/form",
+            "build": build,
+            "status": status,
+            "cases": [{"id": c, "status": s} for c, s in cases],
+        }
+    )
+
+    def history(self, d):
+        f = d / ".data/history.jsonl"
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+    def test_plan_find_on_a_ticket_folder(self):
+        d = self.rundir("PROJ-1", plan=PLAN1)
+        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        self.assertEqual(found["reusable_plan"]["run_dir"], str(d.resolve()))
+        self.assertEqual(found["latest_run"]["name"], "PROJ-1")  # the folder is the run, even before it ran
+        self.assertFalse(found["latest_run"]["can_retest"])
+        (d / ".data/run-form.json").write_text(json.dumps(self.ran(("TC-1", "PASS"), status="INCOMPLETE")))
+        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        lr = found["latest_run"]
+        self.assertIsNone(found["reusable_plan"])  # a case ran: the plan is this run's, re-run in place
+        self.assertEqual(
+            (lr["run_dir"], lr["can_resume"], lr["incomplete_routes"]), (str(d.resolve()), True, ["/form"])
+        )
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-2"])
+        self.assertNotIn("subset_of", lr)
+
+    def test_an_old_combined_folder_is_found_until_the_ticket_has_its_own(self):
+        both = self.rundir(plan=PLAN, runs=[("form", RUN_FORM)])
+        lr = report.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]
+        self.assertEqual((lr["name"], lr["subset_of"]), (both.name, ["PROJ-1", "PROJ-2"]))
+        # the first run in the new layout retests from it: retest_of names the older folder
+        one = {**PLAN1, "retest_of": both.name, "cases": PLAN1["cases"][1:], "prior_passed": lr["passed_cases"]}
+        mine = self.rundir("PROJ-1", plan=one, runs=[("form", self.ran(("TC-2", "PASS")))])
+        self.age(mine)  # older than the combined run: still the ticket's folder
+        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        self.assertEqual(found["latest_run"]["name"], "PROJ-1")
+        self.assertNotIn("subset_of", found["latest_run"])
+        self.assertIsNone(found["reusable_plan"])
+        self.assertEqual(report._case_in_chain(mine, "TC-1")["steps"], ["Open form", "Type 130 | save"])
+        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-1", "PROJ-2"])["latest_run"]["name"], both.name)
+        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]["name"], both.name)
+
+    def test_the_newest_ticket_folder_is_the_tickets_latest_qa(self):
+        self.age(self.rundir(plan=PLAN, runs=[("form", RUN_FORM)]))
+        self.rundir("PROJ-1", plan=PLAN1, runs=[("form", self.ran(("TC-1", "PASS"), ("TC-2", "PASS")))])
+        line = next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
+        cells = [x.strip() for x in line.strip("|").split("|")]
+        self.assertEqual((cells[1], cells[5]), ("⚠️ PASS WITH NOTES", "PROJ-1"))  # Latest run: the ticket's folder
+
+    def test_index_and_header_date_a_ticket_folder_by_its_newest_run_file(self):
+        d = self.rundir("PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
+        t = time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))  # local noon: the date folder names use
+        os.utime(d / ".data/run-form.json", (t, t))
+        e = self.rundir("2026-11-22-form", plan={"kind": "explore", "title": "/form", "tickets": [], "cases": []})
+        report.write_report(e)
+        report.write_report(d)
+        self.assertIn(" · 2026-11-20 · ", (d / "REPORT.md").read_text())  # not plan.created (2026-11-23)
+        rows = [x for x in (self.proj / "qa-out/README.md").read_text().splitlines() if x.startswith("| 2026")]
+        self.assertEqual(rows[0].split(" | ")[:2], ["| 2026-11-22", "[2026-11-22-form](2026-11-22-form/REPORT.md)"])
+        self.assertEqual(rows[1], "| 2026-11-20 | [PROJ-1](PROJ-1/REPORT.md) | ticket | PROJ-1 ⚠️ PASS WITH NOTES | 0 |")
+        self.assertEqual(report.run_summary(self.rundir("PROJ-2", plan=PLAN1))[0], "2026-11-23")  # no run: created
+
+    def test_history_one_line_per_date_build_and_ticket(self):
+        d = self.rundir("PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", self.ran(("TC-1", "PASS"), ("TC-2", "PASS")))])
+        day = time.strftime("%Y-%m-%d", time.localtime((d / ".data/run-form.json").stat().st_mtime))
+        report.write_report(d)
+        line = {"date": day, "build": "1.42", "ticket": "PROJ-1", "verdict": "PASS"}
+        self.assertEqual(self.history(d), [{**line, "cases": {"pass": 2, "fail": 0, "other": 0}, "bugs": 0}])
+        report.write_report(d)  # rendered again (the stop hook, then the skill): still one line
+        self.assertEqual(len(self.history(d)), 1)
+        (d / ".data/run-form.json").write_text(json.dumps(self.ran(("TC-1", "PASS"), ("TC-2", "FAIL"))))
+        report.write_report(d)  # the same day and build, re-run: the line is updated, not added
+        failed = {**line, "verdict": "FAIL", "cases": {"pass": 1, "fail": 1, "other": 0}, "bugs": 0}
+        self.assertEqual(self.history(d), [failed])
+        (d / ".data/run-form.json").write_text(
+            json.dumps(self.ran(("TC-1", "PASS"), ("TC-2", "BLOCKED"), build="1.43"))
+        )
+        report.write_report(d)  # a new build: a new line
+        h = self.history(d)
+        self.assertEqual(h[0], failed)
+        self.assertEqual(
+            h[1],
+            {**line, "build": "1.43", "verdict": "BLOCKED", "cases": {"pass": 1, "fail": 0, "other": 1}, "bugs": 0},
+        )
+
+    def test_history_only_for_a_ticket_run_and_never_through_a_link(self):
+        plan_only = self.rundir("PROJ-1", plan=PLAN1)
+        report.write_report(plan_only)
+        explore = self.rundir(
+            "2026-11-22-form", plan={"kind": "explore", "tickets": [], "cases": []}, runs=[("form", RUN1)]
+        )
+        report.write_report(explore)
+        self.assertEqual((self.history(plan_only), self.history(explore)), ([], []))
+        d = self.rundir("PROJ-2", plan=PLAN1, runs=[("form", RUN1)])
+        outside = self.t / "outside.jsonl"
+        outside.write_text("mine\n")
+        (d / ".data/history.jsonl").symlink_to(outside)
+        report.write_report(d)
+        self.assertEqual(outside.read_text(), "mine\n")
+        self.assertTrue((d / ".data/history.jsonl").is_symlink())
+        self.assertIn("# QA report", (d / "REPORT.md").read_text())  # the report itself is written
+        (d / ".data/history.jsonl").unlink()
+        (d / ".data/history.jsonl").mkdir()  # can't be read or replaced
+        (d / "REPORT.md").unlink()
+        self.assertEqual(cli("report", str(d))[0], 0)  # best effort: a history problem never fails the report
+        self.assertTrue((d / "REPORT.md").is_file())
+
+
 class NextAction(Rendering):
     """`qa-mem next-action <run> <slug>`: after each explorer, continue, recover the sign-in once, or stop."""
 

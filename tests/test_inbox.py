@@ -193,6 +193,26 @@ class Inbox(Base):
         self.assertEqual(code, 0)
         self.assertEqual(out3.splitlines()[-1], "Next: /qa-sdet:qa-ticket 7")
 
+    def test_last_qa_comes_from_a_newer_ticket_folder_over_an_older_combined_run(self):  # the new layout's re-run
+        import os
+        import time
+
+        from support import PLAN
+
+        ran = lambda *cases: [
+            ("form", {"target": "/form", "build": "1", "status": "COMPLETED", "cases": [dict(c) for c in cases]})
+        ]
+        both = self.rundir(plan=PLAN, runs=ran({"id": "TC-1", "status": "FAIL"}, {"id": "TC-2", "status": "PASS"}))
+        t = time.time() - 5000
+        for f in (both, both / ".data/plan.json", both / ".data/run-form.json"):
+            os.utime(f, (t, t))
+        one = {**PLAN, "tickets": PLAN["tickets"][:1], "cases": PLAN["cases"][:2]}
+        self.rundir("PROJ-1", plan=one, runs=ran({"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}))
+        found = report._qa_verdicts_by_key(self.proj / "qa-out", {"PROJ-1", "PROJ-2"})
+        self.assertEqual(found, {"PROJ-1": "✅ PASS", "PROJ-2": "⛔ BLOCKED"})  # PROJ-2 still from the combined run
+        out = cli("inbox", str(self.proj), stdin=json.dumps([{"key": "PROJ-1"}, {"key": "PROJ-2"}]))[1]
+        self.assertIn("| PROJ-1 |  |  |  | ✅ PASS |", out)
+
 
 class Prep(Base):
     """`qa-mem prep`: single deterministic read-only ticket+plan+rules+memory context bundle."""

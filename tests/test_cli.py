@@ -39,6 +39,18 @@ class Cli(Base):
         self.assertEqual(cli("rundir", str(self.proj), "--label", "-h")[0], 0)
         self.assertEqual(cli("code", "--repos")[0], 0)
 
+    def test_rundir_usage_names_one_key(self):  # one folder per ticket: the usage must not invite K1,K2
+        self.assertEqual(
+            cli_mod.COMMANDS["rundir"],
+            "<project> (--keys KEY | --route <route> [--prefix plan-] | --label <text> [--prefix plan-])",
+        )
+        self.config(jiraKeyPrefix="PROJ")
+        code, out, _ = cli("rundir", str(self.proj), "--keys", "7")
+        self.assertEqual((code, Path(out.strip()).name), (0, "PROJ-7"))
+        code, _, err = cli("rundir", str(self.proj), "--label", "x", "--prefix", "plan-", "--keys", "1,2")
+        self.assertEqual(code, 2)
+        self.assertIn("usage: qa-mem rundir", err)
+
     def test_ingest_of_a_bad_file_is_a_message(self):
         code, _, err = cli("ingest", str(self.t / "missing.json"))
         self.assertEqual(code, 2)

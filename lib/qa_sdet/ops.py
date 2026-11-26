@@ -111,6 +111,9 @@ def _project(project):
     return project
 
 
+RUN_SUBDIRS = ("bugs", "evidence", "repro", "scratch", ".data")
+
+
 def make_rundir(project, label, day=None):
     """<project>/qa-out/<YYYY-MM-DD>-<label>[-n]/ with bugs/ evidence/ repro/ scratch/ .data/; a fresh folder every run."""
     project = _project(project)
@@ -126,8 +129,29 @@ def make_rundir(project, label, day=None):
             continue
     else:
         raise core.BadInput(f"too many run folders named {base}")
-    for sub in ("bugs", "evidence", "repro", "scratch", ".data"):
+    for sub in RUN_SUBDIRS:
         (run / sub).mkdir()
+    git_exclude(project)
+    return run
+
+
+def ticket_rundir(project, key):
+    """<project>/qa-out/<KEY>/: one folder per ticket, made once and reused by every re-run (results stay in its run
+    files). A path of that name that is no real folder is refused: a planted link must not take the run's files."""
+    project = _project(project)
+    root = project / "qa-out"
+    root.mkdir(exist_ok=True)
+    run = root / run_label(keys=[key])
+    try:
+        run.mkdir(mode=0o700)
+    except FileExistsError:
+        if run.is_symlink() or not run.is_dir():
+            raise core.BadInput(f"not a folder: {run} (move it away to test {key} here)") from None
+    for sub in RUN_SUBDIRS:  # an earlier run's are kept; one the teardown or the user removed comes back
+        p = run / sub
+        if p.is_symlink() or (p.exists() and not p.is_dir()):
+            raise core.BadInput(f"not a folder: {p} (move it away to test {key} here)")
+        p.mkdir(exist_ok=True)
     git_exclude(project)
     return run
 

@@ -12,7 +12,7 @@ After any config write run `qa-mem doctor` (no other time here, except when a to
 Before opening a run folder, launching an explorer or running `qa-mem crawl` / `discover` (`qa-explore`, `qa-init --crawl`, and `qa-ticket` when not `--review`), run `qa-mem session-check` (pass `--build` when checking for a build change before `--resume`). Exit `0`: proceed. Exit `2`: show stderr and stop. Exit `1` (SSO expired): recover inline without aborting the run — run `playwright-cli -s=qa close; qa-mem browser-open --session qa-login --headed '<qaBaseUrl>'`, tell the user "SSO session expired. Complete SSO + MFA in the browser window and reply `done`", then on `done` run `playwright-cli -s=qa-login close && qa-mem session-check --record`; on exit `0` continue directly with the run (on exit `1` or `2`, stop and say sign-in failed).
 
 ## Run folder
-`qa-mem rundir '<project>' --keys K1,K2` (qa-ticket), `--route '<route>'` (qa-explore) or `--label '<text>'` prints `<run>`.
+`qa-mem rundir '<project>' --keys KEY` (qa-ticket, qa-plan) prints the ticket's folder, `qa-out/<KEY>/`: made on the first run and reused by every re-run, which keeps its results in the run files (one call per ticket; several keys, or `--prefix`, are refused). `--route '<route>'` (qa-explore) or `--label '<text>'` prints a fresh dated folder, `qa-out/<YYYY-MM-DD>-<label>/` (`-2`, `-3` on a clash). After each report, a ticket's folder keeps `.data/history.jsonl`: one line per date and build with its verdict, case counts and bugs.
 
 ## Setup: one Bash call per explorer
 ```
