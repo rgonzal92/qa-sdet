@@ -131,6 +131,13 @@ else:
             once = core.norm_build(build)
             self.assertEqual(core.norm_build(once), once)
 
+    class FramedLocators(unittest.TestCase):
+        """A crawl saves a locator behind its frame; the card finds the code map's row for it by taking the frame off."""
+
+        @given(st.text().filter(lambda css: core.FRAME_MARK not in css), st.integers(0, 4))
+        def test_any_css_comes_back_out_of_its_frame(self, css, n):
+            self.assertEqual(core.frame_tail(core.in_frame(css, n, True)), css)
+
     RANK = {"FAIL": 0, "BLOCKED": 1, "PASS WITH NOTES": 2, "PASS": 3}  # worst first
     WORSE = {"PASS": ("QUESTION", "NOT_RUN", "BLOCKED", "FAIL"), "QUESTION": ("NOT_RUN", "BLOCKED", "FAIL")}
 

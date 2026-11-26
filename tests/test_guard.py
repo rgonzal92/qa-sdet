@@ -1718,6 +1718,14 @@ class R7Mapper(Case):
 
 
 class R8ApproveAndLog(Case):
+    def test_a_locator_behind_its_frame_is_approved(self):  # as a crawl saves it and the card's FRAME line gives it
+        for loc in (
+            "locator('iframe:visible').nth(0).contentFrame().getByTestId('save')",
+            "locator('iframe:visible').nth(1).contentFrame().locator('#msg')",
+            "locator('#module').contentFrame().getByRole('button', { name: 'Save' })",
+        ):
+            self.assertEqual(decision(f'playwright-cli -s=qa click "{loc}"'), "allow", loc)
+
     def test_checked_calls_are_approved(self):
         outside = TMP / "outside.txt"
         outside.write_text("secret\n")

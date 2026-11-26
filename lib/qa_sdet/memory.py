@@ -887,7 +887,28 @@ def _ingest_files(con, pending):
     return n
 
 
-FRAME_MARK = ".contentFrame()."  # in a locator that names its frame, as `playwright-cli generate-locator` prints it
+def _frame(locator):
+    """The frame a locator names, ready to go in front of another one."""
+    return locator[: locator.rindex(core.FRAME_MARK) + len(core.FRAME_MARK)]
+
+
+def _frame_elsewhere(con, route):
+    """The card's FRAME line for a page none of whose fresh locators names a frame ([] when no other page's does): an
+    app shell draws every page in one iframe, so the frame most other pages name is most likely this page's too."""
+    pages = {}
+    for x in con.execute(
+        "SELECT page, locator FROM locators WHERE page!=? AND stale=0 AND instr(locator, ?) ORDER BY last_verified DESC",
+        (route, core.FRAME_MARK),
+    ):
+        pages.setdefault(_frame(x["locator"]), set()).add(x["page"])
+    if not pages:
+        return []
+    frame = max(pages, key=lambda f: len(pages[f]))  # a tie: the one seen last
+    n = len(pages[frame])
+    return [
+        f"FRAME: no locator of this page names a frame yet; {n} other page{'s load' if n > 1 else ' loads'} in one: "
+        f"try `{frame}` in front of a locator that lacks it (a FROM CODE one too)"
+    ]
 
 
 def card(con, q, focus=None, ids=False):
@@ -900,6 +921,7 @@ def card(con, q, focus=None, ids=False):
         )
         return (
             f"NO CARD for '{q}': first visit. Untried heuristics: {', '.join(core.HEURISTICS)}\n"
+            + "".join(f"{x}\n" for x in _frame_elsewhere(con, ""))
             + tip
             + bug_lines(con, None)
         )
@@ -985,7 +1007,7 @@ def card(con, q, focus=None, ids=False):
     ).fetchall()
     if asked:
         out += ["OPEN QUESTIONS (asked before, no answer yet):"] + [f"- #{x['id']} {x['text']}" for x in asked]
-    shown = set()
+    shown, framed = set(), ""
     if current:
         locs, size = [], 0
         # a run that couldn't read the build confirmed them for a week, as its coverage (ON_BUILD): a deploy since may drop them
@@ -994,18 +1016,19 @@ def card(con, q, focus=None, ids=False):
             "last_verified >= ?) ORDER BY last_verified DESC",
             (r, _week_ago()),
         ).fetchall()
-        # one locator saved under several names is one locator (its newest name); the ones that carry their frame
-        # come first: in an app shell a page sits in an iframe, and a locator without it fails as given
+        # one locator saved under several names, or behind its frame spelled two ways (a crawl's and
+        # `generate-locator`'s), is one locator (its newest); the ones that carry their frame come first: in an app
+        # shell a page sits in an iframe, and a locator without it fails as given
         newest = {}
         for x in rows:
-            newest.setdefault(x["locator"], x)
-        rows = sorted(newest.values(), key=lambda x: FRAME_MARK not in x["locator"])  # stable: newest first in each
+            newest.setdefault((core.FRAME_MARK in x["locator"], core.frame_tail(x["locator"])), x)
+        rows = sorted(newest.values(), key=lambda x: core.FRAME_MARK not in x["locator"])  # stable: newest first
         for x in rows:
             entry = f"{core.short(x['name'], 40)}={x['locator']}"  # locators stay whole: a cut one is useless
             if len(locs) >= 20 or size + len(entry) > 2000:
                 break
             locs.append(entry)
-            shown.add(x["locator"])
+            shown |= {x["locator"], core.frame_tail(x["locator"])}  # the code map has it without the frame
             size += len(entry)
         if locs:
             more = (
@@ -1014,15 +1037,15 @@ def card(con, q, focus=None, ids=False):
                 else ""
             )
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
-            framed = next((x["locator"] for x in rows if FRAME_MARK in x["locator"]), "")
-            if (
-                framed
-            ):  # as `generate-locator` prints it: locator('iframe[name="module"]').contentFrame().getByTestId('save')
-                prefix = framed[: framed.rindex(FRAME_MARK) + len(FRAME_MARK)]
+            # as `generate-locator` prints it: locator('iframe[name="module"]').contentFrame().getByTestId('save')
+            framed = next((x["locator"] for x in rows if core.FRAME_MARK in x["locator"]), "")
+            if framed:
                 out.append(
-                    f"FRAME: this page loads in a frame: put `{prefix}` in front of a locator that lacks it "
+                    f"FRAME: this page loads in a frame: put `{_frame(framed)}` in front of a locator that lacks it "
                     "(a FROM CODE one too)"
                 )
+    if not framed:
+        out += _frame_elsewhere(con, r)
     cov, tried, targets = _coverage(con, r, b)
     untested = _untested_rules(con, r, targets)
     changed, in_changed = _changed_here(con, r, pg)

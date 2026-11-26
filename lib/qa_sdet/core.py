@@ -445,6 +445,25 @@ def short(s: object, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+FRAME_MARK = ".contentFrame()."  # in a locator that names its frame, as `playwright-cli generate-locator` prints it
+SHOWN_FRAME = "locator('iframe:visible').nth({}).contentFrame()."  # crawl.FRAME, as a locator spells it
+
+
+def in_frame(value: str, n: int, css: bool) -> str:
+    """A code-map locator as it works from the page when its element sits in the nth iframe the page shows: a frame
+    has no `page` to call `getBy…` on, and CSS is no method there, so it goes in `locator('…')`."""
+    if css:
+        return SHOWN_FRAME.format(n) + "locator('" + value.replace("\\", "\\\\").replace("'", "\\'") + "')"
+    return SHOWN_FRAME.format(n) + re.sub(r"^(?:[A-Za-z_$][\w$]*\.)+", "", value.strip())
+
+
+def frame_tail(locator: str) -> str:
+    """A locator without the frame in front of it, as the code map writes the same element."""
+    tail = locator.rpartition(FRAME_MARK)[2]
+    css = re.fullmatch(r"locator\('((?:[^'\\]|\\.)*)'\)", tail, re.S) if tail != locator else None
+    return re.sub(r"\\(.)", r"\1", css.group(1), flags=re.S) if css else tail
+
+
 class BadInput(ValueError):
     """Bad command-line input: printed to stderr, exit 2."""
 

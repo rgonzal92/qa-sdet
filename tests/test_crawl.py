@@ -20,6 +20,7 @@ CFG = dict(
     buildSource={"type": "selector", "value": "footer .version"},
 )
 BASE = CFG["qaBaseUrl"]
+FRAME_0 = "locator('iframe:visible').nth(0).contentFrame()."  # the first iframe a page shows
 
 
 def page(
@@ -253,13 +254,13 @@ class Crawl(Base):
         self.assertEqual(b.gotos(), [f"{BASE}/alarms", f"{BASE}/zones"])  # no :id route, no route without locators
         zones = next(p for p in run["pages"] if p["route"] == "/zones")
         self.assertEqual(
-            sorted(map(tuple, (x.values() for x in zones["locators"]))),  # verbatim from the code map
+            sorted(map(tuple, (x.values() for x in zones["locators"]))),  # the code map's, behind the frame it is in
             sorted(
                 [
                     ("Save", "getByTestId('save')"),
                     ("Speed", "getByLabel('Speed limit')"),
                     ("Msg", "#msg"),
-                    ("Name", "getByRole('textbox', { name: 'Name' })"),
+                    ("Name", f"{FRAME_0}getByRole('textbox', {{ name: 'Name' }})"),
                 ]
             ),
         )
@@ -312,6 +313,43 @@ class Crawl(Base):
             (code, run["status"], len(b.evals())), (0, "COMPLETED", 2)
         )  # nth=0 said no frame: nth=1 not tried
         self.assertNotIn("failed", run["notes"])
+
+    def test_a_locator_found_in_a_frame_is_saved_with_that_frame_in_front(self):
+        """Found live: memory listed 647 of 678 locators as fresh that matched nothing, each one confirmed inside the
+        app shell's iframe and saved without it."""
+        self.pages[f"{BASE}/zones"].update(
+            found=["page.getByTestId('save')"], frames=[[], ["this.page.getByLabel('Speed limit')", "#msg"]]
+        )
+        con = core.connect()
+        with con:  # a page object's locators are written as its tests call them
+            con.execute("UPDATE codemap SET value='page.getByTestId(''save'')' WHERE label='Save'")
+            con.execute("UPDATE codemap SET value='this.page.getByLabel(''Speed limit'')' WHERE label='Speed'")
+        con.close()
+        _, _, run, _, _ = self.crawl("/zones")
+        frame = "locator('iframe:visible').nth(1).contentFrame()."
+        self.assertEqual(
+            {x["name"]: x["locator"] for x in run["pages"][0]["locators"]},
+            {
+                "Save": "page.getByTestId('save')",  # the top document's: as the code map has it
+                "Speed": f"{frame}getByLabel('Speed limit')",  # a frame has no `page` to call it on
+                "Msg": f"{frame}locator('#msg')",  # CSS is no method: it goes in locator()
+            },
+        )
+
+    def test_a_framed_locator_gives_back_the_code_maps_locator(self):
+        for value, css in (
+            ("getByTestId('save')", False),
+            ("getByRole('button', { name: 'Save' })", False),
+            ("#msg", True),
+            ("[title='It\\'s \\\\ here']", True),
+        ):
+            framed = core.in_frame(value, 2, css)
+            self.assertTrue(framed.startswith("locator('iframe:visible').nth(2).contentFrame()."), framed)
+            self.assertEqual(core.frame_tail(framed), value)
+        for bare in ("getByTestId('save')", "#msg", "locator('#msg')"):  # no frame: nothing to take off
+            self.assertEqual(core.frame_tail(bare), bare)
+        named = "locator('#shell').contentFrame().locator('iframe[name=\"m\"]').contentFrame().locator('#msg')"
+        self.assertEqual(core.frame_tail(named), "#msg")  # as `generate-locator` prints a nested frame's element
 
     def test_a_hidden_frame_is_never_entered(self):  # a shell keeps every module mounted and shows one
         self.pages[f"{BASE}/zones"].update(frames=[{"getByRole('textbox', { name: 'Name' })"}, set()], hidden={0})

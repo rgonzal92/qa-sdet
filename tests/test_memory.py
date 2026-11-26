@@ -564,9 +564,59 @@ class Builds(MemBase):
         self.assertLess(line.index(frame), line.index("Name field"))  # the one that works as given comes first
         card = memory.card(self.con, "/form")
         self.assertIn(f"FRAME: this page loads in a frame: put `{frame}` in front of a locator that lacks it", card)
-        other = {"run_id": "m", "build": "1.0", "pages": [{"route": "/map", "locators": locs(("Layer", "#layer"))}]}
-        memory.ingest(self.con, other)
-        self.assertNotIn("FRAME:", memory.card(self.con, "/map"))  # no frame-safe locator known: nothing to say
+
+    def test_a_frame_spelled_two_ways_is_one_locator_and_no_code_hint(self):
+        """A crawl names the frame by its place among the shown ones, `generate-locator` by its id: the card listed the
+        element once for each, and once more under FROM CODE."""
+        shown, named = "locator('iframe:visible').nth(0).contentFrame().", "locator('#module').contentFrame()."
+        locs = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
+        crawled = locs(("Save", f"{shown}getByTestId('save')"), ("Msg", f"{shown}locator('#msg')"))
+        memory.ingest(self.con, run("1.0", locators=crawled), "2026-11-20T10:00:00Z")
+        memory.ingest(
+            self.con, run("1.0", locators=locs(("Save button", f"{named}getByTestId('save')"))), "2026-11-21T10:00:00Z"
+        )
+        with self.con:
+            for label, value in (("Save", "getByTestId('save')"), ("Msg", "#msg"), ("Name", "getByLabel('Name')")):
+                self.con.execute(
+                    "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("/form", "locator", label, value, "src/F.jsx:1", "/repo", "frontend", core.now(), "src/F.jsx"),
+                )
+        card = memory.card(self.con, "/form")
+        self.assertEqual(card.count("getByTestId('save')"), 1)
+        self.assertIn(f"Save button={named}getByTestId('save')", card)  # the newest spelling
+        self.assertEqual(card.count("#msg"), 1)
+        self.assertIn("- locators to try: Name=getByLabel('Name')\n", card + "\n")  # the one no run has confirmed
+
+    def test_a_page_without_a_framed_locator_borrows_the_frame_of_the_other_pages(self):
+        """Found live: an app shell draws every page in one iframe, and the card of a page whose locators were all
+        saved without it had no FRAME line, so the explorer acted by refs (21 `find` calls in one run)."""
+        frame, widget = "locator('#module').contentFrame().", "locator('#chat').contentFrame()."
+        page = lambda route, *pairs: {"route": route, "locators": [{"name": n, "locator": v} for n, v in pairs]}
+        ingest = lambda rid, build, *pages: memory.ingest(
+            self.con, {"run_id": rid, "build": build, "pages": list(pages)}
+        )
+        hint = (
+            "FRAME: no locator of this page names a frame yet; {} in one: try `{}` in front of a locator that lacks "
+            "it (a FROM CODE one too)"
+        )
+        ingest("a", "1.0", page("/map", ("Layer", "#layer")))
+        self.assertNotIn("FRAME:", memory.card(self.con, "/map"))  # no page names a frame: nothing to say
+        self.assertNotIn("FRAME:", memory.card(self.con, "/never-seen"))
+        ingest(
+            "b",
+            "1.0",
+            page("/zones", ("Save", f"{frame}getByTestId('save')")),
+            page("/alarms", ("Ack", f"{frame}getByTestId('ack')")),
+            page("/help", ("Send", f"{widget}getByTestId('send')")),
+        )
+        most = hint.format("2 other pages load", frame)  # the frame of most pages, not the help widget's
+        self.assertIn(most, memory.card(self.con, "/map").splitlines())
+        self.assertIn(most, memory.card(self.con, "/never-seen").splitlines())  # a first visit starts with it too
+        own = memory.card(self.con, "/alarms")
+        self.assertIn(f"FRAME: this page loads in a frame: put `{frame}` in front", own)  # its own: no borrowing
+        self.assertNotIn("other page", own)
+        ingest("c", "2.0", page("/zones"), page("/alarms"))  # a new build: their locators are stale until seen again
+        self.assertIn(hint.format("1 other page loads", widget), memory.card(self.con, "/map").splitlines())
 
     def test_the_card_says_how_to_reach_the_locators_it_has_no_room_for(self):
         many = [{"name": f"Row {n}", "locator": f"getByTestId('row-{n}')"} for n in range(25)]

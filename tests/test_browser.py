@@ -171,6 +171,22 @@ class Crawl(BrowserBase):
         self.assertEqual(found["/console/schedules"], ["Archived tab", "Preview", "Save schedule", "Shell preview"])
         self.assertEqual(found["/console/preferences"], ["Time zone", "UTC"])  # an option of a closed select counts
 
+    def test_what_a_crawl_saves_acts_as_written(self):
+        """A locator confirmed in the module's frame is saved with that frame in front: playwright-cli takes it as
+        written and lands in the module. One of the shell's own stays in the shell."""
+        self.codemap(*self.SHELL, ("/modules/schedules.html", "locator", "Search box", '[name="q"]'))
+        self.crawl("/console/schedules")
+        run = json.loads((self.run_dir / ".data/run-init-crawl.json").read_text())
+        saved = {x["name"]: x["locator"] for x in run["pages"][0]["locators"]}
+        frame = "locator('iframe:visible').nth(0).contentFrame()."
+        self.assertEqual(saved["Save schedule"], f"{frame}getByTestId('schedule-save')")
+        self.assertEqual(saved["Search box"], f"{frame}locator('[name=\"q\"]')")
+        self.assertEqual(saved["Shell preview"], "getByRole('button', { name: 'Preview' })")
+        self.open("/console/schedules")
+        where = {name: self.js("el => el.ownerDocument.location.pathname", loc) for name, loc in saved.items()}
+        self.assertEqual(where.pop("Shell preview"), "/console/schedules")
+        self.assertEqual(set(where.values()), {"/modules/schedules.html"}, where)
+
     def test_a_role_locator_skips_what_assistive_technology_cannot_see(self):
         self.codemap(
             ("/spa.html", "route", "Devices", ""),

@@ -281,10 +281,10 @@ def _check(idx, specs, target=None):
 # ---------- qa-mem crawl ----------
 def crawl(con, run, routes=()):
     """`qa-mem crawl <run> [<route>...]`: open each static route (default: every one in the code map) and record which of
-    its mapped locators exist, in the top document and its shown iframes, in <run>/.data/run-init-crawl.json. On an app
-    shell's route the locators of the module it mounts are looked for in the frames only: the shell's own document
-    matching one (a button of the same name in the menu bar) says nothing about the module. Prints one JSON line; exit
-    0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
+    its mapped locators exist, in the top document and its shown iframes (one found in a frame is saved with that frame
+    in front, core.in_frame), in <run>/.data/run-init-crawl.json. On an app shell's route the locators of the module it
+    mounts are looked for in the frames only: the shell's own document matching one (a button of the same name in the
+    menu bar) says nothing about the module. Prints one JSON line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
     run = _run_dir(run, "crawl")
     cfg, hosts = ops._qa_config("crawl")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
@@ -353,6 +353,7 @@ def crawl(con, run, routes=()):
                 continue
             frames = state.get("frames") if isinstance(state.get("frames"), int) else 0
             in_shell, found, entered = found & framed, found - framed, False  # the module's: its frame decides
+            where = {}  # the shown frame each locator was found in
             for f in range(min(frames, MAX_FRAMES)):
                 left = [i for i in todo if i not in found | invalid]
                 if not left:
@@ -362,6 +363,7 @@ def crawl(con, run, routes=()):
                     if "does not match any elements" not in err:
                         rec.notes.append(f"{route}: frame {f} check failed ({core.short(' '.join(err.split()), 120)})")
                     break
+                where.update(dict.fromkeys(res[0], f))
                 found, invalid, entered = found | res[0], invalid | res[1], True
             if not entered:  # no frame is shown: the module is drawn in the page itself
                 found |= in_shell
@@ -373,7 +375,19 @@ def crawl(con, run, routes=()):
                 unchecked=n["unchecked"] + unchecked,
             )
             rec.doc["pages"].append(
-                {"route": route, "locators": [{"name": locs[i][0], "locator": locs[i][1]} for i in sorted(found)]}
+                {
+                    "route": route,
+                    # saved as it works from the page: one found in a frame matches nothing without the frame in front
+                    "locators": [
+                        {
+                            "name": locs[i][0],
+                            "locator": core.in_frame(locs[i][1], where[i], specs[i][0] == "css")
+                            if i in where
+                            else locs[i][1],
+                        }
+                        for i in sorted(found)
+                    ],
+                }
             )
             said = f"{route}: {len(found)} of {checked} confirmed" + (f", {unchecked} unchecked" if unchecked else "")
             rec.notes.append(said)
