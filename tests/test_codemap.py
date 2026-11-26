@@ -1214,6 +1214,35 @@ class ShellMenu(CodeMapCase):
         self.assertEqual(s["areas"]["frontend"]["files"], 0)  # a stored "" hash for the menu forced a full re-map
         self.assertEqual(len(self.routes()), 3)
 
+    def test_a_second_menu_list_maps_its_modules_too(self):  # a profile menu beside the main one, same item shape
+        menu = dict(
+            self.SHELL_NAV,
+            accountMenu=[
+                {"key": "preferences", "title": "Preferences", "module": {"id": "m2", "url": "/m/prefs"}},
+                {"key": "help", "title": "Help", "url": "https://help.example.com"},  # an external link: no module
+                {
+                    "key": "me",
+                    "children": [{"key": "display", "title": "Display", "module": {"id": "m3", "url": "/m/d"}}],
+                },
+                {"key": "home", "title": "Home again", "module": {"id": "m9", "url": "/m/other"}},  # nav has /home
+            ],
+            version=3,  # other top-level values are no menus
+            features=["charts", {"key": "beta"}],
+        )
+        ui = git_repo(
+            self.dir / "ui", {"src/routes.js": "const r = []\n", "public/config.json": json.dumps(menu, indent=1)}
+        )
+        self.scan(ui)
+        self.assertEqual(
+            self.routes(),
+            [
+                ("/home", "module m0 at /m/home"),
+                ("/me/display", "module m3 at /m/d"),
+                ("/preferences", "module m2 at /m/prefs"),
+                ("/reports/daily", "module m1 at /m/daily"),
+            ],
+        )
+
     def test_menu_without_modules_drops_its_old_routes(self):  # rows of a module-less menu stayed forever
         ui = self.shell_repo()
         self.scan(ui)

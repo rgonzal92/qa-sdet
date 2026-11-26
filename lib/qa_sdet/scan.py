@@ -283,6 +283,17 @@ def _shell_nav_routes(nav, parent, lines, rel):
     return out
 
 
+def _shell_routes(cfg, lines, rel):
+    """_shell_nav_routes of every menu in the shell config: `nav`, then each other top-level list (a profile menu
+    beside the main one has the same item shape and path rule). A page an earlier menu gave stays that menu's."""
+    seen, out = set(), []
+    for menu in [cfg.get("nav")] + [v for k, v in cfg.items() if k != "nav" and isinstance(v, list)]:
+        rows = [r for r in _shell_nav_routes(menu, "", lines, rel) if r[0] not in seen]
+        seen |= {r[0] for r in rows}
+        out += rows
+    return out
+
+
 def _apply_shell_menu(con, repos):
     """The app shell's menu maps shell page paths to module page paths. Code writes its route rows, in memory and
     straight into the DB, not a mapper: a mapper can fail to write them, and a full re-map deletes its rows. Never raises."""
@@ -295,7 +306,7 @@ def _apply_shell_menu(con, repos):
             except OSError:
                 continue
             try:
-                found = _shell_nav_routes(json.loads(text).get("nav"), "", text.splitlines(), rel)
+                found = _shell_routes(json.loads(text), text.splitlines(), rel)
             except (
                 ValueError,
                 AttributeError,
