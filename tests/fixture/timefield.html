@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Schedule</title>
+<style>[role=dialog]{border:1px solid #444;padding:8px;margin:8px;background:#fff}</style></head>
+<body><h1>Sign schedule</h1>
+<button id="open">Edit schedule</button>
+<p id="saved" role="status"></p>
+<div id="dialog" role="dialog" aria-label="Edit schedule" hidden>
+ <fieldset id="time"><legend>Start time</legend></fieldset>
+ <p id="err" role="alert"></p>
+ <button id="preview">Preview</button> <button id="save">Save</button> <button id="cancel">Cancel</button>
+ <div id="inner" role="dialog" aria-label="Preview" hidden><p id="ptext"></p><button id="pclose">Close preview</button></div>
+</div>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const $=id=>document.getElementById(id),state={hh:'',mm:''};
+// the field is drawn again from its state after every keystroke, as a controlled input is
+function draw(focus){$('time').innerHTML='<legend>Start time</legend><input aria-label="Hours" id="hh" size="2" maxlength="2" value="'+state.hh+'"> : <input aria-label="Minutes" id="mm" size="2" maxlength="2" value="'+state.mm+'">';
+ for(const k of ['hh','mm'])$(k).oninput=e=>{const v=e.target.value.replace(/\D/g,'');
+  if(k==='mm'&&v.length===1)state.hh='';
+  state[k]=v;$('err').textContent=valid()||!(state.hh+state.mm)?'':'Enter a time as HH:MM';draw(k);};
+ if(focus){const el=$(focus);el.focus();el.setSelectionRange(el.value.length,el.value.length);}}
+const valid=()=>/^([01]\d|2[0-3])$/.test(state.hh)&&/^[0-5]\d$/.test(state.mm);
+$('open').onclick=()=>{$('dialog').hidden=false;draw('hh')};
+$('cancel').onclick=()=>{$('dialog').hidden=true};
+$('save').onclick=()=>{if(!valid()){$('err').textContent='Enter a time as HH:MM';return}$('saved').textContent='Starts at '+state.hh+':'+state.mm;$('dialog').hidden=true};
+$('preview').onclick=()=>{$('ptext').textContent='Starts at '+(state.hh||'--')+':'+(state.mm||'--');$('inner').hidden=false};
+$('pclose').onclick=()=>{$('inner').hidden=true};
+addEventListener('keydown',e=>{if(e.key==='Escape'){$('inner').hidden=true;$('dialog').hidden=true}});
+</script></body></html>

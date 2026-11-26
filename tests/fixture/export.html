@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Reports</title></head>
+<body><h1>Reports</h1>
+<button id="daily">Open daily report</button> <button id="weekly">Open weekly report</button>
+<p id="msg" role="status"></p>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+// the tab opens at once, blank, and gets its content when the report is ready
+function report(name){const tab=window.open('','_blank');
+ fetch('api/'+name+'-report.json?delay=300').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})
+  .then(d=>{tab.document.title=d.title;tab.document.body.innerHTML='<h1>'+d.title+'</h1><p>'+d.rows+' rows</p>'})
+  .catch(()=>{if(name==='daily'){tab.close();document.getElementById('msg').textContent='The report could not be made'}});}
+document.getElementById('daily').onclick=()=>report('daily');
+document.getElementById('weekly').onclick=()=>report('weekly');
+</script></body></html>

@@ -1,0 +1,37 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Shift notes</title>
+<style>[role=dialog]{border:1px solid #444;padding:8px;margin:8px}</style></head>
+<body><h1>Shift notes</h1>
+<button id="add">Add note</button>
+<table><thead><tr><th>Note</th><th>Priority</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+<p id="toast" role="status"></p>
+<div id="edit" role="dialog" aria-label="Note" hidden>
+ <label>Name <input id="name"></label>
+ <label>Priority <select id="priority"><option>normal</option><option>high</option></select></label>
+ <p id="err" role="alert"></p>
+ <button id="save">Save</button> <button id="cancel">Cancel</button>
+</div>
+<div id="confirm" role="dialog" aria-label="Delete note" hidden>
+ <p>Type <b>delete</b> to remove <span id="victim"></span>.</p>
+ <label>Confirmation <input id="word"></label>
+ <button id="del" disabled>Delete</button> <button id="keep">Keep</button>
+</div>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const $=id=>document.getElementById(id);let notes=[],editing=null,doomed=null;
+const api=(method,path,body)=>fetch('/api/notes'+path,{method,headers:{'Content-Type':'application/json'},body:body&&JSON.stringify(body)});
+const draw=()=>{$('rows').innerHTML=notes.map(n=>'<tr><td>'+n.name.replace(/</g,'&lt;')+'</td><td>'+n.priority+'</td><td><button data-edit="'+n.id+'">Edit</button> <button data-del="'+n.id+'">Delete</button></td></tr>').join('');};
+const load=()=>api('GET','').then(r=>r.json()).then(d=>{notes=d;draw()});
+function open(n){editing=n;$('name').value=n?n.name:'';$('priority').value=n?n.priority:'normal';$('err').textContent='';$('edit').hidden=false;$('name').focus();}
+$('add').onclick=()=>open(null);$('cancel').onclick=()=>{$('edit').hidden=true};
+$('rows').onclick=e=>{const b=e.target.dataset;if(b.edit)open(notes.find(n=>n.id==b.edit));
+ if(b.del){doomed=notes.find(n=>n.id==b.del);$('victim').textContent=doomed.name;$('word').value='';$('del').disabled=true;$('confirm').hidden=false;}};
+$('save').onclick=async()=>{const body={name:$('name').value,priority:$('priority').value};
+ const r=await api(editing?'PUT':'POST',editing?'/'+editing.id:'',body),d=await r.json().catch(()=>({}));
+ if(r.ok){if(editing)Object.assign(editing,d);else notes.push(d);draw();$('edit').hidden=true;$('toast').textContent='Saved note '+d.name;}
+ else if(editing||r.status>=500)$('err').textContent='Not saved: '+(d.error||r.status);
+ else{$('edit').hidden=true;$('name').value='';$('toast').textContent='Something went wrong';}};
+$('word').oninput=()=>{$('del').disabled=$('word').value!=='delete'};
+$('keep').onclick=()=>{$('confirm').hidden=true};
+$('del').onclick=async()=>{await api('DELETE','/'+doomed.id);$('confirm').hidden=true;$('toast').textContent='Deleted note '+doomed.name;load();};
+load();
+</script></body></html>

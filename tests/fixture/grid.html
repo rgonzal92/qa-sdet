@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Detectors</title>
+<style>#view{height:176px;overflow:auto;border:1px solid #888}#view div{height:22px}</style></head>
+<body><h1>Detectors</h1>
+<label>Find a detector <input type="search" id="q"></label>
+<label>Rows per page <select id="size"><option>20</option><option>50</option></select></label>
+<button id="faulty">Faulty <span id="badge">3</span></button>
+<div id="view" role="list" aria-label="Detectors"><div id="pad"></div></div>
+<p id="range" role="status"></p>
+<button id="prev">Previous</button> <button id="next">Next</button>
+<footer>Build <span id="build">1.0.0</span></footer>
+<script>
+const all=Array.from({length:65},(_,i)=>({id:i+1,name:'Detector '+String(i+1).padStart(2,'0'),faulty:i%20===4}));
+let page=0,size=20,q='',onlyFaulty=false;
+const $=id=>document.getElementById(id),view=$('view');
+const rows=()=>all.filter(r=>r.name.toLowerCase().includes(q)&&(!onlyFaulty||r.faulty));
+// only the rows in view are in the DOM, as a grid for long lists draws them
+function draw(){const f=rows(),shown=f.slice(page*size,page*size+size),first=Math.floor(view.scrollTop/22);
+ view.innerHTML='<div style="height:'+first*22+'px"></div>'+shown.slice(first,first+9).map(r=>'<div role="listitem">'+r.name+(r.faulty?' (faulty)':'')+'</div>').join('')+'<div style="height:'+Math.max(0,shown.length-first-9)*22+'px"></div>';
+ $('range').textContent=shown.length?'Showing '+(page*size+1)+'-'+(page*size+shown.length)+' of '+f.length:'No detectors';
+ $('prev').disabled=page===0;$('next').disabled=(page+1)*size>=f.length;}
+view.onscroll=draw;
+$('prev').onclick=()=>{page--;view.scrollTop=0;draw()};$('next').onclick=()=>{page++;view.scrollTop=0;draw()};
+$('size').onchange=e=>{size=+e.target.value;page=0;draw()};
+$('q').oninput=e=>{q=e.target.value.toLowerCase();draw()};
+$('faulty').onclick=()=>{onlyFaulty=!onlyFaulty;page=0;draw()};
+setInterval(()=>{const r=all.find(x=>!x.faulty);if(r&&all.filter(x=>x.faulty).length<9){r.faulty=true;$('badge').textContent=all.filter(x=>x.faulty).length;if(onlyFaulty)draw();}},3000);
+draw();
+</script></body></html>

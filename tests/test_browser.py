@@ -222,5 +222,116 @@ class Signals(BrowserBase):
         self.assertEqual(t["suspect_200"], [])
 
 
+class Fixtures(BrowserBase):
+    """The planted behaviour of each fixture page, driven as the tips file tells the explorer to: the answer key in a
+    form that fails when a page (or a playwright-cli verb the tips rely on) stops doing what the live runs expect."""
+
+    def text(self, css):
+        return self.js(f"(document.querySelector({json.dumps(css)}) || {{}}).textContent || ''")
+
+    def click(self, name, role="button"):
+        self.pw("click", f"getByRole('{role}', {{ name: '{name}' }})")
+
+    def test_grid_draws_only_the_rows_in_view_and_a_filter_keeps_a_stale_page(self):
+        self.open("/grid.html")
+        self.assertEqual(self.text("#range"), "Showing 1-20 of 65")
+        self.assertEqual(self.js("document.querySelectorAll('[role=listitem]').length"), "9")  # 20 on the page
+        for _ in range(3):
+            self.click("Next")
+        self.assertEqual(self.text("#range"), "Showing 61-65 of 65")
+        self.assertEqual(self.js("document.getElementById('next').disabled"), "true")
+        self.pw("fill", "getByRole('searchbox', { name: 'Find a detector' })", "Detector 0")
+        self.assertEqual(self.text("#range"), "No detectors")  # planted: 9 match, the page index stayed at 4
+
+    def test_dashboard_filter_leaks_into_the_summary_and_a_failed_panel_says_so(self):
+        self.open("/dashboard.html#/signals")
+        self.pw("fill", "getByRole('searchbox', { name: 'Filter signals' })", "Signal 10")
+        self.click("Summary", role="link")
+        self.assertIn("Active: 8 (800%)", self.text("[aria-label=Signals]"))  # planted: the total is the filtered list
+        self.assertIn("Alarms unavailable: The alarm service answered 404", self.text("#alarms [role=alert]"))
+        self.click("Retry")  # a failed section says so and offers a way on: correct, and worth checking
+
+    def test_time_field_loses_the_hour_when_typed_key_by_key_but_not_when_filled(self):
+        self.open("/timefield.html")
+        self.click("Edit schedule")
+        self.pw("fill", "getByLabel('Hours')", "09")
+        self.pw("fill", "getByLabel('Minutes')", "30")
+        self.assertEqual(
+            self.js("document.getElementById('hh').value + ':' + document.getElementById('mm').value"), "09:30"
+        )
+        self.pw("fill", "getByLabel('Hours')", "")
+        self.pw("fill", "getByLabel('Minutes')", "")
+        self.pw("click", "getByLabel('Hours')")  # the tips file's "Type key by key"
+        self.pw("type", "09")
+        self.pw("press", "Tab")
+        self.pw("type", "30")
+        self.assertEqual(
+            self.js("document.getElementById('hh').value + ':' + document.getElementById('mm').value"), ":30"
+        )
+        self.assertEqual(self.text("#err"), "Enter a time as HH:MM")  # planted: the first minute digit empties the hour
+
+    def test_escape_closes_the_outer_dialog_with_the_inner_one(self):
+        self.open("/timefield.html")
+        self.click("Edit schedule")
+        self.click("Preview")
+        self.pw("press", "Escape")
+        self.assertEqual(
+            self.js("document.getElementById('dialog').hidden"), "true"
+        )  # planted: only the preview should close
+
+    def test_a_report_tab_fills_in_and_a_failed_one_stays_blank(self):
+        self.open("/export.html")
+        self.click("Open daily report")
+        self.assertIn("- 1:", self.pw("tab-list"))  # the tips file's "Second tab or popup"
+        self.pw("tab-select", "1")
+        for _ in range(20):  # the tab opens blank and gets its content when the report is ready
+            if self.js("document.title") == "Daily report":
+                break
+        self.assertEqual(
+            self.js("document.title + ' | ' + document.body.innerText.replace(/\\s+/g, ' ')"),
+            "Daily report | Daily report 12 rows",
+        )
+        self.pw("tab-close", "1")
+        self.pw("tab-select", "0")
+        self.click("Open weekly report")
+        self.pw("tab-select", "1")
+        self.assertEqual(self.js("location.href + '|' + document.body.innerText"), "about:blank|")  # planted
+        self.pw("tab-select", "0")
+        self.assertEqual(self.text("#msg"), "")  # and the first tab says nothing
+
+    def test_notes_plants_a_lost_edit_a_lost_draft_and_a_write_behind_an_error(self):
+        self.open("/notes.html")
+        name, save = "getByLabel('Name')", "Save"
+
+        def add(text, priority="normal"):
+            self.click("Add note")
+            self.pw("fill", name, text)
+            self.pw("select", "getByLabel('Priority')", priority)
+            self.click(save)
+
+        add("qa-sdet-n1", "high")
+        self.assertEqual(self.text("#toast"), "Saved note qa-sdet-n1")
+        self.click("Edit")
+        self.pw("select", "getByLabel('Priority')", "normal")
+        self.click(save)
+        self.assertEqual(self.text("#rows td:nth-child(2)"), "normal")  # the page shows the edit and says Saved
+        self.pw("reload")
+        self.assertEqual(self.text("#rows td:nth-child(2)"), "high")  # planted: it was never stored
+        add("reserved")
+        self.assertEqual(self.text("#toast"), "Something went wrong")  # planted: no reason, the dialog is gone
+        self.assertEqual(
+            self.js("document.getElementById('edit').hidden + ' ' + document.getElementById('name').value"), "true "
+        )
+        add("qa-sdet-slow")
+        self.assertEqual(self.text("#err"), "Not saved: Bad gateway")
+        self.pw("reload")
+        self.assertIn("qa-sdet-slow", self.text("#rows"))  # planted: stored behind the error
+        self.pw("click", "getByRole('row', { name: 'qa-sdet-slow' }).getByRole('button', { name: 'Delete' })")
+        self.assertEqual(self.js("document.getElementById('del').disabled"), "true")  # correct: a typed confirmation
+        self.pw("fill", "getByLabel('Confirmation')", "delete")
+        self.pw("click", "getByRole('dialog', { name: 'Delete note' }).getByRole('button', { name: 'Delete' })")
+        self.assertNotIn("qa-sdet-slow", self.text("#rows"))
+
+
 if __name__ == "__main__":
     unittest.main()
