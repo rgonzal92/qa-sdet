@@ -86,7 +86,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(422, RESERVED if name else {"error": "A note needs a name"})
         note = {"id": next(NOTE_IDS), "name": name, "priority": body.get("priority") or "normal"}
         NOTES[note["id"]] = note
-        if "slow" in name.lower():  # planted: the note is stored, then the answer fails
+        if len(name) > 60:  # planted: the note is stored, then the answer fails (a long name is a tester's first try)
             return self._json(502, {"error": "Bad gateway"})
         return self._json(201, note)
 

@@ -337,15 +337,16 @@ class Fixtures(BrowserBase):
         self.assertEqual(
             self.js("document.getElementById('edit').hidden + ' ' + document.getElementById('name').value"), "true "
         )
-        add("qa-sdet-slow")
+        long = "qa-sdet-" + "w" * 60
+        add(long)
         self.assertEqual(self.text("#err"), "Not saved: Bad gateway")
         self.pw("reload")
-        self.assertIn("qa-sdet-slow", self.text("#rows"))  # planted: stored behind the error
-        self.pw("click", "getByRole('row', { name: 'qa-sdet-slow' }).getByRole('button', { name: 'Delete' })")
+        self.assertIn(long, self.text("#rows"))  # planted: stored behind the error
+        self.pw("click", f"getByRole('row', {{ name: '{long}' }}).getByRole('button', {{ name: 'Delete' }})")
         self.assertEqual(self.js("document.getElementById('del').disabled"), "true")  # correct: a typed confirmation
         self.pw("fill", "getByLabel('Confirmation')", "delete")
         self.pw("click", "getByRole('dialog', { name: 'Delete note' }).getByRole('button', { name: 'Delete' })")
-        self.assertNotIn("qa-sdet-slow", self.text("#rows"))
+        self.assertNotIn(long, self.text("#rows"))
 
 
 class Probe(BrowserBase):

@@ -13,7 +13,7 @@ Planted bugs (answer key, keep out of prompts):
   edit dialog too.
 - `export.html`: the weekly report's tab stays blank and the page says nothing.
 - `notes.html`: an edited priority says "Saved" and is gone after a reload; a refused name closes the dialog with
-  "Something went wrong" and drops the text; a name with `slow` answers 502 but the note is stored.
+  "Something went wrong" and drops the text; a name longer than 60 characters answers 502 but the note is stored.
 - `leaks-frame.html` (inside `leaks.html`): a raw ISO timestamp, an internal state name, 800% and an icon button with no
   name.
 
