@@ -488,6 +488,9 @@ class Docs(unittest.TestCase):
         said = harvester.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
         self.assertEqual(" ".join(crawl.HARVESTER_JS.split()), " ".join(said.split()))
         self.assertIn("u.hash.startsWith('#/')", said)  # an app routed by the hash is many pages at one path
+        states_loop = said.split("out.states.push")[0].rsplit("for (", 1)[1]
+        self.assertIn(core.SKIP_LINK_RE.pattern, states_loop)  # a "Delete" menu item is no state to open
+        self.assertIn(core.SKIP_LINK_RE.pattern, said.split("for (const el")[0])  # the links keep the same filter
         self.assertNotRegex(said, r'[$`"\\]')  # it sits in a double-quoted shell string
 
     def test_no_doc_passes_cursor_to_video_show_actions(
@@ -743,6 +746,23 @@ class Docs(unittest.TestCase):
         self.assertIn("unexercised_apis", text("skills/qa-memory/SKILL.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("agents/qa-explorer.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/memory.py"))  # the card line the explorer prompt names
+
+    def test_a_ticket_run_stops_after_its_cases(self):  # 20 of 63 post-case minutes went to the card's open lists
+        explorer = text("agents/qa-explorer.md")
+        step4 = explorer.split("4. **Read the card**")[1].split("\n5. ")[0]
+        step5 = explorer.split("5. **Cases, then the check loop.**")[1].split("\n6. ")[0]
+        for label in ("UNVISITED STATES (", "UNEXERCISED ENDPOINTS ("):  # what dispatch drops from a ticket brief
+            self.assertIn(label, text("lib/qa_sdet/ops.py"))
+        self.assertIn("explore-mode lists (a ticket brief doesn't carry them)", step4)
+        self.assertIn(
+            "Never open a state that deletes, removes or signs out.", step4
+        )  # nor do card or harvester list it
+        self.assertIn("in ticket mode try only the boundary and negative values of the fields the AC name", step5)
+        self.assertIn("in ticket mode, only for fields a given case or AC names", step5)  # server boundary
+        self.assertIn("in explore mode, or when an AC names the condition", step5)  # browser conditions
+        done = next(x for x in step5.splitlines() if x.startswith("   - ticket mode:"))
+        self.assertIn("boundary and negative values of the fields the AC name", done)
+        self.assertNotIn("risks next to them", done)  # open-ended: the run never knew it was done
 
     def test_blindspots_is_a_command_and_documented(self):
         self.assertIn("blindspots", cli.COMMANDS)

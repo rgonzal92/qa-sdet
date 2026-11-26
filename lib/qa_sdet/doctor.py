@@ -260,8 +260,16 @@ def doctor():
     try:
         con = core.connect()
         n_pages, n_rows = con.execute("SELECT count(DISTINCT page), count(*) FROM codemap").fetchone()
+        recent = [r[0] for r in con.execute("SELECT build FROM runs ORDER BY ts DESC LIMIT 3")]
         con.close()
         line(True, f"memory DB {core.db_path()}")
+        if cfg.get("buildSource") and len(recent) == 3 and all(b == core.UNKNOWN for b in recent):
+            # the states, coverage and locators each run confirms are then stored on `unknown`: they count a week only
+            line(
+                False,
+                f"buildSource reads the build (the newest 3 runs all recorded {core.UNKNOWN})",
+                "correct buildSource or remove it (without it, record the build by hand: qa-mem stale <build>)",
+            )
         paths = cfg.get("sourcePaths") if isinstance(cfg, dict) else None
         if paths is not None and not (isinstance(paths, list) and all(isinstance(x, str) and x for x in paths)):
             line(False, "sourcePaths is a list of folders", 'e.g. "sourcePaths": ["/home/me/work/app-ui"]')

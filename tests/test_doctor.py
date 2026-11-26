@@ -275,6 +275,34 @@ class Doctor(Base):
             (os.chmod(core.CONFIG.parent, 0), self.doctor_out(), os.chmod(core.CONFIG.parent, 0o700))[1],
         )
 
+    def test_a_build_source_no_run_could_read_gets_a_fix_line(self):
+        good = dict(
+            app="x",
+            qaBaseUrl="https://qa.example.com",
+            allowedHosts=["qa.example.com"],
+            ssoHost="login.x.com",
+            buildSource={"type": "selector", "value": "footer"},
+        )
+        self.config(**good)
+        want = "FIX  buildSource reads the build"
+        con = core.connect()
+        add = lambda i, build: con.execute(
+            "INSERT INTO runs(id, build, ts) VALUES(?,?,?)", (f"r{i}", build, f"2026-01-0{i}T00:00:00Z")
+        )
+        add(1, "1.0")
+        add(2, core.UNKNOWN)
+        add(3, core.UNKNOWN)
+        con.commit()
+        self.assertNotIn(want, self.doctor_out())  # 2 unread of the newest 3
+        add(4, core.UNKNOWN)
+        con.commit()
+        out = self.doctor_out()
+        self.assertIn(want, out)
+        self.assertIn("correct buildSource or remove it", out.split(want)[1].splitlines()[0])
+        self.config(**{k: v for k, v in good.items() if k != "buildSource"})  # the user records it: qa-mem stale
+        self.assertNotIn(want, self.doctor_out())
+        con.close()
+
     def test_doctor_validates_jira_ac_field_and_inbox_jql(self):
         good = dict(
             app="x",

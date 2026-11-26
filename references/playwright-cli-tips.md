@@ -61,14 +61,14 @@ It reads the body from stdin and prints what is wrong with it; the verdict, clea
 - A 4xx whose body says so (`{"error": "…"}`) is the right answer; only its leaks count.
 
 ## Map the page's states and links (one call, read-only)
-Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES; never follow logout or delete links. A link's query string is dropped: `/list?page=2` and `/list?sort=name` are the page `/list` (a query view that shows other content is an in-page state, not a page). A hash that is a route is kept (`/#/zones` and `/#/zones/12` are two pages); a plain anchor (`#top`) is the page itself.
+Once after the page loads: its same-host links and the triggers of in-page states (tabs, dialogs, menus, expanders), for the run JSON's `states` and `transitions`. Open the ones the card lists under UNVISITED STATES (explore mode); never follow a logout or delete link or open a delete, remove or sign-out state (the script leaves them out). A link's query string is dropped: `/list?page=2` and `/list?sort=name` are the page `/list` (a query view that shows other content is an in-page state, not a page). A hash that is a route is kept (`/#/zones` and `/#/zones/12` are two pages); a plain anchor (`#top`) is the page itself.
 ```
 playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, seen = new Set();
   for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim(),
       to = u.pathname + (u.hash.startsWith('#/') || u.hash.startsWith('#!/') ? u.hash.split('?')[0] : '');
     if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(to + ' ' + t) && !seen.has(to)) { seen.add(to); out.links.push([to, t.slice(0, 40)]); } } catch (e) {} }
-  for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
-    out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
+  for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary')) { const t = (el.textContent || el.getAttribute('aria-label') || '').trim();
+    if (!/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(t + ' ' + (el.getAttribute('aria-label') || ''))) out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), t.slice(0, 40)]); }
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"
 ```
 

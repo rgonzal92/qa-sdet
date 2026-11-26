@@ -26,6 +26,9 @@ MAX_TEXT = 300
 MAX_FACTS, MAX_COVERAGE, MAX_RUNS = 100, 400, 2000  # per page, per page, total
 MAX_LOCATORS = 200  # confirmed locators kept per page: a crawl confirms every mapped one (about 90 on a busy page)
 UNKNOWN = "unknown"
+# a link or in-page state that ends the session or destroys data: never followed, opened or listed (the in-page
+# harvester of crawl.HARVESTER_JS has the same pattern)
+SKIP_LINK_RE = re.compile(r"log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove", re.I)
 STATUSES = {"OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"}
 BROWSERS = ("chrome", "msedge", "firefox", "webkit")  # playwright-cli --browser values
 VISIBLE = ("OPEN", "FILED", "REGRESSED")  # bugs the explorer must know about

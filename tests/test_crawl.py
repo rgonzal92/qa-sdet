@@ -553,6 +553,15 @@ class Discover(Base):
         self.assertEqual(run["pages"][0]["transitions"], [])
         self.assertNotIn("failed", run["notes"])  # the frame past the last shown one is no failure
 
+    def test_a_state_that_deletes_or_signs_out_is_left_out(self):  # an explorer opened "Delete" on a record
+        shell = page(
+            states=[["menuitem", "Delete zone"], ["menuitem", "Sign out"], ["tab", "Active"]],
+            frame_states=[[["menuitem", "Remove member"]]],
+        )
+        code, run, _, err = self.discover({BASE: shell})
+        self.assertEqual(code, 0, err)
+        self.assertEqual([s["key"] for s in run["pages"][0]["states"]], ["tab: Active"])
+
     def test_a_third_party_frames_states_are_left_out(self):  # an embedded player or map widget is not the app
         shell = page(
             frame_states=[[["tab", "Ours"]], [["menuitem", "Theirs"]]],

@@ -22,9 +22,7 @@ NOTES_CAP = 1500
 # eval inside a frame, cross-origin too. Only a frame that is shown: an app shell keeps every module's iframe mounted
 # and hides all but one, and a hidden module's elements are not this page's
 FRAME = "iframe:visible >> nth={} >> internal:control=enter-frame >> :root"
-SKIP_LINK_RE = re.compile(
-    r"log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove", re.I
-)  # the in-page harvester's own filter, too
+SKIP_LINK_RE = core.SKIP_LINK_RE
 
 # ---------- locators: the four documented forms (references/code-map.md) become DOM checks ----------
 _STR = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
@@ -149,8 +147,8 @@ HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set()
   for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim(),
       to = u.pathname + (u.hash.startsWith('#/') || u.hash.startsWith('#!/') ? u.hash.split('?')[0] : '');
     if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(to + ' ' + t) && !seen.has(to)) { seen.add(to); out.links.push([to, t.slice(0, 40)]); } } catch (e) {} }
-  for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
-    out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
+  for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary')) { const t = (el.textContent || el.getAttribute('aria-label') || '').trim();
+    if (!/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(t + ' ' + (el.getAttribute('aria-label') || ''))) out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), t.slice(0, 40)]); }
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"""
 HARVEST_JS = (
     f"JSON.stringify({{...JSON.parse({HARVESTER_JS}), frames: document.querySelectorAll('iframe').length, "
@@ -483,8 +481,14 @@ def discover(run, url=None, depth=2, max_pages=25):
                 ):  # one sample per pattern: /x/12 and /x/34 are /x/:id
                     seen.add(core.norm_route(to))
                     queue.append((to, level + 1))
-            for st in found_states:
-                if isinstance(st, list) and len(st) == 2 and all(isinstance(x, str) for x in st) and st[1].strip():
+            for st in found_states:  # a state that deletes or signs out is never opened (the harvester drops it too)
+                if (
+                    isinstance(st, list)
+                    and len(st) == 2
+                    and all(isinstance(x, str) for x in st)
+                    and st[1].strip()
+                    and not SKIP_LINK_RE.search(st[1])
+                ):
                     states.setdefault(
                         f"{st[0]}: {st[1]}",
                         {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1], "status": "unvisited"},

@@ -278,7 +278,12 @@ def dispatch(
     rules = run.parent.parent / "qa-rules.md"
     if rules.is_file() and not rules.is_symlink():
         out += ["", "RULES:", rules.read_text(encoding="utf-8", errors="replace").strip()[:4000]]
-    out += ["", "## Card", memory.card(con, page, focus=focus)]
+    card = memory.card(con, page, focus=focus)
+    if mode == "ticket":  # a ticket run stops after its cases: the card's open-ended lists kept it going for an hour
+        card = "\n".join(
+            x for x in card.splitlines() if not x.startswith(("UNVISITED STATES (", "UNEXERCISED ENDPOINTS ("))
+        )
+    out += ["", "## Card", card]
     if cases:
         out += ["", "## Given cases (run them first, in priority order)"]
         for c in cases:

@@ -938,6 +938,19 @@ class Dispatch(Base):
             self.assertEqual(r.returncode, 2, (flags, r.stderr))
             self.assertIn("not a JSON object", r.stderr)
 
+    def test_a_ticket_brief_drops_the_cards_open_ended_lists(self):  # 20 of 63 post-case minutes went to them
+        from qa_sdet import memory
+
+        card = "PAGE /list\nUNVISITED STATES (on this page: …): tab: Active\nUNEXERCISED ENDPOINTS (…): GET /api/x\nNOTE: kept"
+        with mock.patch.object(memory, "card", return_value=card):
+            briefs = {
+                m: Path(self.dispatch("/list?a=1", "--mode", m)[1]["brief"]).read_text() for m in ("ticket", "explore")
+            }
+        for line in ("UNVISITED STATES (", "UNEXERCISED ENDPOINTS ("):
+            self.assertNotIn(line, briefs["ticket"])
+            self.assertIn(line, briefs["explore"])
+        self.assertIn("NOTE: kept", briefs["ticket"])
+
     def test_brief_holds_this_routes_cases_its_tickets_acs_rules_and_card(self):
         code, out, _ = self.dispatch("/list?a=1", "--known-bugs", "PROJ-77 Sort breaks on ties")
         self.assertEqual(code, 0)

@@ -1180,13 +1180,21 @@ def _unexercised_apis(con, route, build, bound=None):
 
 
 def _due_states(con, route, build):
-    """The page's in-page states not opened on `build` (newest first): what the card's UNVISITED STATES and `gaps` count."""
+    """The page's in-page states not opened on `build` (newest first): what the card's UNVISITED STATES and `gaps` count.
+    A state that deletes, removes or signs out is never listed: opening it is no check."""
+    week = _week_ago()
     return [
         x
         for x in con.execute(
-            "SELECT state_key, trigger, status, build FROM page_states WHERE page=? ORDER BY ts DESC", (route,)
+            "SELECT state_key, trigger, status, build, ts FROM page_states WHERE page=? ORDER BY ts DESC", (route,)
         )
-        if x["status"] != "visited" or x["build"] != build
+        # a run that couldn't read the build confirmed it for a week, as with locators: else, with a recorded build,
+        # every visited state is due again on every run
+        if not (
+            x["status"] == "visited"
+            and (x["build"] == build or (x["build"] == core.UNKNOWN and (x["ts"] or "") >= week))
+        )
+        and not core.SKIP_LINK_RE.search(f"{x['state_key']} {x['trigger'] or ''}")
     ]
 
 

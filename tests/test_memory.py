@@ -1914,6 +1914,42 @@ class States(MemBase):
         self.visit("2.0", "2026-01-02T00:00:00Z")
         self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
 
+    def test_a_state_visited_on_an_unreadable_build_stays_visited_for_a_week(self):
+        # the user recorded build 2.0 (qa-mem stale) and runs can't read the live build: each run's visit is stored
+        # on `unknown`, which never equals 2.0, so every visited state was listed again on every run
+        self.visit(core.UNKNOWN, core.now(), [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
+        core.set_meta(self.con, "build", "2.0")
+        self.assertNotIn("UNVISITED STATES", memory.card(self.con, "/incidents"))
+        self.assertEqual(json.loads(memory.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 0)
+        self.con.execute("UPDATE page_states SET ts='2026-01-01T00:00:00Z'")  # older than a week: due again
+        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+
+    def test_a_state_visited_on_another_known_build_is_due(self):
+        self.visit("1.0", core.now(), [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
+        core.set_meta(self.con, "build", "2.0")  # after the run: a run that reads its build records it
+        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+
+    def test_a_state_that_deletes_or_signs_out_is_never_listed(self):  # an explorer opened "Delete" on a record
+        self.visit(
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            [
+                {"key": "menuitem: Delete zone", "kind": "menuitem"},
+                {
+                    "key": "menuitem: Actions 3",
+                    "kind": "menuitem",
+                    "trigger": "getByRole('menuitem', { name: 'Remove' })",
+                },
+                {"key": "menuitem: Sign out", "kind": "menuitem"},
+                {"key": "tab: Scheduled", "kind": "tab"},
+            ],
+        )
+        line = next(x for x in memory.card(self.con, "/incidents").splitlines() if x.startswith("UNVISITED STATES"))
+        self.assertIn("tab: Scheduled", line)
+        for gone in ("Delete", "Actions 3", "Sign out"):
+            self.assertNotIn(gone, line)
+        self.assertEqual(json.loads(memory.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 1)
+
 
 class ObservedEndpoints(MemBase):
     """The calls a run's browser really made (requests-<slug>.log), kept as shapes, against the endpoints the code maps."""
