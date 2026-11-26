@@ -303,6 +303,24 @@ class Doctor(Base):
         self.assertNotIn(want, self.doctor_out())
         con.close()
 
+    def test_an_unset_build_source_is_fine_while_a_build_is_stored(self):
+        """Found live: an app with no build the browser can read leaves buildSource out and records the build with
+        `qa-mem stale`. Every doctor run printed FIX for the missing key, which the build read never needs."""
+        self.config(app="x", qaBaseUrl="https://qa.example.com", allowedHosts=["qa.example.com"], ssoHost="login.x.com")
+        out = self.doctor_out()
+        self.assertIn("ok   config has app, qaBaseUrl, allowedHosts, ssoHost\n", out)
+        self.assertIn(
+            "FIX  buildSource unset and no build stored  -> add buildSource, or record the build: qa-mem stale <build>\n",
+            out,
+        )
+        con = core.connect()
+        with con:
+            core.set_meta(con, "build", "3.5.0")
+        con.close()
+        out = self.doctor_out()
+        self.assertIn("ok   buildSource unset: using the stored build 3.5.0 (qa-mem stale)\n", out)
+        self.assertNotIn("FIX  buildSource", out)
+
     def test_doctor_validates_jira_ac_field_and_inbox_jql(self):
         good = dict(
             app="x",

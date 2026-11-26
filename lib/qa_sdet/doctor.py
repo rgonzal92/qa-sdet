@@ -145,21 +145,31 @@ def doctor():
         )
     else:
         line(True, f"config {core.CONFIG}")
-        missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost", "buildSource") if not cfg.get(k)]
-        line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost, buildSource", f"add {missing}")
+        missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost") if not cfg.get(k)]
+        line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost", f"add {missing}")
         bs = cfg.get("buildSource")
-        line(
-            bool(bs)
-            and all(
-                isinstance(x, dict)
-                and x.get("type") in ("selector", "url", "header")
-                and isinstance(x.get("value"), str)
-                and bool(x["value"].strip())
-                for x in (bs if isinstance(bs, list) else [bs])
-            ),
-            "buildSource is {type: selector|url|header, value}, or a list of them",
-            'e.g. {"type": "selector", "value": "footer .version"}',
-        )
+        if bs is None or bs == "":  # an app with no build the browser can read: ops._read_build takes the stored one
+            stored = ops._stored_build()
+            line(
+                bool(stored),
+                f"buildSource unset: using the stored build {stored} (qa-mem stale)"
+                if stored
+                else "buildSource unset and no build stored",
+                "add buildSource, or record the build: qa-mem stale <build>",
+            )
+        else:
+            line(
+                bool(bs)
+                and all(
+                    isinstance(x, dict)
+                    and x.get("type") in ("selector", "url", "header")
+                    and isinstance(x.get("value"), str)
+                    and bool(x["value"].strip())
+                    for x in (bs if isinstance(bs, list) else [bs])
+                ),
+                "buildSource is {type: selector|url|header, value}, or a list of them",
+                'e.g. {"type": "selector", "value": "footer .version"}',
+            )
         hosts = cfg.get("allowedHosts")
         line(
             isinstance(hosts, list) and all(isinstance(h, str) for h in hosts),

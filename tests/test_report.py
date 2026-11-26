@@ -243,7 +243,9 @@ class Verdict(unittest.TestCase):
         )
         self.assertEqual(report.verdict("T-1", [stuck], [])[1], "TC-12 not run")
         item = report._case_item({**stuck, "title": "t"}, "/x", True)
-        self.assertTrue(item.startswith("- **TC-12 t: NOT RUN.** Not testable: faults are off Notes: The 0 seen"), item)
+        self.assertTrue(
+            item.startswith("- **TC-12 t: NOT RUN.** Not testable: faults are off. Notes: The 0 seen"), item
+        )
         nine = [self.case(f"TC-{i}", "FAIL") for i in range(1, 10)]
         self.assertEqual(
             report.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1"
@@ -3905,8 +3907,8 @@ s
 SAMPLE_COMMENT_2 = """QA result: PASSED WITH NOTES on build 1.42 (2026-11-23)
 
 AC-1 Sorted by date: open question.
-  Sort: passed
-  Ties: Order of ties unspecified
+  Sort: passed.
+  Ties: open question. Order of ties unspecified
 
 Bug: Header misaligned (LOW), not filed yet
 """
@@ -4015,6 +4017,40 @@ class Sample(Rendering):
         self.assertIn(
             "Bug: Speed accepts 131 (HIGH), not filed yet\nBug: PROJ-55\n", (d / "jira-comment.txt").read_text()
         )
+
+    def test_the_comment_names_a_known_bug_by_its_hash(self):
+        """Found live: a case said "Known bug 61e2ff0fb387" and the Bug line gave a title only: nothing tied the two,
+        or the line to REPORT.md's `known bug 61e2ff0fb387`."""
+        known = {k: v for k, v in RUN_FORM["bugs"][0].items() if k not in ("draft_path", "evidence", "annotated")}
+        run = {
+            **RUN_FORM,
+            "cases": [RUN_FORM["cases"][0], {**RUN_FORM["cases"][1], "bug": "61e2ff0fb387"}],
+            "bugs": [{**known, "hash": "61e2ff0fb387"}],
+        }
+        d, r = self.folder("PROJ-1", [("form", run)])
+        self.assertIn("known bug 61e2ff0fb387", r)
+        self.assertTrue(
+            (d / "jira-comment.txt")
+            .read_text()
+            .endswith("\n\nBug: Speed accepts 131 (HIGH), known bug 61e2ff0fb387, not filed yet\n")
+        )
+
+    def test_a_question_case_whose_question_is_listed_is_one_thing_to_do(self):
+        """Found live: an explorer marked a case QUESTION and wrote its question in `questions`: What to do said twice
+        to answer it, once by its text and once by its case."""
+        todo = lambda r: r.split("## What to do")[1].split("\n## ")[0]
+        for asked in ("TC-4: do ties keep the order they were added in?", "Order of ties unspecified: which is first?"):
+            with self.subTest(asked=asked):
+                self.n = getattr(self, "n", 0) + 1
+                d = self.rundir(
+                    f"PROJ-2-{self.n}", plan=self.PLANS["PROJ-2"], runs=[("list", {**RUN_LIST, "questions": [asked]})]
+                )
+                report.write_report(d)
+                steps = todo((d / "REPORT.md").read_text())
+                self.assertIn(f"Answer: {asked}", steps)
+                self.assertNotIn("Answer the question TC-4 raised", steps)
+        d, r = self.folder("PROJ-2", [("list", {**RUN_LIST, "questions": ["Is the header fixed?"]})])
+        self.assertIn("Answer the question TC-4 raised: see Results.", todo(r))  # another question: both stand
 
     def test_no_comment_holds_a_placeholder(self):
         """Release and Fixed lines only when known; an unknown build said in words; never `<…>` to fill in."""

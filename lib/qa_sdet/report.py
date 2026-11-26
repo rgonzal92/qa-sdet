@@ -1412,6 +1412,20 @@ def _merge_questions(items):
     return merged
 
 
+def _asked(c, open_qs):
+    """Whether an open question is this QUESTION case's own: it names the case, or one says what the other says.
+    Found live: What to do listed one question twice, by its text and by its case."""
+    flat = lambda x: " ".join(re.sub(r"[^\w\s]", " ", core._s(x).lower()).split())
+    said = [t for t in (flat(c.get("notes")), flat(c.get("actual"))) if len(t) >= 12]
+    for q in open_qs:
+        text = flat(q["text"])
+        if re.search(rf"\b{re.escape(flat(c['id']))}\b", text) or any(
+            t in text or text in t for t in said if len(text) >= 12
+        ):
+            return True
+    return False
+
+
 def _q_rank(q):
     return 0 if "[BLOCKING]" in q["text"].upper() else 1 if "[HIGH]" in q["text"].upper() else 2
 
@@ -1480,7 +1494,7 @@ def _case_item(c, run_dir, with_status):
     shown = " · ".join(
         x
         for x in (
-            f"{actual} Notes: {notes}" if actual and notes else actual or notes,
+            f"{actual}{'' if actual[-1] in '.!?:…' else '.'} Notes: {notes}" if actual and notes else actual or notes,
             f"[image]({img})" + (" (not highlighted)" if c.get("annotated") is False else "") if img else "",
         )
         if x
@@ -1869,8 +1883,8 @@ def _on_build(builds):
 
 def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg, states):
     """A ticket's Jira comment, plain text: the result, build and date; the release and the fix when known; each AC with
-    what its cases saw; the ticket's bugs by title, filed or not; its open blocking questions. No ids, no paths, no
-    placeholders, nothing cut."""
+    what its cases saw; the ticket's bugs by title, filed or not; its open blocking questions. No case or draft ids, no
+    paths, no placeholders, nothing cut."""
     flat = lambda x: " ".join(core._s(x).split())
     head = [f"QA result: {VERDICT_WORD[v]} on {_on_build(builds)}" + (f" ({date})" if date else "")]
     fix = t.get("fix_version")
@@ -1894,12 +1908,15 @@ def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg,
 
     said = lambda c: flat(c.get("actual")) or flat(c.get("notes"))
 
-    def saw(c, several, state):
-        """What one case saw, under its AC: in full; several cases name theirs; a word the AC's entry has isn't repeated."""
+    def saw(c, several, mixed):
+        """What one case saw, under its AC, in full. The AC's entry gives the result of a lone case, and of several that
+        all ended alike; when they differ each line says its own, as Other checks do (found live: a reader could not
+        tell which of an AC's cases had failed)."""
         if not several:
             return "  " + (said(c) or title(c))
-        told = said(c) or (word(c) if word(c) != state else "")
-        return f"  {title(c)}" + (f": {told}" if told else "") + (f" ({word(c)})" if said(c) and c.get("prior") else "")
+        if mixed:
+            return f"  {title(c)}: {word(c)}. {said(c)}".rstrip()
+        return f"  {title(c)}" + (f": {said(c)}" if said(c) else "")
 
     for ac in _list(t, "acs"):
         aid = _ac_id(ac)
@@ -1912,7 +1929,7 @@ def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg,
                 entry.append(f"  {title(c)}: see {placed[c['id']]}.")
             else:
                 placed[c["id"]] = flat(aid)
-                entry.append(saw(c, len(covering) > 1, state))
+                entry.append(saw(c, len(covering) > 1, len({word(x) for x in covering}) > 1))
         groups.append("\n".join(entry))
     rest = [c for c in every if c["id"] not in placed]
     if rest:
@@ -1921,7 +1938,9 @@ def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg,
     for b in ticket_bugs(t["key"], cases, bugs, keys):
         known = _jira_of(b, states)[1]
         filed |= {known} if known else set()
-        found.append(f"Bug: {flat(b.get('title')) or 'untitled'} ({_sev(b)}), {known or 'not filed yet'}")
+        # a bug with no draft here goes by its hash in REPORT.md and in what a case says: the line says which it is
+        ref = "" if known or b.get("id") or not b.get("hash") else f"{_bug_label(b)}, "
+        found.append(f"Bug: {flat(b.get('title')) or 'untitled'} ({_sev(b)}), {ref}{known or 'not filed yet'}")
     named = {k for c in mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())}
     found += [
         f"Bug: {k}" for k in sorted(named - filed - {t["key"].upper()}) if not re.fullmatch(r"BUG-\d+", k)
@@ -2089,7 +2108,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
             todo += [
                 f"Answer the question {one_line(c['id'])} raised: see Results."
                 for c in cases
-                if c["status"] == "QUESTION"
+                if c["status"] == "QUESTION" and not _asked(c, open_qs)
             ]
             todo += [
                 f"Delete the test data left in the app on {one_line(r.get('target') or name)}: {cell(m.group(1).strip())}"
