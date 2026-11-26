@@ -270,6 +270,12 @@ def norm_route(r: object) -> str:
     return path + (f"#{bang}{frag}" if frag else "")
 
 
+def route_hash(fragment: str) -> str:
+    """'#/zones/12' for a URL fragment that is an SPA route ('/zones/12?tab=log', '!/zones/12'), '' for a plain anchor."""
+    f = fragment.split("?")[0]
+    return f"#{f}" if f.startswith(("/", "!/")) else ""
+
+
 def route_key(r: object) -> tuple[str, str]:
     """(norm_route, query): /list?a=1 and /list?a=2 are two routes of one card (two explorers, two run files)."""
     r = str(r or "").strip()

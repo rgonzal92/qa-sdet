@@ -451,12 +451,13 @@ def _store_states(con, route, pg, build, ts):
         if not to or to == route:
             continue
         sample = core.cap(scrub.redact(t.get("sample_path") or ""))
-        try:
-            sample = (
-                urlsplit(sample if "://" in sample else "http://x" + sample).path
+        try:  # its path, and its hash when that is a route (/#/zones/12): never a query string
+            at = (
+                urlsplit(sample if "://" in sample else "http://x" + sample)
                 if sample.startswith(("/", "http"))
-                else ""
+                else None
             )
+            sample = at.path + core.route_hash(at.fragment) if at else ""
         except ValueError:
             sample = ""
         con.execute(

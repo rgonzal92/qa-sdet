@@ -143,11 +143,12 @@ def check_js(spec, frame=False):
 
 
 # The harvester of references/playwright-cli-tips.md ("Map the page's states and links"), verbatim: tests/test_docs.py
-# pins the two together. shortcut: it keys links by location.pathname, so a hash-routed app (/#/x) collapses to one
-# page; key by the hash too when a hash-routed app needs discover.
+# pins the two together. A link is its path, plus its hash when the hash is a route (#/zones, #!/zones): an app routed
+# by the hash is many pages at one path. A plain anchor (#top) is the page itself.
 HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set();
-  for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim();
-    if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(u.pathname + ' ' + t) && !seen.has(u.pathname)) { seen.add(u.pathname); out.links.push([u.pathname, t.slice(0, 40)]); } } catch (e) {} }
+  for (const a of document.querySelectorAll('a[href]')) { try { const u = new URL(a.href, location.href), t = (a.textContent || a.getAttribute('aria-label') || '').trim(),
+      to = u.pathname + (u.hash.startsWith('#/') || u.hash.startsWith('#!/') ? u.hash.split('?')[0] : '');
+    if (u.host === location.host && !/log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove/i.test(to + ' ' + t) && !seen.has(to)) { seen.add(to); out.links.push([to, t.slice(0, 40)]); } } catch (e) {} }
   for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
     out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"""
@@ -415,11 +416,16 @@ def discover(run, url=None, depth=2, max_pages=25):
         raise core.BadInput(f"discover: {start!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
     origin = "{0.scheme}://{0.netloc}".format(urlsplit(start))
     prefix = urlsplit(str(cfg.get("qaBaseUrl") or "")).path.rstrip("/")  # routes are kept under qaBaseUrl, as crawl's
-    app = lambda p: (p[len(prefix) :] or "/") if prefix and (p == prefix or p.startswith(prefix + "/")) else p
+
+    def app(p):
+        path, mark, hash_route = p.partition("#")
+        under = prefix and (path == prefix or path.startswith(prefix + "/"))
+        return ((path[len(prefix) :] or "/") if under else path) + mark + hash_route
+
     n = dict(pages=0, states=0, links=0)
 
     def walk(rec):
-        first = urlsplit(start).path or "/"
+        first = (urlsplit(start).path or "/") + core.route_hash(urlsplit(start).fragment)
         queue, seen, fails, opened = deque([(first, 0)]), {core.norm_route(first)}, 0, True
         while queue and len(rec.doc["pages"]) < max_pages:
             path, level = queue.popleft()
@@ -462,10 +468,12 @@ def discover(run, url=None, depth=2, max_pages=25):
                 raw, label = link
                 if not raw.startswith("/") or raw.startswith("//"):  # a path on this host only
                     continue
-                to = urlsplit(raw).path
+                hash_route = core.route_hash(urlsplit(raw).fragment)
+                to = urlsplit(raw).path + hash_route
                 if (
                     not core.url_allowed(origin + to, hosts)
                     or ops._auth_segment(origin + to)
+                    or ops._auth_segment(origin + hash_route[1:].lstrip("!"))  # #/login is a sign-in page too
                     or SKIP_LINK_RE.search(f"{to} {label}")
                 ):
                     continue

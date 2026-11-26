@@ -419,6 +419,8 @@ class Docs(unittest.TestCase):
 
         said = harvester.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
         self.assertEqual(" ".join(crawl.HARVESTER_JS.split()), " ".join(said.split()))
+        self.assertIn("u.hash.startsWith('#/')", said)  # an app routed by the hash is many pages at one path
+        self.assertNotRegex(said, r'[$`"\\]')  # it sits in a double-quoted shell string
 
     def test_no_doc_passes_cursor_to_video_show_actions(
         self,

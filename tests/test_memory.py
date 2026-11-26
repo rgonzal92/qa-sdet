@@ -1811,6 +1811,18 @@ class States(MemBase):
             ts,
         )
 
+    def test_a_hash_routed_detail_page_keeps_its_sample(self):  # the sample was cut to its path: "/"
+        self.visit(
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            transitions=[
+                {"to": "/#/zones/12", "trigger": "row click", "sample_path": "/#/zones/12?tab=log", "kind": "link"}
+            ],
+        )
+        row = self.con.execute("SELECT to_route, sample_path FROM transitions").fetchone()
+        self.assertEqual(tuple(row), ("/#/zones/:id", "/#/zones/12"))
+        self.assertIn("e.g. /#/zones/12", memory.card(self.con, "/#/zones/:id"))
+
     def test_unvisited_states_leads_and_the_entry_of_a_detail_page(self):
         tab = lambda name, status: {
             "key": f"tab: {name}",

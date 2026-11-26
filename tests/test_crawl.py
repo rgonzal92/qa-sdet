@@ -498,6 +498,44 @@ class Discover(Base):
         self.assertEqual(b.gotos(), [f"{BASE}/ok"])
         self.assertEqual([t["to"] for t in run["pages"][0]["transitions"]], ["/ok"])
 
+    def test_hash_routes_are_pages_and_a_plain_anchor_is_not(self):  # an app routed by the hash is not one page
+        links = [
+            ["/app#/zones", "Zones"],
+            ["/app#!/alarms", "Alarms"],
+            ["/app#/zones/12", "Zone 12"],
+            ["/app#/zones/34", "Zone 34"],
+            ["/app", "Back to top"],  # what the harvester gives for href="#top": the page itself
+        ]
+        pages = {BASE: page(links=links), f"{BASE}#/zones": page(states=[["tab", "Active"]])}
+        code, run, b, _ = self.discover(pages, "--depth", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(b.gotos(), [f"{BASE}#/zones", f"{BASE}#!/alarms", f"{BASE}#/zones/12"])  # a sample per pattern
+        self.assertEqual([p["route"] for p in run["pages"]][:2], ["/", "/#/zones"])
+        self.assertEqual(
+            [(t["to"], t["sample_path"]) for t in run["pages"][0]["transitions"]][:3],
+            [("/#/zones", "/#/zones"), ("/#!/alarms", "/#!/alarms"), ("/#/zones/12", "/#/zones/12")],
+        )
+        self.assertEqual(run["pages"][1]["states"][0]["key"], "tab: Active")
+
+    def test_a_start_url_keeps_its_hash_route(self):
+        pages = {f"{BASE}#/zones": page(links=[["/app#/zones/12", "Zone 12"]])}
+        b = Browser(pages)
+        with mock.patch.object(subprocess, "run", side_effect=b):
+            cli("discover", str(self.run_dir), f"{BASE}#/zones", "--depth", "0")
+        run = json.loads((self.run_dir / ".data/run-discover.json").read_text())
+        self.assertEqual([p["route"] for p in run["pages"]], ["/#/zones"])
+
+    def test_a_sign_in_or_sign_out_hash_route_is_never_followed(self):
+        links = [
+            ["/app#/login", "Sign in"],
+            ["/app#/oauth/callback", "SSO"],
+            ["/app#/account/logout", "Bye"],
+            ["/app#/ok", "OK"],
+        ]
+        _, run, b, _ = self.discover({BASE: page(links=links)})
+        self.assertEqual(b.gotos(), [f"{BASE}#/ok"])
+        self.assertEqual([t["to"] for t in run["pages"][0]["transitions"]], ["/#/ok"])
+
     def test_off_host_links_skipped(self):
         pages = {
             BASE: page(links=[["//evil.example.com/x", "x"], ["https://evil.example.com/y", "y"], ["app/rel", "r"]])

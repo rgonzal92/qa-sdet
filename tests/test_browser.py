@@ -174,6 +174,13 @@ class Crawl(BrowserBase):
         )
         self.assertEqual(self.crawl("/spa.html"), {"/spa.html": ["Close", "Close by attribute"]})
 
+    def test_discover_maps_hash_routes_as_pages(self):
+        code, _, err = cli("discover", str(self.run_dir), self.base + "/spa.html", "--depth", "1")
+        self.assertEqual(code, 0, err)
+        run = json.loads((self.run_dir / ".data/run-discover.json").read_text())
+        # one sample of the two device pages; the `#top` anchor is no page
+        self.assertEqual([p["route"] for p in run["pages"]], ["/spa.html", "/spa.html#/list", "/spa.html#/items/42"])
+
     def test_discover_maps_the_shown_modules_states_onto_the_shell_page(self):
         code, _, err = cli("discover", str(self.run_dir), self.base + "/console/schedules", "--depth", "1")
         self.assertEqual(code, 0, err)
