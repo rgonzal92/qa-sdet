@@ -94,7 +94,7 @@ const norm = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 const match = (got, want, exact) => exact ? norm(got) === norm(want) : norm(got).toLowerCase().includes(norm(want).toLowerCase());
 const IMPLICIT = {button: 'button, input[type=button], input[type=submit], input[type=reset], input[type=image], summary',
   link: 'a[href], area[href]', checkbox: 'input[type=checkbox]', radio: 'input[type=radio]', heading: 'h1, h2, h3, h4, h5, h6',
-  textbox: 'input:not([type]), input[type=text], input[type=email], input[type=tel], input[type=url], input[type=search], textarea',
+  textbox: 'input:not([type]), input[type=text], input[type=email], input[type=tel], input[type=url], textarea', searchbox: 'input[type=search]:not([list])',
   combobox: 'select:not([multiple]), input[list]', listbox: 'select[multiple]', option: 'option', spinbutton: 'input[type=number]',
   slider: 'input[type=range]', img: 'img[alt]', dialog: 'dialog', table: 'table', row: 'tr', navigation: 'nav'};
 const text = el => el ? el.textContent : '';

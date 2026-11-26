@@ -174,6 +174,14 @@ class Crawl(BrowserBase):
         )
         self.assertEqual(self.crawl("/spa.html"), {"/spa.html": ["Close", "Close by attribute"]})
 
+    def test_a_search_input_is_a_searchbox_not_a_textbox(self):
+        self.codemap(
+            ("/spa.html", "route", "Devices", ""),
+            ("/spa.html", "locator", "Search", "getByRole('searchbox', { name: 'Find a device' })"),
+            ("/spa.html", "locator", "Search as text", "getByRole('textbox', { name: 'Find a device' })"),
+        )
+        self.assertEqual(self.crawl("/spa.html"), {"/spa.html": ["Search"]})
+
     def test_discover_maps_hash_routes_as_pages(self):
         code, _, err = cli("discover", str(self.run_dir), self.base + "/spa.html", "--depth", "1")
         self.assertEqual(code, 0, err)
