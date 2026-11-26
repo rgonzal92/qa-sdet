@@ -2227,9 +2227,14 @@ def write_report(run_dir: str | Path) -> Path:
     run_dir = Path(run_dir).resolve()
     if not run_dir.is_dir() or run_dir.parent.name != "qa-out":
         raise core.BadInput(f"report: not a run folder (qa-out/<run>/): {run_dir}")
+    from . import ops  # ops imports this module inside its functions too
+
+    live = ops._run_of(run_dir.parent)  # this folder's page whose explorer is still running: it will write again
+    live = live[2] if live and live[1].resolve() == run_dir else None
     for p in sorted((run_dir / ".data").glob("prior-*.json")):  # an explorer that crashed never reached the stop hook
+        slug = p.name[len("prior-") : -len(".json")]
         try:
-            carry_prior(run_dir, p.name[len("prior-") : -len(".json")])
+            carry_prior(run_dir, slug, keep=slug == live)
         except OSError:
             pass  # the copy stays: the next report or dispatch merges it
     _scrub_run(run_dir)

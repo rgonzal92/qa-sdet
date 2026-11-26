@@ -2709,6 +2709,22 @@ class CarryPrior(Rendering):
         self.assertFalse((f.parent / "prior-form.json").exists())
         self.assertEqual([c["id"] for c in json.loads(f.read_text())["cases"]], ["TC-1", "TC-2"])
 
+    def test_a_report_made_while_the_explorer_still_runs_keeps_the_copy(self):
+        """`qa-mem report` in the middle of a page's run merges what is there, but the explorer will write its file
+        again: without the copy, that last write would drop the earlier results after all."""
+        f = self.earlier(["TC-2", "TC-3"], cases=[{"id": "TC-1", "status": "PASS", "actual": "Saved"}])
+        d, copy = f.parent.parent, f.parent / "prior-form.json"
+        marker = d.parent / ".active"
+        marker.write_text(json.dumps({"expires": time.time() + 3600, "run_dir": str(d), "slug": "form"}))
+        f.write_text(json.dumps({**RUN1, "run_id": "r2", "status": "INCOMPLETE", "cases": RUN1["cases"][1:]}))
+        report.write_report(d)
+        self.assertTrue(copy.exists())  # the run is live: the stop hook merges again
+        f.write_text(json.dumps({**RUN1, "run_id": "r2", "cases": RUN1["cases"][1:]}))  # the explorer's last write
+        marker.write_text(json.dumps({"expires": time.time() + 3600, "run_dir": str(d), "slug": "list"}))
+        report.write_report(d)  # another page's run is live now: this one is over
+        self.assertFalse(copy.exists())
+        self.assertEqual([c["id"] for c in json.loads(f.read_text())["cases"]], ["TC-1", "TC-2"])
+
     def test_a_pass_kept_from_an_earlier_build_reads_like_a_plan_prior_pass(self):
         run = {**RUN1, "build": "1.43", "cases": [{**RUN1["cases"][0], "build": "1.42", "ran": "2026-11-20"}]}
         run["cases"].append(RUN1["cases"][1])
