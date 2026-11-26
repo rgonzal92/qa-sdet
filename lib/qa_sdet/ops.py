@@ -1037,6 +1037,21 @@ def _scrub_body(text):
     return out[:API_BODY_CAP], len(out) > API_BODY_CAP
 
 
+def _note_probe(method, url, status):
+    """One line in <run>/.data/probes-<slug>.jsonl for a request api-probe sent in an explorer's run: the browser logs
+    it as it logs the page's own, and the report's signals leave it out (found live: a probe that failed on CORS was
+    listed as a new severe app signal). Best effort: no run, or a file that can't be written, changes nothing."""
+    for base in dict.fromkeys(b for b in (os.getcwd(), os.environ.get("CLAUDE_PROJECT_DIR")) if b):
+        run = _run_of(Path(base) / "qa-out")
+        if run:
+            try:
+                with open(run[1] / ".data" / f"probes-{run[2]}.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"method": method, "url": scrub.redact(url), "status": status}) + "\n")
+            except OSError:
+                pass
+            return
+
+
 def _probe_page(method, url, headers, body, needle=None):
     """One fetch inside the signed-in `qa` browser: (result, None), or (None, 'api-probe: …' problem). Every value
     is a JSON string in the script, so page or caller text can't break out of it."""
@@ -1073,9 +1088,11 @@ def _probe_page(method, url, headers, body, needle=None):
     if isinstance(res, str):
         res = _unwrap_raw(res)
     if isinstance(res, dict) and res.get("error"):
+        _note_probe(method, url, "FAILED")
         return None, f"api-probe: the request failed in the browser: {core.short(str(res['error']), 200)}"
     if not isinstance(res, dict) or not isinstance(res.get("status"), int):
         return None, f"api-probe: unexpected browser output ({core.short(r.stdout.strip(), 120)})"
+    _note_probe(method, url, res["status"])
     return res, None
 
 

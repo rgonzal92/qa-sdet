@@ -1211,7 +1211,7 @@ TypeError: rows is undefined
 class Signals(Rendering):
     """Console errors and failed requests the explorer saved before closing the browser (.data/*-<slug>.log)."""
 
-    def signals_run(self, run=RUN1, requests=REQUESTS_LOG, console=CONSOLE_LOG, drafts=()):
+    def signals_run(self, run=RUN1, requests=REQUESTS_LOG, console=CONSOLE_LOG, drafts=(), probes=None):
         self.config(releaseTemplates=TEMPLATES)
         d = self.rundir(
             "2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", run)]
@@ -1221,6 +1221,8 @@ class Signals(Rendering):
                 (d / f".data/{kind}-form.log").write_text(text)
         for i, text in enumerate(drafts, 1):
             (d / f"bugs/BUG-{i}.md").write_text(text)
+        if probes is not None:  # what `qa-mem api-probe` notes of its own requests
+            (d / ".data/probes-form.jsonl").write_text("".join(json.dumps(x) + "\n" for x in probes))
         for c in run.get("cases") or []:  # every checked case has its image: only signals are under test
             (d / f"evidence/{c['id']}.png").write_bytes(b"png")
         report.write_report(d)
@@ -1240,6 +1242,25 @@ class Signals(Rendering):
             self.assertNotIn(gone, r)  # 2xx, network lines the requests log carries, stack lines, a token
         self.assertIn("\n\n✅ PASS · ", r)  # signals never change a verdict
         self.assertIn("1. Look into the 1 severe browser signal no bug explains", r)  # the failed request
+
+    def test_a_request_the_explorers_own_probe_sent_is_no_app_signal(self):
+        """Found live: `qa-mem api-probe` to another allowed host failed on CORS, and the report listed its request and
+        its console error as new severe app signals; the page's own 26 calls of that endpoint had all answered 200."""
+        url = "https://api.qa.example/lock/status"
+        ok, failed = f"[GET] {url} => [200] OK", f"[GET] {url} => [FAILED] net::ERR_FAILED"
+        console = f"[ERROR] Access to fetch at '{url}' from origin 'https://qa.example' has been blocked by CORS policy: x @ https://qa.example/form:0\n"
+        probe = {"method": "GET", "url": url, "status": "FAILED"}
+        log = lambda *lines: "".join(f"{i}. {x}\n" for i, x in enumerate(lines, 1))
+        r = self.signals_run(requests=log(ok, failed, ok), console=console, probes=[probe])
+        self.assertNotIn("Signals no bug explains", r)
+        self.assertNotIn("severe browser signal", r)
+        r = self.signals_run(requests=log(ok, failed, ok), console=console, probes=[])  # the page's own failure
+        self.assertIn("- /form: GET /lock/status → FAILED net::ERR_FAILED\n", r)
+        self.assertIn("- /form: console: Access to fetch at", r)
+        r = self.signals_run(requests=log(failed, failed, failed), console="", probes=[probe])
+        self.assertIn(
+            "- /form: GET /lock/status → FAILED net::ERR_FAILED (×2)\n", r
+        )  # one was the probe's, two the page's
 
     def test_a_signal_the_run_or_a_bug_draft_names_is_explained(self):
         r = self.signals_run(

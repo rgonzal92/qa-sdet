@@ -1238,7 +1238,8 @@ def triage_signals(run_dir, slug, run, hosts=None):
     .data/requests-<slug>.log, console-<slug>.log and bodies-<slug>.json (what `qa-mem body-check` found in the bodies the
     explorer read): failed requests (4xx, 5xx, FAILED), a 2xx whose body was an error envelope, an HTML page or a leak, a
     call made STORM_CALLS+ times (a request loop), and console errors, each once, minus those the run JSON or a bug draft
-    names (a request by its method and path, a message by its first 60 characters). A leak signature (stack trace, SQL
+    names (a request by its method and path, a message by its first 60 characters), and minus the requests the
+    explorer's own `qa-mem api-probe` sent (.data/probes-<slug>.jsonl). A leak signature (stack trace, SQL
     error) in a body or a console message is added to the signal in brackets. A failed request to a host outside
     allowedHosts (a CDN, map tiles) is only counted. "Failed to load resource" lines repeat the requests log and are
     skipped. `suspect_200` is up to SUSPECT_200_SHOWN 2xx calls nobody has checked or named whose body the log can't show
@@ -1248,11 +1249,22 @@ def triage_signals(run_dir, slug, run, hosts=None):
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
     names, gone, unchecked = _body_ops(data, slug), _body_gone(data, slug), []
+    probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (ops._note_probe): the explorer's own
+    for line in _text(data / f"probes-{slug}.jsonl").splitlines():
+        try:
+            p = json.loads(line)
+            probes.append([str(p["method"]), scrub.redact(str(p["url"])), str(p["status"])])
+        except (ValueError, KeyError, TypeError):
+            continue
+    probe_failed = {url for _, url, status in probes if status == "FAILED"}  # the console names these too
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
             continue
         index, method, url, code, text = m.groups()
+        if [method, url, code] in probes:  # one log line for each probe: the page's own calls of that URL stay
+            probes.remove([method, url, code])
+            continue
         try:
             path = urlsplit(url).path or url
         except ValueError:  # an odd host such as an unclosed [IPv6
@@ -1291,6 +1303,8 @@ def triage_signals(run_dir, slug, run, hosts=None):
             continue  # blank, stack lines, headers
         level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
         msg = re.sub(r"\s+@\s+\S*$", "", line[level.end() :] if level else line).strip()  # " @ <source>:1"
+        if any(url in msg for url in probe_failed):  # a probe the browser refused (CORS): its own error message
+            continue
         if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
             leaks = "".join(
                 f" [leak: {label}]" for label, rx in LEAKS if rx.search(msg)

@@ -778,6 +778,24 @@ class ApiProbe(Base):
             code, out, err = cli("api-probe", *args)
         return code, (json.loads(out) if out.strip() else None), err, mrun
 
+    def test_a_probe_in_a_run_is_noted_for_the_reports_signals(self):
+        """The browser logs a probe's request as it logs the page's: the run folder says which were the probe's."""
+        failed = done(0, out=json.dumps(json.dumps({"error": "TypeError: Failed to fetch"})) + "\n")
+        self.assertEqual(self.probe("GET", self.URL, seq=[failed])[0], 1)  # no run: nothing to note, no crash
+        run = self.proj / "qa-out/2026-11-25-PROJ-1"
+        (run / ".data").mkdir(parents=True)
+        self.marker(run_dir=str(run), slug="form")
+        self.assertEqual(self.probe("GET", self.URL, seq=[failed])[0], 1)
+        self.assertEqual(self.probe("GET", self.URL, seq=[self.page(404)])[0], 0)
+        noted = [json.loads(x) for x in (run / ".data/probes-form.jsonl").read_text().splitlines()]
+        self.assertEqual(
+            noted,
+            [
+                {"method": "GET", "url": self.URL, "status": "FAILED"},
+                {"method": "GET", "url": self.URL, "status": 404},
+            ],
+        )
+
     def test_get_prints_status_safe_headers_and_a_scrubbed_body(self):
         body = json.dumps({"name": "qa-sdet-zone-1", "apiToken": "abc123", "speed": 130})
         page = self.page(
