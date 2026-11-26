@@ -745,8 +745,15 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
                 and not hash_of(b) & hashes
                 and (named(b, cases) or (same_build and not named(b, olds.values())))
             ]
+            # the explorer names an earlier bug it sees again by its memory hash, under the title the card gave it:
+            # that entry and the carried draft are one bug
+            title = lambda b: " ".join(core._s(b.get("title")).split())
+            again = {title(b): b for b in _list(new, "bugs") if b.get("hash") and not bug_id(b)}
+            same = {title(b) for b in carried if not b.get("hash")} & set(again)
+            carried = [{**b, "hash": again[title(b)]["hash"]} if title(b) in same else b for b in carried]
             if carried:
-                out["bugs"] = _list(new, "bugs") + carried
+                out["bugs"] = [b for b in _list(new, "bugs") if again.get(title(b)) is not b or title(b) not in same]
+                out["bugs"] += carried
             text = lambda q: str(q.get("text") if isinstance(q, dict) else q)
             qs = lambda r: r["questions"] if isinstance(r.get("questions"), list) else []
             asked = set(map(text, qs(new)))
@@ -2073,7 +2080,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
                 f"Delete the test data left in the app on {one_line(r.get('target') or name)}: {cell(m.group(1).strip())}"
                 for name, r in runs
                 for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))
-                if not re.fullmatch(r"(none|nothing|n/a|-)\.?", m.group(1).strip(), re.I)
+                if not re.fullmatch(r"(none|nothing|n/a)\s*([.;,(].*)?|-", m.group(1).strip(), re.I)
             ]  # step 9 couldn't delete them: they stay in the shared QA app
             severe = [k for _, (sig, _) in triaged for k, _ in sig if signal_severity(k) == "severe"]
             if severe:

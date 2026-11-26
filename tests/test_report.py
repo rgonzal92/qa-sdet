@@ -1100,7 +1100,7 @@ class Layout(Rendering):
         )
 
     def test_nothing_left_in_the_app_is_nothing_to_do(self):  # a live run wrote "Left in the app: none."
-        for none in ("none", "None.", "nothing", "n/a", "-"):
+        for none in ("none", "None.", "nothing", "n/a", "-", "none. Browser closed.", "nothing (no write was sent)"):
             run = {**RUN1, "notes": f"Explored the form.\nLeft in the app: {none}"}
             _, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
             self.assertNotIn("Delete the test data", r, none)
@@ -2863,6 +2863,23 @@ class CarryPrior(Rendering):
         report.carry_prior(f.parent.parent, "form")
         self.assertFalse((f.parent / "prior-form.json").exists())
         return json.loads(f.read_text())
+
+    def test_an_earlier_bug_the_resumed_explorer_names_by_its_hash_is_one_bug(self):  # a live run counted it twice
+        f = self.earlier(
+            ["TC-1"],
+            cases=[{"id": "TC-1", "status": "NOT_RUN"}, {"id": "TC-2", "status": "FAIL", "bug": "BUG-1"}],
+            bugs=[self.BUG(1, title="Speed accepts 131", severity="HIGH")],
+        )
+        run = self.merged(
+            f,
+            cases=[{"id": "TC-1", "status": "PASS", "actual": "Saved"}],
+            bugs=[{"route": "/form", "title": "Speed  accepts 131", "hash": "abc123def456"}, self.BUG(2)],
+        )
+        self.assertEqual(
+            run["bugs"],
+            [self.BUG(2), {**self.BUG(1, title="Speed accepts 131", severity="HIGH"), "hash": "abc123def456"}],
+        )
+        self.assertEqual(self.merged(f), run)
 
     def test_the_merge_keeps_a_result_and_a_bug_the_new_file_dropped(self):  # the bug a resumed explorer lost
         f = self.earlier(
