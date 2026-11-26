@@ -84,7 +84,7 @@ class RunDir(Base):
         self.assertTrue(run.is_absolute())
         self.assertRegex(run.name, r"^\d{4}-\d{2}-\d{2}-AB-1\+AB-2$")
         self.assertEqual(run.parent, self.proj.resolve() / "qa-out")
-        self.assertEqual(sorted(p.name for p in run.iterdir()), [".data", "bugs", "evidence", "repro"])
+        self.assertEqual(sorted(p.name for p in run.iterdir()), [".data", "bugs", "evidence", "repro", "scratch"])
         self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
         second = Path(cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")[1].strip())
         third = Path(cli("rundir", str(self.proj), "--keys", "AB-1,ab-2")[1].strip())
@@ -358,6 +358,18 @@ class Prune(Base):
         self.assertEqual(ops.prune(self.proj, run=empty_run), 1)
         self.assertTrue(old_snap.exists())
         self.assertFalse((cli_dir / "after.yml").exists())
+
+    def test_a_runs_scratch_files_go_at_teardown(self):
+        """<run>/scratch/ takes the explorer's throwaway snapshots and screenshots: page data nobody scrubbed, so the
+        teardown's prune empties it and keeps the evidence."""
+        run = self.rundir("2026-11-25-form")
+        (run / "scratch").mkdir()
+        (run / "scratch/page.yml").write_text("- button Save")
+        (run / "scratch/look.png").write_bytes(b"png")
+        (run / "evidence/BUG-1.png").write_bytes(b"png")
+        self.assertEqual(ops.prune(self.proj, run=run), 2)
+        self.assertEqual(list((run / "scratch").iterdir()), [])
+        self.assertTrue((run / "evidence/BUG-1.png").exists())
 
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed")  # optional at run time
     def test_a_pillow_value_error_is_bad_input_not_a_traceback(self):  # L6: e.g. a huge zTXt chunk
@@ -962,6 +974,12 @@ class Dispatch(Base):
         out = self.dispatch("/list?a=1", "--faults", "--api-writes")[1]
         self.assertIs(marker()["api_writes"], True)
         self.assertIn("faults: yes\napi_writes: yes", Path(out["brief"]).read_text())
+
+    def test_dispatch_gives_the_run_its_scratch_folder(self):
+        """A run folder made before scratch/ existed gets one when its next explorer is set up."""
+        self.assertFalse((self.run_dir / "scratch").exists())
+        self.dispatch("/list?a=1")
+        self.assertTrue((self.run_dir / "scratch").is_dir())
 
     def test_the_run_limit_flags_and_spend_are_gone(self):
         for flag in ("--budget", "--minutes", "--max-turns"):

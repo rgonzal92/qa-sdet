@@ -111,7 +111,7 @@ def _project(project):
 
 
 def make_rundir(project, label, day=None):
-    """<project>/qa-out/<YYYY-MM-DD>-<label>[-n]/ with bugs/ evidence/ repro/ .data/; a fresh folder every run."""
+    """<project>/qa-out/<YYYY-MM-DD>-<label>[-n]/ with bugs/ evidence/ repro/ scratch/ .data/; a fresh folder every run."""
     project = _project(project)
     root = project / "qa-out"
     root.mkdir(exist_ok=True)
@@ -125,7 +125,7 @@ def make_rundir(project, label, day=None):
             continue
     else:
         raise core.BadInput(f"too many run folders named {base}")
-    for sub in ("bugs", "evidence", "repro", ".data"):
+    for sub in ("bugs", "evidence", "repro", "scratch", ".data"):
         (run / sub).mkdir()
     git_exclude(project)
     return run
@@ -309,6 +309,7 @@ def dispatch(
             "## Known Jira bugs (no hash: name the key, never list them in bugs)",
             str(known_bugs).strip()[:4000],
         ]
+    (run / "scratch").mkdir(exist_ok=True)  # a run folder older than scratch/ gets one with its next explorer
     brief = data / f"brief-{slug}.md"
     core._write(brief, scrub.redact("\n".join(out)) + "\n")
     marker_start(run.parent.parent, faults, run_dir=run, slug=slug, api_writes=api_writes)
@@ -976,10 +977,10 @@ def prune(project, days=7, t=None, run=None):
                 since = os.lstat(run).st_mtime
             except OSError:
                 since = None
-        data = Path(run) / ".data"
+        data, scratch = Path(run) / ".data", Path(run) / "scratch"
         for f in (
             [*data.glob("snapshot*.md"), *data.glob("map-*.png")] if data.is_dir() and not data.is_symlink() else []
-        ):
+        ) + (list(scratch.iterdir()) if scratch.is_dir() and not scratch.is_symlink() else []):
             try:
                 if stat.S_ISREG(f.lstat().st_mode):
                     f.unlink()

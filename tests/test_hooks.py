@@ -397,6 +397,19 @@ class Hooks(Base):
         self.assertIn("8 browser calls", seen[9])
         self.assertEqual(seen[10:], ["", ""])  # once
 
+    def test_a_word_that_sends_a_call_to_the_slow_check_is_named_once(self):
+        """One word the guard doesn't approve (jq, a loop) makes the whole call wait for Claude Code's own permission
+        check, some 5 s against under 1: the explorer hears which word, once per word."""
+        self.default_run()
+        self.assertEqual(self.pw("playwright-cli -s=qa snapshot | sed -n '1,5p'"), "")  # approved: nothing to say
+        note = self.pw("playwright-cli -s=qa snapshot | jq .")
+        self.assertIn("`jq`", note)
+        self.assertIn("grep", note)  # it names the shapes that are approved
+        self.assertEqual(self.pw("playwright-cli -s=qa requests | jq ."), "")  # once per word
+        self.assertIn("`for`", self.pw("for i in 1 2; do playwright-cli -s=qa find x; done"))
+        self.assertEqual(self.pw("playwright-cli -s=qa goto https://evil.example"), "")  # a denial has its own message
+        self.assertEqual(self.pw("git status | jq .", agent=""), "")  # the main session isn't the explorer
+
     def test_a_new_interaction_or_a_file_written_is_progress(self):
         self.default_run()
         for n in range(1, 31):  # 30 different clicks, each looked at: never a spin

@@ -221,6 +221,7 @@ EXPLORER_FILES = {
     "bugs": r"[^/]+",
     "repro": r"[^/]+",
     "evidence": r"[^/]+",  # agents/qa-explorer.md "Files you write"
+    "scratch": r"[^/]+",  # a snapshot to grep, a throwaway screenshot: the teardown empties it (ops.prune)
     ".data": r"run-[^/]+\.json|(requests|console)-[^/]+\.log|map-\d+\.png",
 }
 WRITE_TOOLS, PATH_KEYS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}, ("file_path", "notebook_path", "path")
@@ -1570,14 +1571,21 @@ class Ctx:
         self.marker = read_marker(cwd)[1]
         self.guarded = mentions_guarded(raw, explorer)
         self.area = mentions_data_dir(raw) or mentions_profile(raw) or (explorer and mentions_config(raw))
-        self.runs_pw, self.approve, self.segments = False, True, 0
+        self.runs_pw, self.approve, self.segments, self.blocker = False, True, 0, None
+
+    def block(self, what):
+        """No approval for this call. `what` (a program, or a shape) is kept from the first time only: it is what
+        PostToolUse names to the explorer and the run's trace counts."""
+        if self.approve:
+            self.blocker = what
+        self.approve = False
 
 
 def check(cmd, cwd, ctx=None, depth=0, explorer=False):
     """Deny reason for a Bash command, or None."""
     ctx = ctx or Ctx(cwd, explorer, cmd)
     if len(cmd) > MAX_TEXT:
-        ctx.approve = False
+        ctx.block("its length")
         return "the command is too long to check; split it" if ctx.guarded else None
     if (reason := _check(cmd, cwd, ctx, depth)) or depth:
         return reason
@@ -1587,7 +1595,8 @@ def check(cmd, cwd, ctx=None, depth=0, explorer=False):
 
 
 def _check(cmd, cwd, ctx, depth, carried=()):
-    ctx.approve = ctx.approve and not depth
+    if depth:
+        ctx.block("a nested command")
     if depth > 4:
         return ODD.format("nesting deeper than 4 levels") if ctx.guarded else None
     cmd = re.sub(r"\\\n", "", cmd)  # line continuations: bash joins the lines
@@ -1595,14 +1604,15 @@ def _check(cmd, cwd, ctx, depth, carried=()):
     cmd, docs = split_heredocs(cmd)
     docs += carried  # a substitution's heredoc bodies were split off the text around it
     bodies, cmd = substitutions(normalize(cmd))
-    ctx.approve = ctx.approve and not (docs or bodies)
+    if docs or bodies:
+        ctx.block("$(...) or a heredoc")
     for body in bodies:
         if r := _check(unmark(body), cwd, ctx, depth + 1, docs):
             return r
     try:
         toks = tokens(cmd)
     except ValueError:
-        ctx.approve = False
+        ctx.block("an unclosed quote")
         return ODD.format("text the shell can't parse (an unclosed quote)") if ctx.guarded else None
     cwds, stack, seg = Dirs({cwd}), [], []
     for tok in toks + [";"]:  # sentinel flushes the last segment
@@ -1610,7 +1620,7 @@ def _check(cmd, cwd, ctx, depth, carried=()):
             seg.append(tok)
             continue
         if tok not in (";", "&&", "||", "|") or (not seg and tok != ";"):
-            ctx.approve = False  # subshells, background jobs, a pipe with nothing before it
+            ctx.block("a subshell or &")  # subshells, background jobs, a pipe with nothing before it
         if seg:
             ctx.segments += 1
             if r := check_segment(seg, cwds, cwd, ctx, depth, docs):
@@ -1632,11 +1642,113 @@ _GREP_VAL_OPTS = set(
 _HEAD_SAFE_LONG = {"--quiet", "--silent", "--verbose", "--zero-terminated"}
 
 
-def _filter_ok(name, rest, cwd, bases):
-    """head/tail/grep auto-approve only as stdin filters, or reading files under qa-out/ or .playwright-cli/."""
-    roots = bases | {
+def _run_roots(cwd, bases):
+    """The folders an approved filter may read: qa-out/ and the snapshots in .playwright-cli/."""
+    return bases | {
         os.path.realpath(os.path.join(b, ".playwright-cli")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b
     }
+
+
+# R8, explorer only: the text tools explorers chain after a browser command. Per tool: the short options that take no
+# value, the short options whose value is glued on or the next word, and the long options. An option outside these
+# could write a file or run a program (sort -o, sort --compress-program, wc --files0-from): no approval then.
+_READ_ONLY = {
+    "cat": ("AbEensTtuv", "", set()),
+    "wc": ("clLmw", "", {"--bytes", "--chars", "--lines", "--words", "--max-line-length"}),
+    "cut": ("nsz", "bcdf", {"--complement", "--only-delimited", "--output-delimiter"}),
+    "sort": ("bdfghiMnRrsuVz", "kt", {"--reverse", "--numeric-sort", "--unique", "--ignore-case", "--stable"}),
+    "uniq": ("cdiuz", "fsw", {"--count", "--repeated", "--unique", "--ignore-case"}),
+    "ls": ("1AaCcdFhklmnopqrSstUuvXx", "", set()),
+}
+_PLAIN_RE = re.compile(rf"[^$`{SUBST}]*")  # a word the shell passes on as written, quoted or not
+# a sed regex: one line, and a `$` only as an anchor (in double quotes `$VAR` would be the shell's)
+_SED_RE = r"(?:[^/\\$\n]|\\.|\$(?![\w{(]))*"
+_SED_ADDR = rf"(?:\d+|\$|/{_SED_RE}/)"
+_SED_PRINT = re.compile(rf"{_SED_ADDR}(?:,{_SED_ADDR})?p")  # 1,40p  5p  /dialog/,$p
+_SED_SUBST = re.compile(rf"s/{_SED_RE}/{_SED_RE}/[gIip\d]*")  # s/a/b/g: no w (a file) or e (a command) flag
+_AWK_READS = re.compile(r"getline|ENVIRON|ARGV|ARGC|PROCINFO|close|@")  # other files, the environment, loaded code
+
+
+def _file_operands(name, rest):
+    """The operands of a _READ_ONLY tool (`-`, stdin, is one), or None for an option the table doesn't list."""
+    flags, valued, longs = _READ_ONLY[name]
+    files, skip, end = [], False, False
+    for a in rest:
+        if skip:
+            skip = False
+        elif end or not a.startswith("-") or a == "-":
+            files.append(a)
+        elif a == "--":
+            end = True
+        elif a.startswith("--"):
+            if a.split("=", 1)[0] not in longs:
+                return None
+        elif a[1] in valued:  # -c1-200, -k2,2n, -d ' '
+            skip = len(a) == 2
+        elif not set(a[1:]) <= set(flags):
+            return None
+    return None if skip else files
+
+
+def _read_only(name, rest, cwd, bases):
+    """A text tool in a form that reads stdin or a file under qa-out/ or .playwright-cli/ and writes only stdout."""
+    roots = _run_roots(cwd, bases)
+    in_roots = lambda f, strict=True: (
+        bool(_PLAIN_RE.fullmatch(f))
+        and not GLOB_RE.search(f)
+        and any(real(f, cwd).startswith(b + os.sep) or (not strict and real(f, cwd) == b) for b in roots)
+    )
+    plain = lambda words: all(_PLAIN_RE.fullmatch(a) for a in words)
+    if name in _READ_ONLY:
+        files = _file_operands(name, rest)
+        if files is None or not plain(rest) or (name == "uniq" and len(files) > 1):  # uniq IN OUT writes OUT
+            return False
+        if name == "ls":  # a folder of the run, never the project or a walk down the tree (-R is not in the table)
+            return bool(files) and all(in_roots(f, strict=False) for f in files)
+        return all(f == "-" or in_roots(f) for f in files)
+    if name == "tr":  # stdin to stdout, whatever its sets say
+        return plain(rest)
+    if name == "echo":
+        return plain(rest) and not any(GLOB_RE.search(a) for a in rest)
+    if name == "date":  # the time, in a format: -f, -r and -s read a file or set the clock
+        return plain(rest) and all(a in ("-u", "--utc", "--universal") or a.startswith("+") for a in rest)
+    if name not in ("sed", "awk"):
+        return False
+    valued, flags = (("-e",), r"-[nEr]+") if name == "sed" else (("-F", "-v"), r"-F.+")
+    code, files, k = [], [], 0  # the script: sed's -e value, else the first operand; the operands after it are files
+    while k < len(rest):
+        a = rest[k]
+        if a in valued and k + 1 < len(rest):
+            k += 1
+            if name == "sed":
+                code.append(rest[k])
+            elif not plain([rest[k]]):
+                return False
+        elif re.fullmatch(flags, a) and plain([a]):
+            pass
+        elif a.startswith("-"):
+            return False  # -i, -f, --file: a file written in place, or code the guard hasn't read
+        elif code or (name == "sed" and "-e" in rest):
+            files.append(a)
+        else:
+            code.append(a)
+        k += 1
+    if len(code) != 1 or len(files) > 1 or not all(map(in_roots, files)):
+        return False
+    text = unmark(code[0])
+    if name == "sed":
+        return bool(_SED_PRINT.fullmatch(text) or _SED_SUBST.fullmatch(text))
+    return (  # awk: `$1` and `$NF` are fields; any other `$` could be the shell's inside double quotes
+        plain([text.replace("$", "")])
+        and not re.search(r"\$(?!\d|NF\b)", text)
+        and not AWK_WRITES.search(text)
+        and not _AWK_READS.search(text)
+    )
+
+
+def _filter_ok(name, rest, cwd, bases):
+    """head/tail/grep auto-approve only as stdin filters, or reading files under qa-out/ or .playwright-cli/."""
+    roots = _run_roots(cwd, bases)
     if name in ("head", "tail"):
         if any(
             a.startswith("--") and a.split("=", 1)[0] not in _HEAD_VAL_OPTS | _HEAD_SAFE_LONG
@@ -1672,8 +1784,8 @@ def _acli_approvable(rest):
 
 
 def approvable(
-    i, name, rest, outs, ins, feeds, cwd
-):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep, sleep <=30
+    i, name, rest, outs, ins, feeds, cwd, explorer=False
+):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep, sleep <=30; for the explorer also _read_only
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if (
         i != 0
@@ -1698,6 +1810,11 @@ def approvable(
             and float(rest[0]) <= 30
         )
         or (q is not None and not (q[:1] == ["setup-permissions"] and "--apply" in q))
+        or (  # never with a file redirect: `echo … > run-x.json` would be a write the guard hasn't read
+            explorer
+            and all(unmark(o) in ("/dev/null", "/dev/stdout", "/dev/stderr") for o in outs)
+            and _read_only(name, rest, cwd, bases)
+        )
     )
 
 
@@ -1720,7 +1837,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     redirects = list(outs)  # check_pw adds the files playwright-cli reads and writes to outs
     feeds = here + (list(docs) if ndocs else [])  # what it reads on stdin from here-strings and heredocs
     if words[:1] in (["case"], ["for"], ["select"]) and not (outs or ins or feeds):
-        ctx.approve = False
+        ctx.block(words[0])
         return None  # a list of words (a $(...) in it was checked as its own command)
     i, wrappers, lookup, env_dir = command_word(words)
     name, rest = (prog_name(words[i]), words[i + 1 :]) if i is not None else ("", [])
@@ -1728,10 +1845,9 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     q = qamem_args(name, rest, local)
     run = how_run(name, rest) if name in SHELLS or (INTERP_RE.fullmatch(name) and q is None) else (None, None)
     if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q, local)) or lookup:
-        ctx.approve = False
+        ctx.block(name or "its form")
         return r  # `command -v x` runs nothing
     if name in ("cd", "pushd", "popd"):  # where the later commands run
-        ctx.approve = False
         target = next((a for a in rest if a not in ("-L", "-P", "-e", "-@", "--")), "~")
         old = getattr(cwds, "old", None)  # where `cd -` goes, once a cd in this call set it
         new = (
@@ -1741,6 +1857,9 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
             if target == "-" or name == "popd"
             else {real(target, c) for c in cwds}
         )
+        here = {os.path.realpath(start)}  # the explorer's `cd <where the call already runs> && …` changes nothing
+        if not (ctx.explorer and i == 0 and name == "cd" and target != "-" and new == here and set(cwds) == {start}):
+            ctx.block(name)
         if isinstance(cwds, Dirs):
             cwds.old = set(cwds)
         return cwds.clear() or cwds.update(new)
@@ -1758,7 +1877,8 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
         if q is not None
         else None
     ) or (explorer_net(name, rest, ctx.raw) if ctx.explorer and name in NET_CLIS else None)
-    ctx.approve = ctx.approve and approvable(i, name, rest, outs, ins, feeds or ndocs, start)
+    if not approvable(i, name, rest, outs, ins, feeds or ndocs, start, ctx.explorer):
+        ctx.block(name if i == 0 and name else "a prefix or wrapper")
     return (
         r
         or check_profile(name, rest, outs, ins, local, pw_profile_values(rest) if name == "playwright-cli" else ())
@@ -1855,7 +1975,10 @@ def run_file(p, cwds):
 
 
 def run_files_reason(role="explorer"):
-    return f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files"
+    return (
+        f"the {role} writes only <project>/qa-out/<run>/{{bugs,repro,evidence}}/<file> and its .data/ run files; "
+        "a throwaway file (a snapshot to grep, a screenshot to look at) goes in <run>/scratch/"
+    )
 
 
 def check_explorer(tool, tin, cwd, role="qa-explorer"):

@@ -10,7 +10,7 @@ Every command starts `playwright-cli -s=qa <cmd>` (the allow rules match that sh
 | Silent failure | `console error`, `requests`, then `response-body <n>` / `request-body <n>` | `request <n>`, `response-headers <n>` (denied: cookies); `--clear` (it also empties the `--all` list your step 9 saves) |
 | Read a value | `--raw eval "document.querySelector('#x').textContent"`; one header: `--raw eval "fetch(url).then(r => r.headers.get('content-type'))"` | snapshot + reading |
 | Many input values | one `--raw eval` loop (below) | a fill and a read per value; `run-code` (denied) |
-| Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"` | one call per command |
+| Several steps | one Bash call: `playwright-cli -s=qa fill "<locator>" 131 && playwright-cli -s=qa click "<locator>"`; a throwaway file in `<out>/scratch/` | one call per command; a variable, `$(…)`, a loop or `jq` in the call (it then waits about 5 s for a permission check) |
 
 Many values in one eval; repeat a suspicious one with real `fill` / `click` before calling it a bug (the recording needs them; its code goes into the repro spec):
 ```

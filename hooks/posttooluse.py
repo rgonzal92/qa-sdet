@@ -274,6 +274,19 @@ def replay(recs):
     return spin, fails, given
 
 
+def slow_word(guard, data):
+    """What kept the guard from approving this Bash call, so that Claude Code's own permission check ran (a program
+    such as `jq`, or a shape such as a loop): None for an approved or a denied call."""
+    tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    if data.get("tool_name") != "Bash":
+        return None
+    cmd, cwd = guard.clean(tin.get("command") or ""), guard._cwd(data)
+    ctx = guard.Ctx(cwd, True, cmd)
+    if guard.check(cmd, cwd, ctx) or (ctx.approve and ctx.segments) or not ctx.blocker:
+        return None
+    return re.sub(r"[^\w .()$&-]", "?", str(ctx.blocker))[:24]  # a name the model typed: never more than a word
+
+
 def run_feedback(data, who):
     """Count this call in the run's progress file, then: the same failing call repeated, or a spin."""
     sys.path.insert(0, HERE)
@@ -319,6 +332,20 @@ def run_feedback(data, who):
                 "run": run_name,
                 "slug": m.get("slug"),
             },
+        )
+    word = slow_word(guard, data)
+    if word and f"slow:{word}" not in given:
+        notes.append(
+            f"qa-sdet: `{word}` sent that call to Claude Code's own permission check (about 5 s, against under 1 for an "
+            "approved call). Approved at once: `playwright-cli`, `qa-mem` and `sleep` up to 30, joined by `;` or `&&` "
+            "and piped into `grep`, `head`, `tail`, `sed -n 'N,Mp'`, `cut`, `sort`, `uniq`, `wc`, `tr` or `awk`, with "
+            "no variable, loop, `$(…)` or `cd` to another folder."
+        )
+        append_progress(state, expires, {"t": "n", "n": f"slow:{word}"})
+        _log_event(
+            path.parent,
+            "nudge",
+            {"agent": who, "kind": "slow_call", "detail": word, "run": run_name, "slug": m.get("slug")},
         )
     return " ".join(x for x in notes if x) or None
 

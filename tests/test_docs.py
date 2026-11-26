@@ -273,6 +273,37 @@ class Docs(unittest.TestCase):
                         cmd,
                     )
 
+    def test_the_explorer_is_told_which_calls_run_at_once_and_the_guard_agrees(self):
+        """One word the guard doesn't approve sends a whole call to Claude Code's slow permission check: the explorer's
+        Bash paragraph names the words that run at once, and a chain of them is approved for it."""
+        para = next(x for x in text("agents/qa-explorer.md").splitlines() if x.startswith("Write each Bash call"))
+        words = "grep head tail cut sort uniq wc tr awk echo date ls".split()
+        for word in (*words, "sed -n 'N,Mp'", "`<out>/scratch/`", "slow permission check"):
+            self.assertIn(word, para)
+        self.assertNotIn("Read the `.playwright-cli/page-", para)  # a whole snapshot in the context: grep it instead
+        self.assertIn("`<out>/scratch/", text("agents/qa-explorer.md").split("## Files you write")[1].split("\n\n")[0])
+        steps_row = text("references/playwright-cli-tips.md").split("| Several steps |")[1].split("\n")[0]
+        self.assertIn("scratch/", steps_row)
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            proj = Path(os.path.realpath(d)) / "proj"
+            (proj / "qa-out/run/scratch").mkdir(parents=True)
+            chain = (
+                "date -u +%Y%m%d-%H%M; echo ---; playwright-cli -s=qa click e3 && sleep 1; "
+                f"playwright-cli -s=qa snapshot > '{proj}/qa-out/run/scratch/page.yml'; "
+                f"grep -n Save '{proj}/qa-out/run/scratch/page.yml' | head -5 | tail -2; ls '{proj}/qa-out/run/scratch'; "
+                "playwright-cli -s=qa snapshot | sed -n '1,40p' | cut -c1-200 | tr -s ' ' | awk '{print $1}' "
+                "| sort | uniq -c | wc -l"
+            )
+            call = {"tool_name": "Bash", "tool_input": {"command": chain}, "cwd": str(proj)}
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(g.evaluate(call | {"agent_type": "qa-sdet:qa-explorer"}), (None, True))
+                find = "playwright-cli -s=qa find Save"
+                for slow in ("X=1; " + chain, chain + " | jq .", chain + " || true", "cd /tmp && " + find):
+                    self.assertEqual(
+                        g.evaluate(call | {"agent_type": "qa-explorer", "tool_input": {"command": slow}}), (None, False)
+                    )
+
     def test_the_body_check_pipeline_is_approved_and_named_by_the_explorer_and_the_tips(self):
         """Step 9 reads a body into `qa-mem body-check`: the verb exists, the guard lets the pipe through, both docs name it."""
         self.assertIn("body-check", cli.COMMANDS)

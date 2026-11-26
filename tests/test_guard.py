@@ -1468,6 +1468,25 @@ class R6Marker(Case):
         ):
             self.assertIsNone(bash(cmd, RUN, True), cmd)
 
+    def test_the_explorer_has_a_scratch_folder_in_its_run(self):
+        """A snapshot to grep, a throwaway screenshot: explorers kept saving those to /tmp or .data/ and were denied.
+        <run>/scratch/ takes any file; teardown empties it."""
+        for cmd in (
+            f"playwright-cli -s=qa snapshot > '{RUN}/qa-out/r/scratch/page.yml'",
+            f"playwright-cli -s=qa screenshot --filename='{RUN}/qa-out/r/scratch/look.png'",
+            f"playwright-cli -s=qa snapshot > '{RUN}/qa-out/r/scratch/page.yml'; grep -n Save '{RUN}/qa-out/r/scratch/page.yml'",
+        ):
+            self.assertIsNone(bash(cmd, RUN, True), cmd)
+            self.assertEqual(decision(cmd, agent_type="qa-explorer"), "allow", cmd)
+        for cmd in (
+            "playwright-cli -s=qa snapshot > /tmp/page.yml",
+            f"playwright-cli -s=qa screenshot --filename='{RUN}/qa-out/r/.data/look.png'",
+            f"playwright-cli -s=qa snapshot > '{RUN}/qa-out/r/scratch/deep/page.yml'",  # one level, like the others
+            f"playwright-cli -s=qa snapshot > '{RUN}/qa-out/scratch/page.yml'",  # in a run, not beside the runs
+        ):
+            self.assertIn("writes only", bash(cmd, RUN, True) or "", cmd)
+        self.assertIsNone(tool("Write", "qa-explorer", RUN, file_path=f"{RUN}/qa-out/r/scratch/notes.txt", content="x"))
+
     def test_page_start_and_evidence_are_hosts_checked(self):
         cwd = project()
         self.assertIn("non-allowlisted host", bash("qa-mem page-start https://evil.com/", cwd, True))
@@ -1754,6 +1773,118 @@ class R8ApproveAndLog(Case):
             self.assertNotEqual(decision(cmd), "allow", cmd)
         self.assertEqual(decision("playwright-cli -s=qa goto https://evil.com | tail -3"), "deny")
         self.assertIsNone(decision("git status"))  # not ours: Claude Code decides
+
+    def test_read_only_filters_are_approved_for_the_explorer_only(self):
+        """The words explorers chain after a browser command (sed, echo, cut, date, ls, awk, sort, cat, wc, tr): each in a
+        form that reads stdin or a run file and writes only stdout. One such word used to send the whole call to Claude
+        Code's slow permission check."""
+        log, snaps = f"{RUN}/qa-out/c.txt", f"{RUN}/.playwright-cli"
+        ok = [
+            "playwright-cli -s=qa snapshot | sed -n '1,40p'",
+            "playwright-cli -s=qa snapshot | sed -n '5p'",
+            "playwright-cli -s=qa snapshot | sed -n '/dialog/,$p'",
+            "playwright-cli -s=qa snapshot | grep -n Save | sed 's/^ *//'",
+            "playwright-cli -s=qa snapshot | sed -E 's/ +$//g'",
+            f"sed -n '1,50p' {log}",
+            "playwright-cli -s=qa click e3; echo; playwright-cli -s=qa find Saved",
+            "echo ---; playwright-cli -s=qa find Saved",
+            "echo '--- after click ---'; playwright-cli -s=qa find Saved",
+            "playwright-cli -s=qa snapshot | cut -c1-200",
+            "playwright-cli -s=qa requests | cut -d ' ' -f 2,3",
+            "playwright-cli -s=qa requests | sort | uniq -c",
+            "playwright-cli -s=qa requests | sort -k2 -n -r | head -5",
+            f"cat {log} | wc -l",
+            "playwright-cli -s=qa snapshot | wc -l",
+            "playwright-cli -s=qa --raw eval 'document.title' | tr -d '\"'",
+            "date; playwright-cli -s=qa find Saved",
+            "date -u +%Y%m%d-%H%M",
+            f"ls {RUN}/qa-out/r/evidence",
+            f"ls -t {snaps}/ | head -1",
+            "playwright-cli -s=qa snapshot | awk 'NR<50'",
+            "playwright-cli -s=qa requests | awk '{print $2, $NF}'",
+            "playwright-cli -s=qa requests | awk -F: 'NR>2 {print $1}'",
+            f"cd {RUN} && playwright-cli -s=qa find Saved",  # a cd into the folder the call started in changes nothing
+            "playwright-cli -s=qa find Saved 2>&1 | sed -n '1,5p'",
+        ]
+        for cmd in ok:
+            self.assertEqual(decision(cmd, agent_type="qa-explorer"), "allow", cmd)
+            self.assertIsNone(decision(cmd), cmd)  # the main session keeps its list: Claude Code decides there
+        outside = TMP / "outside.txt"
+        outside.write_text("secret\n")
+        for cmd in [
+            f"sed -n '1,5p' {outside}",
+            f"cat {outside}",
+            f"cat {CFG}",
+            f"wc -l {outside}",
+            f"cut -c1-5 {outside}",
+            f"sort {outside}",
+            f"uniq {log} {RUN}/qa-out/out.txt",  # uniq's second operand is a file it writes
+            f"uniq -c - {RUN}/qa-out/out.txt",
+            f"sed -n '1,5p' {RUN}/qa-out/../../outside.txt",
+            f"sed -n -e '1,5p' {outside}",
+            "playwright-cli -s=qa requests | awk '{close(\"x\")}'",
+            "playwright-cli -s=qa requests | awk '{print | \"sh\"}'",
+            "playwright-cli -s=qa requests | awk -v 'x=$HOME' '{print x}'",
+            "playwright-cli -s=qa requests | sort -T /tmp",
+            f"ls {TMP}",
+            "ls /",
+            "ls",
+            f"ls -R {RUN}/qa-out",
+            f"cat {RUN}/qa-out/*.txt",  # a glob
+            "playwright-cli -s=qa snapshot | sed -i 's/a/b/' x",
+            "playwright-cli -s=qa snapshot | sed '1e id'",
+            "playwright-cli -s=qa snapshot | sed 's/a/b/e'",
+            "playwright-cli -s=qa snapshot | sed 's/a/b/w f'",
+            "playwright-cli -s=qa snapshot | sed '1r /etc/passwd'",
+            "playwright-cli -s=qa snapshot | sed -n '1,5p;w f'",
+            "playwright-cli -s=qa snapshot | sed -f script.sed",
+            'playwright-cli -s=qa snapshot | sed "s/^/$SECRET /"',
+            "playwright-cli -s=qa requests | sort -o sorted.txt",
+            "playwright-cli -s=qa requests | sort --compress-program=sh",
+            "playwright-cli -s=qa snapshot | wc --files0-from=names",
+            "date -f dates.txt",
+            "date -s 2030-01-01",
+            "echo $HOME",
+            "echo $?",
+            'echo "$(id)"',
+            "echo `id`",
+            "echo *",
+            f"echo x > {RUN}/qa-out/r/.data/run-a.json",  # the new words never with a file redirect
+            f"playwright-cli -s=qa snapshot | sed -n '1,5p' > {RUN}/qa-out/c2.txt",
+            "playwright-cli -s=qa requests | awk '{print $1 > \"f\"}'",
+            "playwright-cli -s=qa requests | awk '{system(\"id\")}'",
+            "playwright-cli -s=qa requests | awk 'BEGIN{while((getline l < \"/etc/passwd\")>0) print l}'",
+            "playwright-cli -s=qa requests | awk '{print ENVIRON[\"HOME\"]}'",
+            "playwright-cli -s=qa requests | awk 'BEGIN{ARGV[1]=\"/etc/passwd\";ARGC=2} {print}'",
+            'playwright-cli -s=qa requests | awk "{print \\"$SECRET\\"}"',
+            "playwright-cli -s=qa requests | awk -f prog.awk",
+            "tr a-z $X",
+            "cd /tmp && playwright-cli -s=qa find Saved",
+            f"cd {RUN}/qa-out && playwright-cli -s=qa find Saved",
+            "for i in 1 2; do playwright-cli -s=qa find x; done",
+            "X=1; playwright-cli -s=qa find x",
+            "playwright-cli -s=qa find x || true",
+            "playwright-cli -s=qa snapshot | jq .",
+        ]:
+            self.assertNotEqual(decision(cmd, agent_type="qa-explorer"), "allow", cmd)
+
+    def test_the_first_word_that_blocks_approval_is_named(self):
+        """PostToolUse tells the explorer which word sent a call to the slow check, and the run's trace counts them."""
+        ctx_of = lambda cmd: (c := g.Ctx(str(RUN), True, cmd), g.check(cmd, str(RUN), c))[0]
+        for cmd, word in [
+            ("playwright-cli -s=qa snapshot | jq .", "jq"),
+            ("playwright-cli -s=qa snapshot | sed -i 's/a/b/' x | jq .", "sed"),  # the first one only
+            ("sleep 45; playwright-cli -s=qa find x", "sleep"),
+            ("cd /tmp && playwright-cli -s=qa find x", "cd"),
+            ("for i in 1 2; do playwright-cli -s=qa find x; done", "for"),
+            ("timeout 5 playwright-cli -s=qa find x", "a prefix or wrapper"),
+        ]:
+            c = ctx_of(cmd)
+            self.assertFalse(c.approve, cmd)
+            self.assertEqual(c.blocker, word, cmd)
+        c = ctx_of("playwright-cli -s=qa snapshot | sed -n '1,5p'")
+        self.assertTrue(c.approve)
+        self.assertIsNone(c.blocker)
 
     def test_audit_parser_and_wrapper_bypasses(self):
         # F1: python3 -c / arbitrary /tmp/qa-mem / -X qa-mem must never spoof qa-mem
