@@ -1,4 +1,4 @@
-"""REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira pass-comment draft."""
+"""REPORT.md and the run index (qa_sdet.report): verdicts, merged cases, layout, escaping and the Jira comment."""
 
 import fcntl
 import json
@@ -103,11 +103,11 @@ class Verdict(unittest.TestCase):
         )  # untagged bug on one of its routes
         self.assertEqual(
             v("T-1", [self.case("TC-1", "PASS"), self.case("TC-5", "NOT_RUN", notes="session expired")], []),
-            ("BLOCKED", "TC-5 not run: session expired"),
+            ("BLOCKED", "TC-5 not run"),  # what it said is under its AC in REPORT.md, once
         )
         self.assertEqual(v("T-1", [self.case("TC-5", "BLOCKED")], [])[0], "BLOCKED")
         same = [self.case(f"TC-{i}", "BLOCKED", notes="browser can't start") for i in range(1, 13)]
-        self.assertEqual(v("T-1", same, []), ("BLOCKED", "12 cases (TC-1–TC-12) blocked: browser can't start"))
+        self.assertEqual(v("T-1", same, []), ("BLOCKED", "12 cases (TC-1–TC-12) blocked"))
         self.assertEqual(v("T-1", [self.case("TC-1", "PASS", ticket="T-2")], []), ("BLOCKED", "no test cases"))
         self.assertEqual(v("T-1", [self.case("TC-1", "QUESTION")], []), ("PASS WITH NOTES", "TC-1 open question"))
         self.assertEqual(
@@ -152,7 +152,7 @@ class Verdict(unittest.TestCase):
             self.assertEqual(v("T-1", not_blocking)[0], "PASS", not_blocking)
         self.assertEqual(
             v("T-1", "[blocking] no number here"),
-            ("PASS WITH NOTES", "open blocking question: [blocking] no number here"),
+            ("PASS WITH NOTES", "1 open blocking question"),  # its text is in What to do
         )
         # it is named first, so the pass draft's Notes line never cuts it off
         busy = [self.case(f"TC-{i}", "QUESTION") for i in range(1, 5)]
@@ -187,12 +187,17 @@ class Verdict(unittest.TestCase):
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "FAIL", ticket="T-2", bug="BUG-1", actual="131 saved")]
         bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
         self.assertEqual(v("T-1", cases, bug), ("PASS", "all 1 cases passed"))
-        self.assertEqual(v("T-2", cases, bug), ("FAIL", "TC-2 failed (AC-1): 131 saved; BUG-1 HIGH"))
+        self.assertEqual(v("T-2", cases, bug), ("FAIL", "TC-2 failed (AC-1); BUG-1 HIGH"))
         # a case covering two AC covers both; an AC without a case is a note, not a PASS
         t = {"key": "T-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}, {"id": "AC-3", "text": "x"}]}
         two = [self.case("TC-1", "PASS", ac="AC-1, AC-2")]
         self.assertEqual(v(t, two, []), ("PASS WITH NOTES", "AC-3 has no test case"))
-        self.assertEqual(report._ac_lines(t, two, True)[:2], ["- AC-1 — ✅ PASS (TC-1)", "- AC-2 — ✅ PASS (TC-1)"])
+        blocks = report._results(t, two, "/x", True, 3)
+        self.assertEqual(
+            [b for b in blocks if b.startswith("#")],
+            ["### AC-1: PASS", "### AC-2: PASS", "### AC-3 x: not covered by a case"],
+        )
+        self.assertEqual(blocks[3], "- See TC-1 under AC-1.")  # listed once, under its first AC
         # a route skipped after another explorer was BLOCKED: say which route has no result
         self.assertEqual(
             v("T-1", [self.case("TC-1", "NOT_RUN", route="/list")], []),
@@ -216,7 +221,7 @@ class Verdict(unittest.TestCase):
             ("FAIL", "known bug Save 500 HIGH"),
         )
 
-    def test_several_failures_named_not_cut_mid_word(self):  # "TC-3 failed (AC-1): … at 1…; …; +4 more"
+    def test_several_failures_named_and_never_quoted_cut(self):  # "TC-3 failed (AC-1): … at 1…; …; +4 more"
         acts = [
             "Speed 131 shows 'Saved zone \"qa-sdet-zone-c\" at 131 km/h', no error",
             "55.5 saved",
@@ -232,13 +237,13 @@ class Verdict(unittest.TestCase):
             ("FAIL", "4 cases failed (TC-1, TC-2, TC-3, TC-4) on AC-1, AC-10; BUG-1 HIGH; BUG-2 HIGH; +1 more"),
         )
         v, why = report.verdict("T-1", cases[:1], [])
-        self.assertEqual(why, 'TC-1 failed (AC-1): Speed 131 shows \'Saved zone "qa-sdet-zone-c" at…')
+        self.assertEqual(why, "TC-1 failed (AC-1)")  # what it saw is under its AC, whole
         stuck = self.case(
             "TC-12", "NOT_RUN", actual="Not testable: faults are off", notes="The 0 seen comes from the 404"
         )
-        self.assertEqual(
-            report.verdict("T-1", [stuck], [])[1], "TC-12 not run: Not testable: faults are off"
-        )  # why, not a side note
+        self.assertEqual(report.verdict("T-1", [stuck], [])[1], "TC-12 not run")
+        item = report._case_item({**stuck, "title": "t"}, "/x", True)
+        self.assertTrue(item.startswith("- **TC-12 t: NOT RUN.** Not testable: faults are off Notes: The 0 seen"), item)
         nine = [self.case(f"TC-{i}", "FAIL") for i in range(1, 10)]
         self.assertEqual(
             report.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1"
@@ -336,7 +341,7 @@ class MergedCases(Base):
             [(c["id"], c["status"], c["actual"]) for c in cases],
             [("TC-1", "FAIL", "131 saved"), ("TC-2", "PASS", ""), ("TC-3", "PASS", "")],
         )
-        self.assertEqual(report.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed: 131 saved"))
+        self.assertEqual(report.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed"))
         # a PASS from another run never hides a FAIL or a QUESTION, whichever run is newer
         for worse in ("FAIL", "QUESTION"):
             for first, second in ((worse, "PASS"), ("PASS", worse)):
@@ -448,11 +453,11 @@ class MergedCases(Base):
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
         why = "TC-1 repeats an id in plan.json: its result can't be told apart"
-        self.assertIn(f"| A-1 | ⛔ BLOCKED | {why} |", r)
-        self.assertIn(f"| B-1 | ⛔ BLOCKED | {why} |", r)
-        self.assertIn("| C-1 | ✅ PASS |", r)  # a ticket with ids of its own is untouched
-        passes = sorted(p.name for p in d.glob("jira-comment-*.md") if "Passed on" in p.read_text())
-        self.assertEqual(passes, ["jira-comment-C-1.md"])  # the others get a BLOCKED note, never a pass
+        self.assertIn(f"- A-1: ⛔ BLOCKED — {why}\n", r)
+        self.assertIn(f"- B-1: ⛔ BLOCKED — {why}\n", r)
+        self.assertIn("- C-1: ✅ PASS — ", r)  # a ticket with ids of its own is untouched
+        passes = sorted(p.name for p in d.glob("jira-comment-*.txt") if "QA result: PASSED" in p.read_text())
+        self.assertEqual(passes, ["jira-comment-C-1.txt"])  # the others get a BLOCKED comment, never a pass
         self.assertIn(
             "A-1 ⛔ BLOCKED, B-1 ⛔ BLOCKED, C-1 ✅ PASS", (d.parent / "README.md").read_text()
         )  # index agrees
@@ -463,7 +468,7 @@ class MergedCases(Base):
             runs=[("b", ran("/b", ("TC-1", "PASS"), ("TC-2", "PASS"), ("TC-4", "FAIL")))],
         )
         report.write_report(d2)
-        self.assertIn("| B-1 | ❌ FAIL | TC-4 failed (AC-1): x |", (d2 / "REPORT.md").read_text())
+        self.assertIn("- B-1: ❌ FAIL — TC-4 failed (AC-1)\n", (d2 / "REPORT.md").read_text())
 
     def test_numeric_id_zero_is_an_id(self):
         warnings = []
@@ -485,38 +490,35 @@ class Report(Base):
         code, out, _ = cli("report", str(d))
         self.assertEqual((code, out.strip()), (0, str(d / "REPORT.md")))
         r = (d / "REPORT.md").read_text()
-        lines = r.splitlines()
-        self.assertEqual(lines[0], "# QA report: PROJ-1, PROJ-2")
-        self.assertEqual(lines[1], "ticket · 2026-11-23 · https://qa.example · build 1.42 · browser chrome")
-        self.assertIn(
-            "| PROJ-1 — Speed limit form | ❌ FAIL | TC-2 failed (AC-2): 131 saved; BUG-1 HIGH | 1 / 1 / 0 | 1 |", r
+        blocks = r.split("\n\n")
+        self.assertEqual(blocks[:2], ["# QA report: PROJ-1, PROJ-2", "ticket · 2026-11-23 · build 1.42"])
+        self.assertEqual(  # one line per ticket: its verdict and why, once
+            blocks[2],
+            "- PROJ-1: ❌ FAIL — TC-2 failed (AC-2); BUG-1 HIGH\n- PROJ-2: ⚠️ PASS WITH NOTES — TC-4 open question; BUG-2 LOW",
         )
         self.assertIn(
-            "| PROJ-2 — Incident list | ⚠️ PASS WITH NOTES | TC-4 open question; BUG-2 LOW | 1 / 0 / 1 | 1 |", r
+            "## PROJ-1: Speed limit form\n\n❌ FAIL · build 1.42 · 1 of 2 cases passed · 1 bug\n\n### Results", r
         )
+        self.assertIn("## PROJ-2: Incident list\n\n⚠️ PASS WITH NOTES · build 1.42 · 1 of 2 cases passed · 1 bug", r)
+        self.assertIn("#### AC-1 Saves 0-130: PASS\n\n- **TC-1 Save 130: PASS.** Saved\n", r)
         self.assertIn(
-            "## PROJ-1 — Speed limit form\n**Verdict: ❌ FAIL** — TC-2 failed (AC-2): 131 saved; BUG-1 HIGH", r
+            "#### AC-2 Rejects 131: FAIL\n\n- **TC-2 Reject 131: FAIL ([BUG-1](bugs/BUG-1.md)).** 131 saved\n", r
         )
-        self.assertIn("- AC-1 Saves 0-130 — ✅ PASS (TC-1)", r)
-        self.assertIn("- AC-2 Rejects 131 — ❌ FAIL (TC-2)", r)
-        self.assertIn("- AC-1 Sorted by date — ❓ QUESTION (TC-3, TC-4)", r)
+        self.assertIn("#### AC-1 Sorted by date: QUESTION\n\n- **TC-3 Sort: PASS.**", r)
+        self.assertIn("- **TC-4 Ties: QUESTION.** Order of ties unspecified\n", r)
         self.assertIn("- **Scope:** speed field\n- **Risks:**\n  - rounding\n- **Out of scope:**\n  - mobile", r)
-        # the plan set a priority (P1 first): a Pri column; one start page per ticket: no Page column
-        self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)
-        self.assertIn("| TC-1 | P1 | AC-1 | Save 130 | ✅ PASS | Saved | — |", r)
-        self.assertIn("| TC-2 |  | AC-2 | Reject 131 | ❌ FAIL | 131 saved [BUG-1](bugs/BUG-1.md) | — |", r)
-        self.assertIn(
-            "| [BUG-1](bugs/BUG-1.md) | HIGH | CONFIRMED | Speed accepts 131 | /form | PROJ-1 (TC-2 · AC-2) | "
-            "[image](evidence/BUG-1.png) · ⚠",
+        self.assertIn("  Page: /form · priority P1\n\n  1. Open form\n  2. Type 130 \\| save\n\n  Expected: Saved", r)
+        self.assertIn(  # the case that failed on it, and its AC
+            "#### BUG-1 Speed accepts 131 (HIGH, CONFIRMED)\n\n- Page /form · found by TC-2 (AC-2)\n\n"
+            "- [draft](bugs/BUG-1.md) · [image](evidence/BUG-1.png) · ⚠",
             r,
-        )  # the case that failed on it, and its AC
-        self.assertIn(
-            "| [BUG-2](bugs/BUG-2.md) | LOW | CONFIRMED | Header misaligned | /list | PROJ-2 | ⚠ no repro spec", r
         )
         self.assertIn(
-            "### Open questions (2)\n- Is 0 a valid speed? _(from /form)_\n"
-            "- TC-4: Order of ties unspecified _(from /list)_",
+            "#### BUG-2 Header misaligned (LOW, CONFIRMED)\n\n- Page /list\n\n- [draft](bugs/BUG-2.md) · ⚠ no repro spec",
             r,
+        )
+        self.assertIn(
+            "3. Answer: Is 0 a valid speed? _(from /form)_\n\n4. Answer the question TC-4 raised: see Results.", r
         )
         self.assertIn("<details><summary>Other (1)</summary>\n\n- Keyboard only: out of time", r)
         self.assertIn(
@@ -528,15 +530,18 @@ class Report(Base):
         order = [
             r.index(h)
             for h in (
-                "## Summary",
-                "## Needs your action",
+                "## What to do",
                 "## PROJ-1",
+                "### Bugs",
                 "## PROJ-2",
                 "## Not tested",
                 "## Exploration notes",
             )
         ]
         self.assertEqual(order, sorted(order))
+        self.assertEqual(
+            sorted(p.name for p in d.glob("jira-comment*")), ["jira-comment-PROJ-1.txt", "jira-comment-PROJ-2.txt"]
+        )
 
     def test_a_known_bug_resighted_as_run_json_says_counts_like_a_new_one(self):
         """run-json.md: a re-sighting carries the hash and severity its card line shows, classification CONFIRMED. Rated
@@ -580,16 +585,19 @@ class Report(Base):
         d = self.rundir(
             name="2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", {**RUN1, "run_id": "r-1", "bugs": [resight]})]
         )
-        self.assertIn("**Verdict: ❌ FAIL** — known bug Speed accepts 131 HIGH", report.render_report(d))
+        r = report.render_report(d)
+        self.assertIn("\n\n❌ FAIL · build 1.42 · ", r)
+        self.assertIn("\n\nknown bug Speed accepts 131 HIGH\n\n", r)  # the reason, under the status line
 
     def test_nothing_run_yet(self):
         d = self.rundir(plan=PLAN)
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
-        self.assertEqual(r.count("⏸️ not run"), 4 + 3)  # every case, and every covered AC
-        self.assertIn("| PROJ-1 — Speed limit form | ⏳ NOT STARTED | testing hasn't started yet | 0 / 0 / 2 | 0 |", r)
-        self.assertIn("build not run yet", r)
-        for absent in ("## Bugs", "## Exploration notes", "## Questions"):
+        self.assertEqual(r.count("NOT RUN"), 4 + 3)  # every case, and every covered AC
+        self.assertIn("- PROJ-1: ⏳ NOT STARTED — testing hasn't started yet\n", r)
+        self.assertIn("⏳ NOT STARTED · build not run yet · 0 of 2 cases passed · no bugs", r)
+        self.assertEqual(list(d.glob("jira-comment*")), [])  # nothing to say yet: no comment
+        for absent in ("# Bugs", "## Exploration notes", "## Questions"):
             self.assertNotIn(absent, r)
 
     def test_empty_folder_and_broken_files(self):
@@ -599,7 +607,7 @@ class Report(Base):
         (d / ".data/run-a.json").write_text("[1]")
         r = report.render_report(d)
         self.assertIn(
-            "## Problems reading this folder\n- plan.json unreadable (JSONDecodeError)\n- run-a.json is not an object",
+            "## Problems reading this folder\n\n- plan.json unreadable (JSONDecodeError)\n- run-a.json is not an object",
             r,
         )
         self.assertEqual(cli("report", str(self.proj))[0], 2)  # not a qa-out/<run> folder
@@ -612,35 +620,44 @@ class Report(Base):
             runs=[("form", run)],
         )
         r = report.render_report(d)
-        self.assertIn("## Summary\n**Status:** /form COMPLETED · 1 bug(s)", r)
-        self.assertNotIn("Verdict", r)
-        self.assertNotIn("| Ticket | Verdict", r)
+        self.assertEqual(
+            r.split("\n\n")[:2], ["# QA report: /form", "explore · 2026-11-23 · build 1.42 · /form COMPLETED · 1 bug"]
+        )
+        self.assertNotIn("# Results", r)  # no ACs, no verdict
+        self.assertIn("1. Check the bug: BUG-1 Speed accepts 131 (HIGH)\n", r)  # no draft: nothing to file, no link
         self.assertIn(
-            "| BUG-1 | HIGH | CONFIRMED | Speed accepts 131 | /form |  | ⚠ no draft bugs/BUG-1.md", r
-        )  # no link
+            "## Bugs\n\n### BUG-1 Speed accepts 131 (HIGH, CONFIRMED)\n\n- Page /form\n- ⚠ no draft bugs/BUG-1.md", r
+        )
         self.assertIn("## Exploration notes", r)
+        self.assertNotIn("History", r)
 
     def test_plan_kind(self):
         d = self.rundir("2026-11-23-plan-PROJ-1", plan={**PLAN, "kind": "plan"})
         r = report.render_report(d)
-        self.assertIn("| PROJ-1 — Speed limit form | 2 | 2 |", r)
-        self.assertIn("| ID | AC | Case |\n|---|---|---|", r)
-        self.assertNotIn("Status", r)
-        self.assertNotIn("Verdict", r)
-        self.assertIn("- AC-1 Saves 0-130 (TC-1)", r)
+        self.assertEqual(
+            r.split("\n\n")[:2], ["# QA report: PROJ-1, PROJ-2", "plan · 2026-11-23 · not run yet · 4 cases"]
+        )
+        self.assertIn("- PROJ-1: Speed limit form — 2 AC, 2 cases\n- PROJ-2: Incident list — 1 AC, 2 cases\n", r)
+        self.assertIn("## PROJ-1: Speed limit form\n\n### Cases\n\n", r)
+        self.assertIn("#### AC-1 Saves 0-130\n\n- **TC-1 Save 130.**\n\n  <details><summary>Steps</summary>", r)
+        for absent in ("PASS", "NOT RUN", "What to do", "jira-comment"):
+            self.assertNotIn(absent, r)
+        one = report.render_report(self.rundir("2026-11-23-plan-1", plan={**PLAN1, "kind": "plan", "questions": []}))
+        self.assertEqual(
+            one.split("\n\n")[:3],
+            ["# PROJ-1: Speed limit form", "plan · 2026-11-23 · not run yet · 2 cases", "## Cases"],
+        )
 
     def test_plan_questions_render(self):
         q = {**PLAN, "kind": "plan", "questions": ["Q1 [BLOCKING] Is 0 a valid speed?", "Q2 [LOW] Units?"]}
         r = report.render_report(self.rundir("2026-11-23-plan-PROJ-1", plan=q))
-        self.assertIn("## Questions\n- Q1 [BLOCKING] Is 0 a valid speed?\n- Q2 [LOW] Units?", r)
+        self.assertIn("## Questions\n\n- Q1 [BLOCKING] Is 0 a valid speed?\n- Q2 [LOW] Units?", r)
         d = self.rundir(plan={**q, "kind": "ticket"}, runs=[("form", RUN_FORM)])
         # a run's follow-up on plan Q1 read as a second, unnumbered Q1 in one flat list: two labelled lists
         r = report.render_report(d)
-        self.assertIn("- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)  # a run's follow-up is one list now
-        self.assertIn("- Q2 [LOW] Units? _(from test plan)_", r)
-        self.assertIn(
-            "## Exploration notes\nHeuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", r
-        )
+        self.assertIn("Answer: Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)  # a run's follow-up: one list
+        self.assertIn("Answer: Q2 [LOW] Units? _(from test plan)_", r)
+        self.assertIn("Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked", r)
 
     def test_odd_field_types_never_crash(self):
         t = [{"key": "PROJ-1", "summary": "A", "acs": [{"id": "AC-1", "text": "x"}]}]
@@ -671,7 +688,7 @@ class Report(Base):
             d = self.rundir(f"2026-11-23-fuzz{i}", plan=plan, runs=[(f"r{k}", r) for k, r in enumerate(runs)])
             code, _, err = cli("report", str(d))
             self.assertEqual((code, err), (0, ""), plan)
-            self.assertTrue((d / "REPORT.md").read_text().startswith("# QA report: "), plan)
+            self.assertTrue((d / "REPORT.md").read_text().startswith("# "), plan)
             self.assertNotIn("Could not render", (d / "REPORT.md").read_text(), plan)  # rendered, not the fallback
             self.assertEqual(cli("plan-find", str(self.proj), "--run", str(d))[0], 0, plan)  # --resume/--retest state
         self.assertEqual((self.proj / "qa-out/README.md").read_text().count("| 2026-11-23 |"), len(plans))
@@ -702,8 +719,8 @@ class Report(Base):
             ],
         )
         text = report.render_report(d)
-        self.assertIn("- 2 a number — ✅ PASS (TC-2)", text)
-        self.assertIn("a list for an id — not covered", text)
+        self.assertIn("### 2 a number: PASS\n\n- **TC-2 Reject 131: PASS.**", text)
+        self.assertIn("### a list for an id: not covered by a case\n", text)
         self.assertNotIn("2 has no test case", text)
 
     def test_wrong_typed_run_fields_are_named_not_hidden(self):
@@ -784,8 +801,9 @@ class Report(Base):
             ],
         )  # the same bug listed again: once
         r = report.render_report(d)
-        table = r.split("### Bugs to file")[1].split("\n\n")[0]
-        self.assertEqual((table.count("Speed accepts 131"), table.count("List sorts wrong")), (1, 1))
+        listed = r.split("\n## Bugs\n")[1].split("\n## ")[0]
+        self.assertEqual((listed.count("Speed accepts 131"), listed.count("List sorts wrong")), (1, 1))
+        self.assertEqual(listed.count("### BUG-1 "), 2)
         self.assertIn("BUG-1 is also the id of another bug", r.split("## Problems reading this folder")[1])
 
     def test_ac_ids_match_whatever_their_case_and_unknown_ones_are_named(self):
@@ -795,28 +813,24 @@ class Report(Base):
         }
         d = self.rundir("2026-11-23-PROJ-1", plan=plan, runs=[("form", RUN1)])
         r = report.render_report(d)
-        self.assertIn("**Verdict: ✅ PASS**", r)
+        self.assertIn("\n\n✅ PASS · ", r)
         self.assertNotIn("not covered", r)
         self.assertIn("TC-2 names AC-9, which PROJ-1 doesn't have", r.split("## Problems reading this folder")[1])
 
     def test_page_column_when_a_ticket_spans_pages(self):
         cases = [
             {"id": "TC-1", "route": "/a", "status": "PASS", "actual": "", "notes": ""},
-            {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": ""},
+            {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": "", "priority": "P1"},
         ]
-        self.assertEqual(
-            report._case_table(cases, "/x", True)[0], "| ID | AC | Page | Case | Status | Actual | Evidence |"
-        )
-        self.assertEqual(report._case_table(cases[:1], "/x", False)[0], "| ID | AC | Case |")
+        self.assertIn("\n  Page: /a\n", report._case_item(cases[0], "/x", True))  # in the case's fold
+        self.assertIn("\n  Page: /b · priority P1\n", report._case_item(cases[1], "/x", False))
 
     def test_header_browser_comes_from_the_runs(self):
         plan = {"kind": "ticket", "env": {"url": "https://qa", "browser": "chrome"}}
         runs = [("run-form.json", {"env": {"url": "https://qa/form", "browser": "firefox"}})]
-        self.assertEqual(
-            report._header("/x/qa-out/2026-11-23-T", "ticket", plan, runs)[1],
-            "ticket · 2026-11-23 · https://qa · build not run yet · browser firefox",
-        )
-        self.assertTrue(report._header("/x/qa-out/2026-11-23-T", "ticket", plan, [])[1].endswith("browser chrome"))
+        self.assertEqual(report._env_line(plan, runs), "https://qa · browser firefox")
+        self.assertEqual(report._env_line(plan, []), "https://qa · browser chrome")
+        self.assertEqual(report._env_line({}, []), "")
 
     def test_header_says_what_the_runs_ran_as(self):  # a tenant or role changes what a page shows
         runs = [
@@ -827,9 +841,10 @@ class Report(Base):
                 {"env": {"url": "https://qa/c", "browser": "chrome", "context": "site South;\nrole viewer"}},
             ),
         ]
-        head = report._header("/x/qa-out/2026-11-23-T", "explore", {}, runs)[1]
-        self.assertTrue(head.endswith("browser chrome · as site North; role editor / site South; role viewer"), head)
-        self.assertNotIn(" as ", report._header("/x/qa-out/2026-11-23-T", "explore", {}, runs[:0])[1])
+        self.assertEqual(report._ran_as(runs), "as site North; role editor / site South; role viewer")
+        self.assertEqual(report._ran_as(runs[:0]), "")
+        d = self.rundir("2026-11-23-T", plan=PLAN1, runs=[(n[4:-5], {**RUN1, **r}) for n, r in runs])
+        self.assertIn(" · as site North; role editor / site South; role viewer\n", report.render_report(d))
 
     def test_index_write_waits_for_another_report(self):
 
@@ -862,14 +877,20 @@ class Layout(Rendering):
 
     def test_verdict_block_action_and_draft_for_a_pass(self):
         d, r = self.render_run([("form", RUN1)], plan=PLAN1_ANSWERED)
-        self.assertIn("**Verdict: ✅ PASS** — all 2 cases passed\n", r)
-        self.assertIn("Jira comment draft: [jira-comment-PROJ-1.md](jira-comment-PROJ-1.md)", r)
-        self.assertNotIn("## Summary", r)  # one ticket: no table
-        self.assertLess(r.index("## Needs your action"), r.index("## PROJ-1"))  # actions come before the detail
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("Passed on Release-A-3.5.0 and Release-B-3.5.0\n", draft)
-        self.assertIn("Fixed: Speed no longer accepts 131.", draft)
-        self.assertIn("TC-1 - PASS: Save 130\nTC-2 - PASS: Reject 131", draft)
+        self.assertIn(
+            "\n\n✅ PASS · build 1.42 · 2026-11-23 · 2 of 2 cases passed · no bugs\n\nall 2 cases passed\n\n", r
+        )
+        self.assertIn("1. Post the Jira comment: [jira-comment.txt](jira-comment.txt), after these checks:", r)
+        self.assertNotIn("| Ticket", r)  # one ticket: no table
+        self.assertLess(r.index("## What to do"), r.index("## Results"))  # actions come before the detail
+        self.assertEqual(
+            (d / "jira-comment.txt").read_text(),
+            "QA result: PASSED on build 1.42 (2026-11-23)\n"
+            "Release: Release-A-3.5.0, Release-B-3.5.0\n"
+            "Fixed: Speed no longer accepts 131.\n\n"
+            "AC-1 Saves 0-130: passed.\n  Saved\n\n"
+            "AC-2 Rejects 131: passed.\n  Error shown\n",
+        )
 
     def test_action_block_lists_failures_and_open_questions(self):
         runs = [
@@ -885,9 +906,11 @@ class Layout(Rendering):
             )
         ]
         _, r = self.render_run(runs)
-        self.assertIn("### Open questions (1)\n- Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_", r)
-        self.assertIn("### Failed, blocked or not-run cases (1)\n- TC-2 ❌ FAIL (AC-2) — 131 saved · PROJ-1", r)
-        self.assertNotIn("Nothing needs your action", r)
+        todo = r.split("## What to do\n\n")[1].split("\n## ")[0]
+        self.assertIn("1. Answer: Q1 [BLOCKING] Is 0 a valid speed? _(from test plan)_\n", todo)
+        self.assertIn("\n\nTC-2 failed (AC-2)\n\n", r)  # the failure: named once under the status line
+        self.assertEqual(r.count("131 saved"), 1)  # what it saw: once, under its AC
+        self.assertIn("### AC-2 Rejects 131: FAIL\n\n- **TC-2 Reject 131: FAIL.** 131 saved\n", r)
 
     def test_same_question_on_two_pages_is_one_line_and_resolved_ones_fold(self):
         a = {**RUN1, "target": "/a", "cases": [], "questions": ["Is the limit inclusive?"] + RUN1["questions"]}
@@ -913,21 +936,23 @@ class Layout(Rendering):
             )
         ]
         _, r = self.render_run(runs)
-        self.assertIn("| ID | Pri | AC | Case | Status | Actual | Evidence |", r)  # no Steps or Expected columns
-        self.assertNotIn("| Steps |", r)
-        self.assertIn("<details><summary>TC-1 — Save 130</summary>", r)  # passing: closed
-        self.assertIn("<details open><summary>TC-2 — Reject 131</summary>", r)  # failing: open
-        self.assertIn("**Expected:** Error shown", r)
+        self.assertNotIn("| ID", r)  # no case table: each case once, under its AC
+        self.assertIn("- **TC-1 Save 130: PASS.** Saved\n\n  <details><summary>Steps</summary>", r)  # passing: closed
+        self.assertIn(
+            "- **TC-2 Reject 131: FAIL.** 131 saved\n\n  <details open><summary>Steps</summary>", r
+        )  # failing: open
+        self.assertIn("  Expected: Error shown\n", r)
 
     def test_case_image_is_linked_and_embedded_only_when_the_file_exists(self):
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
-        self.assertIn("| ✅ PASS | Saved | — |", report.render_report(d))
+        self.assertIn("- **TC-1 Save 130: PASS.** Saved\n", report.render_report(d))
         (d / "evidence").mkdir(exist_ok=True)
         (d / "evidence" / "TC-1.png").write_bytes(b"png")
         r = report.render_report(d)
-        self.assertIn("| ✅ PASS | Saved | [image](evidence/TC-1.png) |", r)
-        self.assertIn("![TC-1](evidence/TC-1.png)", r)
-        self.assertIn("1 evidence image(s)", r)
+        self.assertIn("- **TC-1 Save 130: PASS.** Saved · [image](evidence/TC-1.png)\n", r)
+        self.assertEqual(r.count("evidence/TC-1.png"), 1)  # linked once, never embedded
+        self.assertNotIn("![", r)
+        self.assertIn("   - Add TC-1's image (/form) to the comment in Jira.\n", r)
         # annotated=False on a planned case result must surface as "(not highlighted)"
         d2 = self.rundir(
             "2026-11-23-PROJ-1-nohl",
@@ -968,23 +993,24 @@ class Layout(Rendering):
             )
         ]
         _, r = self.render_run(runs)
-        self.assertIn("**Verdict: ❌ FAIL**", r)
-        self.assertIn("| Broken | /form | PROJ-1 |", r)
-        self.assertNotIn("| Broken | /form | none |", r)
+        self.assertIn("\n\n❌ FAIL · build 1.42 · 2026-11-23 · 2 of 2 cases passed · 1 bug\n\nBroken HIGH\n\n", r)
+        self.assertIn("### Broken (HIGH, CONFIRMED)\n\n- Page /form\n", r)  # PROJ-1's bug, as the verdict counts it
+        self.assertNotIn("none", r.split("## Bugs")[1])
 
     def test_a_folder_named_like_a_case_image_is_not_one(self):
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         (d / "evidence" / "TC-1.png").mkdir(parents=True)
         r = report.render_report(d)
-        self.assertIn("0 evidence image(s)", r)
-        self.assertNotIn("![TC-1]", r)
+        self.assertIn("- **TC-1 Save 130: PASS.** Saved\n", r)
+        self.assertNotIn("evidence/TC-1.png", r)
 
     def test_case_fold_opens_when_a_case_did_not_pass(self):  # the outer fold was never checked
         runs = [("form", {**RUN1, "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL"}]})]
         _, r = self.render_run(runs)
-        self.assertIn("<details open><summary>Steps, expected results and evidence (2 cases)</summary>", r)
+        self.assertIn("- **TC-2 Reject 131: FAIL.**\n\n  <details open><summary>Steps</summary>", r)
+        self.assertIn("- **TC-1 Save 130: PASS.**\n\n  <details><summary>Steps</summary>", r)
         _, r = self.render_run([("form", RUN1)])
-        self.assertIn("<details><summary>Steps, expected results and evidence (2 cases)</summary>", r)
+        self.assertNotIn("<details open>", r)
 
     def test_open_beats_resolved_and_blocking_comes_first(self):
         a = {
@@ -996,7 +1022,8 @@ class Layout(Rendering):
         b = {**RUN1, "target": "/b", "cases": [], "questions": ["same?", "[BLOCKING] A?"]}
         _, r = self.render_run([("a", a), ("b", b)], plan={**PLAN1, "questions": []})
         self.assertNotIn("Resolved questions", r)  # asked open on /b: still open
-        opened = r.split("### Open questions (4)", 1)[1].split("###", 1)[0]
+        opened = r.split("## What to do", 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(opened.count("Answer: "), 4)
         self.assertLess(opened.index("[BLOCKING] A?"), opened.index("[HIGH] B?"))
         self.assertLess(opened.index("[HIGH] B?"), opened.index("C?"))
         self.assertIn("Same?", opened)
@@ -1017,10 +1044,12 @@ class Layout(Rendering):
                 "2026-11-24-r", runs=[("f", {"mode": "explore", "target": "/f", "status": "COMPLETED", "bugs": bugs})]
             )
         )
-        self.assertIn("| b1 |", r)
+        self.assertIn("### b1 (LOW, CONFIRMED)\n\n- Page /f\n", r)
         self.assertNotIn("[image](evidence/", r)
 
-    def test_a_draft_no_run_file_lists_stays_in_the_action_block(self):  # --resume replaced the run file that found it
+    def test_a_draft_no_run_file_lists_is_an_earlier_bug_in_the_history(
+        self,
+    ):  # --resume replaced the run that found it
         found = {
             **RUN1,
             "status": "INCOMPLETE",
@@ -1035,7 +1064,7 @@ class Layout(Rendering):
             ],
         }
         d, r = self.render_run([("form", found)], plan=PLAN1_ANSWERED)
-        self.assertIn("**Verdict: ❌ FAIL**", r)
+        self.assertIn("\n\n❌ FAIL · ", r)
         (d / "bugs/BUG-1.md").write_text("# Save drops data on /form\n\nbody\n")
         (d / "bugs/BUG-3.md").write_text("# Named by a case\n")
         (d / "bugs/notes.md").write_text("# not a draft\n")
@@ -1043,29 +1072,31 @@ class Layout(Rendering):
             json.dumps({**found, "cases": [{**RUN1["cases"][0], "bug": "see BUG-3"}, RUN1["cases"][1]]})
         )
         report.write_report(d)
-        self.assertNotIn(
-            "no run file lists", (d / "REPORT.md").read_text()
-        )  # its bugs or a case name both: not repeated
+        self.assertNotIn("did not see", (d / "REPORT.md").read_text())  # its bugs or a case name both: not repeated
         (d / "bugs/BUG-3.md").unlink()
         (d / "bugs/BUG-2.md").write_text("# Toast <b>overlaps</b> Save\n")
         (d / ".data/run-form.json").write_text(json.dumps(RUN1))  # the resumed explorer didn't see it again
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
-        self.assertIn("**Verdict: ✅ PASS**", r)  # drafts alone never change a verdict
-        self.assertIn("### Bug drafts no run file lists (2)\n", r)
+        self.assertIn("\n\n✅ PASS · ", r)  # drafts alone never change a verdict
         self.assertIn(
+            "## History\n\n| Date |",  # this run's line first
+            r,
+        )
+        self.assertIn(
+            "\n\nEarlier bugs this run did not see (no verdict counts them; file one if it still applies):\n\n"
             "- [BUG-1](bugs/BUG-1.md) Save drops data on /form\n- [BUG-2](bugs/BUG-2.md) Toast &lt;b>overlaps&lt;/b> Save\n",
             r,
         )
         self.assertNotIn("not a draft", r)
-        self.assertNotIn("Nothing needs your action.", r)
+        self.assertNotIn("File the bug", r)  # no verdict counts them: in the history, not in What to do
 
     def test_test_data_left_in_the_app_is_something_to_act_on(self):  # it was only in the folded exploration notes
         run = {**RUN1, "notes": "Explored the form.\nLeft in the app: qa-sdet-zone-1 (delete refused: budget used up)"}
         _, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
-        sec = r[r.index("## Needs your action") : r.index("## PROJ-1")]
+        sec = r[r.index("## What to do") : r.index("## Results")]
         self.assertIn(
-            "### Test data left in the app (1)\n- /form: qa-sdet-zone-1 (delete refused: budget used up)\n", sec
+            "1. Delete the test data left in the app on /form: qa-sdet-zone-1 (delete refused: budget used up)\n", sec
         )
 
     def test_bug_video_is_linked_only_when_the_file_exists(self):
@@ -1084,9 +1115,14 @@ class Layout(Rendering):
         (d / "evidence/BUG-2.webm").write_bytes(b"webm")
         (d / "evidence/BUG-3.webm").mkdir()
         r = report.render_report(d)
-        self.assertIn("| image and video | /f |  | [image](evidence/BUG-1.png) · [video](evidence/BUG-1.webm) · ⚠", r)
-        self.assertIn("| video only | /f |  | [video](evidence/BUG-2.webm) · ⚠", r)
-        self.assertIn("| folder named like a video | /f |  | ⚠ no draft", r)  # no video link; the repro badge stays
+        self.assertIn(
+            "### BUG-1 image and video (HIGH, CONFIRMED)\n\n- Page /f\n- [image](evidence/BUG-1.png) · [video](evidence/BUG-1.webm) · ⚠",
+            r,
+        )
+        self.assertIn("### BUG-2 video only (HIGH, CONFIRMED)\n\n- Page /f\n- [video](evidence/BUG-2.webm) · ⚠", r)
+        self.assertIn(
+            "### BUG-3 folder named like a video (HIGH, CONFIRMED)\n\n- Page /f\n- ⚠ no draft", r
+        )  # the badge stays
 
     def test_odd_not_tested_shapes(self):  # a string listed its letters; a list category raised TypeError
         _, r = self.render_run([("form", {**RUN1, "not_tested": "keyboard"})])
@@ -1167,7 +1203,7 @@ class Signals(Rendering):
     def test_unexplained_signals_are_listed_once_with_counts(self):
         r = self.signals_run()
         self.assertIn(
-            "### Browser signals no bug explains (4)\n"
+            "## Signals no bug explains (4)\n\n"
             "- /form: GET /api/closures.json → 404 (×2)\n"
             "- /form: GET /api/x → FAILED net::ERR_UNSAFE_PORT\n"
             "- /form: console: Zone save failed: 500\n"
@@ -1176,17 +1212,17 @@ class Signals(Rendering):
         )
         for gone in ("incidents.json", "Failed to load resource", "favicon", "at eval", "abc123secret"):
             self.assertNotIn(gone, r)  # 2xx, network lines the requests log carries, stack lines, a token
-        self.assertIn("**Verdict: ✅ PASS**", r)  # signals never change a verdict
-        self.assertNotIn("Nothing needs your action.", r)
+        self.assertIn("\n\n✅ PASS · ", r)  # signals never change a verdict
+        self.assertIn("1. Look into the 1 severe browser signal no bug explains", r)  # the failed request
 
     def test_a_signal_the_run_or_a_bug_draft_names_is_explained(self):
         r = self.signals_run(
             run={**RUN1, "notes": "The toast says zone save failed: 500, as the ticket expects."},
             drafts=["## Evidence\n- Network: `GET /api/closures.json` → 404"],
         )
-        sec = r[r.index("## Needs your action") : r.index("## PROJ-1")]
+        sec = r[r.index("## Signals no bug explains") : r.index("## Exploration notes")]
         self.assertIn(
-            "### Browser signals no bug explains (2)\n"
+            "## Signals no bug explains (2)\n\n"
             "- /form: GET /api/x → FAILED net::ERR_UNSAFE_PORT\n"
             "- /form: console: TypeError: rows is undefined\n",
             sec,
@@ -1582,36 +1618,39 @@ class Signals(Rendering):
         for c in run.get("cases") or []:
             (d / f"evidence/{c['id']}.png").write_bytes(b"png")
         report.write_report(d)
-        return d, (d / "jira-comment-PROJ-1.md").read_text(), (d / "jira-comment-PROJ-1.txt").read_text()
+        r = (d / "REPORT.md").read_text()
+        return d, r.split("## What to do")[1].split("\n## ")[0], (d / "jira-comment.txt").read_text()
 
     def test_a_pass_draft_warns_about_unexplained_severe_signals_and_the_verdict_stays(self):
-        d, md, txt = self.pass_draft(
+        d, check, txt = self.pass_draft(
             "1. [POST] http://localhost:8765/form => [500] Internal Server Error\n"
             "2. [GET] http://localhost:8765/api/closures.json => [404] Not Found\n",
             console="[ERROR] TypeError: rows is undefined @ :1\n",
         )
-        check = md.split("---------- paste below")[0]
         self.assertIn(
-            "- Unexplained server errors, failed requests or leaks in this run (1): /form: POST /form → 500.", check
+            "   - 1 severe browser signal on its pages no bug explains (a 5xx, a failed request, an error body or a "
+            "leak): a pass over them may hide a bug. Read Signals no bug explains first.\n",
+            check,
         )
-        self.assertIn("read REPORT.md", check)
         self.assertIn(
-            "- 2 other unexplained browser signal(s) (4xx, console errors, request loops): see REPORT.md.", check
+            "   - 2 other unexplained browser signals (4xx, console errors, request loops): see Signals no bug explains.\n",
+            check,
         )
-        self.assertNotIn("Unexplained", txt)  # the comment body stays clean
-        self.assertIn("**Verdict: ✅ PASS**", (d / "REPORT.md").read_text())  # signals never change a verdict
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("- /form: POST /form → 500\n", r.split("## Signals no bug explains (3)")[1])  # named there, once
+        self.assertNotIn("signal", txt)  # the comment stays clean
+        self.assertIn("\n\n✅ PASS · ", r)  # signals never change a verdict
 
     def test_a_pass_draft_has_no_signal_warning_when_the_run_names_the_call_or_the_user_ignored_it(self):
-        _, md, _ = self.pass_draft(
+        _, check, _ = self.pass_draft(
             "1. [POST] http://localhost:8765/form => [500] Error\n",
             run={**RUN1, "notes": "POST /form 500 is the known fixture error, bug BUG-9."},
         )
-        self.assertNotIn("Unexplained", md)
-        self.assertNotIn("other unexplained", md)
+        self.assertNotIn("signal", check)
         ignored = {("/form", "request", "POST /form 500"): ("IGNORED", 2, "r0")}
         with mock.patch.object(report, "_signal_baseline", return_value=ignored):
-            _, md, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n")
-        self.assertNotIn("Unexplained", md)
+            _, check, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n")
+        self.assertNotIn("signal", check)
 
     def test_a_checked_error_body_and_a_leak_reach_the_pass_draft(self):
         d = self.triage_dir("1. [POST] http://localhost:8765/graphql => [200] OK\n")
@@ -1619,8 +1658,9 @@ class Signals(Rendering):
         for c in RUN1.get("cases") or []:
             (d / f"evidence/{c['id']}.png").write_bytes(b"png")
         report.write_report(d)
-        md = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("/form: POST /graphql → 200 [error body: errors: Forbidden]", md)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn("- /form: POST /graphql → 200 [error body: errors: Forbidden]\n", r)
+        self.assertIn("   - 1 severe browser signal on its pages no bug explains", r)  # under Post the Jira comment
 
     def test_third_party_failures_fold_into_one_line_and_request_loops_show(self):
         self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
@@ -1632,7 +1672,7 @@ class Signals(Rendering):
             "3. [GET] https://tiles.example.org/1/2/3.png => [FAILED] net::ERR\n" + loop
         )
         report.write_report(d)
-        sec = (d / "REPORT.md").read_text().split("## Needs your action")[1].split("\n## ")[0]
+        sec = (d / "REPORT.md").read_text().split("## Signals no bug explains")[1].split("\n## ")[0]
         self.assertIn("- /form: POST /form → 500", sec)
         self.assertIn("- /form: GET /api/zones/:id ×6 (the same call 6 times: a request loop?)", sec)
         self.assertNotIn("cdn.example.com", sec.split("<details>")[0])
@@ -1648,9 +1688,10 @@ class Signals(Rendering):
             ("3. [GET] http://h/api/closures.json => [404] Not found\n", None, ["GET /api/closures.json → 404"]),
         ):
             r = self.signals_run(requests=requests, console=console, drafts=drafts)
-            self.assertNotIn("Browser signals", r)
-            # a draft no run file lists is still something to act on (the signal it explains is not)
-            self.assertIn("### Bug drafts no run file lists (1)" if drafts else "Nothing needs your action.", r)
+            self.assertNotIn("Signals no bug explains", r)
+            self.assertNotIn("signal", r.split("## What to do")[1].split("\n## ")[0])
+            # a draft no run file lists is still shown (the signal it explains is not)
+            self.assertEqual("Earlier bugs this run did not see" in r, bool(drafts))
             self.assertNotIn("Problems reading this folder", r)
 
     def test_page_text_in_a_message_stays_text(self):
@@ -1661,7 +1702,7 @@ class Signals(Rendering):
 
     def test_a_long_list_is_cut_and_says_where_the_rest_is(self):
         r = self.signals_run(requests=None, console="".join(f"[ERROR] row {i} failed @ :1\n" for i in range(30)))
-        self.assertIn("### Browser signals no bug explains (30)", r)
+        self.assertIn("## Signals no bug explains (30)\n\n", r)
         self.assertIn(
             "- /form: console: row 14 failed\n- +15 more: see `requests-*.log` and `console-*.log` in `.data/`\n", r
         )
@@ -1693,21 +1734,24 @@ class Escaping(Rendering):
         self.assertEqual(
             headings,
             [
-                "# QA report: T ## injected",
-                "## Needs your action",
-                "### Bugs to file (1)",
-                "### Failed, blocked or not-run cases (1)",
-                "## PROJ-1 — s # H1 \\| x",
-                "### Acceptance criteria",
-                "### Test cases",
+                "# PROJ-1: s # H1 \\| x",
+                "## What to do",
+                "## Results",
+                "### AC-1 - x t: FAIL",
+                "## Bugs",
+                "### known bug ab\\|cd ef t (unrated)",
                 "## Exploration notes",
             ],
         )
-        self.assertIn("| ❌ FAIL | BUG-9 \\| &lt;img src=x> new |", r)  # not a link: not exactly BUG-n
+        self.assertIn("\n\n❌ FAIL · build 1 ## b · ", r)  # in a line, not a heading
+        self.assertIn(
+            "- **TC-1 t: FAIL (BUG-9 \\| &lt;img src=x> new).** [image](evidence/TC-1.png)", r
+        )  # not a link: not exactly BUG-n
         self.assertNotIn("](bugs/BUG-9", r)
-        self.assertIn("| known ab\\|cd ef |", r)
-        self.assertIn("- AC-1 - x t — ❌ FAIL (TC-1)", r)
-        self.assertIn("## PROJ-1 — s # H1 \\| x", r)
+        self.assertIn("1. Check the bug: known bug ab\\|cd ef t (unrated)\n", r)
+        self.assertNotIn("<img", r)
+        explore = self.rundir("2026-11-24-x", plan={"kind": "explore", "title": "T\n## injected"}, runs=[("f", run)])
+        self.assertTrue(report.render_report(explore).startswith("# QA report: T ## injected\n\nexplore · "))
 
     def test_hostile_text_stays_text(self):
         """XSS payloads, `<!--`, remote images, a leading ``` and `@@` in run text can't hide or rewire the report."""
@@ -1753,38 +1797,42 @@ class Escaping(Rendering):
         self.assertIn("— other:", r)  # the coverage line is in the folded page title now
         self.assertIn("\n\\```<br>rest\n", r)
         self.assertIn(
-            "| [BUG-1](bugs/BUG-1.md) | LOW |  | bad @@ title | /f | PROJ-1 | [image](evidence/BUG-1.png) |", r
+            "### BUG-1 bad @@ title (LOW)\n\n- Page /f\n- [draft](bugs/BUG-1.md) · [image](evidence/BUG-1.png)\n", r
         )
-        self.assertIn("| [image](evidence/shot%20%281%29.png) |", r)
+        self.assertIn("### two (LOW)\n\n- Page /f\n- [image](evidence/shot%20%281%29.png)\n", r)
+        self.assertIn("--body-file '", r)  # a folder name with a space is quoted inside the command
+        self.assertEqual(spacing_problems(r), [])
         idx = (self.proj / "qa-out/README.md").read_text()
-        self.assertIn("| [2026-11-23-odd name](2026-11-23-odd%20name/REPORT.md) |", idx)
+        self.assertIn("| [PROJ-1](2026-11-23-odd%20name/REPORT.md) |", idx)  # one ticket: its key; the target quoted
 
     def test_string_steps_cannot_fence_off_the_report(self):
         plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "steps": "```js\nalert(1)"}, PLAN1["cases"][1]]}
         _, r = self.render_run([("form", RUN1)], plan=plan)
-        self.assertIn("\n\\```js<br>alert(1)\n", r)
+        self.assertIn("\n  \\```js<br>alert(1)\n", r)  # escaped, inside the case's fold
+        self.assertEqual(spacing_problems(r), [])
 
     def test_summary_lines_are_html_escaped_once(self):  # `\|` showed as typed; a case title was escaped twice
         plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "title": "a|b <i>x</i> & c\\d"}, PLAN1["cases"][1]]}
         _, r = self.render_run([("form", {**RUN1, "target": "/f|g"})], plan=plan)
-        self.assertIn("<summary>TC-1 — a|b &lt;i&gt;x&lt;/i&gt; &amp; c\\d</summary>", r)
-        self.assertIn("<summary>/f|g (run-form.json: COMPLETED, build 1.42)</summary>", r)
+        self.assertIn("- **TC-1 a\\|b &lt;i>x&lt;/i> & c\\\\d: PASS.**", r)  # Markdown escapes once, in a list line
+        self.assertIn("<summary>/f|g (run-form.json: COMPLETED, build 1.42)</summary>", r)  # HTML escapes in a summary
         self.assertNotIn("<i>", r)
 
-    def test_action_list_escapes_case_id_and_ac(self):  # the only place ids reached the report unescaped
+    def test_reason_and_case_lines_escape_case_id_and_ac(self):  # the only place ids reached the report unescaped
         plan = {**PLAN1, "cases": [{**PLAN1["cases"][0], "id": "<img src=x onerror=alert(1)>", "ac": "<b>AC</b>"}]}
         _, r = self.render_run(
             [("form", {**RUN1, "cases": [{"id": "<img src=x onerror=alert(1)>", "status": "FAIL"}]})], plan=plan
         )
-        self.assertIn("- &lt;img src=x onerror=alert(1)> ❌ FAIL (&lt;b>AC&lt;/b>)", r)
+        self.assertIn("\n\n&lt;img src=x onerror=alert(1)> failed (&lt;b>AC&lt;/b>)\n\n", r)  # the reason line
+        self.assertIn("- **&lt;img src=x onerror=alert(1)> Save 130: FAIL.**", r)
         self.assertNotIn("<img", r)
         self.assertNotIn("<b>", r)
 
 
 class JiraDraft(Rendering):
-    """jira-comment-<KEY>.md for a ticket that passed."""
+    """jira-comment.txt: the ticket's Jira comment, for every verdict, and what to check before posting it."""
 
-    def test_fail_has_no_draft_and_a_stale_draft_is_removed(self):
+    def test_a_fail_gets_a_failed_comment_and_stale_drafts_are_removed(self):
         runs = [
             (
                 "form",
@@ -1798,19 +1846,18 @@ class JiraDraft(Rendering):
             )
         ]
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=runs)
-        (d / "jira-comment-PROJ-1.md").write_text("old draft")
-        (d / "jira-comment-PROJ-9.md").write_text("a ticket no longer in the plan")
+        for old in ("jira-comment-PROJ-1.md", "jira-comment-PROJ-1.txt", "jira-comment-PROJ-9.md", "jira-comment.md"):
+            (d / old).write_text("old draft")  # the .md twin and the old per-key name, or a ticket gone from the plan
         report.write_report(d)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()  # a rejection now, never the old or a pass draft
-        self.assertIn("QA: FAIL", draft)
-        self.assertNotIn("Passed on", draft)
-        self.assertFalse((d / "jira-comment-PROJ-9.md").exists())  # stale: removed
-        r = (d / "REPORT.md").read_text()
-        self.assertIn("**Verdict: ❌ FAIL**", r)
+        draft = (d / "jira-comment.txt").read_text()  # a FAILED comment now, never the old or a pass one
+        self.assertTrue(draft.startswith("QA result: FAILED on build 1.42 (2026-11-23)\n"), draft)
+        self.assertIn("AC-2 Rejects 131: FAILED.\n  131 saved\n", draft)
+        self.assertEqual(sorted(p.name for p in d.glob("jira-comment*")), ["jira-comment.txt"])  # stale: removed
+        self.assertIn("\n\n❌ FAIL · ", (d / "REPORT.md").read_text())
 
     def test_a_failed_render_leaves_no_earlier_pass_draft(self):  # "Passed on …" stayed postable after a FAIL
         d, _ = self.render_run([("form", RUN1)])
-        self.assertIn("Passed on", (d / "jira-comment-PROJ-1.txt").read_text())
+        self.assertIn("QA result: PASSED WITH NOTES", (d / "jira-comment.txt").read_text())
         failed = {**RUN1, "cases": [RUN1["cases"][0], {"id": "TC-2", "status": "FAIL", "actual": "131 saved"}]}
         (d / ".data/run-form.json").write_text(json.dumps(failed))
         with mock.patch.object(report, "render_report_parts", side_effect=TypeError("boom")):
@@ -1828,8 +1875,9 @@ class JiraDraft(Rendering):
                 (d / ".data/run-form-resume.json").write_text(cut)
                 report.write_report(d)
                 r = (d / "REPORT.md").read_text()
-                self.assertIn("**Verdict: ⛔ BLOCKED** — run-form-resume.json unreadable", r)
-                self.assertIn("QA: BLOCKED", (d / "jira-comment-PROJ-1.txt").read_text())  # never "Passed on"
+                self.assertIn("\n\n⛔ BLOCKED · ", r)
+                self.assertIn("\n\nrun-form-resume.json unreadable: its results are not counted\n\n", r)
+                self.assertIn("QA result: BLOCKED", (d / "jira-comment.txt").read_text())  # never a pass
                 self.assertIn("PROJ-1 ⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
                 # a partial --retest must not carry a pass this verdict didn't trust
                 self.assertEqual(report._run_state(d)["passed_cases"], [])
@@ -1839,12 +1887,13 @@ class JiraDraft(Rendering):
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", failed)])
         (d / ".data/run-form-resume.json").write_text(cut)
         report.write_report(d)
-        self.assertIn("**Verdict: ❌ FAIL**", (d / "REPORT.md").read_text())  # a failure it did read still wins
+        self.assertIn("\n\n❌ FAIL · ", (d / "REPORT.md").read_text())  # a failure it did read still wins
 
     def test_a_blocked_run_gets_no_pass_draft(self):  # its cases said PASS; the run said BLOCKED
         d, r = self.render_run([("form", {**RUN1, "status": "BLOCKED", "summary": "session expired"})])
-        self.assertIn("**Verdict: ⛔ BLOCKED** — the run on /form ended BLOCKED: session expired", r)
-        self.assertNotIn("Passed on", (d / "jira-comment-PROJ-1.md").read_text())  # a BLOCKED note, never a pass
+        self.assertIn("\n\n⛔ BLOCKED · build 1.42 · ", r)
+        self.assertIn("\n\nthe run on /form ended BLOCKED: session expired\n\n", r)
+        self.assertTrue((d / "jira-comment.txt").read_text().startswith("QA result: BLOCKED on build 1.42"))
         self.assertIn("⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
 
     def test_build_check_uses_the_builds_of_the_tickets_own_runs(self):  # another ticket's build hid it
@@ -1859,9 +1908,14 @@ class JiraDraft(Rendering):
                 ("form", {**RUN1, "build": unk}),
                 ("list", {**RUN1, "target": "/list", "build": "3.4.0", "cases": [{"id": "TC-3", "status": "PASS"}]}),
             ]
-            d, _ = self.render_run(runs, plan=plan)
-            self.assertIn("- Build: unknown in this run.", (d / "jira-comment-PROJ-1.md").read_text(), unk)
-            self.assertNotIn("Build: unknown", (d / "jira-comment-PROJ-2.md").read_text(), unk)
+            d, r = self.render_run(runs, plan=plan)
+            one, two = r.split("Post the Jira comment for PROJ-1")[1].split("Post the Jira comment for PROJ-2")
+            self.assertIn("- The build is unknown in this run: confirm the QA app runs 3.5.0,", one, unk)
+            self.assertNotIn("build is unknown", two.split("\n## ")[0], unk)
+            self.assertIn(
+                "QA result: PASSED WITH NOTES on an unknown build", (d / "jira-comment-PROJ-1.txt").read_text(), unk
+            )
+            self.assertIn(" on build 3.4.0 (", (d / "jira-comment-PROJ-2.txt").read_text(), unk)
 
     def test_draft_takes_one_passing_image_per_route(self):  # one route and two passes proved neither
         plan = {
@@ -1887,10 +1941,10 @@ class JiraDraft(Rendering):
             (d / "evidence" / f"{cid}.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
         report.write_report(d)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn(f"Paste this image: {d}/evidence/TC-2.png (/form)", draft)  # TC-1 is first, but no pass
-        self.assertIn(f"Paste this image: {d}/evidence/TC-3.png (/list)", draft)
-        self.assertNotIn("TC-1.png", draft)
+        checks = (d / "REPORT.md").read_text().split("Post the Jira comment")[1].split("\n## ")[0]
+        self.assertIn("   - Add TC-2's image (/form) to the comment in Jira.\n", checks)  # TC-1 is first, but no pass
+        self.assertIn("   - Add TC-3's image (/list) to the comment in Jira.\n", checks)
+        self.assertNotIn("TC-1", checks)
 
     def test_draft_lines_stay_single_and_true_is_no_text(self):
         plan = {
@@ -1898,16 +1952,22 @@ class JiraDraft(Rendering):
             "tickets": [{**PLAN1["tickets"][0], "fix_version": True}],
             "cases": [{**c, "route": "/form\ninjected"} for c in PLAN1["cases"]],
         }
-        d, r = self.render_run([("form", {**RUN1, "not_tested": [True, "Real gap"], "questions": [True]})], plan=plan)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("Passed on <release name>", draft)
-        self.assertIn("screenshot for /form injected", draft)
+        d = self.rundir(
+            "2026-11-23-PROJ-1",
+            plan=plan,
+            runs=[("form", {**RUN1, "not_tested": [True, "Real gap"], "questions": [True]})],
+        )
+        (d / "evidence/TC-1.png").write_bytes(b"png")
+        report.write_report(d)
+        r, draft = (d / "REPORT.md").read_text(), (d / "jira-comment.txt").read_text()
+        self.assertNotIn("Release:", draft)  # JSON true is no fix version: no release line, and no placeholder
+        self.assertIn("   - Add TC-1's image (/form injected) to the comment in Jira.\n", r)
         self.assertNotIn("- True", r)
         self.assertIn("Real gap", r)
         self.config(releaseTemplates=["Rel-\n{version}"])
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
         report.write_report(d)
-        self.assertIn("Passed on Rel- 3.5.0\n", (d / "jira-comment-PROJ-1.md").read_text())
+        self.assertIn("\nRelease: Rel- 3.5.0\n", (d / "jira-comment.txt").read_text())
 
     def test_draft_shows_one_image_per_route_and_no_markup(self):
         d = self.rundir("2026-11-23-PROJ-1", plan=PLAN1, runs=[("form", RUN1)])
@@ -1916,13 +1976,12 @@ class JiraDraft(Rendering):
         (d / "evidence" / "TC-2.png").write_bytes(b"png")
         self.config(releaseTemplates=TEMPLATES)
         report.write_report(d)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertEqual(draft.count("Paste this image:"), 1)  # both cases are on /form: first passing one only
-        self.assertIn(f"Paste this image: {d}/evidence/TC-1.png (/form)", draft)
-        body = draft.split("---------- paste below ----------", 1)[1]
-        self.assertNotRegex(body, r"[|<>*#]|!\[")  # plain text for Jira
+        r = (d / "REPORT.md").read_text()
+        self.assertEqual(r.count("'s image ("), 1)  # both cases are on /form: the first passing one only
+        self.assertIn("   - Add TC-1's image (/form) to the comment in Jira.\n", r)
+        self.assertNotRegex((d / "jira-comment.txt").read_text(), r"[|<>*#_`]|!\[|\]\(")  # plain text for Jira
 
-    def test_missing_templates_or_fix_version_leave_placeholders(self):
+    def test_missing_templates_or_fix_version_leave_no_line_and_no_placeholder(self):
         d = self.rundir(
             "2026-11-23-PROJ-1",
             plan={**PLAN1, "tickets": [{**PLAN1["tickets"][0], "fix_version": None, "fixed_note": ""}]},
@@ -1930,13 +1989,12 @@ class JiraDraft(Rendering):
         )
         self.config()  # no releaseTemplates at all
         report.write_report(d)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("Passed on <release name>", draft)
-        self.assertIn("release names (set releaseTemplates in the qa-sdet config)", draft)
-        self.assertIn("Fixed: <write one sentence: what was fixed>", draft)
-        self.assertIn("Placeholders to fill:", draft)
+        draft = (d / "jira-comment.txt").read_text()
+        self.assertTrue(draft.startswith("QA result: PASSED WITH NOTES on build 1.42 (2026-11-23)\n\nAC-1 "), draft)
+        for absent in ("Release:", "Fixed:", "<"):
+            self.assertNotIn(absent, draft)
 
-    def test_pass_with_notes_draft_has_a_notes_line(self):
+    def test_pass_with_notes_comment_says_what_is_open(self):
         runs = [
             (
                 "form",
@@ -1950,10 +2008,11 @@ class JiraDraft(Rendering):
             )
         ]
         d, r = self.render_run(runs)
-        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("TC-2 - QUESTION: Reject 131", draft)
-        self.assertIn("Notes: Q1 open blocking question; TC-2 open question\n", draft)  # PLAN1's Q1 is still open
+        self.assertIn("\n\n⚠️ PASS WITH NOTES · ", r)
+        draft = (d / "jira-comment.txt").read_text()
+        self.assertIn("\nAC-2 Rejects 131: open question.\n  Order unclear\n", draft)
+        self.assertTrue(draft.endswith("\n\nOpen question: Is 0 a valid speed?\n"), draft)  # PLAN1's Q1, still open
+        self.assertIn("Fixed: Speed no longer accepts 131.\n", draft)
 
     def test_release_names_fill_the_version(self):
         self.assertEqual(report._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
@@ -1970,7 +2029,7 @@ class JiraDraft(Rendering):
         (d / ".data/run-broken.json").symlink_to(self.t / "missing-target.json")
         (d / ".data/run-deep.json").write_text("[" * 3000 + "]" * 3000)
         r = report.render_report(d)
-        self.assertIn("**Verdict: ⛔ BLOCKED** — run-broken.json unreadable", r)  # rendered; what they held is unknown
+        self.assertIn("\n\n⛔ BLOCKED · ", r)  # rendered; what they held is unknown
         self.assertIn("run-broken.json unreadable", r)
         self.assertIn("run-deep.json unreadable", r)
         # M5: bool/list case IDs warned & dropped, numeric 0 actual kept, non-string ticket keys ignored in run_summary
@@ -1986,10 +2045,9 @@ class JiraDraft(Rendering):
         }
         d2 = self.rundir("2026-11-23-ODD", plan=plan_odd, runs=[("form", run_zero)])
         r2 = report.render_report(d2)
-        self.assertIn("| TC-1 |", r2)
-        self.assertIn("| ✅ PASS | 0 |", r2)
-        self.assertNotIn("| True |", r2)
-        self.assertNotIn("| ['x'] |", r2)
+        self.assertIn("- **TC-1 Save 130: PASS.** 0\n", r2)
+        self.assertNotIn("True", r2)
+        self.assertNotIn("['x']", r2)
         self.assertNotIn("other:", r2)
         summary = report.run_summary(d2)
         self.assertNotIn("['bad']", summary[2])
@@ -2095,7 +2153,7 @@ class PlanFindAndRetest(Rendering):
             ],
         )
         report.write_report(prior)
-        self.assertIn("**Verdict: ❌ FAIL**", (prior / "REPORT.md").read_text())
+        self.assertIn("\n- PROJ-1: ❌ FAIL — ", (prior / "REPORT.md").read_text())
         lr = json.loads(cli("plan-find", str(self.proj), "--run", str(prior))[1])["latest_run"]
         self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-1", "TC-2", "TC-5"])
         self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-3", "TC-4", "TC-6"])
@@ -2110,8 +2168,8 @@ class PlanFindAndRetest(Rendering):
             "2026-11-21-PROJ-1+PROJ-2", plan=retest, runs=[("fail", ran("/fail", "COMPLETED", ("TC-5", "PASS")))]
         )
         report.write_report(d)
-        self.assertIn("| PROJ-1 | ⛔ BLOCKED |", (d / "REPORT.md").read_text())
-        self.assertIn("QA: BLOCKED", (d / "jira-comment-PROJ-1.md").read_text())
+        self.assertIn("\n- PROJ-1: ⛔ BLOCKED — ", (d / "REPORT.md").read_text())
+        self.assertIn("QA result: BLOCKED", (d / "jira-comment-PROJ-1.txt").read_text())
 
     def test_retest_trusts_a_pass_exactly_when_the_verdict_does(self):  # one rule for "a run that ended BLOCKED"
         blocked = lambda **kw: {"status": "BLOCKED", "summary": "session expired", "cases": [], **kw}
@@ -2160,7 +2218,7 @@ class PlanFindAndRetest(Rendering):
         report.write_report(d)
         want = {"QA-1": "⚠️ PASS WITH NOTES", "QA-2": "⛔ BLOCKED", "QA-3": "⚠️ PASS WITH NOTES", "QA-4": "✅ PASS"}
         r = (d / "REPORT.md").read_text()
-        self.assertEqual({k: re.search(rf"^\| {k} \| ([^|]+) \|", r, re.M).group(1) for k in want}, want)
+        self.assertEqual({k: re.search(rf"^- {k}: (.+?) — ", r, re.M).group(1) for k in want}, want)
         self.assertIn(", ".join(f"{k} {v}" for k, v in want.items()), (d.parent / "README.md").read_text())
         con = core.connect()
         try:
@@ -2200,12 +2258,24 @@ class PlanFindAndRetest(Rendering):
         (prior / f"evidence/{pid}.png").write_bytes(b"png")
         run = {**RUN1, "build": "1.43", "cases": [{"id": c["id"], "status": "PASS"} for c in plan["cases"]]}
         d, r = self.render_run([("form", run)], plan=plan)
-        row = next(x for x in r.splitlines() if x.startswith("| PROJ-2"))
-        self.assertIn(f"0 / 0 / 0 (+{len(plan['prior_passed'])} prior)", row)
-        draft = (d / "jira-comment-PROJ-2.md").read_text()
-        self.assertNotIn("unknown in this run", draft)
-        self.assertNotIn("No screenshot", draft)
-        self.assertIn(f"2026-11-23-PROJ-1+PROJ-2/evidence/{pid}.png", draft)
+        self.assertIn("\n\nticket · 2026-11-23 · build 1.43 · retest of 2026-11-23-PROJ-1+PROJ-2\n\n", r)
+        self.assertIn(
+            "## PROJ-2: Incident list\n\n⚠️ PASS WITH NOTES · build 1.43 · 2 of 2 cases passed (2 on an earlier build) · "
+            "no bugs\n",
+            r,
+        )
+        checks = r.split("Post the Jira comment for PROJ-2")[1].split("\n## ")[0]
+        self.assertNotIn("unknown in this run", checks)
+        self.assertNotIn("No screenshot", checks)
+        self.assertIn(
+            f"   - Add [../2026-11-23-PROJ-1+PROJ-2/evidence/{pid}.png](../2026-11-23-PROJ-1%2BPROJ-2/evidence/{pid}.png) "
+            "(/list) to the comment in Jira.\n",
+            checks,
+        )
+        self.assertIn(
+            "AC-1 Sorted by date: passed on build 1.42, not re-run on 1.43.\n  Sort\n  Ties\n",
+            (d / "jira-comment-PROJ-2.txt").read_text(),
+        )
 
     def test_partial_retest_verdict_is_pass_with_notes_and_honest_draft(self):
         plan = {
@@ -2216,26 +2286,33 @@ class PlanFindAndRetest(Rendering):
         }
         run_pass = {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "PASS", "actual": "Error shown"}]}
         d, r = self.render_run([("form", run_pass)], plan=plan)
-        self.assertIn("retest of 2026-11-23-PROJ-1", r)
-        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES**", r)
-        self.assertIn("verified on prior build 1.42; not re-run here", r)
-        self.assertIn("- AC-1 Saves 0-130 — verified on prior build 1.42 (TC-1)", r)
-        self.assertIn("<summary>Prior-build passes not re-run here (1)</summary>", r)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
-        self.assertIn("Partial retest of 2026-11-23-PROJ-1", draft)
-        self.assertIn("TC-1 - PASS (prior build 1.42): Save 130", draft)
-        self.assertIn("TC-2 - PASS: Reject 131", draft)
-        # If the retested case fails, verdict is FAIL with no draft
+        self.assertIn(
+            "\n\n⚠️ PASS WITH NOTES · build 1.43 · 2026-11-23 · 2 of 2 cases passed (1 on an earlier build) · no bugs · "
+            "retest of 2026-11-23-PROJ-1\n\n",
+            r,
+        )
+        self.assertIn("1 case verified on prior build 1.42; not re-run here", r)
+        self.assertIn(
+            "### AC-1 Saves 0-130: PASS on build 1.42\n\n- **TC-1 Save 130: PASS on build 1.42, not re-run here.**", r
+        )
+        self.assertIn(
+            "   - TC-1 passed on build 1.42 and was not re-run here (retest of 2026-11-23-PROJ-1): the comment says so.\n",
+            r,
+        )
+        draft = (d / "jira-comment.txt").read_text()
+        self.assertIn("\nAC-1 Saves 0-130: passed on build 1.42, not re-run on 1.43.\n  Save 130\n", draft)
+        self.assertIn("\nAC-2 Rejects 131: passed.\n  Error shown\n", draft)
+        # If the retested case fails, the verdict is FAIL and so is the comment
         run_fail = {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "FAIL", "actual": "Still saves 131"}]}
         d2, r2 = self.render_run([("form", run_fail)], plan=plan)
-        self.assertIn("**Verdict: ❌ FAIL**", r2)
-        self.assertIn("QA: FAIL", (d2 / "jira-comment-PROJ-1.md").read_text())
+        self.assertIn("\n\n❌ FAIL · ", r2)
+        self.assertTrue((d2 / "jira-comment.txt").read_text().startswith("QA result: FAILED on build 1.43"))
 
 
 class JiraBundles(Rendering):
-    """Jira comment drafts for every verdict, with a clean body file; filed bugs get a comment, not a new bug."""
+    """A Jira comment for every verdict and the command to post it; filed bugs get a comment, not a new bug."""
 
-    def test_a_fail_gets_a_rejection_draft_with_a_clean_body_and_a_printed_command(self):
+    def test_a_fail_gets_a_failed_comment_and_a_printed_command(self):
         run = {
             **RUN1,
             "cases": [
@@ -2254,16 +2331,17 @@ class JiraBundles(Rendering):
             ],
         }
         d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
-        md, txt = (d / "jira-comment-PROJ-1.md").read_text(), (d / "jira-comment-PROJ-1.txt").read_text()
-        self.assertIn("CHECK BEFORE POSTING", md)
-        self.assertNotIn("CHECK BEFORE POSTING", txt)
-        self.assertIn("QA: FAIL on build 1.42", txt)
-        self.assertIn("TC-2 - FAIL (AC-2): 131 saved", txt)
-        self.assertIn("BUG-1", txt)
-        self.assertIn(f"acli jira workitem comment create --key PROJ-1 --body-file {d / 'jira-comment-PROJ-1.txt'}", r)
-        run_ok = {**RUN1}
-        d2, _ = self.render_run([("form", run_ok)], plan=PLAN1_ANSWERED)
-        self.assertIn("Passed on", (d2 / "jira-comment-PROJ-1.txt").read_text())  # pass drafts get the clean body too
+        txt = (d / "jira-comment.txt").read_text()
+        self.assertTrue(txt.startswith("QA result: FAILED on build 1.42 (2026-11-23)\n"), txt)
+        self.assertIn("\nAC-2 Rejects 131: FAILED.\n  131 saved\n", txt)
+        self.assertTrue(txt.endswith("\n\nBug: Speed accepts 131 (HIGH), not filed yet\n"), txt)
+        self.assertNotIn("BUG-1", txt)
+        self.assertIn(
+            f"   ```sh\n   acli jira workitem comment create --key PROJ-1 --body-file {d / 'jira-comment.txt'}\n   ```\n",
+            r,
+        )
+        d2, _ = self.render_run([("form", {**RUN1})], plan=PLAN1_ANSWERED)
+        self.assertTrue((d2 / "jira-comment.txt").read_text().startswith("QA result: PASSED on build 1.42"))
 
     def test_a_bug_already_filed_gets_a_comment_and_a_new_one_a_link_when_configured(self):
         from qa_sdet import memory
@@ -2309,9 +2387,16 @@ class JiraBundles(Rendering):
             json.dumps({"BUG-2": [{"key": "PROJ-77", "summary": "Name too long saved"}]})
         )
         report.write_report(d)
-        block = (d / "REPORT.md").read_text().split("Filing commands")[1]
-        one, two = block.split("**BUG-2**")
-        self.assertIn("already in Jira as PROJ-55 (REGRESSED)", one)
+        r = (d / "REPORT.md").read_text()
+        self.assertIn(
+            "1. Comment on PROJ-55 (already in Jira, REGRESSED): [BUG-1](bugs/BUG-1.md) Speed accepts 131 (HIGH)\n", r
+        )
+        self.assertIn(
+            "\nBug: Speed accepts 131 (HIGH), PROJ-55\nBug: Name accepts 300 chars (LOW), not filed yet\n",
+            (d / "jira-comment.txt").read_text(),
+        )
+        one, two = r.split("\n## Bugs\n")[1].split("### BUG-2 ")
+        self.assertIn("- already in Jira as PROJ-55 (REGRESSED): add this draft there as a comment:", one)
         self.assertIn(f"acli jira workitem comment create --key PROJ-55 --body-file {d / 'bugs/BUG-1.md'}", one)
         self.assertNotIn("workitem create --project", one)
         self.assertIn("acli jira workitem link create --out <JIRA-KEY> --in PROJ-1 --type Blocks --yes", two)
@@ -2348,9 +2433,8 @@ class Traceability(Rendering):
             ],
         }
         d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
-        self.assertIn("- AC-2 Rejects 131 — ❌ FAIL (TC-2) · bugs: BUG-1", r)
-        row = next(x for x in r.splitlines() if x.startswith("| BUG-1") or x.startswith("| [BUG-1]"))
-        self.assertIn("PROJ-1 (TC-2 · AC-2)", row)
+        self.assertIn("### AC-2 Rejects 131: FAIL\n\n- **TC-2 Reject 131: FAIL (BUG-1).**", r)  # no draft: no link
+        self.assertIn("### BUG-1 Speed accepts 131 (HIGH, CONFIRMED)\n\n- Page /form · found by TC-2 (AC-2)\n", r)
 
     def test_a_ticket_whose_requirements_changed_says_so(self):
         plan = {
@@ -2359,7 +2443,9 @@ class Traceability(Rendering):
         }
         _, r = self.render_run([("form", RUN1)], plan=plan)
         self.assertIn(
-            "**Verdict: ⚠️ PASS WITH NOTES** — requirements changed: description changed in Jira since 2026-11-20", r
+            "\n\n⚠️ PASS WITH NOTES · build 1.42 · 2026-11-23 · 2 of 2 cases passed · no bugs\n\n"
+            "requirements changed: description changed in Jira since 2026-11-20\n\n",
+            r,
         )
 
     def test_one_ticket_is_found_inside_a_multi_ticket_run(self):
@@ -2585,7 +2671,10 @@ class TicketFolder(Rendering):
         self.assertIn(" · 2026-11-20 · ", (d / "REPORT.md").read_text())  # not plan.created (2026-11-23)
         rows = [x for x in (self.proj / "qa-out/README.md").read_text().splitlines() if x.startswith("| 2026")]
         self.assertEqual(rows[0].split(" | ")[:2], ["| 2026-11-22", "[2026-11-22-form](2026-11-22-form/REPORT.md)"])
-        self.assertEqual(rows[1], "| 2026-11-20 | [PROJ-1](PROJ-1/REPORT.md) | ticket | PROJ-1 ⚠️ PASS WITH NOTES | 0 |")
+        self.assertEqual(
+            rows[1],
+            "| 2026-11-20 | [PROJ-1 — Speed limit form](PROJ-1/REPORT.md) | ticket | PROJ-1 ⚠️ PASS WITH NOTES | 0 |",
+        )
         self.assertEqual(report.run_summary(self.rundir("PROJ-2", plan=PLAN1))[0], "2026-11-23")  # no run: created
 
     def test_history_one_line_per_date_build_and_ticket(self):
@@ -2626,7 +2715,7 @@ class TicketFolder(Rendering):
         report.write_report(d)
         self.assertEqual(outside.read_text(), "mine\n")
         self.assertTrue((d / ".data/history.jsonl").is_symlink())
-        self.assertIn("# QA report", (d / "REPORT.md").read_text())  # the report itself is written
+        self.assertTrue((d / "REPORT.md").read_text().startswith("# PROJ-1: "))  # the report itself is written
         (d / ".data/history.jsonl").unlink()
         (d / ".data/history.jsonl").mkdir()  # can't be read or replaced
         (d / "REPORT.md").unlink()
@@ -2847,19 +2936,28 @@ class CarryPrior(Rendering):
         run = {**RUN1, "build": "1.43", "cases": [{**RUN1["cases"][0], "build": "1.42", "ran": "2026-11-20"}]}
         run["cases"].append(RUN1["cases"][1])
         d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
-        draft = (d / "jira-comment-PROJ-1.md").read_text()
+        draft = (d / "jira-comment.txt").read_text()
         st = report._run_state(d)  # a --retest of this folder carries TC-1 on the build it passed on
         self.assertEqual([(c["id"], c["build"]) for c in st["passed_cases"]], [("TC-1", "1.42"), ("TC-2", "1.43")])
         plan = {**PLAN1_ANSWERED, "cases": PLAN1["cases"][1:], "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}
         d2, r2 = self.render_run([("form", {**run, "cases": RUN1["cases"][1:]})], plan=plan)
-        verdict = lambda text: re.search(r"^\*\*Verdict: .*$", text, re.M).group(0)
+        verdict = lambda text: text.split("\n\n")[1:3]  # the status line and why
         self.assertEqual(verdict(r), verdict(r2))
-        self.assertIn("**Verdict: ⚠️ PASS WITH NOTES** — 1 case verified on prior build 1.42; not re-run here", r)
-        self.assertIn("- AC-1 Saves 0-130 — verified on prior build 1.42 (TC-1)", r)
-        self.assertIn("<summary>Prior-build passes not re-run here (1)</summary>", r)
-        self.assertNotIn("| TC-1 |", r.split("<summary>Prior-build")[0])  # not also a current pass
-        self.assertEqual(draft, (d2 / "jira-comment-PROJ-1.md").read_text())
-        self.assertIn("TC-1 - PASS (prior build 1.42): Save 130", draft)
+        self.assertEqual(
+            verdict(r),
+            [
+                "⚠️ PASS WITH NOTES · build 1.43 · 2026-11-23 · 2 of 2 cases passed (1 on an earlier build) · no bugs",
+                "1 case verified on prior build 1.42; not re-run here",
+            ],
+        )
+        self.assertIn(
+            "### AC-1 Saves 0-130: PASS on build 1.42\n\n- **TC-1 Save 130: PASS on build 1.42, not re-run here.** Saved",
+            r,
+        )
+        self.assertEqual(r.count("**TC-1 "), 1)  # not also a current pass
+        prior_entry = "\nAC-1 Saves 0-130: passed on build 1.42, not re-run on 1.43.\n"
+        self.assertIn(prior_entry + "  Saved\n", draft)  # the kept result says what it saw
+        self.assertIn(prior_entry + "  Save 130\n", (d2 / "jira-comment.txt").read_text())  # a plan's: its title
 
 
 class ExploreStopCheck(Base):
@@ -3285,7 +3383,8 @@ class FilingBundle(Rendering):
                 (d / f"bugs/BUG-{i}.md").write_text(f"# Bug {i}\n")
             with mock.patch.object(report, "ticket_bugs", wraps=report.ticket_bugs) as spy:
                 r = report.render_report(d)
-            self.assertEqual(r.count("| /form | PROJ-1"), n)  # every untagged bug on /form still counts for PROJ-1
+            mine = r.split("## PROJ-1")[1].split("## PROJ-2")[0]
+            self.assertEqual(mine.count("- Page /form"), n)  # every untagged bug on /form still counts for PROJ-1
             return spy.call_count
 
         self.assertEqual(lookups(1), lookups(12))
@@ -3322,15 +3421,17 @@ class FilingBundle(Rendering):
         (d / "repro/BUG-1.spec.ts").write_text("test('x', () => {});")
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
-        self.assertIn("<summary>Filing commands &amp; attachments (1 confirmed)</summary>", r)
-        self.assertNotIn("Flaky toast\n", r.split("Filing commands", 1)[1])
+        one, two = r.split("\n## Bugs\n")[1].split("### BUG-2 ")
+        self.assertIn("- File it:\n\n  ```sh\n  acli jira workitem create --project PROJ ", one)
+        self.assertNotIn("acli", two)  # SUSPECTED: confirm it first
+        self.assertIn("Check the bug: [BUG-2](bugs/BUG-2.md) Flaky toast (LOW, SUSPECTED)", r)
         h = core.bug_hash("/form", "131 saved")
-        self.assertIn(f"qa-mem bug-status {h} FILED <JIRA-KEY>", r)
-        self.assertIn("BUG-1.png", r.split("Filing commands", 1)[1])
-        self.assertIn("BUG-1.webm", r.split("Filing commands", 1)[1])
-        self.assertIn("BUG-1.spec.ts", r.split("Filing commands", 1)[1])
+        self.assertIn(f"\n  qa-mem bug-status {h} FILED <JIRA-KEY>\n", one)
+        attach = next(ln for ln in one.splitlines() if ln.startswith("  # attach"))
+        for name in ("evidence/BUG-1.png", "evidence/BUG-1.webm", "repro/BUG-1.spec.ts"):
+            self.assertIn(f"{d}/{name}", attach)
         # Verify the printed acli command is shell-safe (does not execute $(echo INJECTED) or backticks)
-        cmd = next(ln for ln in r.splitlines() if ln.startswith("acli jira workitem create "))
+        cmd = next(ln.strip() for ln in r.splitlines() if ln.strip().startswith("acli jira workitem create "))
         out = subprocess.run(
             ["bash", "-c", cmd.replace("acli ", "printf '%s\\n' ", 1)], capture_output=True, text=True
         ).stdout
@@ -3469,7 +3570,7 @@ class AuditBugs(Rendering):
             crit = [t for c, t in self.issues(d) if c]
             self.assertTrue(any(want in t for t in crit), (want, self.issues(d)))
             report.write_report(d)
-            self.assertIn("⚠", (d / "REPORT.md").read_text().split("### Bugs to file")[1].split("\n\n")[0])
+            self.assertIn("· ⚠ ", (d / "REPORT.md").read_text().split("## Bugs")[1].split("\n## ")[0])
         code, out, _ = cli("audit-bugs", str(d))
         self.assertEqual(code, 0)
         self.assertIn("BUG-1", out)
@@ -3485,7 +3586,7 @@ class AuditBugs(Rendering):
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
         self.assertIn("⚠ check before filing: the oracle cites the code", r)
-        self.assertIn("**Verdict: ❌ FAIL**", r)  # the review is a note for the user, not a verdict
+        self.assertIn("\n\n❌ FAIL · ", r)  # the review is a note for the user, not a verdict
         (d / ".data/review.json").write_text(json.dumps({"bugs": [{"id": "BUG-1", "verdict": "solid"}]}))
         self.assertIn("reviewed ✓", report.render_report(d))
         (d / ".data/review.json").write_text("{oops")
@@ -3496,10 +3597,10 @@ class AuditBugs(Rendering):
         (d / "evidence/BUG-1-network.txt").write_text('POST /api/zones => 500\n{"code": "ZONE_OVERLAP"}\n')
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
-        row = next(x for x in r.splitlines() if x.startswith("| [BUG-1]"))
+        row = next(x for x in r.splitlines() if x.startswith("- [draft](bugs/BUG-1.md)"))
         self.assertIn("[repro](repro/BUG-1.spec.ts)", row)
         self.assertIn("[network](evidence/BUG-1-network.txt)", row)
-        self.assertIn("BUG-1-network.txt`", r.split("Filing commands")[1])  # attached to the Jira bug too
+        self.assertIn("evidence/BUG-1-network.txt", r.split("- File it:")[1])  # attached to the Jira bug too
         self.assertNotIn("abcdefghijklmnopqrst", (d / "bugs/BUG-1.md").read_text())  # scrubbed before it was linked
 
     def test_a_checked_case_without_its_image_is_an_evidence_gap(self):
@@ -3508,8 +3609,8 @@ class AuditBugs(Rendering):
         (d / "evidence/TC-2.png").write_bytes(b"")  # 0 bytes: no image
         report.write_report(d)
         r = (d / "REPORT.md").read_text()
-        self.assertIn("### Evidence gaps (1)\n- TC-2: no evidence image (evidence/TC-2.png)", r)
-        self.assertIn("TC-2 has no evidence image", (d / "jira-comment-PROJ-1.md").read_text())
+        self.assertIn(", after these checks:\n\n   - TC-2 has no evidence image: take it or say why.\n", r)
+        self.assertNotIn("TC-1 has no evidence image", r)
 
     def test_contract_warnings(self):
         spec = (
@@ -3534,6 +3635,389 @@ class AuditBugs(Rendering):
             self.assertTrue(any(want in t for t in warn), (want, warn))
         self.assertEqual(report.spec_issues(GOOD_SPEC), [])
         self.assertEqual(report.draft_issues(good_draft(self.H)), [])
+
+
+SAMPLE_PROJ_1 = """# PROJ-1: Speed limit form
+
+❌ FAIL · build 1.42 · 2026-11-23 · 1 of 2 cases passed · 1 bug
+
+TC-2 failed (AC-2); BUG-1 HIGH
+
+## What to do
+
+1. File the bug: [BUG-1](bugs/BUG-1.md) Speed accepts 131 (HIGH)
+
+2. Answer: Is 0 a valid speed? _(from /form)_
+
+3. Post the Jira comment: [jira-comment.txt](jira-comment.txt), after these checks:
+
+   - TC-2 has no evidence image: take it or say why.
+
+   ```sh
+   acli jira workitem comment create --key PROJ-1 --body-file {run}/jira-comment.txt
+   ```
+
+## Results
+
+<details><summary>Test plan</summary>
+
+- **Scope:** speed field
+- **Risks:**
+  - rounding
+- **Out of scope:**
+  - mobile
+
+</details>
+
+### AC-1 Saves 0-130: PASS
+
+- **TC-1 Save 130: PASS.** Saved · [image](evidence/TC-1.png)
+
+  <details><summary>Steps</summary>
+
+  Page: /form · priority P1
+
+  1. Open form
+  2. Type 130 \\| save
+
+  Expected: Saved
+
+  </details>
+
+### AC-2 Rejects 131: FAIL
+
+- **TC-2 Reject 131: FAIL ([BUG-1](bugs/BUG-1.md)).** 131 saved
+
+  <details open><summary>Steps</summary>
+
+  Page: /form
+
+  1. Type 131
+
+  Expected: Error shown
+
+  </details>
+
+## Bugs
+
+### BUG-1 Speed accepts 131 (HIGH, CONFIRMED)
+
+- Page /form · found by TC-2 (AC-2)
+
+- [draft](bugs/BUG-1.md) · [image](evidence/BUG-1.png) · [repro](repro/BUG-1.spec.ts) · repro ✓
+
+- File it:
+
+  ```sh
+  acli jira workitem create --project PROJ --type Bug --summary 'Speed accepts 131' --description-file {run}/bugs/BUG-1.md
+  qa-mem bug-status {hash} FILED <JIRA-KEY>
+  # attach (look at images and videos first): {run}/evidence/BUG-1.png {run}/repro/BUG-1.spec.ts
+  ```
+
+## Not tested
+
+<details><summary>Other (1)</summary>
+
+- Keyboard only: out of time
+
+</details>
+
+## Exploration notes
+
+App: https://qa.example · browser chrome
+
+Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked
+
+<details><summary>/form (run-form.json: COMPLETED, build 1.42) — boundary ❌, happy-path ✅</summary>
+
+Explored the speed field.
+
+</details>
+
+## History
+
+| Date | Build | Verdict | Cases | Bugs |
+|---|---|---|---|---|
+| 2026-11-23 | 1.42 | ❌ FAIL | 1 passed, 1 failed, 0 other | 1 |
+"""
+SAMPLE_COMMENT_1 = """QA result: FAILED on build 1.42 (2026-11-23)
+
+AC-1 Saves 0-130: passed.
+  Saved
+
+AC-2 Rejects 131: FAILED.
+  131 saved
+
+Bug: Speed accepts 131 (HIGH), not filed yet
+"""
+SAMPLE_PROJ_2 = """# PROJ-2: Incident list
+
+⚠️ PASS WITH NOTES · build 1.42 · 2026-11-23 · 1 of 2 cases passed · 1 bug
+
+TC-4 open question; BUG-2 LOW
+
+## What to do
+
+1. File the bug: [BUG-2](bugs/BUG-2.md) Header misaligned (LOW)
+
+2. Answer the question TC-4 raised: see Results.
+
+3. Post the Jira comment: [jira-comment.txt](jira-comment.txt), after these checks:
+
+   - TC-3 has no evidence image: take it or say why.
+   - No screenshot for this ticket yet: add one before you post.
+
+   ```sh
+   acli jira workitem comment create --key PROJ-2 --body-file {run}/jira-comment.txt
+   ```
+
+## Results
+
+### AC-1 Sorted by date: QUESTION
+
+- **TC-3 Sort: PASS.**
+
+  <details><summary>Steps</summary>
+
+  Page: /list
+
+  1. Open
+
+  Expected: Newest first
+
+  </details>
+
+- **TC-4 Ties: QUESTION.** Order of ties unspecified
+
+  <details open><summary>Steps</summary>
+
+  Page: /list
+
+  1. Open
+
+  Expected: Stable
+
+  </details>
+
+## Bugs
+
+### BUG-2 Header misaligned (LOW, CONFIRMED)
+
+- Page /list
+
+- [draft](bugs/BUG-2.md) · ⚠ no repro spec repro/BUG-2.spec.ts (+7: qa-mem audit-bugs)
+
+- File it:
+
+  ```sh
+  acli jira workitem create --project PROJ --type Bug --summary 'Header misaligned' --description-file {run}/bugs/BUG-2.md
+  qa-mem bug-status {hash} FILED <JIRA-KEY>
+  ```
+
+## Exploration notes
+
+App: https://qa.example · browser chrome
+
+Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked
+
+<details><summary>/list (run-list.json: COMPLETED, build 1.42)</summary>
+
+s
+
+</details>
+
+## History
+
+| Date | Build | Verdict | Cases | Bugs |
+|---|---|---|---|---|
+| 2026-11-23 | 1.42 | ⚠️ PASS WITH NOTES | 1 passed, 0 failed, 1 other | 1 |
+"""
+SAMPLE_COMMENT_2 = """QA result: PASSED WITH NOTES on build 1.42 (2026-11-23)
+
+AC-1 Sorted by date: open question.
+  Sort: passed
+  Ties: Order of ties unspecified
+
+Bug: Header misaligned (LOW), not filed yet
+"""
+
+
+def spacing_problems(text):
+    """Headings, tables, fences and <details> lines of a Markdown text without a blank line around them."""
+    lines, bad, fenced = text.split("\n"), [], False
+    blank = lambda i: i < 0 or i >= len(lines) or not lines[i].strip()
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("```"):
+            if not blank(i - 1 if not fenced else i + 1):
+                bad.append((i + 1, ln))
+            fenced = not fenced
+        elif fenced:
+            continue
+        elif ln.startswith("#") or s.startswith("<details") or s == "</details>":
+            if not (blank(i - 1) and blank(i + 1)):
+                bad.append((i + 1, ln))
+        elif s.startswith("|"):
+            table = lambda j: lines[j].strip().startswith("|")
+            if not (blank(i - 1) or table(i - 1)) or not (blank(i + 1) or table(i + 1)):
+                bad.append((i + 1, ln))
+    return bad
+
+
+class Sample(Rendering):
+    """The two-ticket fixture as two ticket folders, REPORT.md and jira-comment.txt compared whole; each fact once."""
+
+    PLANS = {
+        "PROJ-1": {**PLAN, "title": "PROJ-1", "tickets": PLAN["tickets"][:1], "cases": PLAN["cases"][:2]},
+        "PROJ-2": {**PLAN, "title": "PROJ-2", "tickets": PLAN["tickets"][1:], "cases": PLAN["cases"][2:]},
+    }
+
+    def folder(self, key, runs, files=(), plan=None):
+        d = self.rundir(key, plan=plan or self.PLANS[key], runs=runs)
+        noon = time.mktime((2026, 11, 23, 12, 0, 0, 0, 0, -1))  # local: the day _run_date and the history give
+        for f in (d / ".data").glob("run-*.json"):
+            os.utime(f, (noon, noon))
+        for rel, body in dict(files).items():
+            (d / rel).write_bytes(body if isinstance(body, bytes) else body.encode())
+        report.write_report(d)
+        return d, (d / "REPORT.md").read_text()
+
+    def sample(self):
+        h = core.bug_hash("/form", "Speed accepts 131")
+        one = self.folder(
+            "PROJ-1",
+            [("form", RUN_FORM)],
+            {
+                "bugs/BUG-1.md": good_draft(h),
+                "repro/BUG-1.spec.ts": GOOD_SPEC,
+                "evidence/BUG-1.png": b"png",
+                "evidence/TC-1.png": b"png",
+            },
+        )
+        two = self.folder("PROJ-2", [("list", RUN_LIST)], {"bugs/BUG-2.md": "# Header misaligned\n"})
+        return one, two
+
+    def test_the_fixture_renders_as_designed(self):
+        (d1, r1), (d2, r2) = self.sample()
+        fill = lambda text, d, h: text.replace("{run}", str(d.resolve())).replace("{hash}", h)
+        self.assertEqual(r1, fill(SAMPLE_PROJ_1, d1, core.bug_hash("/form", "Speed accepts 131")))
+        self.assertEqual(r2, fill(SAMPLE_PROJ_2, d2, core.bug_hash("/list", "Header misaligned")))
+        self.assertEqual((d1 / "jira-comment.txt").read_text(), SAMPLE_COMMENT_1)
+        self.assertEqual((d2 / "jira-comment.txt").read_text(), SAMPLE_COMMENT_2)
+        self.assertEqual(sorted(p.name for p in d1.glob("jira-comment*")), ["jira-comment.txt"])  # no .md twin
+        idx = (self.proj / "qa-out/README.md").read_text()
+        self.assertIn("| [PROJ-1 — Speed limit form](PROJ-1/REPORT.md) | ticket | PROJ-1 ❌ FAIL | 1 |", idx)
+
+    def test_every_heading_table_fence_and_fold_has_blank_lines_around_it(self):
+        (_, r1), (_, r2) = self.sample()
+        both = self.rundir(plan=PLAN, runs=[("form", RUN_FORM), ("list", RUN_LIST)])
+        report.write_report(both)
+        explore = self.rundir("2026-11-24-form", runs=[("form", {**RUN_FORM, "mode": "explore", "cases": []})])
+        plan_only = self.rundir("2026-11-24-plan", plan={**PLAN, "kind": "plan", "questions": ["Units?"]})
+        for text in (
+            r1,
+            r2,
+            report.render_report(both),
+            report.render_report(explore),
+            report.render_report(plan_only),
+        ):
+            self.assertEqual(spacing_problems(text), [], text)
+            self.assertNotIn("\n\n\n", text)
+
+    def test_a_long_actual_is_shown_whole_once_in_the_report_and_once_in_the_comment(self):
+        long = "The form saved 131 km/h and showed 'Saved'; " * 9 + "after a reload the field still shows 131."
+        self.assertGreater(len(long), 400)
+        run = {**RUN_FORM, "cases": [RUN_FORM["cases"][0], {**RUN_FORM["cases"][1], "actual": long}]}
+        d, r = self.folder("PROJ-1", [("form", run)])
+        comment = (d / "jira-comment.txt").read_text()
+        self.assertEqual((r.count(long), comment.count(long)), (1, 1))
+        self.assertIn(f"  {long}\n", comment)  # on its line, never cut
+        self.assertNotIn("…", r + comment)
+
+    def test_the_comment_lists_a_bug_once_with_no_local_ids(self):
+        (d1, _), (d2, _) = self.sample()
+        for d in (d1, d2):
+            comment = (d / "jira-comment.txt").read_text()
+            self.assertEqual(comment.count("Bug: "), 1, comment)  # a case's BUG-1 is no Jira key
+            self.assertNotRegex(comment, r"BUG-|TC-|/qa-out/|[|*#]")
+        jira = {**RUN_FORM, "cases": [RUN_FORM["cases"][0], {**RUN_FORM["cases"][1], "bug": "BUG-1, PROJ-55"}]}
+        d, _ = self.folder("PROJ-1", [("form", jira)])
+        self.assertIn(
+            "Bug: Speed accepts 131 (HIGH), not filed yet\nBug: PROJ-55\n", (d / "jira-comment.txt").read_text()
+        )
+
+    def test_no_comment_holds_a_placeholder(self):
+        """Release and Fixed lines only when known; an unknown build said in words; never `<…>` to fill in."""
+        quiet = json.loads(json.dumps(self.PLANS["PROJ-1"]))
+        quiet["tickets"][0].pop("plan")
+        for templates, fix, build in ((None, None, "unknown"), (TEMPLATES, None, ""), (TEMPLATES, "3.5", "1.42")):
+            with self.subTest(templates=templates, fix=fix, build=build):
+                self.config(**({"releaseTemplates": templates} if templates else {}))
+                plan = {
+                    **quiet,
+                    "tickets": [{**quiet["tickets"][0], "fix_version": fix, "fixed_note": fix and "No 131."}],
+                }
+                for cases in (RUN1["cases"], RUN_FORM["cases"]):
+                    run = {**RUN_FORM, "build": build, "cases": cases, "bugs": []}
+                    d, r = self.folder("PROJ-1", [("form", run)], plan=plan)
+                    comment = (d / "jira-comment.txt").read_text()
+                    self.assertNotRegex(comment, r"<[A-Za-z]", comment)
+                    self.assertEqual("Release: Release-A-3.5.0, Release-B-3.5.0" in comment, bool(fix), comment)
+                    self.assertEqual("Fixed: No 131." in comment, bool(fix) and cases is RUN1["cases"], comment)
+                    if build != "1.42":
+                        self.assertTrue(comment.startswith("QA result: "), comment)
+                        self.assertIn(" on an unknown build (2026-11-23)\n", comment.splitlines()[0] + "\n")
+                        self.assertIn("The build is unknown in this run: confirm", r)
+
+    def test_history_rows_newest_first_and_earlier_bugs_this_run_did_not_see(self):
+        d = self.rundir("PROJ-1", plan=self.PLANS["PROJ-1"])
+        lines = [
+            {
+                "date": "2026-11-20",
+                "build": "1.40",
+                "ticket": "PROJ-1",
+                "verdict": "FAIL",
+                "cases": {"pass": 0, "fail": 2, "other": 0},
+                "bugs": 2,
+            },
+            {
+                "date": "2026-11-22",
+                "build": "1.41",
+                "ticket": "PROJ-1",
+                "verdict": "BLOCKED",
+                "cases": {"pass": 1, "fail": 0, "other": 1},
+                "bugs": 0,
+            },
+            {"date": "2026-11-22", "build": "1.41", "ticket": "PROJ-9", "verdict": "PASS", "cases": {}, "bugs": 0},
+        ]
+        (d / ".data/history.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        (d / "bugs/BUG-3.md").write_text("# Old title\n")
+        run = {
+            **RUN_FORM,
+            "build": "1.42",
+            "bugs": [],
+            "cases": [{**RUN_FORM["cases"][0]}, {"id": "TC-2", "status": "PASS"}],
+        }
+        d, r = self.folder("PROJ-1", [("form", run)])
+        history = r.split("## History\n\n", 1)[1]
+        rows = [x for x in history.splitlines() if x.startswith("| 2026")]
+        self.assertEqual(
+            rows,
+            [
+                "| 2026-11-23 | 1.42 | ✅ PASS | 2 passed, 0 failed, 0 other | 0 |",
+                "| 2026-11-22 | 1.41 | ⛔ BLOCKED | 1 passed, 0 failed, 1 other | 0 |",
+                "| 2026-11-20 | 1.40 | ❌ FAIL | 0 passed, 2 failed, 0 other | 2 |",
+            ],
+        )  # this run's line first, another ticket's left out
+        self.assertIn(
+            "Earlier bugs this run did not see (no verdict counts them; file one if it still applies):\n\n"
+            "- [BUG-3](bugs/BUG-3.md) Old title\n",
+            history,
+        )
+        self.assertNotIn("BUG-3", r.split("## History")[0])  # no verdict counts it: not something to file now
+        (d / ".data/history.jsonl").unlink()
+        (d / "bugs/BUG-3.md").unlink()
+        self.assertNotIn("## History", report.render_report(d))  # no file and no earlier draft: no section
 
 
 if __name__ == "__main__":

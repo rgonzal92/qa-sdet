@@ -211,12 +211,12 @@ def doctor():
                 'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"',
             )
         temps = cfg.get("releaseTemplates")
-        if temps not in (None, []):  # optional: the Jira pass-comment draft fills {version} into these
+        if temps not in (None, []):  # optional: the Jira comment's Release line fills {version} into these
             ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
             line(
                 ok_t,
                 "releaseTemplates lists release names with {version}",
-                'a list such as ["Release-A-{version}"]: the pass-comment draft fills in the fix version',
+                'a list such as ["Release-A-{version}"]: the Release line of the Jira comment fills in the fix version',
             )
         ac_field = cfg.get("jiraAcField")
         if ac_field not in (None, ""):

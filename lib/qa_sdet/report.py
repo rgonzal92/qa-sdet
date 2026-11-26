@@ -1,4 +1,4 @@
-"""REPORT.md, the Jira draft, the run index and `inbox`."""
+"""REPORT.md, the Jira comment, the run index and `inbox`."""
 
 from __future__ import annotations
 
@@ -26,13 +26,6 @@ if TYPE_CHECKING:  # NOSONAR
 
 
 # ---------- REPORT.md: one human report per run folder, rendered from .data/plan.json + .data/run-*.json ----------
-STATUS_ICON = {
-    "PASS": "✅ PASS",
-    "FAIL": "❌ FAIL",
-    "BLOCKED": "⛔ BLOCKED",
-    "NOT_RUN": "⏸️ not run",
-    "QUESTION": "❓ QUESTION",
-}
 STATUS_RANK = ("FAIL", "BLOCKED", "QUESTION", "NOT_RUN", "PASS")  # worst first
 VERDICT_ICON = {
     "FAIL": "❌ FAIL",
@@ -302,7 +295,7 @@ def _serious(b):
 def _bug_word(b):
     sev = " ".join(str(b.get("severity") or "").split()).upper() or "unrated"
     extra = "" if _first_word(b.get("classification")) in ("confirmed", "") else f" {str(b['classification']).lower()}"
-    name = b.get("id") or ("known bug " if b.get("hash") else "") + core.short(b.get("title"), 40)  # known: re-sighted
+    name = b.get("id") or ("known bug " if b.get("hash") else "") + " ".join(core._s(b.get("title")).split())
     return f"{name} {sev}{extra}"
 
 
@@ -369,23 +362,18 @@ def verdict(
     prior_mine = [c for c in prior_passed if c.get("ticket") == key]
     its_bugs = ticket_bugs(key, cases, bugs, known)
     st = lambda c: c.get("status") or "NOT_RUN"
+    # a reason names cases, never quotes what they saw: REPORT.md shows that once, in full, under the case's AC
     why = lambda c: (
-        f": {_clip(c.get('actual') or c.get('notes'), 60)}"
-        if c.get("notes") or c.get("actual")
-        else f": no result reported for {core.norm_route(c['route'])}"
-        if st(c) == "NOT_RUN" and c.get("route")
+        f": no result reported for {core.norm_route(c['route'])}"
+        if st(c) == "NOT_RUN" and c.get("route") and not (c.get("notes") or c.get("actual"))
         else ""
     )
     unsure = [c for c in cases if key in c.get("id_tickets", ())]  # its result may be another plan case's
     fails = [c for c in mine if st(c) == "FAIL" and c not in unsure]
-    if len(fails) == 1:  # one failure: say what happened (cut at a word, never mid-number: "at 1…" for 131)
+    if len(fails) == 1:
         c = fails[0]
-        failed = [
-            f"{c['id']} failed"
-            + (f" ({c['ac']})" if c.get("ac") else "")
-            + (f": {_clip(c.get('actual') or c.get('notes'), 50)}" if c.get("actual") or c.get("notes") else "")
-        ]
-    else:  # several: one entry naming them all; each case's actual is in the case table
+        failed = [f"{c['id']} failed" + (f" ({c['ac']})" if c.get("ac") else "")]
+    else:  # several: one entry naming them all
         acs = sorted(
             {a for c in fails for a in _case_acs(c)},
             key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)],
@@ -414,7 +402,7 @@ def verdict(
             stuck.setdefault(f"{'blocked' if st(c) == 'BLOCKED' else 'not run'}{why(c)}", []).append(c["id"])
     ended = [
         f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
-        + (f": {_clip(r.get('summary'), 60)}" if r.get("summary") else "")
+        + (f": {' '.join(str(r['summary']).split())}" if r.get("summary") else "")
         for name, r in _blocked_runs(mine, runs)
     ]
     if stuck or ended:
@@ -432,15 +420,16 @@ def verdict(
     owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
     qid = lambda q: re.match(r"\s*(Q\d+)\b", q["text"])
     drift = d if isinstance(ticket, dict) and isinstance(d := ticket.get("drift"), str) else ""
+    blocking = [
+        q
+        for q in questions
+        if not q["resolved"] and "[BLOCKING]" in q["text"].upper() and (owner(q) == me or owner(q) not in plan_keys)
+    ]
+    unnumbered = sum(not qid(q) for q in blocking)  # its text is in REPORT.md's What to do: counted here, not quoted
     notes = (
-        ([f"requirements changed: {_clip(drift, 80)}"] if drift.strip() else [])
-        + [
-            f"{m.group(1)} open blocking question"
-            if (m := qid(q))
-            else f"open blocking question: {_clip(q['text'], 40)}"
-            for q in questions
-            if not q["resolved"] and "[BLOCKING]" in q["text"].upper() and (owner(q) == me or owner(q) not in plan_keys)
-        ]
+        ([f"requirements changed: {' '.join(drift.split())}"] if drift.strip() else [])
+        + [f"{m.group(1)} open blocking question" for q in blocking if (m := qid(q))]
+        + ([f"{unnumbered} open blocking question{'s' * (unnumbered != 1)}"] if unnumbered else [])
         + [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"]
         + [_bug_word(b) for b in its_bugs]
         + [
@@ -529,46 +518,12 @@ def summary_text(v):
     return html.escape(" ".join(str(v if v is not None else "").split()), quote=False)
 
 
-def _counts(cases):
-    p = sum(c["status"] == "PASS" for c in cases)
-    f = sum(c["status"] == "FAIL" for c in cases)
-    return f"{p} / {f} / {len(cases) - p - f}"
-
-
 def _bug_link(bid, run_dir):
     """A link to bugs/BUG-n.md when bid is exactly BUG-n and the draft exists; anything else as escaped text."""
     bid = str(bid or "")
     if re.fullmatch(r"BUG-\d+", bid) and (Path(run_dir) / "bugs" / f"{bid}.md").exists():
         return f"[{bid}](bugs/{bid}.md)"
     return one_line(bid)
-
-
-def _ticket_title(t):
-    return " ".join(str(f"{t.get('key')} — {t['summary']}" if t.get("summary") else t.get("key")).split())
-
-
-def _ac_lines(t, cases, with_status, prior_passed=()):
-    out = []
-    for ac in _list(t, "acs"):
-        aid = _ac_id(ac)
-        mine = [c for c in cases if _ac_key(aid) in _case_acs(c)]
-        prior = [c for c in prior_passed if _ac_key(aid) in _case_acs(c)]
-        ids = (
-            f" ({one_line(', '.join(str(c['id']) for c in (mine or prior) if c.get('id')))})" if (mine or prior) else ""
-        )
-        if not mine and not prior:
-            state = " — not covered"
-        elif mine and with_status:
-            state = " — " + STATUS_ICON[next(s for s in STATUS_RANK if any(c["status"] == s for c in mine))]
-        elif not mine and prior:
-            pb = ", ".join(sorted({str(c.get("build") or core.UNKNOWN) for c in prior}))
-            state = f" — verified on prior build {one_line(pb)}"
-        else:
-            state = ""
-        named = sorted(set().union(*map(_case_bugs, mine))) if mine else []
-        bugs = f" · bugs: {one_line(', '.join(named))}" if named and with_status else ""
-        out.append(f"- {one_line(aid)} {cell(ac.get('text'))}{state}{ids}{bugs}".replace("  ", " "))
-    return out
 
 
 def _prior_passed(plan, keys, cases=()):
@@ -593,18 +548,6 @@ def _prior_passed(plan, keys, cases=()):
         )
         out.append({**c, "ticket": tk, "ac": ac})
     return out + kept
-
-
-def _prior_block(prior_mine):
-    out = [
-        f"<details><summary>Prior-build passes not re-run here ({len(prior_mine)})</summary>",
-        "",
-        row("ID", "AC", "Case", "Prior build"),
-        "|---|---|---|---|",
-    ]
-    for c in prior_mine:
-        out.append(row(c.get("id"), c.get("ac"), c.get("title"), c.get("build") or core.UNKNOWN))
-    return out + ["", "</details>", ""]
 
 
 def _plan_lines(t):
@@ -637,79 +580,6 @@ def _evidence_file(run_dir, cid):
     return f"evidence/{quote(name)}" if (Path(run_dir) / "evidence" / name).is_file() else ""
 
 
-def _case_table(cases, run_dir, with_status):
-    """Compact table: ID, AC, case, status, actual, evidence. Steps and expected are in _case_details."""
-    pri = any(c.get("priority") for c in cases)
-    routes = len({str(c.get("route")).strip() for c in cases if c.get("route")}) > 1
-    head = (
-        ["ID"]
-        + ["Pri"] * pri
-        + ["AC"]
-        + ["Page"] * routes
-        + ["Case"]
-        + (["Status", "Actual", "Evidence"] if with_status else [])
-    )
-    out = [row(*head), "|" + "---|" * len(head)]
-    for c in cases:
-        cols = [c["id"]] + [c.get("priority")] * pri + [c.get("ac")] + [c.get("route")] * routes + [c.get("title")]
-        if with_status:
-            actual = Raw(
-                " ".join(
-                    x
-                    for x in (
-                        cell(core.short(c.get("actual") or c.get("notes"), 160)),
-                        _bug_link(c["bug"], run_dir) if c.get("bug") else "",
-                    )
-                    if x
-                )
-            )
-            img = _evidence_file(run_dir, c["id"])
-            ev = Raw(f"[image]({img})" + (" (not highlighted)" if c.get("annotated") is False else "")) if img else "—"
-            cols += [STATUS_ICON[c["status"]], actual, ev]
-        out.append(row(*cols))
-    return out
-
-
-def _case_details(cases, run_dir, with_status):
-    """One folded block per case: steps, expected, actual and notes, with the case image inside. Non-pass cases open."""
-    out = []
-    for c in cases:
-        steps = c.get("steps")
-        if isinstance(steps, list):
-            step_lines = [f"{i}. {cell(x)}" for i, x in enumerate(steps, 1)]
-        else:
-            step_lines = [paragraph(steps)] if steps else []
-        non_pass = with_status and c["status"] != "PASS"
-        head = " ".join(x for x in (c["id"], "—", str(c.get("title") or "")) if x)  # status is in the table
-        out += [f"<details{' open' if non_pass else ''}><summary>{summary_text(head)}</summary>", ""]
-        out += ["**Steps**", ""] + step_lines + [""] if step_lines else []
-        out += [f"**Expected:** {cell(c.get('expected'))}", ""] if c.get("expected") else []
-        if with_status:
-            out += [f"**Actual:** {cell(c.get('actual'))}", ""] if c.get("actual") else []
-            out += [f"**Notes:** {cell(c.get('notes'))}", ""] if c.get("notes") else []
-        img = _evidence_file(run_dir, c["id"]) if with_status else ""
-        if img:
-            out += [f"![{c['id']}]({img})", ""]
-        out += ["</details>", ""]
-    return out
-
-
-def _case_block(cases, run_dir, with_status):
-    """Table, then the per-case details folded in one block."""
-    non_pass = with_status and any(c["status"] != "PASS" for c in cases)
-    return (
-        _case_table(cases, run_dir, with_status)
-        + [
-            "",
-            f"<details{' open' if non_pass else ''}><summary>Steps, expected results and evidence ({len(cases)} cases)"
-            "</summary>",
-            "",
-        ]
-        + _case_details(cases, run_dir, with_status)
-        + ["</details>", ""]
-    )
-
-
 def _newest_run_file(run_dir):
     return max((_mtime(f) for f in (Path(run_dir) / ".data").glob("run-*.json")), default=0.0)
 
@@ -728,32 +598,6 @@ def _run_date(run_dir, plan):
 
 def _run_builds(runs):
     return sorted({str(r.get("build")) for _, r in runs if r.get("build")})
-
-
-def _header(run_dir, kind, plan, runs):
-    env = plan.get("env") if isinstance(plan.get("env"), dict) else {}
-    renvs = [r["env"] for _, r in runs if isinstance(r.get("env"), dict)]
-    renv = renvs[0] if renvs else {}
-    # plan.json is written before any browser opens: what the runs used wins
-    used = sorted({str(e["browser"]) for e in renvs if e.get("browser")})
-    date = _run_date(run_dir, plan)
-    builds = _run_builds(runs)
-    ran_as = sorted({" ".join(scrub.redact(str(e["context"])).split()) for e in renvs if e.get("context")})
-    bits = [
-        kind,
-        date,
-        str(env.get("url") or renv.get("url") or ""),
-        "build " + (", ".join(builds) if builds else "not run yet"),
-        "browser " + (", ".join(used) or str(env.get("browser") or "?")),
-        f"retest of {plan['retest_of']}"
-        if isinstance(plan.get("retest_of"), str) and plan["retest_of"].strip()
-        else "",
-        "as " + " / ".join(core.short(x, 120) for x in ran_as[:3]) if ran_as else "",  # the tenant and role
-    ]
-    return [
-        f"# QA report: {one_line(plan.get('title') or Path(run_dir).name)}",
-        " · ".join(one_line(b) for b in bits if b),
-    ]
 
 
 def _draft_title(draft_path, fallback):
@@ -1012,7 +856,7 @@ def _repro_badge(bid, b, audit, reviews=None):
     if verdict == "solid":
         badge += " · reviewed ✓"
     elif verdict == "needs_check":
-        badge += f" · ⚠ check before filing: {core.short(notes, 160) or 'see .data/review.json'}"
+        badge += f" · ⚠ check before filing: {notes or 'see .data/review.json'}"
     return badge
 
 
@@ -1033,144 +877,6 @@ def _db_bug_states():
         return {}
 
 
-def _filing_block(bugs, cases, tickets, run_dir, cfg):
-    """Folded shell-safe filing commands, existing attachments and bug-status follow-ups for CONFIRMED bug drafts. A bug
-    memory already links to a Jira key (filed before, now seen again) gets a comment on that key instead of a new bug;
-    a new one tied to a ticket gets a link command when jiraBugLinkType is set; persisted duplicate hits show above it."""
-    run_dir = Path(run_dir).resolve()
-    entries, states = [], _db_bug_states()
-    link_type = str(cfg.get("jiraBugLinkType") or "").strip()
-    dups = _load_json(run_dir / ".data" / "jira-dups.json", [])
-    dups = dups if isinstance(dups, dict) else {}
-    default_proj = str(cfg.get("jiraProject") or "").strip() or "<PROJ>"
-    for b, owners in zip(bugs, _bug_owners(bugs, cases, tickets)):
-        bid = b.get("id") or ""
-        if not bid or _first_word(b.get("classification")) != "confirmed":
-            continue
-        draft = run_dir / "bugs" / f"{bid}.md"
-        if not draft.is_file():
-            continue
-        proj = next((o.split("-", 1)[0] for o in owners if ops.KEY_RE.fullmatch(o.upper())), default_proj)
-        title = _draft_title(draft, b.get("title") or bid)
-        cmd = (
-            f"acli jira workitem create --project {shlex.quote(proj)} --type Bug "
-            f"--summary {shlex.quote(title)} --description-file {shlex.quote(str(draft))}"
-        )
-        h = _stored_hash(b)
-        attachments = [
-            p
-            for p in (
-                run_dir / "evidence" / f"{bid}.png",
-                run_dir / "evidence" / f"{bid}.webm",
-                run_dir / "evidence" / f"{bid}-network.txt",
-                run_dir / "repro" / f"{bid}.spec.ts",
-            )
-            if p.is_file()
-        ]
-        status, known = next(((st, k) for full, (st, k) in states.items() if k and full.startswith(h)), (None, None))
-        if known and ops.KEY_RE.fullmatch(known):  # filed before: the news goes on that issue, not on a duplicate
-            block = [
-                f"**{one_line(bid)}** — {one_line(core.short(title, 100))}: already in Jira as {known} ({status}): "
-                "add this draft there as a comment",
-                "",
-                "```sh",
-                f"acli jira workitem comment create --key {known} --body-file {shlex.quote(str(draft))}",
-                "```",
-            ]
-        else:
-            ticket = next((o.upper() for o in owners if ops.KEY_RE.fullmatch(o.upper())), None)
-            hits = [x for x in dups.get(bid, []) if isinstance(x, dict) and x.get("key")]
-            block = [f"**{one_line(bid)}** — {one_line(core.short(title, 100))}", ""]
-            block += [
-                f"possible duplicate: {one_line(x['key'])} {one_line(core.short(x.get('summary'), 100))} "
-                "(check it before filing)"
-                for x in hits
-            ] + ([""] if hits else [])
-            block += (
-                ["```sh", cmd]
-                + (
-                    [
-                        f"acli jira workitem link create --out <JIRA-KEY> --in {ticket} --type "
-                        # not a vulnerability (S6350): printed for the user, never run; every value is shlex-quoted or a validated Jira key
-                        f"{shlex.quote(link_type)} --yes"  # NOSONAR
-                    ]
-                    if link_type and ticket
-                    else []
-                )
-                + [f"qa-mem bug-status {h} FILED <JIRA-KEY>", "```"]
-            )
-        if attachments:
-            block.append("Attach (inspect images/videos first): " + ", ".join(f"`{p}`" for p in attachments))
-        block.append("")
-        entries.append("\n".join(block))
-    if not entries:
-        return []
-    return [
-        "",
-        f"<details><summary>Filing commands &amp; attachments ({len(entries)} confirmed)</summary>",
-        "",
-        *entries,
-        "</details>",
-    ]
-
-
-def _evidence_gaps(cases, run_dir, kind):
-    """'TC-n: no evidence image (…)' for each case of a ticket run checked to PASS or FAIL without a non-empty image."""
-    out = []
-    for c in cases if kind == "ticket" else []:
-        p = Path(run_dir) / "evidence" / f"{c['id']}.png"
-        if (
-            c["status"] in ("PASS", "FAIL")
-            and re.fullmatch(r"[A-Za-z]+-\d+", str(c["id"]))
-            and (not p.is_file() or p.stat().st_size == 0)
-        ):
-            out.append(f"{c['id']}: no evidence image (evidence/{p.name})")
-    return out
-
-
-def _bug_section(bugs, cases, tickets, run_dir, heading="### Bugs to file", cfg=None, audit=None, reviews=None):
-    out = [
-        heading,
-        row("Bug", "Severity", "Class", "Title", "Page", "Ticket", "Evidence"),
-        "|---|---|---|---|---|---|---|",
-    ]
-    for b, owners in zip(bugs, _bug_owners(bugs, cases, tickets)):
-        bid = b.get("id") or ""
-        png = Path(run_dir) / "evidence" / f"{bid}.png"
-        ev = Path(str(b.get("evidence") or ""))
-        img = (
-            f"evidence/{quote(png.name)}"
-            if bid and png.is_file()
-            else f"evidence/{quote(ev.name)}"
-            if b.get("evidence") and (Path(run_dir) / "evidence" / ev.name).is_file()
-            else ""
-        )
-        # (is_file: evidence '.', '..' or '/' names a folder, and a link to it is broken)
-        image = f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else ""
-        webm = Path(run_dir) / "evidence" / f"{bid}.webm"  # the video of the clean-state repro
-        video = f"[video](evidence/{quote(webm.name)})" if bid and webm.is_file() else ""
-        spec, net = Path(run_dir) / "repro" / f"{bid}.spec.ts", Path(run_dir) / "evidence" / f"{bid}-network.txt"
-        repro = f"[repro](repro/{quote(spec.name)})" if bid and spec.is_file() else ""
-        network = f"[network](evidence/{quote(net.name)})" if bid and net.is_file() else ""
-        badge = cell(_repro_badge(bid, b, audit or {}, reviews))
-        evidence = " · ".join(x for x in (image, video, repro, network, badge) if x) or "—"
-        link = _bug_link(bid, run_dir) or (one_line(f"known {str(b.get('hash'))[:12]}") if b.get("hash") else "—")
-        found_by = [c for c in cases if _bug_refs(b) & _case_bugs(c)]  # the case that failed on it, and its AC
-        trace = "; ".join(" · ".join(str(x) for x in (c["id"], c.get("ac")) if x) for c in found_by)
-        out.append(
-            row(
-                Raw(link),
-                b.get("severity"),
-                b.get("classification"),
-                core.short(b.get("title"), 120),
-                b.get("route"),
-                ", ".join(owners) + (f" ({trace})" if trace else ""),
-                Raw(evidence),
-            )
-        )
-    return out + _filing_block(bugs, cases, tickets, run_dir, cfg or {})
-
-
 LEAD_RANK = {"HIGH": 0, "MEDIUM": 1}
 
 
@@ -1186,49 +892,6 @@ def _leads(runs, skip=()):
                 seen.add(key)
                 out.append({**lead, "route": route, "priority": str(lead.get("priority") or "MEDIUM").strip().upper()})
     return sorted(out, key=lambda x: LEAD_RANK.get(x["priority"], 2))
-
-
-def _notes_section(runs):
-    out = [
-        "## Exploration notes",
-        "Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked",
-        "",
-    ]
-    for name, r in runs:
-        route = r.get("target") or next((p.get("route") for p in _list(r, "pages")), "") or name
-        cov = {}
-        for p in _list(r, "pages"):
-            for c in _list(p, "coverage"):
-                if core.norm(c.get("heuristic")):
-                    h, res = core.heuristic_id(c["heuristic"]), core.coverage_result(c.get("result"))
-                    order = ("fail", "blocked", "pass")
-                    if h not in cov or (
-                        res in order and (cov[h] not in order or order.index(res) < order.index(cov[h]))
-                    ):
-                        cov[h] = res
-        icons = ", ".join(f"{h} {COVERAGE_ICON.get(v, v)}" for h, v in cov.items())
-        title = summary_text(
-            f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})"
-            + (f" — {icons}" if icons else "")
-        )
-        out += [f"<details><summary>{title}</summary>", ""]
-        if r.get("stop_reason"):
-            out += [f"Stopped: {cell(r['stop_reason'])}", ""]
-        if r.get("notes") or r.get("summary"):
-            out += [paragraph(core.short(r.get("notes") or r.get("summary"), 1500)), ""]
-        out += ["</details>", ""]
-    leads = _leads(runs)
-    if leads:
-        out += [f"<details><summary>Suggested follow-up leads ({len(leads)})</summary>", ""]
-        out += [
-            f"- {cell(x['priority'])} {cell(x['route'])}"
-            + (f" ({cell(x['kind'])})" if x.get("kind") else "")
-            + ": "
-            + cell(core.short(": ".join(str(x[f]) for f in ("target", "reason") if x.get(f)), 200))
-            for x in leads[:10]
-        ]
-        out += ["", "</details>", ""]
-    return out
 
 
 # ---------- browser signals: playwright-cli `requests --all` / `console error --all`, saved by the explorer at its end ----
@@ -1731,182 +1394,535 @@ def _q_rank(q):
     return 0 if "[BLOCKING]" in q["text"].upper() else 1 if "[HIGH]" in q["text"].upper() else 2
 
 
-def _q_bullet(q, show_from=True):
+# ---------- REPORT.md blocks: each a string; the report joins them with a blank line, so every heading, list, table,
+# fenced block and fold has one around it
+def _plural(n, word):
+    return f"{n} {word}{'s' * (n != 1)}"
+
+
+def _line(bits):
+    """One text line of the report from its parts, escaped (a leading `#` or ``` can't head or fence the rest)."""
+    s = " · ".join(one_line(b) for b in bits if b)
+    return ("\\" if s[:1] in tuple("#`~>-+*=_") else "") + s
+
+
+def _indent(text, n):
+    return "\n".join(" " * n + ln if ln else ln for ln in text.split("\n"))
+
+
+def _items(items):
+    """A list from its item texts: a blank line between the items when one of them holds more than a line."""
+    return ("\n\n" if any("\n" in i for i in items) else "\n").join(items)
+
+
+def _numbered(items):
+    out = []
+    for n, item in enumerate(items, 1):
+        first, _, rest = item.partition("\n")
+        out.append(f"{n}. {first}" + ("\n" + _indent(rest, len(f"{n}. ")) if rest else ""))
+    return _items(out)
+
+
+def _fold(summary, blocks, opened=False):
+    """A <details> fold: `summary` is plain text (HTML-escaped here), `blocks` Markdown."""
+    head = f"<details{' open' if opened else ''}><summary>{summary_text(summary)}</summary>"
+    return "\n\n".join([head, *blocks, "</details>"])
+
+
+def _link(text, target):
+    """[text](target): the text escaped, `target` a relative path already URL-quoted."""
+    shown = one_line(text).replace("[", "\\[").replace("]", "\\]")
+    return f"[{shown}]({target})"
+
+
+def _sh(lines):
+    return "```sh\n" + "\n".join(lines) + "\n```"
+
+
+def _worst(cases):
+    return next(s for s in STATUS_RANK if any(c["status"] == s for c in cases))
+
+
+def _case_item(c, run_dir, with_status):
+    """A case as a list item: id, title and result in bold, then what it saw and its image; its page, steps and expected
+    result folded (open when it did not pass)."""
+    esc = lambda v: one_line(v).replace("*", "\\*")
+    head = " ".join(x for x in (esc(c["id"]), esc(c.get("title"))) if x)
+    if with_status:
+        word = CASE_RESULT_WORD[c["status"]]
+        if c.get("prior"):
+            word += f" on build {esc(c.get('build') or core.UNKNOWN)}, not re-run here"
+        head += f": {word}" + (f" ({_bug_link(c['bug'], run_dir)})" if c.get("bug") else "")
+    actual, notes = cell(c.get("actual")), cell(c.get("notes"))
+    img = _evidence_file(run_dir, c["id"]) if with_status else ""
+    shown = " · ".join(
+        x
+        for x in (
+            f"{actual} Notes: {notes}" if actual and notes else actual or notes,
+            f"[image]({img})" + (" (not highlighted)" if c.get("annotated") is False else "") if img else "",
+        )
+        if x
+    )
+    inner = [
+        " · ".join(
+            x
+            for x in (
+                f"Page: {one_line(c['route'])}" if c.get("route") else "",
+                f"priority {one_line(c['priority'])}" if c.get("priority") else "",
+            )
+            if x
+        )
+    ]
+    steps = c.get("steps")
+    if isinstance(steps, list):
+        inner.append("\n".join(f"{i}. {paragraph(x)}" for i, x in enumerate(steps, 1)))
+    elif steps:
+        inner.append(paragraph(steps))
+    inner += [f"Expected: {cell(c['expected'])}"] if c.get("expected") else []
+    inner = [b for b in inner if b]
+    line = f"- **{head}.**" + (f" {shown}" if shown else "")
+    if not inner:
+        return line
+    return line + "\n\n" + _indent(_fold("Steps", inner, with_status and c["status"] != "PASS"), 2)
+
+
+def _results(t, cases, run_dir, with_status, level):
+    """Blocks for a ticket's cases: its test plan folded, a heading per AC with the cases that cover it (a case under the
+    first AC it names, the others pointing there), then the ticket's cases that name none of its ACs."""
+    blocks = [_fold("Test plan", ["\n".join(_plan_lines(t))])] if _plan_lines(t) else []
+    placed, acs = {}, _list(t, "acs")
+    for ac in acs:
+        aid = _ac_id(ac)
+        covering = [c for c in cases if aid and _ac_key(aid) in _case_acs(c)]
+        now = [c for c in covering if not c.get("prior")]
+        state = (
+            "not covered by a case"
+            if not covering
+            else ""
+            if not with_status
+            else CASE_RESULT_WORD[_worst(now)]
+            if now
+            else "PASS on build " + ", ".join(sorted({str(c.get("build") or core.UNKNOWN) for c in covering}))
+        )
+        title = " ".join(x for x in (one_line(aid), one_line(ac.get("text"))) if x) or "untitled"
+        blocks.append(f"{'#' * level} {title}" + (f": {one_line(state)}" if state else ""))
+        items = []
+        for c in covering:
+            if c["id"] in placed:
+                items.append(f"- See {one_line(c['id'])} under {placed[c['id']]}.")
+            else:
+                placed[c["id"]] = one_line(aid)
+                items.append(_case_item(c, run_dir, with_status))
+        blocks += [_items(items)] if items else []
+    rest = [c for c in cases if c["id"] not in placed]
+    if rest:
+        blocks += [f"{'#' * level} Other cases"] if acs else []
+        blocks.append(_items([_case_item(c, run_dir, with_status) for c in rest]))
+    return blocks
+
+
+def _env_line(plan, runs):
+    """The app's URL and the browser the runs used (plan.json is written before any browser opens: the runs win)."""
+    env = plan.get("env") if isinstance(plan.get("env"), dict) else {}
+    renvs = [r["env"] for _, r in runs if isinstance(r.get("env"), dict)]
+    used = ", ".join(sorted({str(e["browser"]) for e in renvs if e.get("browser")})) or str(env.get("browser") or "")
+    url = str(env.get("url") or (renvs[0].get("url") if renvs else "") or "")
+    return _line([url, f"browser {used}" if used else ""])
+
+
+def _ran_as(runs):
+    """'as <tenant and role>' the runs recorded (a tenant or role changes what a page shows), else ''."""
+    renvs = [r["env"] for _, r in runs if isinstance(r.get("env"), dict)]
+    ran = sorted({" ".join(scrub.redact(str(e["context"])).split()) for e in renvs if e.get("context")})
+    return "as " + " / ".join(ran[:3]) if ran else ""
+
+
+def _jira_of(b, states):
+    """(status, Jira key) of the memory bug this one is (filed before, now seen again), else (None, None)."""
+    h = _stored_hash(b)
+    return next(
+        ((st, k) for full, (st, k) in states.items() if k and full.startswith(h) and ops.KEY_RE.fullmatch(k)),
+        (None, None),
+    )
+
+
+def _bug_label(b):
+    return b.get("id") or (f"known bug {str(b.get('hash'))[:12]}" if b.get("hash") else "")
+
+
+def _bug_title(b, run_dir):
+    bid = b.get("id") or ""
+    return b.get("title") or (_draft_title(Path(run_dir) / "bugs" / f"{bid}.md", "") if bid else "")
+
+
+def _bug_name(b, run_dir, linked=True):
+    """'[BUG-n](bugs/BUG-n.md) title' (its id linked when the draft exists), 'known bug <hash> title' or the title."""
+    ref = _bug_link(b["id"], run_dir) if b.get("id") and linked else one_line(_bug_label(b))
+    return " ".join(x for x in (ref, one_line(_bug_title(b, run_dir))) if x) or "untitled bug"
+
+
+def _sev(b):
+    return " ".join(str(b.get("severity") or "").split()).upper() or "unrated"
+
+
+def _bug_todo(b, run_dir, states):
+    """The What to do line of one bug: comment on the Jira key memory links it to, file a CONFIRMED draft, or check it."""
+    cls = _first_word(b.get("classification"))
+    sev = _sev(b) + ("" if cls in ("confirmed", "") else f", {' '.join(str(b['classification']).split()).upper()}")
+    what = f"{_bug_name(b, run_dir)} ({one_line(sev)})"
+    status, known = _jira_of(b, states)
+    if known:
+        return f"Comment on {known} (already in Jira, {one_line(status)}): {what}"
+    draft = Path(run_dir) / "bugs" / f"{b.get('id')}.md"
+    return ("File the bug: " if cls == "confirmed" and b.get("id") and draft.is_file() else "Check the bug: ") + what
+
+
+def _filing(b, owners, run_abs, cfg, states):
+    """[the list item with a CONFIRMED draft's commands]: a new bug's create (and link, with jiraBugLinkType) and its
+    bug-status follow-up, or a comment on the Jira key memory links it to; then the files to attach. [] otherwise."""
+    bid = b.get("id") or ""
+    draft = run_abs / "bugs" / f"{bid}.md"
+    if not bid or _first_word(b.get("classification")) != "confirmed" or not draft.is_file():
+        return []
+    status, known = _jira_of(b, states)
+    if known:  # filed before: the news goes on that issue, not on a duplicate
+        say = f"already in Jira as {known} ({one_line(status)}): add this draft there as a comment"
+        cmds = [f"acli jira workitem comment create --key {known} --body-file {shlex.quote(str(draft))}"]
+    else:
+        proj = next(
+            (o.split("-", 1)[0] for o in owners if ops.KEY_RE.fullmatch(o.upper())),
+            str(cfg.get("jiraProject") or "").strip() or "<PROJ>",
+        )
+        ticket = next((o.upper() for o in owners if ops.KEY_RE.fullmatch(o.upper())), None)
+        link_type = str(cfg.get("jiraBugLinkType") or "").strip()
+        say = "File it"
+        cmds = [
+            f"acli jira workitem create --project {shlex.quote(proj)} --type Bug "
+            f"--summary {shlex.quote(_draft_title(draft, b.get('title') or bid))} --description-file {shlex.quote(str(draft))}"
+        ]
+        if link_type and ticket:
+            # not a vulnerability (S6350): printed for the user, never run; every value is shlex-quoted or a validated Jira key
+            cmds.append(
+                f"acli jira workitem link create --out <JIRA-KEY> --in {ticket} --type {shlex.quote(link_type)} --yes"
+            )  # NOSONAR
+        cmds.append(f"qa-mem bug-status {_stored_hash(b)} FILED <JIRA-KEY>")
+    attach = [
+        p
+        for p in (
+            run_abs / "evidence" / f"{bid}.png",
+            run_abs / "evidence" / f"{bid}.webm",
+            run_abs / "evidence" / f"{bid}-network.txt",
+            run_abs / "repro" / f"{bid}.spec.ts",
+        )
+        if p.is_file()
+    ]
+    if attach:
+        cmds.append("# attach (look at images and videos first): " + " ".join(shlex.quote(str(p)) for p in attach))
+    return [f"- {say}:\n\n" + _indent(_sh(cmds), 2)]
+
+
+def _bug_entry(b, owners, here, cases, run_dir, cfg, ctx, level):
+    """A bug's heading and its list: page, the cases that found it, its files and review, possible duplicates and the
+    commands to file it. `here`: the plan tickets this part of the report is about (an owner outside them is named)."""
+    run_dir, bid = Path(run_dir), b.get("id") or ""
+    cls = " ".join(str(b.get("classification") or "").split()).upper()
+    head = f"{'#' * level} {_bug_name(b, run_dir, linked=False)} ({one_line(_sev(b) + (', ' + cls if cls else ''))})"
+    found = [c for c in cases if _bug_refs(b) & _case_bugs(c)]  # the case that failed on it, and its AC
+    where = [
+        f"Page {one_line(b['route'])}" if b.get("route") else "",
+        "found by " + "; ".join(one_line(c["id"]) + (f" ({one_line(c['ac'])})" if c.get("ac") else "") for c in found)
+        if found
+        else "",
+        f"ticket {one_line(', '.join(owners))}" if owners and set(owners) - set(here) else "",
+        "no ticket's verdict counts it" if here and not owners else "",
+    ]
+    png, ev = run_dir / "evidence" / f"{bid}.png", Path(str(b.get("evidence") or ""))
+    # (is_file: evidence '.', '..' or '/' names a folder, and a link to it is broken)
+    img = (
+        f"evidence/{quote(png.name)}"
+        if bid and png.is_file()
+        else f"evidence/{quote(ev.name)}"
+        if b.get("evidence") and (run_dir / "evidence" / ev.name).is_file()
+        else ""
+    )
+    files = [
+        f"[draft](bugs/{bid}.md)" if bid and (run_dir / "bugs" / f"{bid}.md").is_file() else "",
+        f"[image]({img})" + (" (not highlighted)" if b.get("annotated") is False else "") if img else "",
+        f"[video](evidence/{bid}.webm)" if bid and (run_dir / "evidence" / f"{bid}.webm").is_file() else "",
+        f"[repro](repro/{bid}.spec.ts)" if bid and (run_dir / "repro" / f"{bid}.spec.ts").is_file() else "",
+        f"[network](evidence/{bid}-network.txt)"
+        if bid and (run_dir / "evidence" / f"{bid}-network.txt").is_file()
+        else "",
+        cell(_repro_badge(bid, b, ctx["audit"], ctx["reviews"])),
+    ]
+    lines = [f"- {x}" for x in (" · ".join(x for x in where if x), " · ".join(x for x in files if x)) if x]
+    if _jira_of(b, ctx["states"])[1] is None:
+        lines += [
+            f"- possible duplicate: {one_line(x['key'])} {one_line(x.get('summary'))} (check it before filing)"
+            for x in ctx["dups"].get(bid, [])
+            if isinstance(x, dict) and x.get("key")
+        ]
+    lines += _filing(b, owners, run_dir.resolve(), cfg, ctx["states"])
+    return [head, _items(lines)] if lines else [head]
+
+
+def _evidence_gaps(cases, run_dir):
+    """Ids of the cases checked to PASS or FAIL without a non-empty evidence/<id>.png."""
+    out = []
+    for c in cases:
+        p = Path(run_dir) / "evidence" / f"{c['id']}.png"
+        if (
+            c["status"] in ("PASS", "FAIL")
+            and re.fullmatch(r"[A-Za-z]+-\d+", str(c["id"]))
+            and (not p.is_file() or p.stat().st_size == 0)
+        ):
+            out.append(c["id"])
+    return out
+
+
+def _post_checks(t, i, run_dir, retest_of):
+    """What to check before posting a ticket's Jira comment (`i`: the ticket's verdict, cases, builds and signals as
+    render_report_parts gathers them): an unknown build, passes not re-run here, cases without their image; for a pass,
+    the image to add per page and the unexplained browser signals on its pages (a pass over a 5xx may hide a bug; the
+    verdict never changes)."""
+    v, mine, prior, builds, signals = i["v"], i["mine"], i["prior"], i["builds"], i["signals"]
+    out = []
+    if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):
+        fix = t.get("fix_version")
+        fix = " ".join(str(fix).split()) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
+        fix = fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix
+        out.append(
+            f"The build is unknown in this run: confirm the QA app runs {one_line(fix)}, and name the build in the comment."
+            if fix
+            else "The build is unknown in this run: confirm which build the QA app runs, and name it in the comment."
+        )
+    if prior:
+        pb = ", ".join(sorted({str(c.get("build") or core.UNKNOWN) for c in prior}))
+        out.append(
+            _line([f"{', '.join(str(c['id']) for c in prior)} passed on build {pb}"])
+            + f" and {'was' if len(prior) == 1 else 'were'} not re-run here"
+            + (f" (retest of {one_line(retest_of)})" if retest_of else "")
+            + ": the comment says so."
+        )
+    out += [f"{one_line(cid)} has no evidence image: take it or say why." for cid in _evidence_gaps(mine, run_dir)]
+    if v not in ("PASS", "PASS WITH NOTES"):
+        return out
+    route_of = lambda c: " ".join(str(c.get("route") or "").split())
+    shots, seen = [], set()  # one passing image per page: one page and two passes proved neither
+    for c in mine:  # the case links its image: named here, not linked again
+        if route_of(c) not in seen and c["status"] == "PASS" and _evidence_file(run_dir, c["id"]):
+            seen.add(route_of(c))
+            shots.append((route_of(c), f"{one_line(c['id'])}'s image"))
+    if not mine and retest_of:  # every case carried from the retested folder: its images are the ones to use
+        for c in prior:
+            rel = _evidence_file(Path(run_dir).parent / retest_of, c.get("id"))
+            if rel and route_of(c) not in seen:
+                seen.add(route_of(c))
+                shots.append(
+                    (route_of(c), _link(f"../{retest_of}/evidence/{c['id']}.png", quote(f"../{retest_of}/") + rel))
+                )
+    out += [f"Add {what} ({one_line(r or 'test page')}) to the comment in Jira." for r, what in shots]
+    if not shots:
+        out.append("No screenshot for this ticket yet: add one before you post.")
+    severe = [k for _, k in signals if signal_severity(k) == "severe"]
+    if severe:
+        out.append(
+            f"{_plural(len(severe), 'severe browser signal')} on its pages no bug explains (a 5xx, a failed request, an "
+            "error body or a leak): a pass over them may hide a bug. Read Signals no bug explains first."
+        )
+    if len(signals) > len(severe):
+        out.append(
+            f"{_plural(len(signals) - len(severe), 'other unexplained browser signal')} (4xx, console errors, request "
+            "loops): see Signals no bug explains."
+        )
+    return out
+
+
+def _post_item(key, name, run_abs, checks, multi):
+    head = f"Post the Jira comment{f' for {key}' if multi else ''}: [{name}]({name})" + (
+        ", after these checks:" if checks else ""
+    )
+    cmd = f"acli jira workitem comment create --key {key} --body-file {shlex.quote(str(run_abs / name))}"
+    return "\n\n".join([head, *(["\n".join(f"- {c}" for c in checks)] if checks else []), _sh([cmd])])
+
+
+def _notes_blocks(plan, runs):
+    blocks = ["## Exploration notes"]
+    if env := _env_line(plan, runs):
+        blocks.append(f"App: {env}")
+    blocks.append("Heuristics: ✅ checked, no problem · ❌ problem found · ⛔ could not be checked")
+    for name, r in runs:
+        route = r.get("target") or next((p.get("route") for p in _list(r, "pages")), "") or name
+        cov = {}
+        for p in _list(r, "pages"):
+            for c in _list(p, "coverage"):
+                if core.norm(c.get("heuristic")):
+                    h, res = core.heuristic_id(c["heuristic"]), core.coverage_result(c.get("result"))
+                    order = ("fail", "blocked", "pass")
+                    if h not in cov or (
+                        res in order and (cov[h] not in order or order.index(res) < order.index(cov[h]))
+                    ):
+                        cov[h] = res
+        icons = ", ".join(f"{h} {COVERAGE_ICON.get(v, v)}" for h, v in cov.items())
+        title = f"{route} ({name}: {r.get('status') or '?'}, build {r.get('build') or '?'})" + (
+            f" — {icons}" if icons else ""
+        )
+        inner = [f"Stopped: {cell(r['stop_reason'])}"] if r.get("stop_reason") else []
+        if r.get("notes") or r.get("summary"):
+            inner.append(paragraph(core.short(r.get("notes") or r.get("summary"), 1500)))
+        blocks.append(_fold(title, inner))
+    leads = _leads(runs)
+    if leads:
+        lines = [
+            f"- {cell(x['priority'])} {cell(x['route'])}"
+            + (f" ({cell(x['kind'])})" if x.get("kind") else "")
+            + ": "
+            + cell(": ".join(str(x[f]) for f in ("target", "reason") if x.get(f)))
+            for x in leads[:10]
+        ]
+        blocks.append(_fold(f"Suggested follow-up leads ({len(leads)})", ["\n".join(lines)]))
+    return blocks
+
+
+def _history_table(run_dir, key):
+    """The table of .data/history.jsonl's lines for one ticket, newest first; '' without one."""
+    rows = []
+    for line in reversed(_text(Path(run_dir) / ".data" / "history.jsonl").splitlines()):
+        try:
+            h = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(h, dict) and h.get("ticket") == key:
+            n = h["cases"] if isinstance(h.get("cases"), dict) else {}
+            rows.append(
+                row(
+                    h.get("date"),
+                    h.get("build"),
+                    VERDICT_ICON.get(str(h.get("verdict")), h.get("verdict")),
+                    f"{n.get('pass', 0)} passed, {n.get('fail', 0)} failed, {n.get('other', 0)} other",
+                    h.get("bugs"),
+                )
+            )
+    if not rows:
+        return ""
+    return "\n".join([row("Date", "Build", "Verdict", "Cases", "Bugs"), "|---|---|---|---|---|", *rows])
+
+
+def _q_text(q, show_from=True):
     labels = ", ".join(str(w) for w in q["where"])
-    return f"- {cell(core.short(q['text'], 300))}" + (f" _(from {cell(labels)})_" if labels and show_from else "")
+    return cell(q["text"]) + (f" _(from {cell(labels)})_" if labels and show_from else "")
 
 
 def _safe_key(key):
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", str(key or "")))
 
 
-# ---------- Jira pass comment: a paste-ready draft, never posted (passed on, fixed, one line per case)
+# ---------- the Jira comment: one plain-text file per ticket with a verdict, never posted (Jira writes are the user's)
+VERDICT_WORD = {"PASS": "PASSED", "PASS WITH NOTES": "PASSED WITH NOTES", "FAIL": "FAILED", "BLOCKED": "BLOCKED"}
+AC_WORD = {"PASS": "passed", "FAIL": "FAILED", "BLOCKED": "blocked", "QUESTION": "open question", "NOT_RUN": "not run"}
+
+
 def _release_names(templates, fix):
-    """(names, gap): the config's releaseTemplates with {version} filled from the fix version (3.5 -> 3.5.0)."""
+    """(names, gap): the config's releaseTemplates with {version} filled from the fix version (3.5 -> 3.5.0); no names
+    and what is missing when either is."""
     temps = (
         [" ".join(t.split()) for t in templates if isinstance(t, str) and t.strip()]
         if isinstance(templates, list)
         else []
     )
     if not temps:
-        return ["<release name>"], "set releaseTemplates in the qa-sdet config"
+        return [], "set releaseTemplates in the qa-sdet config"
     if not fix:
-        return ["<release name>"], "the ticket has no single fix version (plan.json fix_version)"
+        return [], "the ticket has no single fix version (plan.json fix_version)"
     v = fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix
     return [t.replace("{version}", v) for t in temps], ""
 
 
-PASTE_BELOW = "---------- paste below ----------"
+def _on_build(builds):
+    known = [b for b in builds if core.norm_build(b) != core.UNKNOWN]
+    if not known:
+        return "an unknown build"
+    return "build " + ", ".join(known) + (" and an unknown build" if len(known) < len(builds) else "")
 
 
-def _jira_fail_draft(t, verdict_v, why, mine, cases, bugs, keys, builds, plan):
-    """A FAIL or BLOCKED comment draft: build, why, the failed or blocked cases with what happened, the bugs and the open
-    blocking questions. Plain text; never posted (Jira writes are the user's)."""
-    word = lambda c: CASE_RESULT_WORD.get(c["status"], c["status"])
-    flat = lambda v: " ".join(str(v or "").split())
-    bad = [c for c in mine if c["status"] in (("FAIL", "QUESTION") if verdict_v == "FAIL" else ("BLOCKED", "NOT_RUN"))]
-    bug_names = [
-        f"{b.get('id') or 'known bug'} ({flat(core.short(b.get('title'), 80))})"
-        for b in ticket_bugs(t["key"], cases, bugs, keys)
-    ]
-    jira_keys = sorted({k for c in mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())} - {t["key"]})
+def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg, states):
+    """A ticket's Jira comment, plain text: the result, build and date; the release and the fix when known; each AC with
+    what its cases saw; the ticket's bugs by title, filed or not; its open blocking questions. No ids, no paths, no
+    placeholders, nothing cut."""
+    flat = lambda x: " ".join(core._s(x).split())
+    head = [f"QA result: {VERDICT_WORD[v]} on {_on_build(builds)}" + (f" ({date})" if date else "")]
+    fix = t.get("fix_version")
+    fix = (
+        flat(fix) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
+    )  # JSON true is no version
+    names, _ = _release_names(cfg.get("releaseTemplates"), fix)
+    head += ["Release: " + ", ".join(names)] if names else []
+    if flat(t.get("fixed_note")) and v in ("PASS", "PASS WITH NOTES"):
+        head.append(f"Fixed: {flat(t.get('fixed_note'))}")
+    groups, placed, every = ["\n".join(head)], {}, mine + prior
+    now_build = ", ".join(b for b in builds if core.norm_build(b) != core.UNKNOWN)
+    title = lambda c: flat(c.get("title")) or "untitled check"
+
+    def word(c):
+        if c.get("prior"):
+            return f"passed on build {flat(c.get('build')) or core.UNKNOWN}, " + (
+                f"not re-run on {now_build}" if now_build else "not re-run here"
+            )
+        return AC_WORD[c["status"]]
+
+    said = lambda c: flat(c.get("actual")) or flat(c.get("notes"))
+
+    def saw(c, several, state):
+        """What one case saw, under its AC: in full; several cases name theirs; a word the AC's entry has isn't repeated."""
+        if not several:
+            return "  " + (said(c) or title(c))
+        told = said(c) or (word(c) if word(c) != state else "")
+        return f"  {title(c)}" + (f": {told}" if told else "") + (f" ({word(c)})" if said(c) and c.get("prior") else "")
+
+    for ac in _list(t, "acs"):
+        aid = _ac_id(ac)
+        covering = [c for c in every if aid and _ac_key(aid) in _case_acs(c)]
+        now = [c for c in covering if not c.get("prior")]
+        state = "not covered by a case" if not covering else AC_WORD[_worst(now)] if now else word(covering[0])
+        entry = [" ".join(x for x in (flat(aid), flat(ac.get("text"))) if x) + f": {state}."]
+        for c in covering:
+            if c["id"] in placed:
+                entry.append(f"  {title(c)}: see {placed[c['id']]}.")
+            else:
+                placed[c["id"]] = flat(aid)
+                entry.append(saw(c, len(covering) > 1, state))
+        groups.append("\n".join(entry))
+    rest = [c for c in every if c["id"] not in placed]
+    if rest:
+        groups.append("\n".join(["Other checks:"] + [f"  {title(c)}: {word(c)}. {said(c)}".rstrip() for c in rest]))
+    found, filed = [], set()
+    for b in ticket_bugs(t["key"], cases, bugs, keys):
+        known = _jira_of(b, states)[1]
+        filed |= {known} if known else set()
+        found.append(f"Bug: {flat(b.get('title')) or 'untitled'} ({_sev(b)}), {known or 'not filed yet'}")
+    named = {k for c in mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())}
+    found += [
+        f"Bug: {k}" for k in sorted(named - filed - {t["key"].upper()}) if not re.fullmatch(r"BUG-\d+", k)
+    ]  # a case's BUG-n is this folder's draft, listed above: only a Jira key is one more
+    groups += ["\n".join(found)] if found else []
     qs = [
-        q["text"]
+        re.sub(r"^\s*(Q\d+\s*)?(\[[A-Z]+\]\s*)*", "", q["text"])
         for q in _q_items(plan, "test plan")
         if not q["resolved"]
         and "[BLOCKING]" in q["text"].upper()
         and str(q.get("ticket") or t["key"]).strip().upper() == t["key"].upper()
     ]
-    lines = [
-        "CHECK BEFORE POSTING (not part of the comment)",
-        "- Not posted for you: post the .txt next to this file with the command REPORT.md shows, after reading it.",
-    ]
-    if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):
-        lines.append("- Build: unknown in this run. Name the build you tested before you post.")
-    lines += [
-        "",
-        PASTE_BELOW,
-        "",
-        f"QA: {verdict_v} on build {', '.join(builds) or '<build>'}",
-        "",
-        f"Why: {flat(why)}",
-        "",
-    ]
-    lines += [
-        f"{c['id']} - {word(c)}"
-        + (f" ({flat(c['ac'])})" if c.get("ac") else "")
-        + (f": {flat(core.short(c.get('actual') or c.get('notes'), 200))}" if c.get("actual") or c.get("notes") else "")
-        for c in bad
-    ]
-    if bug_names or jira_keys:
-        lines += ["", "Bugs: " + ", ".join(bug_names + jira_keys)]
-    if qs:
-        lines += ["", "Open questions:"] + [f"- {flat(q)}" for q in qs]
-    return "\n".join(lines) + "\n"
-
-
-def _signal_warnings(signals):
-    """CHECK BEFORE POSTING lines for the unexplained browser signals [(route, key)] of the runs that tested a ticket: the
-    severe ones named (at most 5), the rest counted. The verdict never changes; the user decides before posting a pass."""
-    severe = [(r, k) for r, k in signals if signal_severity(k) == "severe"]
-    out = []
-    if severe:
-        shown = "; ".join(f"{' '.join(str(r).split())}: {core.short(' '.join(k.split()), 120)}" for r, k in severe[:5])
-        out.append(
-            f"- Unexplained server errors, failed requests or leaks in this run ({len(severe)}): {shown}"
-            + (f"; +{len(severe) - 5} more" if len(severe) > 5 else "")
-            + ". A pass over these may hide a bug: read REPORT.md (Browser signals no bug explains) before you post."
-        )
-    if len(signals) > len(severe):
-        out.append(
-            f"- {len(signals) - len(severe)} other unexplained browser signal(s) (4xx, console errors, request loops): "
-            "see REPORT.md."
-        )
-    return out
-
-
-def _jira_draft(t, verdict_v, why, mine, run_dir, cfg, builds, retest_of="", prior_passed=(), signals=()):
-    fix = t.get("fix_version")
-    # one line each in the draft: newlines collapsed; JSON true is no version
-    fix = " ".join(str(fix).split()) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
-    fix = fix or None
-    names, gap = _release_names(cfg.get("releaseTemplates"), fix)
-    fixed = " ".join(str(t.get("fixed_note") or "").split())
-    route_of = lambda c: " ".join(str(c.get("route") or "").split())
-    routes = []
-    for c in mine:
-        if route_of(c) not in routes:
-            routes.append(route_of(c))
-    shots, placeholders = [], ([f"release names ({gap})"] if gap else []) + ([] if fixed else ["the fixed note"])
-    for r in routes:
-        pick = next(
-            (c for c in mine if route_of(c) == r and c.get("status") == "PASS" and _evidence_file(run_dir, c["id"])),
-            None,
-        )
-        if pick:
-            shots.append((r or "test page", Path(run_dir) / "evidence" / f"{pick['id']}.png"))
-        else:
-            placeholders.append(f"screenshot for {r or 'the test page'}")
-    if not mine:  # every case carried from the retested run: its images and builds are the ones to use
-        prior_dir = Path(run_dir).parent / " ".join(str(retest_of).split()) if retest_of else None
-        for c in prior_passed:
-            png = (
-                prior_dir / "evidence" / f"{c.get('id')}.png"
-                if prior_dir and _evidence_file(prior_dir, c.get("id"))
-                else None
-            )
-            if png and route_of(c) not in {r for r, _ in shots}:
-                shots.append((route_of(c) or "test page", png))
-        builds = [c.get("build") for c in prior_passed]
-    lines = ["CHECK BEFORE POSTING (not part of the comment)"]
-    if not builds or any(
-        core.norm_build(b) == core.UNKNOWN for b in builds
-    ):  # one page on an unknown build is enough to check
-        shown = (fix + ".0" if re.fullmatch(r"\d+\.\d+", fix) else fix) if fix else "<version>"
-        lines.append(f"- Build: unknown in this run. Confirm the QA app runs {shown} before you post.")
-    if prior_passed:
-        pb = ", ".join(sorted({str(c.get("build") or core.UNKNOWN) for c in prior_passed}))
-        pids = ", ".join(str(c.get("id") or "?") for c in prior_passed)
-        tag = f" of {' '.join(str(retest_of).split())}" if retest_of else ""
-        lines.append(
-            f"- Partial retest{tag}: {len(prior_passed)} case(s) ({pids}) passed on prior build {pb} and were not re-run here."
-        )
-    lines += _signal_warnings(signals)
-    lines += [
-        f"- {g.split(':')[0]} has no evidence image: take it or say why"
-        for g in _evidence_gaps(mine, run_dir, "ticket")
-    ]
-    lines += [f"- Paste this image: {path} ({label})" for label, path in shots]
-    if not shots:
-        lines.append("- No screenshot for this ticket yet. Add one before you post.")
-    if placeholders:
-        lines.append("- Placeholders to fill: " + "; ".join(placeholders))
-    passed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-    lines += [
-        "",
-        PASTE_BELOW,
-        "",
-        f"Passed on {passed}",
-        "",
-        f"Fixed: {fixed or '<write one sentence: what was fixed>'}",
-        "",
-    ]
-    lines += [
-        f"{c.get('id')} - PASS (prior build {c.get('build') or core.UNKNOWN}): {' '.join(str(c.get('title') or '').split())}"
-        for c in prior_passed
-    ]
-    lines += [
-        f"{c['id']} - {CASE_RESULT_WORD[c['status']]}: {' '.join(str(c.get('title') or '').split())}" for c in mine
-    ]
-    if verdict_v == "PASS WITH NOTES":
-        lines += ["", f"Notes: {why}"]
-    return "\n".join(lines) + "\n"
+    groups += ["\n".join(f"Open question: {q}" for q in qs)] if qs else []
+    return "\n\n".join(groups) + "\n"
 
 
 def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tuple[str, dict[str, str]]:
-    """(REPORT.md text, {draft file name: text}). A ticket with a verdict gets a Jira comment draft (.md, with what to
-    check) and its clean body (.txt, what acli posts): a pass comment, or a rejection for FAIL and BLOCKED."""
+    """(REPORT.md text, {Jira comment file name: text}). One renderer for every kind: a ticket's report (status, what
+    to do, results by AC, bugs, not tested, signals, exploration notes, history), an exploration's (the same without
+    ACs), a plan's (questions, then cases by AC) and an older folder's several tickets one after another. Each ticket
+    with a verdict gets one plain-text Jira comment: jira-comment.txt, or jira-comment-<KEY>.txt beside other tickets."""
     run_dir = Path(run_dir)
+    run_abs = run_dir.resolve()
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
@@ -1921,261 +1937,255 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
                 f"{c['id']} names {a}, which {t['key']} doesn't have: fix the case's `ac` in plan.json"
                 for a in sorted(_case_acs(c) - have)
             ]
-    retest_of = str(plan.get("retest_of") or "").strip() if isinstance(plan.get("retest_of"), str) else ""
+    retest_of = " ".join(plan["retest_of"].split()) if isinstance(plan.get("retest_of"), str) else ""
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
-    drafts, vmap = {}, (_verdicts(plan, runs, cases, bugs, d["unread"]) if tickets and with_status else {})
+    vmap = _verdicts(plan, runs, cases, bugs, d["unread"]) if tickets and with_status else {}
     cases = [c for c in cases if not c.get("prior")]  # from here on in prior_all, as a plan's prior_passed
+    prior_all = [{**c, "id": str(c.get("id") or "?"), "status": "PASS", "prior": True} for c in prior_all]
     hosts, baseline = core.allowed_hosts(cfg), _signal_baseline()
-    triaged = [
-        (r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs
-    ]  # per run, in order
-    if vmap:
-        for t in tickets:
-            prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-            v, why = vmap[t["key"]]
-            mine = [c for c in cases if c.get("ticket") == t["key"]]
-            ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
-            tested = [k for k, (_, r) in enumerate(runs) if any(str(x.get("id")) in ids for x in _list(r, "cases"))]
-            builds = sorted({core.norm_build(runs[k][1].get("build")) for k in tested})
-            seen = [(triaged[k][0], key) for k in tested for key, _ in triaged[k][1][0]]
-            if v in ("PASS", "PASS WITH NOTES") and (mine or prior_mine) and _safe_key(t["key"]):
-                drafts[f"jira-comment-{t['key']}.md"] = _jira_draft(
-                    t, v, why, mine, run_dir, cfg, builds, retest_of, prior_mine, seen
-                )
-            elif v in ("FAIL", "BLOCKED") and _safe_key(t["key"]):  # the rejection the user would type by hand
-                drafts[f"jira-comment-{t['key']}.md"] = _jira_fail_draft(
-                    t, v, why, mine, cases, bugs, keys, builds, plan
-                )
-        for name in list(drafts):  # the clean body acli posts as is: no check list, plain text
-            drafts[name[:-3] + ".txt"] = drafts[name].split(PASTE_BELOW, 1)[-1].lstrip("\n")
-    draft_of = lambda key: f"jira-comment-{key}.md" if f"jira-comment-{key}.md" in drafts else ""
-    run_abs = Path(run_dir).resolve()
-    post = lambda key: (
-        f" · post it (never posted for you): `acli jira workitem comment create --key {key} --body-file "
-        f"{shlex.quote(str(run_abs / f'jira-comment-{key}.txt'))}`"
-        + (" after filling its `<…>` placeholders" if "<" in drafts.get(f"jira-comment-{key}.txt", "") else "")
-    )
+    triaged = [(r.get("target") or name, _signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
+    dups = _load_json(run_dir / ".data" / "jira-dups.json", [])
+    ctx = {
+        "states": _db_bug_states() if bugs or tickets else {},
+        "dups": dups if isinstance(dups, dict) else {},
+        "audit": audit_bugs(run_dir) if bugs else {},
+        "reviews": _reviews(run_dir, d["warnings"]) if bugs else {},
+    }
+    owners = _bug_owners(bugs, cases, keys)
+    single, multi, date = len(tickets) == 1, len(tickets) > 1, _run_date(run_dir, plan)
+    drafts: dict[str, str] = {}
+    info: dict[str, dict[str, Any]] = {}  # per ticket: its cases, builds, verdict, signals and comment file
+    for t in tickets:
+        key = t["key"]
+        mine = [c for c in cases if c.get("ticket") == key]
+        prior = [c for c in prior_all if c.get("ticket") == key]
+        ids = {c["id"] for c in mine}  # the builds of the runs that tested this ticket, not the whole folder's
+        tested = [k for k, (_, r) in enumerate(runs) if any(str(x.get("id")) in ids for x in _list(r, "cases"))]
+        builds = (
+            sorted({core.norm_build(runs[k][1].get("build")) for k in tested})
+            or sorted({core.norm_build(r.get("build")) for _, r in runs})
+            or sorted({core.norm_build(c.get("build")) for c in prior})
+        )
+        v, why = vmap.get(key) or ("NOT STARTED", "testing hasn't started yet")
+        seen = [(triaged[k][0], s) for k in tested for s, _ in triaged[k][1][0]]  # its pages' unexplained signals
+        name = "jira-comment.txt" if single else f"jira-comment-{key}.txt"
+        if v != "NOT STARTED" and _safe_key(key):
+            drafts[name] = _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg, ctx["states"])
+        info[key] = {
+            "mine": mine,
+            "prior": prior,
+            "builds": builds,
+            "v": v,
+            "why": why,
+            "signals": seen,
+            "name": name,
+        }
 
-    out = _header(run_dir, kind, plan, runs) + [""]
+    def status(t, folder):  # folder: the report's own status line (one ticket), with what holds for the whole folder
+        i = info[t["key"]]
+        passed = sum(c["status"] == "PASS" for c in i["mine"]) + len(i["prior"])
+        total = len(i["mine"]) + len(i["prior"])
+        n = len(ticket_bugs(t["key"], cases, bugs, keys))
+        return _line(
+            [
+                VERDICT_ICON[i["v"]],
+                "build " + (", ".join(i["builds"]) if runs else "not run yet"),
+                date if folder else "",
+                f"{passed} of {_plural(total, 'case')} passed"
+                + (f" ({len(i['prior'])} on an earlier build)" if i["prior"] else ""),
+                _plural(n, "bug") if n else "no bugs",
+                f"retest of {retest_of}" if retest_of and folder else "",
+                _ran_as(runs) if folder else "",
+            ]
+        )
+
+    heading = lambda t: one_line(t["key"]) + (f": {one_line(t['summary'])}" if t.get("summary") else "")
+    blocks = [f"# {heading(tickets[0])}" if single else f"# QA report: {one_line(plan.get('title') or run_dir.name)}"]
     if not plan and not runs:
-        out += ["_Nothing recorded yet: no plan and no test run in this folder._", ""]
-    if tickets and kind == "plan":
-        out += ["## Summary", row("Ticket", "ACs", "Cases"), "|---|---|---|"]
-        out += [
-            row(_ticket_title(t), len(_list(t, "acs")), sum(c.get("ticket") == t["key"] for c in cases))
-            for t in tickets
-        ]
-    elif tickets and len(tickets) > 1:
-        out += [
-            "## Summary",
-            row("Ticket", "Verdict", "Why", "Cases (pass/fail/other)", "Bugs"),
-            "|---|---|---|---|---|",
-        ]
-        for t in tickets:
-            v, why = vmap.get(t["key"]) or ("NOT STARTED", "")
-            mine = [c for c in cases if c.get("ticket") == t["key"]]
-            prior_n = sum(c.get("ticket") == t["key"] for c in prior_all)
-            out.append(
-                row(
-                    _ticket_title(t),
-                    VERDICT_ICON[v],
-                    why,
-                    _counts(mine) + (f" (+{prior_n} prior)" if prior_n else ""),
-                    len(ticket_bugs(t["key"], cases, bugs, keys)),
-                )
-            )
-    elif tickets and with_status:
-        t = tickets[0]
-        v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
-        out += [f"**Verdict: {VERDICT_ICON[v]}** — {one_line(why)}"]
-    elif runs:
-        out += [
-            "## Summary",
-            "**Status:** "
-            + "; ".join(one_line(f"{r.get('target') or name} {r.get('status') or '?'}") for name, r in runs)
-            + f" · {len(bugs)} bug(s)"
-            + (f" · cases {_counts(cases)} (pass/fail/other)" if cases else ""),
-        ]
-
-    # questions: plan, runs and QUESTION cases, one list
-    q_items = (
-        _q_items(plan, "test plan")
-        + [q for name, r in runs for q in _q_items(r, str(r.get("target") or name))]
-        + [
-            {
-                "text": f"{c['id']}: {' '.join(str(c.get('notes') or c.get('actual') or c.get('title') or '').split())}",
-                "resolved": False,
-                "answer": "",
-                "where": str(c.get("route") or "test cases"),
-            }
-            for c in cases
-            if c["status"] == "QUESTION"
-        ]
-    )
+        blocks.append("_Nothing recorded yet: no plan and no test run in this folder._")
+    q_items = _q_items(plan, "test plan") + [q for name, r in runs for q in _q_items(r, str(r.get("target") or name))]
     merged = _merge_questions(q_items)
     open_qs = sorted([q for q in merged if not q["resolved"]], key=_q_rank)
-    resolved_qs = [q for q in merged if q["resolved"]]
-    attention = [c for c in cases if c["status"] in ("FAIL", "BLOCKED", "NOT_RUN")]
-    if runs:
-        n_img = sum(bool(_evidence_file(run_dir, c["id"])) for c in cases)
-        out += [
-            f"{len(bugs)} bug(s) · {len(open_qs)} open question(s) · "
-            f"{len([c for c in cases if c['status'] in ('FAIL', 'BLOCKED', 'NOT_RUN', 'QUESTION')])} "
-            f"case(s) need attention · {n_img} evidence image(s)"
-        ]
-    if len(tickets) == 1 and draft_of(tickets[0]["key"]):
-        out += [
-            f"Jira comment draft: [{draft_of(tickets[0]['key'])}]({draft_of(tickets[0]['key'])})"
-            + post(tickets[0]["key"])
-        ]
-    out.append("")
-
-    if not runs and open_qs:  # plan only: no run to act on, so the questions are the list (resolved: folded below)
-        out += ["## Questions"] + [_q_bullet(q, show_from=False) for q in open_qs] + [""]
-    # the things to act on, first
-    if runs:
-        action = []
-        if bugs:
-            action += _bug_section(
-                bugs,
-                cases,
-                keys,
-                run_dir,
-                heading=f"### Bugs to file ({len(bugs)})",
-                cfg=cfg,
-                audit=audit_bugs(run_dir),
-                reviews=_reviews(run_dir, d["warnings"]),
-            ) + [""]
-        # a draft whose run file a later one replaced (--resume): still shown, but no verdict counts it
-        listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
-        orphans = sorted(
-            (
-                p
-                for p in (run_dir / "bugs").glob("BUG-*.md")
-                if re.fullmatch(r"BUG-\d+", p.stem) and p.stem not in listed and p.is_file()
-            ),
-            key=lambda p: int(p.stem[4:]),
-        )
-        if orphans:
-            action += [
-                f"### Bug drafts no run file lists ({len(orphans)})",
-                "A later run file replaced the one that found them (`--resume`), so no verdict counts them: "
-                "check each and file it if it still applies.",
-                *[f"- {_bug_link(p.stem, run_dir)} {one_line(_draft_title(p, ''))}" for p in orphans],
-                "",
-            ]
-        if open_qs:
-            action += [f"### Open questions ({len(open_qs)})"] + [_q_bullet(q) for q in open_qs] + [""]
-        if attention:
-            action += (
-                [f"### Failed, blocked or not-run cases ({len(attention)})"]
-                + [
-                    f"- {cell(c['id'])} {STATUS_ICON[c['status']]}"
-                    + (f" ({cell(c['ac'])})" if c.get("ac") else "")
-                    + (
-                        f" — {cell(core.short(c.get('actual') or c.get('notes'), 160))}"
-                        if (c.get("actual") or c.get("notes"))
-                        else ""
-                    )
-                    + (f" · {cell(c['ticket'])}" if c.get("ticket") else "")
-                    for c in attention
-                ]
-                + [""]
-            )
-        left = [
-            (r.get("target") or name, m.group(1).strip())
-            for name, r in runs
-            for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))
-        ]
-        if left:  # step 9 couldn't delete them: they stay in the shared QA app
-            action += (
-                [f"### Test data left in the app ({len(left)})"]
-                + [f"- {one_line(route)}: {cell(core.short(text, 300))}" for route, text in left]
-                + [""]
-            )
-        if gaps := _evidence_gaps(cases, run_dir, kind):
-            action += [f"### Evidence gaps ({len(gaps)})"] + [f"- {cell(g)}" for g in gaps] + [""]
-        signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
-        third = sum(n for _, (_, n) in triaged)
-        if signals:
-            action += [f"### Browser signals no bug explains ({len(signals)})"] + [
-                f"- {one_line(route)}: {one_line(core.short(key, 200))}" + (f" (×{n})" if n > 1 else "")
-                for route, key, n in signals[:SIGNALS_SHOWN]
-            ]
-            if len(signals) > SIGNALS_SHOWN:
-                action.append(
-                    f"- +{len(signals) - SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`"
+    answered = [q for q in merged if q["resolved"]]
+    answers = "\n".join(
+        f"- {cell(q['text'])}" + (f" — answer: {cell(q['answer'])}" if q["answer"] else "") for q in answered
+    )
+    resolved_fold = [_fold(f"Resolved questions ({len(answered)})", [answers])] if answered else []
+    if kind == "plan":
+        blocks.append(_line(["plan", date, "not run yet", _plural(len(cases), "case")]))
+        if multi:
+            blocks.append(
+                _items(
+                    [
+                        f"- {heading(t)} — {len(_list(t, 'acs'))} AC, {_plural(len(info[t['key']]['mine']), 'case')}"
+                        for t in tickets
+                    ]
                 )
-            action.append("")
-        if third:  # a CDN or map-tile failure can still break the page: counted, folded, never mixed with the app's
-            action += [
-                f"<details><summary>{third} third-party signal(s) (hosts outside allowedHosts)</summary>",
-                "",
-                "Failed requests to hosts outside `allowedHosts`: see `requests-*.log` in `.data/`.",
-                "",
-                "</details>",
-                "",
+            )
+        if open_qs:
+            blocks += ["## Questions", _items([f"- {_q_text(q, show_from=False)}" for q in open_qs])]
+        blocks += resolved_fold
+    else:
+        if single:
+            blocks += [status(tickets[0], True), _line([info[keys[0]]["why"]])]
+        elif multi:
+            blocks.append(
+                _line(
+                    [
+                        kind,
+                        date,
+                        "build " + (", ".join(_run_builds(runs)) or "not run yet"),
+                        f"retest of {retest_of}" if retest_of else "",
+                        _ran_as(runs),
+                    ]
+                )
+            )
+            blocks.append(
+                _items([f"- {one_line(k)}: {VERDICT_ICON[info[k]['v']]} — {one_line(info[k]['why'])}" for k in keys])
+            )
+        elif plan or runs:
+            n = len(bugs)
+            blocks.append(
+                _line(
+                    [
+                        kind,
+                        date,
+                        "build " + (", ".join(_run_builds(runs)) or "not run yet"),
+                        "; ".join(f"{r.get('target') or name} {r.get('status') or '?'}" for name, r in runs),
+                        _plural(n, "bug") if n else "no bugs",
+                        _ran_as(runs),
+                    ]
+                )
+            )
+        if plan or runs:
+            todo = [
+                _bug_todo(b, run_dir, ctx["states"])
+                for b in sorted(bugs, key=lambda b: _first_word(b.get("classification")) != "confirmed")
             ]
-        out += ["## Needs your action"] + (action or ["Nothing needs your action.", ""])
+            todo += [f"Answer: {_q_text(q)}" for q in open_qs]
+            todo += [
+                f"Answer the question {one_line(c['id'])} raised: see Results."
+                for c in cases
+                if c["status"] == "QUESTION"
+            ]
+            todo += [
+                f"Delete the test data left in the app on {one_line(r.get('target') or name)}: {cell(m.group(1).strip())}"
+                for name, r in runs
+                for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core._s(r.get("notes")))
+            ]  # step 9 couldn't delete them: they stay in the shared QA app
+            severe = [k for _, (sig, _) in triaged for k, _ in sig if signal_severity(k) == "severe"]
+            if severe:
+                todo.append(
+                    f"Look into the {_plural(len(severe), 'severe browser signal')} no bug explains (a 5xx, a failed "
+                    "request, an error body or a leak): see Signals no bug explains."
+                )
+            todo += [
+                _post_item(
+                    t["key"],
+                    info[t["key"]]["name"],
+                    run_abs,
+                    _post_checks(t, info[t["key"]], run_dir, retest_of),
+                    multi,
+                )
+                for t in tickets
+                if info[t["key"]]["name"] in drafts
+            ]
+            blocks += ["## What to do", _numbered(todo) if todo else "Nothing needs your action.", *resolved_fold]
 
+    level = 3 if multi else 2
     for t in tickets:
-        mine = [c for c in cases if c.get("ticket") == t["key"]]
-        prior_mine = [c for c in prior_all if c.get("ticket") == t["key"]]
-        out.append(f"## {one_line(_ticket_title(t))}")
-        if with_status and len(tickets) > 1:
-            v, why = vmap.get(t["key"]) or ("NOT STARTED", "testing hasn't started yet")
-            out.append(f"**Verdict: {VERDICT_ICON[v]}** — {one_line(why)}")
-        if len(tickets) > 1 and draft_of(t["key"]):  # one ticket: the link is in the top block
-            out.append(f"**Jira comment draft:** [{draft_of(t['key'])}]({draft_of(t['key'])})" + post(t["key"]))
-        if _list(t, "acs"):
-            out += ["### Acceptance criteria"] + _ac_lines(t, mine, with_status, prior_mine)
-        if mine:
-            out += ["### Test cases"] + _case_block(mine, run_dir, with_status)
-        if prior_mine:
-            out += _prior_block(prior_mine)
-        if _plan_lines(t):
-            out += ["<details><summary>Test plan</summary>", ""] + _plan_lines(t) + ["", "</details>", ""]
-        out.append("")
+        i = info[t["key"]]
+        if multi:
+            blocks.append(f"## {heading(t)}")
+            blocks += [status(t, False)] if with_status else []
+        res = _results(t, i["mine"] + i["prior"], run_dir, with_status, level + 1)
+        if res:
+            blocks += [f"{'#' * level} {'Results' if with_status else 'Cases'}", *res]
+        mine_bugs = [(b, o) for b, o in zip(bugs, owners) if single or (o and o[0] == t["key"])]
+        elsewhere = [  # a bug of several tickets is listed once, under the first
+            f"- {_bug_name(b, run_dir)}: listed under {one_line(o[0])}."
+            for b, o in zip(bugs, owners)
+            if multi and t["key"] in o[1:]
+        ]
+        if mine_bugs or elsewhere:
+            blocks.append(f"{'#' * level} Bugs")
+            for b, o in mine_bugs:
+                blocks += _bug_entry(b, o, [t["key"]], cases, run_dir, cfg, ctx, level + 1)
+            blocks += [_items(elsewhere)] if elsewhere else []
+        if multi and (table := _history_table(run_dir, t["key"])):
+            blocks += ["### History", table]
     other = [c for c in cases if c.get("ticket") not in keys]
     if other:
-        out += (
-            ["## Test cases" if not tickets else "## Other test cases"]
-            + _case_block(other, run_dir, with_status)
-            + [""]
-        )
+        blocks += [
+            "## Other test cases" if tickets else "## Cases",
+            _items([_case_item(c, run_dir, with_status) for c in other]),
+        ]
+    if not single:
+        rest = [(b, o) for b, o in zip(bugs, owners) if not (o and o[0] in keys)]
+        if rest:
+            blocks.append("## Other bugs" if tickets else "## Bugs")
+            for b, o in rest:
+                blocks += _bug_entry(b, o, keys, cases, run_dir, cfg, ctx, 3)
 
     not_tested = [item for _, r in runs for item in _not_tested(r)]
     if not_tested:
-        out += ["## Not tested"]
+        blocks.append("## Not tested")
         for key, label in NOT_TESTED_CATEGORIES:
-            group = [t for k, t in not_tested if k == key]
+            group = [x for k, x in not_tested if k == key]
             if group:
-                out += (
-                    [f"<details><summary>{label} ({len(group)})</summary>", ""]
-                    + [f"- {cell(core.short(t, 300))}" for t in group]
-                    + ["", "</details>", ""]
+                blocks.append(_fold(f"{label} ({len(group)})", ["\n".join(f"- {cell(x)}" for x in group)]))
+    signals = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
+    third = sum(n for _, (_, n) in triaged)
+    if signals or third:
+        blocks.append("## Signals no bug explains" + (f" ({len(signals)})" if signals else ""))
+        lines = [
+            f"- {one_line(route)}: {one_line(key)}" + (f" (×{n})" if n > 1 else "")
+            for route, key, n in signals[:SIGNALS_SHOWN]
+        ]
+        if len(signals) > SIGNALS_SHOWN:
+            lines.append(
+                f"- +{len(signals) - SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`"
+            )
+        blocks += ["\n".join(lines)] if lines else []
+        if third:  # a CDN or map-tile failure can still break the page: counted, folded, never mixed with the app's
+            blocks.append(
+                _fold(
+                    f"{third} third-party signal(s) (hosts outside allowedHosts)",
+                    ["Failed requests to hosts outside `allowedHosts`: see `requests-*.log` in `.data/`."],
                 )
-    if resolved_qs:
-        out += [f"<details><summary>Resolved questions ({len(resolved_qs)})</summary>", ""]
-        out += [
-            f"- {cell(core.short(q['text'], 300))}"
-            + (f" — answer: {cell(core.short(q['answer'], 300))}" if q["answer"] else "")
-            for q in resolved_qs
-        ] + ["", "</details>", ""]
+            )
     if runs:
-        out += _notes_section(runs)
+        blocks += _notes_blocks(plan, runs)
+    history = [_history_table(run_dir, keys[0])] if single else []
+    listed = {b["id"] for b in bugs}.union(*map(_case_bugs, cases))
+    orphans = sorted(
+        (
+            p
+            for p in (run_dir / "bugs").glob("BUG-*.md")
+            if re.fullmatch(r"BUG-\d+", p.stem) and p.stem not in listed and p.is_file()
+        ),
+        key=lambda p: int(p.stem[4:]),
+    )
+    if runs and orphans:  # a draft whose run file a later one replaced: still shown, but no verdict counts it
+        history += [
+            "Earlier bugs this run did not see (no verdict counts them; file one if it still applies):",
+            "\n".join(f"- {_bug_link(p.stem, run_dir)} {one_line(_draft_title(p, ''))}" for p in orphans),
+        ]
+    if any(history):
+        blocks += ["## History", *(x for x in history if x)]
     if d["warnings"]:
-        out += ["## Problems reading this folder"] + [f"- {one_line(w)}" for w in d["warnings"]] + [""]
-    return "\n".join(out).rstrip() + "\n", drafts
+        blocks += ["## Problems reading this folder", "\n".join(f"- {one_line(w)}" for w in d["warnings"])]
+    return "\n\n".join(blocks) + "\n", drafts
 
 
 def render_report(run_dir: str | Path) -> str:
     return render_report_parts(run_dir)[0]
 
 
-def run_summary(run_dir: str | Path) -> tuple[str, str, str, int]:
-    """(date, kind, verdict text, bug count) for the qa-out/README.md index."""
+def run_summary(run_dir: str | Path) -> tuple[str, str, str, int, str]:
+    """(date, kind, verdict text, bug count, label) for the qa-out/README.md index: the label is `KEY — summary` for a
+    one-ticket plan (a ticket's folder), else the folder's name."""
     d = load_run(run_dir)
     plan, runs = d["plan"], d["runs"]
     kind = str(plan.get("kind") or (runs[0][1].get("mode") if runs else "") or "explore")
@@ -2188,7 +2198,9 @@ def run_summary(run_dir: str | Path) -> tuple[str, str, str, int]:
         verdicts = ", ".join(f"{t['key']} {VERDICT_ICON[vmap[t['key']][0]]}" for t in tickets)
     else:
         verdicts = ", ".join(str(r.get("status") or "?") for _, r in runs) or "not run yet"
-    return _run_date(run_dir, plan), kind, verdicts, len(bugs)
+    t = tickets[0] if len(tickets) == 1 else {}
+    label = " — ".join(str(x) for x in (t.get("key"), t.get("summary")) if x) or Path(run_dir).name
+    return _run_date(run_dir, plan), kind, verdicts, len(bugs), label
 
 
 def render_index(qa_out):
@@ -2206,12 +2218,13 @@ def render_index(qa_out):
     for p in runs:
         n: int | str  # the bug count, or "?" for a folder that can't be read
         try:
-            date, kind, verdicts, n = run_summary(p)
+            date, kind, verdicts, n, label = run_summary(p)
             ts = when(p)
         except Exception as e:  # one odd folder must not break the index  # noqa: BLE001 - the error is shown, not swallowed
             m = re.match(r"\d{4}-\d{2}-\d{2}", p.name)
             date, kind, verdicts, n, ts = (m.group(0) if m else ""), "?", f"unreadable ({type(e).__name__})", "?", 0.0
-        name = one_line(p.name).replace("[", "\\[").replace("]", "\\]")
+            label = p.name
+        name = one_line(label).replace("[", "\\[").replace("]", "\\]")
         rows.append(((date, ts), row(date, Raw(f"[{name}]({quote(p.name, safe='+')}/REPORT.md)"), kind, verdicts, n)))
     rows.sort(key=lambda x: x[0], reverse=True)
     return (
@@ -2306,31 +2319,32 @@ def write_report(run_dir: str | Path) -> Path:
         except OSError:
             pass  # the copy stays: the next report or dispatch merges it
     _scrub_run(run_dir)
-    try:
-        text, drafts = render_report_parts(run_dir)
-    except Exception as e:  # never fail: say what went wrong in the report itself  # noqa: BLE001 - the error is shown, not swallowed
-        text, drafts = (
-            (
-                f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
-                f"{one_line(core.short(e, 200))}. Check the files in .data/. Jira comment drafts from an earlier "
-                "render were removed: no verdict stands behind them._\n"
-            ),
-            {},
-        )
-    core._write(run_dir / "REPORT.md", text)
-    # Jira drafts: written with the report; a draft no longer due is removed. A failed render removes them all: an
-    # earlier "Passed on …" would stay postable after the run turned FAIL.
-    for name, body in drafts.items():
-        core._write(run_dir / name, body)
-    for old in [*run_dir.glob("jira-comment-*.md"), *run_dir.glob("jira-comment-*.txt")]:
-        if old.name not in drafts and (old.is_symlink() or old.is_file()):
-            old.unlink(missing_ok=True)
     # Two reports at once (two sessions, or report + hook): without the lock the later index write could be one
-    # rendered before the other run's REPORT.md existed, and that run would vanish from the index.
+    # rendered before the other run's REPORT.md existed, and that run would vanish from the index; and two renders
+    # must not both read the old history file. The history line goes first: REPORT.md's History shows this run too.
     fd = os.open(run_dir.parent, os.O_RDONLY)  # the qa-out folder itself: no lock file left behind
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        _write_history(run_dir)  # under the lock too: two renders must not both read the old file
+        _write_history(run_dir)
+        try:
+            text, drafts = render_report_parts(run_dir)
+        except Exception as e:  # never fail: say what went wrong in the report itself  # noqa: BLE001 - the error is shown, not swallowed
+            text, drafts = (
+                (
+                    f"# QA report: {one_line(run_dir.name)}\n\n_Could not render this report: {type(e).__name__}: "
+                    f"{one_line(core.short(e, 200))}. Check the files in .data/. Jira comment drafts from an earlier "
+                    "render were removed: no verdict stands behind them._\n"
+                ),
+                {},
+            )
+        core._write(run_dir / "REPORT.md", text)
+        # Jira comments: written with the report; one no longer due is removed. A failed render removes them all: an
+        # earlier pass would stay postable after the run turned FAIL. A .md twin is from before the plain-text comment.
+        for name, body in drafts.items():
+            core._write(run_dir / name, body)
+        for old in [*run_dir.glob("jira-comment*.md"), *run_dir.glob("jira-comment*.txt")]:
+            if old.name not in drafts and (old.is_symlink() or old.is_file()):
+                old.unlink(missing_ok=True)
         core._write(run_dir.parent / "README.md", render_index(run_dir.parent))
     finally:
         os.close(fd)
