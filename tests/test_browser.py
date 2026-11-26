@@ -212,10 +212,10 @@ class Signals(BrowserBase):
 
     def test_body_check_all_names_each_failed_graphql_operation(self):
         self.open("/gql.html")
-        (self.run_dir / ".data/requests-x.log").write_text(self.pw("requests", "--all"))
-        code, out, err = cli("body-check", str(self.run_dir), "--slug", "x", "--all")
+        code, out, err = cli("body-check", str(self.run_dir), "--slug", "x", "--all")  # it saves the request log too
         self.assertEqual(code, 0, err)
         self.assertIn("4 bodies read, 3 with a finding", out)
+        self.assertEqual((self.run_dir / ".data/requests-x.log").read_text().count("/graphql"), 4)
         t = report.triage_signals(self.run_dir, "x", {})
         self.assertEqual(
             [k for k, _, _ in t["app"]],
@@ -226,6 +226,15 @@ class Signals(BrowserBase):
             ],
         )
         self.assertEqual(t["suspect_200"], [])
+
+    def test_an_answer_the_reload_dropped_is_gone_not_clean(self):
+        self.open("/gql.html")
+        self.pw("reload")  # the first load's four answers are no longer in the browser
+        code, out, err = cli("body-check", str(self.run_dir), "--slug", "x", "--all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("4 bodies read, 3 with a finding, 4 with no body left", out)
+        t = report.triage_signals(self.run_dir, "x", {})
+        self.assertEqual((len(t["app"]), t["suspect_200"]), (3, []))
 
 
 class Fixtures(BrowserBase):

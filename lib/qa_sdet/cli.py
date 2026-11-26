@@ -244,6 +244,12 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             bad = [x for x in r["checked"] if x[2]]
             print(
                 f"body-check --all: {len(r['checked'])} bodies read, {len(bad)} with a finding"
+                + (
+                    f", {r['gone']} with no body left (the browser drops a call's answer when the page navigates: run "
+                    "this before a reload)"
+                    if r["gone"]
+                    else ""
+                )
                 + (f", {r['unread']} not read ({r['why']})" if r["unread"] else "")
                 + (f", {r['left']} left (run it again)" if r["left"] else "")
             )
@@ -269,7 +275,10 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             + (f" {what}" if what else "")
             + ": "
             + (
-                "nothing suspicious (no error envelope, HTML page or leak signature)"
+                "no body left to read (the browser drops a call's answer when the page navigates): not judged. Read "
+                "answers before a reload, all at once: qa-mem body-check <run dir> --slug <slug> --all"
+                if findings is None
+                else "nothing suspicious (no error envelope, HTML page or leak signature)"
                 if not findings
                 else "\n"
                 + "\n".join(f"- {f}" for f in findings)

@@ -1311,6 +1311,13 @@ def _bodies(data, slug):
     }
 
 
+def _body_gone(data, slug):
+    """The request numbers whose body the browser no longer held when body-check asked (the file's `gone`): not
+    judged, and nothing more to read."""
+    v = _bodies_file(data, slug).get("gone")
+    return {str(x) for x in v} if isinstance(v, list) else set()
+
+
 def _body_ops(data, slug):
     """{request number: GraphQL operation name} of the calls `qa-mem body-check --all` checked (the file's `ops`)."""
     v = _bodies_file(data, slug).get("ops")
@@ -1323,7 +1330,9 @@ def check_body(run_dir, slug, index, text, op="", mutation=False):
     """Judge the body of request `index` (the number `requests` printed) and record the verdict, clean or not, in
     .data/bodies-<slug>.json for triage_signals. The method, path and status come from .data/requests-<slug>.log when it
     has the request. op, mutation: the GraphQL operation's name and whether it writes, when the caller read the request
-    (every operation shares one method and path, so the name tells them apart). Returns (what it was, findings)."""
+    (every operation shares one method and path, so the name tells them apart). An empty body of a 2xx that should
+    have one is not judged: the browser drops a response's body when the page navigates, so empty says nothing. It is
+    recorded as gone, never as clean. Returns (what it was, findings), findings None when there was no body."""
     data = Path(run_dir) / ".data"
     line = next(
         (
@@ -1341,14 +1350,22 @@ def check_body(run_dir, slug, index, text, op="", mutation=False):
             pass
         status = int(line.group(4)) if line.group(4).isdigit() else 0
     write = mutation if RPC_PATH.search(path) else line is not None and line.group(2) in ops.API_WRITES
-    findings = [scrub.redact(f) for f in body_verdict(text, path, status, write)]
+    no_body = not text.strip() and 200 <= status < 300 and status not in (204, 205)
+    findings = None if no_body else [scrub.redact(f) for f in body_verdict(text, path, status, write)]
     recorded: dict[str, Any] = _bodies(data, slug)
-    recorded[index] = findings
-    names = _body_ops(data, slug)
+    names, gone = _body_ops(data, slug), _body_gone(data, slug)
+    if findings is None:
+        gone.add(index)
+    else:
+        recorded[index] = findings
     if GQL_NAME.fullmatch(op):
         names[index] = op
+    if names:
+        recorded["ops"] = names
+    if gone:
+        recorded["gone"] = sorted(gone, key=lambda x: (len(x), x))
     tmp = data / f".bodies-{slug}.tmp"
-    tmp.write_text(json.dumps({**recorded, "ops": names} if names else recorded, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(recorded, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, data / f"bodies-{slug}.json")
     shown = path + (f"#{names[index]}" if index in names else "")
     return (f"{line.group(2)} {shown} → {line.group(4)}" if line else ""), findings
@@ -1390,23 +1407,30 @@ def _saved_body(text):
 
 
 def sweep_bodies(run_dir, slug):
-    """`qa-mem body-check <run> --slug <slug> --all`: read, with the browser still open, the body of every call triage
-    would name (triage_signals' `unchecked`: GraphQL and RPC calls, writes, then failed calls; never a sign-in path) and
-    record each verdict, at most SWEEP_CALLS in SWEEP_SECONDS. A GraphQL call's request body is read first for its
-    operation name and kind, and is never stored; an operation named like a sign-in is settled without reading its
-    answer. Returns {"checked": [(request number, what it was, findings)], "unread": n, "why": the first reason one
+    """`qa-mem body-check <run> --slug <slug> --all`: with the browser still open, save its request list as
+    .data/requests-<slug>.log (as step 9 does), then read the body of every call triage would name (triage_signals'
+    `unchecked`: GraphQL and RPC calls, writes, then failed calls; never a sign-in path) and record each verdict, at
+    most SWEEP_CALLS in SWEEP_SECONDS. A GraphQL call's request body is read first for its operation name and kind, and
+    is never stored; an operation named like a sign-in is settled without reading its answer. A body the browser no
+    longer holds (the page navigated since the call) is counted as gone, never as clean: run this before a reload.
+    Returns {"checked": [(request number, what it was, findings)], "gone": n, "unread": n, "why": the first reason one
     could not be read, "left": calls past the cap}."""
     from . import crawl  # the playwright-cli runner; crawl imports nothing from this module
 
     log = Path(run_dir) / ".data" / f"requests-{slug}.log"
-    if not log.is_file():
-        raise core.BadInput(f"body-check --all: no {log}; save it first (playwright-cli -s=qa requests --all > …)")
+    ok, listed = crawl._pw(["requests", "--all"], SWEEP_CALL_SECONDS)
+    if ok:
+        core._write(log, listed)
+    elif not log.is_file():
+        raise core.BadInput(
+            f"body-check --all: the browser isn't open and there is no {log} ({core.short(' '.join(listed.split()), 120)})"
+        )
     todo = triage_signals(run_dir, slug, {})["unchecked"]
-    checked, unread, why, deadline = [], 0, "", time.monotonic() + SWEEP_SECONDS
+    checked, gone, unread, why, deadline = [], 0, 0, "", time.monotonic() + SWEEP_SECONDS
     for index, _method, path in todo[:SWEEP_CALLS]:
         if time.monotonic() > deadline:
             break
-        op, mutation, body = "", False, ""
+        op, mutation, body = "", False, "{}"  # (a sign-in operation is settled as an empty answer, unread)
         if RPC_PATH.search(path):
             ok, sent = crawl._pw(["--raw", "request-body", index], SWEEP_CALL_SECONDS)
             op, mutation = _gql_operation(sent) if ok else ("", False)
@@ -1415,9 +1439,15 @@ def sweep_bodies(run_dir, slug):
             if not ok:  # the browser dropped the request, or it is closed: the call stays a suspect
                 unread, why = unread + 1, why or core.short(" ".join(body.split()), 120)
                 continue
-            body = _saved_body(body)
-        checked.append((index, *check_body(run_dir, slug, index, body[:200_000], op, mutation)))
-    return {"checked": checked, "unread": unread, "why": why, "left": len(todo) - len(checked) - unread}
+            # a binary body was saved to a file: nothing to read in it, and not a body that is gone
+            body = body if _saved_body(body) == body else "{}"
+        what, findings = check_body(run_dir, slug, index, body[:200_000], op, mutation)
+        if findings is None:
+            gone += 1
+        else:
+            checked.append((index, what, findings))
+    left = len(todo) - len(checked) - gone - unread
+    return {"checked": checked, "gone": gone, "unread": unread, "why": why, "left": left}
 
 
 def triage_signals(run_dir, slug, run, hosts=None):
@@ -1435,7 +1465,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     data, found, calls, third = Path(run_dir) / ".data", {}, {}, 0
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
-    names, unchecked = _body_ops(data, slug), []
+    names, gone, unchecked = _body_ops(data, slug), _body_gone(data, slug), []
     for line in scrub.redact(_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
@@ -1458,7 +1488,9 @@ def triage_signals(run_dir, slug, run, hosts=None):
         shown = path + (f"#{names[index]}" if index in names else "")
         if index in checked and not rpc:
             checked_shapes.add((method, shape))
-        if index not in checked and code != "FAILED" and not _credential_call(path):  # body-check --all's work list
+        if index in gone:  # its body was gone when body-check asked: nothing more to read, and no verdict
+            pass
+        elif index not in checked and code != "FAILED" and not _credential_call(path):  # body-check --all's work list
             turn = (2 if int(code) >= 500 else 3) if int(code) >= 400 else 0 if rpc else 1
             if turn != 1 or method in ops.API_WRITES:
                 unchecked.append((turn, index, method, path))
@@ -1467,7 +1499,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
             found.setdefault(f"{method} {shown} → {status}{notes}", [(method, shown), 0, index])[1] += 1
         elif notes:
             found.setdefault(f"{method} {shown} → {code}{notes}", [(method, shown), 0, index])[1] += 1
-        elif index not in checked:
+        elif index not in checked and index not in gone:
             seen_2xx.append((method, path, shape, index))
     for (method, shape), (n, index) in calls.items():
         if n >= STORM_CALLS:

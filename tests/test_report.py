@@ -1355,12 +1355,14 @@ class Signals(Rendering):
             cli("body-check", str(d), "--slug", "form", n, stdin='{"data": {"notes": []}}')
         self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [])
 
-    def sweep(self, d, responses, requests=None):
+    def sweep(self, d, responses, requests=None, log=None):
         """(exit code, stdout, the playwright-cli calls) of `qa-mem body-check --all` with a fake playwright-cli that
         holds these bodies by request number."""
         calls = []
 
         def fake(cmd, **kw):
+            if cmd[2:] == ["requests", "--all"]:  # the sweep saves the log itself: None = the browser is closed
+                return done(1, err="Browser 'qa' is not open") if log is None else done(0, out="### Result\n" + log)
             self.assertEqual(cmd[:3], ["playwright-cli", "-s=qa", "--raw"])
             calls.append(f"{cmd[3]} {cmd[4]}")
             held = responses if cmd[3] == "response-body" else (requests or {})
@@ -1457,6 +1459,31 @@ class Signals(Rendering):
         for text in ('{"data": {}}', str(keep), f"see {dump}", ""):
             self.assertEqual(report._saved_body(text), text)
         self.assertTrue(keep.exists())
+
+    def test_an_empty_body_is_not_judged_clean(self):  # the browser drops a response's body when the page navigates
+        d = self.triage_dir(self.GQL_LOG + "5. [DELETE] http://localhost:8765/api/zones/9 => [204] No Content\n")
+        bad = '{"data": {"saveNote": {"note": null, "errors": [{"message": "Too long"}]}}}'
+        code, out, _ = self.sweep(d, {"1": "\n", "2": "", "3": bad, "4": '{"data": {}}', "5": ""})
+        self.assertEqual(code, 0, out)
+        self.assertIn("3 bodies read, 1 with a finding, 2 with no body left", out)  # the 204 has none to read: read
+        recorded = json.loads((d / ".data/bodies-form.json").read_text())
+        self.assertEqual((sorted(k for k in recorded if k.isdigit()), recorded["gone"]), (["3", "4", "5"], ["1", "2"]))
+        t = report.triage_signals(d, "form", RUN1)
+        self.assertEqual((len(t["app"]), t["suspect_200"], t["unchecked"]), (1, [], []))  # nothing left to ask for
+        code, out, _ = cli("body-check", str(d), "--slug", "form", "1", stdin="\n")  # by hand: the same answer
+        self.assertEqual(code, 0)
+        self.assertIn("no body left", out)
+        self.assertNotIn("nothing suspicious", out)
+
+    def test_body_check_all_saves_the_request_log_itself(self):  # one command right after a write, before a reload
+        d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])
+        self.config(releaseTemplates=TEMPLATES, allowedHosts=["localhost"])
+        code, out, calls = self.sweep(
+            d, {"1": '{"ok": false}'}, log="1. [PUT] http://localhost:8765/api/zones/7 => [200] OK\n"
+        )
+        self.assertEqual((code, calls), (0, ["response-body 1"]), out)
+        self.assertIn("#1 PUT /api/zones/7 → 200: error body: ok false", out)
+        self.assertIn("1. [PUT]", (d / ".data/requests-form.log").read_text())
 
     def test_body_check_all_needs_the_requests_log(self):
         d = self.rundir("2026-11-23-PROJ-1", plan={**PLAN1, "questions": []}, runs=[("form", RUN1)])
