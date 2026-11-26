@@ -131,6 +131,18 @@ def bug_id(b):
 MERGE_RANK = ("NOT_RUN", "BLOCKED", "PASS", "QUESTION", "FAIL")  # weakest first: what a run actually saw beats a skip
 
 
+def _now_build(runs):
+    """The build of the newest run (load_run's order) that read one, else None. A ticket's folder keeps every re-run's
+    files: a run file from another known build holds results the new build's run has not repeated."""
+    known = [b for _, r in runs if (b := core.norm_build(r.get("build"))) != core.UNKNOWN]
+    return known[-1] if known else None
+
+
+def _older_build(build, now):
+    """A known build that is not `now` (_now_build's): an unknown one can't be compared."""
+    return bool(now) and core.norm_build(build) not in (core.UNKNOWN, now)
+
+
 def merged_cases(
     plan: JsonObj, runs: Sequence[tuple[str, JsonObj]], warnings: list[str] | None = None
 ) -> list[JsonObj]:
@@ -153,8 +165,7 @@ def merged_cases(
                 cid = str(c["id"])
                 if cid not in results or rank(c) >= rank(results[cid]):
                     results[cid], run_build[cid] = c, r.get("build")
-    known = [b for _, r in runs if (b := core.norm_build(r.get("build"))) != core.UNKNOWN]
-    now = known[-1] if known else None  # the build of the newest run (load_run's order) that read one
+    now = _now_build(runs)
     out, seen = [], set()
     plan_cases = _list(plan, "cases")
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
@@ -202,7 +213,7 @@ def merged_cases(
         if (
             tk in keys
             and merged["status"] == "PASS"
-            and (ran_on != core.norm_build(run_build.get(cid)) or (now and ran_on not in (core.UNKNOWN, now)))
+            and (ran_on != core.norm_build(run_build.get(cid)) or _older_build(ran_on, now))
         ):
             merged.update(build=ran_on, prior=True)
         out.append(merged)
@@ -2411,16 +2422,19 @@ def _run_state(run_dir):
         k = core.route_key(c.get("route"))
         if k[0] and k not in routes_order:
             routes_order.append(k)
-    run_status_by_route = {}
+    run_status_by_route, run_build_by_route = {}, {}
     for _, r in runs:
         k = core.route_key(r.get("target"))
         if k[0]:
-            run_status_by_route[k] = _first_word(r.get("status"))
+            run_status_by_route[k], run_build_by_route[k] = _first_word(r.get("status")), r.get("build")
+    now, of = _now_build(runs), lambda by, k: by.get(k, by.get((k[0], "")))
     incomplete = []
     for k in routes_order:
         rcases = [c for c in cases if core.route_key(c.get("route")) == k]
-        if run_status_by_route.get(k, run_status_by_route.get((k[0], ""))) in ("blocked", "incomplete") or any(
-            c["status"] in ("BLOCKED", "NOT_RUN") for c in rcases
+        if (
+            of(run_status_by_route, k) in ("blocked", "incomplete")
+            or _older_build(of(run_build_by_route, k), now)  # a new build's re-run stopped before this page
+            or any(c["status"] in ("BLOCKED", "NOT_RUN") for c in rcases)
         ):
             incomplete.append(k)
     spell = lambda k: k[0] + (f"?{k[1]}" if k[1] else "")

@@ -1247,6 +1247,16 @@ class Dispatch(Base):
         self.assertEqual((out["case_count"], out["held"], self.given(out)), (3, 0, (["TC-1", "TC-2", "TC-3"], None)))
         self.assertEqual(json.loads(prior.read_text())["given"], ["TC-1", "TC-2", "TC-3"])
 
+    def test_a_page_last_run_on_an_earlier_build_gets_every_case(self):  # a new build's re-run stopped before it
+        self.form_run("COMPLETED", TC_1="PASS", TC_2="FAIL", TC_3="PASS")
+        self.assertEqual(self.dispatch("/form")[1]["held"], 3)
+        newer = {"run_id": "r2", "target": "/list", "build": "1.1", "status": "COMPLETED", "cases": []}
+        (self.run_dir / ".data/run-list.json").write_text(json.dumps(newer))
+        out = self.dispatch("/form")[1]
+        self.assertEqual((out["case_count"], out["held"], self.given(out)), (3, 0, (["TC-1", "TC-2", "TC-3"], None)))
+        (self.run_dir / ".data/run-list.json").write_text(json.dumps({**newer, "build": "unknown"}))
+        self.assertEqual(self.dispatch("/form")[1]["held"], 3)  # an unknown build can't be compared
+
     def test_a_completed_run_file_gives_only_its_blocked_case(self):
         self.form_run("COMPLETED", TC_1="PASS", TC_2="QUESTION", TC_3="BLOCKED")
         out = self.dispatch("/form")[1]

@@ -3000,12 +3000,14 @@ class CarryPrior(Rendering):
         self.assertIn(prior_entry + "  Saved\n", draft)  # the kept result says what it saw
         self.assertIn(prior_entry + "  Save 130\n", (d2 / "jira-comment.txt").read_text())  # a plan's: its title
 
-    def test_a_page_the_new_build_never_reached_holds_passes_not_re_run_here(self):  # found in audit: a false PASS
-        # a ticket's folder keeps every re-run's files: the 1.43 re-run stopped after /form, /list last ran on 1.42
+    def stopped_before_list(self, build="1.42"):
+        """A ticket's folder keeps every re-run's files: the 1.43 re-run stopped after /form, /list last ran on `build`."""
         plan = {**PLAN1_ANSWERED, "cases": [PLAN1["cases"][0], {**PLAN1["cases"][1], "route": "/list"}]}
-        older = {**RUN1, "target": "/list", "cases": RUN1["cases"][1:]}
-        newer = {**RUN1, "build": "1.43", "cases": RUN1["cases"][:1]}
-        d, r = self.render_run([("list", older), ("form", newer)], plan=plan)
+        older = {**RUN1, "target": "/list", "build": build, "cases": RUN1["cases"][1:]}
+        return self.render_run([("list", older), ("form", {**RUN1, "build": "1.43", "cases": RUN1["cases"][:1]})], plan)
+
+    def test_a_page_the_new_build_never_reached_holds_passes_not_re_run_here(self):  # found in audit: a false PASS
+        d, r = self.stopped_before_list()
         self.assertEqual(
             r.split("\n\n")[1:3],
             [
@@ -3016,8 +3018,16 @@ class CarryPrior(Rendering):
         draft = (d / "jira-comment.txt").read_text()
         self.assertIn("QA result: PASSED WITH NOTES on build 1.43 (", draft)
         self.assertIn("\nAC-2 Rejects 131: passed on build 1.42, not re-run on 1.43.\n", draft)
-        _, r = self.render_run([("list", {**older, "build": "unknown"}), ("form", newer)], plan=plan)
+        _, r = self.stopped_before_list("unknown")
         self.assertIn("\n\nall 2 cases passed\n\n", r)  # an unknown build can't be compared: What to do names it
+
+    def test_a_page_the_new_build_never_reached_is_left_to_run(self):  # the same command said: already tested
+        st = report._run_state(self.stopped_before_list()[0])
+        self.assertEqual(
+            (st["incomplete_routes"], st["completed_routes"], st["can_resume"]), (["/list"], ["/form"], True)
+        )
+        st = report._run_state(self.stopped_before_list("unknown")[0])
+        self.assertEqual((st["incomplete_routes"], st["completed_routes"]), ([], ["/form", "/list"]))
 
 
 class ExploreStopCheck(Base):

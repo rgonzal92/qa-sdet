@@ -227,7 +227,8 @@ def dispatch(
     run_id, flags, config, card, the cases it gives and their tickets' AC, the project's qa-rules.md, the charter, known
     Jira bugs; scrubbed) and returns {slug, target, brief, mode, case_count (given), held}. Which cases: case_ids exactly,
     all_cases every one; else, on a re-run, those the route's run file doesn't show as PASS, FAIL or QUESTION, or all
-    when that file can't be read or ended BLOCKED (its PASS is not trusted). An earlier run file is saved with the ids
+    when that file can't be read, ended BLOCKED (its PASS is not trusted) or is from an earlier build than the folder's
+    newest run (a new build's re-run stopped before this page). An earlier run file is saved with the ids
     given as .data/prior-<slug>.json: report.carry_prior merges it into what the explorer writes. open_record: the
     explorer starts on the list page `route` and tests the detail page it leads to, so its brief, cases, card and slug
     are that detail page's (the list page's own brief and run file stay); without a known detail page the slug is
@@ -288,7 +289,12 @@ def dispatch(
                 f"dispatch: --cases {','.join(case_ids)}: give ids of this route's plan cases ({', '.join(have) or 'none'})"
             )
         given = [c for c in cases if text(c.get("id")) in case_ids]
-    elif all_cases or earlier is None or report._first_word(earlier.get("status")) == "blocked":
+    elif (
+        all_cases
+        or earlier is None
+        or report._first_word(earlier.get("status")) == "blocked"
+        or report._older_build(earlier.get("build"), report._now_build(report.load_run(run)["runs"]))
+    ):
         given = cases
     else:
         given = [c for c in cases if done.get(text(c.get("id"))) not in ("PASS", "FAIL", "QUESTION")]
