@@ -15,11 +15,13 @@ from urllib.parse import urlsplit
 from . import codemap, core, ops
 
 GOTO_SECONDS, EVAL_SECONDS = 60, 30
-MAX_FRAMES = 5  # iframes checked per route, by index
+MAX_FRAMES = 5  # shown iframes checked per route, by index
 CHUNK = 200  # locators per eval: keeps one argument far below Linux's 128 KB limit
 FAILS_IN_A_ROW = 3  # pages that fail to load or answer in a row end the run: the app or the browser is down
 NOTES_CAP = 1500
-FRAME = "iframe >> nth={} >> internal:control=enter-frame >> :root"  # eval inside the frame, cross-origin too
+# eval inside a frame, cross-origin too. Only a frame that is shown: an app shell keeps every module's iframe mounted
+# and hides all but one, and a hidden module's elements are not this page's
+FRAME = "iframe:visible >> nth={} >> internal:control=enter-frame >> :root"
 SKIP_LINK_RE = re.compile(
     r"log[ _-]?(out|off)|sign[ _-]?(out|off)|end[ _-]?session|delete|remove", re.I
 )  # the in-page harvester's own filter, too
@@ -83,7 +85,10 @@ def parse_locator(text):
 
 # Text matches as Playwright's do: whitespace collapsed, case-insensitive substring; exact = whole and case-sensitive.
 # The accessible name is approximate (aria-label, aria-labelledby, label, button value, alt, text, title, placeholder):
-# a miss only leaves a locator unconfirmed. Polls up to ~4 s until every locator is found or the count stops moving.
+# a miss only leaves a locator unconfirmed. A role matches only an element assistive technology sees, as getByRole
+# does (not under aria-hidden, not display:none or visibility:hidden; an option goes by its select: it has no box of
+# its own while the list is closed); test ids, labels and CSS match by presence, as their Playwright forms do.
+# Polls up to ~4 s until every locator is found or the count stops moving.
 CHECK_BODY = r"""const spec = __SPEC__;
 const norm = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 const match = (got, want, exact) => exact ? norm(got) === norm(want) : norm(got).toLowerCase().includes(norm(want).toLowerCase());
@@ -93,6 +98,9 @@ const IMPLICIT = {button: 'button, input[type=button], input[type=submit], input
   combobox: 'select:not([multiple]), input[list]', listbox: 'select[multiple]', option: 'option', spinbutton: 'input[type=number]',
   slider: 'input[type=range]', img: 'img[alt]', dialog: 'dialog', table: 'table', row: 'tr', navigation: 'nav'};
 const text = el => el ? el.textContent : '';
+const box = el => el.closest('select') || el;
+const shown = el => !el.closest('[aria-hidden=true]')
+  && (el.checkVisibility ? box(el).checkVisibility({checkVisibilityCSS: true, visibilityProperty: true}) : box(el).getClientRects().length > 0);
 const accName = el => norm(el.getAttribute('aria-label'))
   || norm((el.getAttribute('aria-labelledby') || '').split(/\s+/).map(id => text(d.getElementById(id))).join(' '))
   || norm([...(el.labels || [])].map(text).join(' '))
@@ -106,7 +114,7 @@ const check = () => {
     : s[0] === 'label' ? [...d.querySelectorAll('label')].some(l => match(l.textContent, s[1], s[2]))
       || [...d.querySelectorAll('[aria-label]')].some(el => match(el.getAttribute('aria-label'), s[1], s[2]))
     : s[0] === 'role' ? [...d.querySelectorAll('[role~="' + s[1] + '"]' + (IMPLICIT[s[1]] ? ', ' + IMPLICIT[s[1]] : ''))]
-      .some(el => { const own = el.getAttribute('role'); return (!own || own.split(/\s+/)[0] === s[1]) && (s[2] === null || match(accName(el), s[2], s[3])); })
+      .some(el => { const own = el.getAttribute('role'); return (!own || own.split(/\s+/)[0] === s[1]) && shown(el) && (s[2] === null || match(accName(el), s[2], s[3])); })
     : Boolean(d.querySelector(s[1]));
   const found = [], invalid = [];
   spec.forEach((s, i) => { try { if (has(s)) found.push(i); } catch (e) { invalid.push(i); } });
@@ -143,7 +151,12 @@ HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set()
   for (const el of document.querySelectorAll('[role=tab], [aria-haspopup], [aria-expanded], [role=menuitem], details > summary'))
     out.states.push([el.getAttribute('role') || el.tagName.toLowerCase(), (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40)]);
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"""
-HARVEST_JS = f"JSON.stringify({{...JSON.parse({HARVESTER_JS}), ...{ops.PAGE_STATE_JS}}})"
+HARVEST_JS = (
+    f"JSON.stringify({{...JSON.parse({HARVESTER_JS}), frames: document.querySelectorAll('iframe').length, "
+    f"...{ops.PAGE_STATE_JS}}})"
+)
+# run on FRAME's element: `document` and `location` are the frame's
+FRAME_HARVEST_JS = f"el => JSON.stringify({{...JSON.parse({HARVESTER_JS}), host: location.host}})"
 
 
 # ---------- the browser and the run file ----------
@@ -269,8 +282,10 @@ def _check(idx, specs, target=None):
 # ---------- qa-mem crawl ----------
 def crawl(con, run, routes=()):
     """`qa-mem crawl <run> [<route>...]`: open each static route (default: every one in the code map) and record which of
-    its mapped locators exist, in the top document and its iframes, in <run>/.data/run-init-crawl.json. Prints one JSON
-    line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
+    its mapped locators exist, in the top document and its shown iframes, in <run>/.data/run-init-crawl.json. On an app
+    shell's route the locators of the module it mounts are looked for in the frames only: the shell's own document
+    matching one (a button of the same name in the menu bar) says nothing about the module. Prints one JSON line; exit
+    0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
     run = _run_dir(run, "crawl")
     cfg, hosts = ops._qa_config("crawl")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
@@ -299,16 +314,13 @@ def crawl(con, run, routes=()):
     routes = [r for r in routes if r not in auth]
     plan, skipped = [], [f"{r}: sign-in or sign-out page, not opened" for r in auth]
     for route in routes:
-        locs = list(
-            dict.fromkeys(
-                (x["label"], x["value"])
-                for x in codemap._codemap_rows(con, route)
-                if x["kind"] == "locator" and x["value"]
-            )
-        )
+        module = codemap.module_target(con, route)
+        rows = [x for x in codemap._codemap_rows(con, route) if x["kind"] == "locator" and x["value"]]
+        locs = list(dict.fromkeys((x["label"], x["value"]) for x in rows))
+        own = {(x["label"], x["value"]) for x in rows if x["page"] != module}  # the route's own rows: the shell's
         specs = [parse_locator(v) for _, v in locs]
         if any(specs):
-            plan.append((route, locs, specs))
+            plan.append((route, locs, specs, {i for i, loc in enumerate(locs) if module and loc not in own}))
         else:
             skipped.append(
                 f"{route}: " + (f"{len(locs)} locators, none checkable here" if locs else "no locators in the code map")
@@ -318,7 +330,7 @@ def crawl(con, run, routes=()):
     def walk(rec):
         rec.notes += skipped
         fails = 0
-        for k, (route, locs, specs) in enumerate(plan, 1):
+        for k, (route, locs, specs, framed) in enumerate(plan, 1):
             todo = [i for i, s in enumerate(specs) if s]
             ok, out = _pw(["goto", base + route], GOTO_SECONDS)
             res, err = _check(todo, specs) if ok else (None, out)
@@ -341,16 +353,19 @@ def crawl(con, run, routes=()):
                 rec.save()
                 continue
             frames = state.get("frames") if isinstance(state.get("frames"), int) else 0
+            in_shell, found, entered = found & framed, found - framed, False  # the module's: its frame decides
             for f in range(min(frames, MAX_FRAMES)):
                 left = [i for i in todo if i not in found | invalid]
                 if not left:
                     break
                 res, err = _check(left, specs, FRAME.format(f))
-                if res is None:  # no such frame (it went away) is no failure
+                if res is None:  # no such frame (hidden, or it went away) is no failure
                     if "does not match any elements" not in err:
                         rec.notes.append(f"{route}: frame {f} check failed ({core.short(' '.join(err.split()), 120)})")
                     break
-                found, invalid = found | res[0], invalid | res[1]
+                found, invalid, entered = found | res[0], invalid | res[1], True
+            if not entered:  # no frame is shown: the module is drawn in the page itself
+                found |= in_shell
             checked, unchecked = len(todo) - len(invalid), len(specs) - len(todo) + len(invalid)
             n.update(
                 loaded=n["loaded"] + 1,
@@ -391,6 +406,7 @@ def crawl(con, run, routes=()):
 def discover(run, url=None, depth=2, max_pages=25):
     """`qa-mem discover <run> [<url>] [--depth D] [--max-pages N]`: breadth-first over same-host links from url (default
     qaBaseUrl), one sample per detail pattern, recording each page's states and links in <run>/.data/run-discover.json.
+    The states of the iframes a page shows are the page's (an app shell's module); a frame's links are not followed.
     Never follows logout, delete or sign-in links; never clicks or types. Prints one JSON line; exit 0, or 1 BLOCKED."""
     run = _run_dir(run, "discover")
     cfg, hosts = ops._qa_config("discover")
@@ -426,6 +442,19 @@ def discover(run, url=None, depth=2, max_pages=25):
                 return "BLOCKED", landed[1]
             if landed:
                 continue
+            frames = h.get("frames") if isinstance(h.get("frames"), int) else 0
+            found_states = h.get("states") if isinstance(h.get("states"), list) else []
+            for f in range(min(frames, MAX_FRAMES)):  # an app shell: the tabs and menus of the module it shows
+                ok, out = _pw(["--raw", "eval", FRAME_HARVEST_JS, FRAME.format(f)], EVAL_SECONDS)
+                fh = _parsed(out) if ok else None
+                if fh is None:  # no such frame (hidden, or it went away) is no failure
+                    if "does not match any elements" not in out:
+                        rec.notes.append(f"{path}: frame {f} failed ({core.short(' '.join(out.split()), 120)})")
+                    break
+                # an embedded widget of another host is not the app. The frame's links are left out too: a module's
+                # own URL is no page users open (it may not load alone)
+                if core.url_allowed(f"https://{fh.get('host') or ''}/", hosts):
+                    found_states = found_states + (fh.get("states") if isinstance(fh.get("states"), list) else [])
             links, states = [], {}
             for link in h.get("links") if isinstance(h.get("links"), list) else []:
                 if not (isinstance(link, list) and len(link) == 2 and all(isinstance(x, str) for x in link)):
@@ -446,7 +475,7 @@ def discover(run, url=None, depth=2, max_pages=25):
                 ):  # one sample per pattern: /x/12 and /x/34 are /x/:id
                     seen.add(core.norm_route(to))
                     queue.append((to, level + 1))
-            for st in h.get("states") if isinstance(h.get("states"), list) else []:
+            for st in found_states:
                 if isinstance(st, list) and len(st) == 2 and all(isinstance(x, str) for x in st) and st[1].strip():
                     states.setdefault(
                         f"{st[0]}: {st[1]}",

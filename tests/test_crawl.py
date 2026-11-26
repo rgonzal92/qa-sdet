@@ -22,11 +22,27 @@ CFG = dict(
 BASE = CFG["qaBaseUrl"]
 
 
-def page(found=(), frames=(), status=200, host="qa.example.com", password=False, invalid=(), links=(), states=()):
-    """A fake page: the locator values its top document holds, one set per iframe, and what its harvester returns."""
+def page(
+    found=(),
+    frames=(),
+    status=200,
+    host="qa.example.com",
+    password=False,
+    invalid=(),
+    links=(),
+    states=(),
+    hidden=(),
+    frame_states=(),
+    frame_hosts=(),
+):
+    """A fake page: the locator values its top document holds, one set per iframe (`hidden`: the indices of the frames
+    that are mounted but not shown), and what the harvester returns in the top document and in each frame."""
     return dict(
         found=set(found),
         frames=[set(f) for f in frames],
+        hidden=set(hidden),
+        frame_states=[list(s) for s in frame_states],
+        frame_hosts=list(frame_hosts),
         status=status,
         host=host,
         password=password,
@@ -65,15 +81,25 @@ class Browser:
             return self.eval(args[2], args[3] if len(args) > 3 else None)
         raise AssertionError(f"unexpected playwright-cli call {cmd}")
 
+    def frame(self, pg, target):
+        """The index of the iframe a frame target names, as the page orders its frames (`iframe:visible` counts only
+        the shown ones), or None when there is no such frame."""
+        shown = [k for k in range(max(len(pg["frames"]), len(pg["frame_states"]))) if k not in pg["hidden"]]
+        order = shown if ":visible" in target else sorted(set(shown) | pg["hidden"])
+        i = int(target.split("nth=")[1].split(" ")[0])
+        return order[i] if i < len(order) else None
+
     def eval(self, js, target):
         pg = self.pages.get(self.url) or page(status=404)
         state = {"host": pg["host"], "hasPassword": pg["password"], "status": pg["status"]}
+        gone = done(1, err=f"Error: locator.evaluate: Locator '{target}' does not match any elements")
+        count = len(pg["frames"]) if pg["frame_count"] is None else pg["frame_count"]
         if "const spec = " in js:
             spec = json.JSONDecoder().raw_decode(js, js.index("const spec = ") + len("const spec = "))[0]
             if target:
-                i = int(target.split("nth=")[1].split(" ")[0])
-                if i >= len(pg["frames"]):
-                    return done(1, err=f"Error: locator.evaluate: Locator '{target}' does not match any elements")
+                i = self.frame(pg, target)
+                if i is None or i >= len(pg["frames"]):
+                    return gone
                 held = pg["frames"][i]
             else:
                 held = pg["found"]
@@ -83,19 +109,17 @@ class Browser:
                 "found": [k for k, s in enumerate(spec) if json.dumps(s) in have],
                 "invalid": [k for k, s in enumerate(spec) if json.dumps(s) in bad],
             }
-            return done(
-                0,
-                out=json.dumps(
-                    out
-                    | (
-                        {}
-                        if target
-                        else state | {"frames": len(pg["frames"]) if pg["frame_count"] is None else pg["frame_count"]}
-                    )
-                ),
-            )
+            return done(0, out=json.dumps(out | ({} if target else state | {"frames": count})))
+        if "a[href]" in js and target:  # the harvester inside a frame
+            i = self.frame(pg, target)
+            if i is None or i >= len(pg["frame_states"]):
+                return gone
+            host = pg["frame_hosts"][i] if i < len(pg["frame_hosts"]) else pg["host"]
+            inside = {"links": [["/m/inside", "Inside"]], "states": pg["frame_states"][i], "host": host}
+            return done(0, out=json.dumps(inside))
         if "a[href]" in js:
-            return done(0, out=json.dumps(state | {"links": pg["links"], "states": pg["states"]}))
+            frames = max(count, len(pg["frame_states"]))
+            return done(0, out=json.dumps(state | {"links": pg["links"], "states": pg["states"], "frames": frames}))
         if "hasPassword" in js:  # page-start's sign-in check
             return done(0, out=json.dumps(state))
         if "footer .version" in js:
@@ -277,8 +301,8 @@ class Crawl(Base):
         self.assertEqual(
             targets,
             [
-                "iframe >> nth=0 >> internal:control=enter-frame >> :root",
-                "iframe >> nth=1 >> internal:control=enter-frame >> :root",
+                "iframe:visible >> nth=0 >> internal:control=enter-frame >> :root",
+                "iframe:visible >> nth=1 >> internal:control=enter-frame >> :root",
             ],
         )
         self.assertIn("Name", [x["name"] for x in run["pages"][0]["locators"]])
@@ -288,6 +312,31 @@ class Crawl(Base):
             (code, run["status"], len(b.evals())), (0, "COMPLETED", 2)
         )  # nth=0 said no frame: nth=1 not tried
         self.assertNotIn("failed", run["notes"])
+
+    def test_a_hidden_frame_is_never_entered(self):  # a shell keeps every module mounted and shows one
+        self.pages[f"{BASE}/zones"].update(frames=[{"getByRole('textbox', { name: 'Name' })"}, set()], hidden={0})
+        _, _, run, b, _ = self.crawl("/zones")
+        self.assertNotIn("Name", [x["name"] for x in run["pages"][0]["locators"]])
+        self.assertTrue(all(c[5].startswith("iframe:visible >> ") for c in b.evals() if len(c) > 5))
+
+    def module(self):
+        """/zones becomes a shell route that mounts the module page /m/zones, which owns the Save and Name locators."""
+        con = core.connect()
+        with con:
+            con.execute("UPDATE codemap SET value='module zones at /m/zones' WHERE page='/zones' AND kind='route'")
+            con.execute("UPDATE codemap SET page='/m/zones' WHERE page='/zones' AND label IN ('Save', 'Name')")
+        con.close()
+
+    def test_a_module_locator_is_confirmed_in_its_frame_not_by_the_shell(self):
+        self.module()  # the shell document holds a `save` test id of its own: that is not the module's Save
+        _, _, run, _, _ = self.crawl("/zones")
+        self.assertEqual(sorted(x["name"] for x in run["pages"][0]["locators"]), ["Msg", "Name", "Speed"])
+
+    def test_a_module_drawn_in_the_page_is_checked_in_the_top_document(self):
+        self.module()
+        self.pages[f"{BASE}/zones"]["frames"] = []  # no frame: the module renders into the shell's own document
+        _, _, run, _, _ = self.crawl("/zones")
+        self.assertEqual(sorted(x["name"] for x in run["pages"][0]["locators"]), ["Msg", "Save", "Speed"])
 
     def test_no_frame_eval_when_the_top_document_confirms_all(self):
         self.pages[f"{BASE}/alarms"]["frames"] = [["x"]]
@@ -456,6 +505,23 @@ class Discover(Base):
         _, run, b, _ = self.discover(pages)
         self.assertFalse([c for c in b.calls if any("evil" in a for a in c)])
         self.assertEqual(run["pages"][0]["transitions"], [])
+
+    def test_frame_states_land_on_the_shell_page_and_frame_links_do_not(self):
+        # a shell page: its module's tabs are states of the page users open; the module's own URLs are not pages
+        shell = page(states=[["tab", "Shell tab"]], hidden={0}, frame_states=[[["tab", "Hidden"]], [["tab", "Active"]]])
+        code, run, _, _ = self.discover({BASE: shell}, "--depth", "0")
+        self.assertEqual((code, run["status"]), (0, "COMPLETED"))
+        self.assertEqual([s["key"] for s in run["pages"][0]["states"]], ["tab: Shell tab", "tab: Active"])
+        self.assertEqual(run["pages"][0]["transitions"], [])
+        self.assertNotIn("failed", run["notes"])  # the frame past the last shown one is no failure
+
+    def test_a_third_party_frames_states_are_left_out(self):  # an embedded player or map widget is not the app
+        shell = page(
+            frame_states=[[["tab", "Ours"]], [["menuitem", "Theirs"]]],
+            frame_hosts=["qa.example.com", "cdn.example.net"],
+        )
+        _, run, _, _ = self.discover({BASE: shell}, "--depth", "0")
+        self.assertEqual([s["key"] for s in run["pages"][0]["states"]], ["tab: Ours"])
 
     def test_stops_at_max_pages(self):
         pages = {

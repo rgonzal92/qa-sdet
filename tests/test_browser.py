@@ -8,14 +8,14 @@ import shutil
 import threading
 import unittest
 
-from support import ROOT, Base, load_hook
+from support import ROOT, Base, cli, load_hook
 
-from qa_sdet import crawl, doctor, ops
+from qa_sdet import core, crawl, doctor, ops
 
 serve = load_hook("fixture_serve", ROOT / "tests/fixture/serve.py")
 # a system browser: Playwright's own builds live under the real HOME, which the sandbox replaces
 BROWSER = next((b for b, (ok, _) in doctor.installed_browsers(("chrome", "msedge")).items() if ok), None)
-FRAME = "iframe:visible >> nth={} >> internal:control=enter-frame >> :root"
+FRAME = crawl.FRAME
 
 
 @unittest.skipUnless(
@@ -122,6 +122,68 @@ class PlaywrightCli(BrowserBase):
         for missing in ("getByRole('textbox')", "getByRole('button', { name: 'Ghost' })", "getByTestId('close-btn')"):
             ok, out = crawl._pw(["--raw", "eval", tag, missing], 60)
             self.assertEqual((ok, "does not match any elements" in out), (False, True), missing)
+
+
+class Crawl(BrowserBase):
+    """`qa-mem crawl` and `qa-mem discover` on the fixture's shell: three module iframes stay mounted, one is shown."""
+
+    SHELL = (
+        ("/console/schedules", "route", "Schedules", "module schedules at /modules/schedules.html"),
+        ("/console/preferences", "route", "Preferences", "module preferences at /modules/preferences.html"),
+        ("/console/schedules", "locator", "Shell preview", "getByRole('button', { name: 'Preview' })"),
+        ("/modules/schedules.html", "locator", "Preview", "getByRole('button', { name: 'Preview' })"),
+        ("/modules/schedules.html", "locator", "Save schedule", "getByTestId('schedule-save')"),
+        ("/modules/schedules.html", "locator", "Archived tab", "getByRole('tab', { name: 'Archived' })"),
+        ("/modules/schedules.html", "locator", "Sign save", "getByTestId('sign-save')"),  # the hidden Signs module's
+        ("/modules/schedules.html", "locator", "Signs link", "getByRole('link', { name: 'Signs' })"),  # the shell's
+        ("/modules/preferences.html", "locator", "Time zone", "getByLabel('Time zone')"),
+        ("/modules/preferences.html", "locator", "UTC", "getByRole('option', { name: 'UTC' })"),
+    )
+
+    def codemap(self, *rows):
+        con = core.connect()
+        with con:
+            con.executemany(
+                "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
+                [(*r, "src/x.tsx", "/repo", "frontend", "t", "s") for r in rows],
+            )
+        con.close()
+
+    def crawl(self, *routes):
+        """{route: the names of its confirmed locators} of a crawl of `routes`."""
+        code, _, err = cli("crawl", str(self.run_dir), *routes)
+        self.assertEqual(code, 0, err)
+        run = json.loads((self.run_dir / ".data/run-init-crawl.json").read_text())
+        self.assertEqual(run["status"], "COMPLETED", run["notes"])
+        self.assertNotIn("failed", run["notes"])
+        return {p["route"]: sorted(x["name"] for x in p["locators"]) for p in run["pages"]}
+
+    def test_a_shell_route_confirms_what_its_shown_module_holds(self):
+        self.codemap(*self.SHELL)
+        found = self.crawl("/console/schedules", "/console/preferences")
+        # not the hidden module's test id, not the shell's own link; each Preview button in its own document
+        self.assertEqual(found["/console/schedules"], ["Archived tab", "Preview", "Save schedule", "Shell preview"])
+        self.assertEqual(found["/console/preferences"], ["Time zone", "UTC"])  # an option of a closed select counts
+
+    def test_a_role_locator_skips_what_assistive_technology_cannot_see(self):
+        self.codemap(
+            ("/spa.html", "route", "Devices", ""),
+            ("/spa.html", "locator", "Ghost", "getByRole('button', { name: 'Ghost' })"),  # inside aria-hidden
+            ("/spa.html", "locator", "Close", "getByRole('button', { name: 'Close' })"),
+            ("/spa.html", "locator", "Close by attribute", '[data-qa-item="close-btn"]'),
+        )
+        self.assertEqual(self.crawl("/spa.html"), {"/spa.html": ["Close", "Close by attribute"]})
+
+    def test_discover_maps_the_shown_modules_states_onto_the_shell_page(self):
+        code, _, err = cli("discover", str(self.run_dir), self.base + "/console/schedules", "--depth", "1")
+        self.assertEqual(code, 0, err)
+        run = json.loads((self.run_dir / ".data/run-discover.json").read_text())
+        pages = {p["route"]: p for p in run["pages"]}
+        self.assertEqual(sorted(pages), ["/console/preferences", "/console/schedules", "/console/signs"])
+        self.assertEqual([s["key"] for s in pages["/console/schedules"]["states"]], ["tab: Active", "tab: Archived"])
+        self.assertEqual(pages["/console/signs"]["states"], [])
+        links = {t["to"] for p in run["pages"] for t in p["transitions"]}
+        self.assertEqual(links, {"/console/signs", "/console/schedules", "/console/preferences"})  # no module URL
 
 
 if __name__ == "__main__":
