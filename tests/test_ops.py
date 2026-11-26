@@ -161,6 +161,19 @@ class Marker(Base):
         ops.marker_stop(self.proj)
         self.assertEqual([r["ts"] for r in map(json.loads, trace.read_text().splitlines())], [2, 3, 5])
 
+    def test_the_kept_trace_holds_verbs_not_what_was_typed(self):
+        """A line's `s` is the verb and its first argument while the run needs it (the stuck nudge); the argument can be
+        a word of page text or a typed value, so the trace that stays keeps the verb only."""
+        d, e = self.start_run()
+        self.lines(
+            e, {"t": "pw", "ts": 1, "s": "find 'Saved", "k": "k1"}, {"t": "pw", "ts": 2, "s": "close", "k": "k2"}
+        )
+        self.lines(e, {"t": "n", "n": "stuck", "s": "fill e5"})
+        ops.marker_stop(self.proj)
+        kept = (d / ".data/trace-form.jsonl").read_text()
+        self.assertEqual([r.get("s") for r in map(json.loads, kept.splitlines())], ["find", "close", "fill"])
+        self.assertNotIn("Saved", kept)
+
     def test_a_crawl_or_a_planted_link_leaves_no_trace(self):
         ops.marker_start(self.proj)  # crawl and discover: no run file to keep it beside
         self.lines(1, {"t": "o"})

@@ -406,8 +406,10 @@ def _trace_totals(recs):
 
 def _keep_trace(rdir, slug, lines):
     """Append this run's lines to <run>/.data/trace-<slug>.jsonl (a resumed route keeps its earlier ones). Not the
-    explorer's to write (guard EXPLORER_FILES); never through a link. Best effort."""
+    explorer's to write (guard EXPLORER_FILES); never through a link. Best effort. A line's `s` keeps its verb only:
+    the first argument after it can be a word of page text or a typed value."""
     data = rdir / ".data"
+    verb = lambda r: {**r, "s": str(r["s"]).split(" ", 1)[0]} if r.get("s") else r
     if not lines or not re.fullmatch(r"[\w-][\w.-]*", slug) or data.is_symlink() or not data.is_dir():
         return  # the slug names a file in .data: never a path
     try:
@@ -416,7 +418,7 @@ def _keep_trace(rdir, slug, lines):
         )
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             if stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                fh.write("".join(raw + "\n" for raw, _ in lines))
+                fh.write("".join(json.dumps(verb(r), separators=(",", ":")) + "\n" for _, r in lines))
     except OSError:
         pass
 
