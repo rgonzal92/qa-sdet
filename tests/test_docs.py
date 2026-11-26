@@ -352,6 +352,38 @@ class Docs(unittest.TestCase):
         self.assertIn("FOCUS:", section.split("**Dark mode**")[1].split("**Unsaved edits**")[0])
         self.assertIn("Browser conditions", text("agents/qa-explorer.md"))
 
+    def test_the_tab_typing_and_settling_recipes_pass_the_guard_and_the_explorer_names_them(self):
+        """A popup tab, a field typed key by key, a count read until it settles, a control that moved: the explorer is
+        sent to each section by its title, and every command there is allowed to it."""
+        tips, explorer = text("references/playwright-cli-tips.md"), text("agents/qa-explorer.md")
+        fill = {
+            "<locator of the first part>": "getByLabel('Hours')",
+            "<css of the parts>": "#time input",
+            "<css of the count>": "#range",
+        }
+        with tempfile.TemporaryDirectory() as d:
+            g, env = load_guard(os.path.realpath(d))
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                for title, commands in (
+                    ("Second tab or popup", 2),
+                    ("Type key by key", 1),
+                    ("Settled, not just loaded", 1),
+                    ("A control that moved", 0),
+                ):
+                    self.assertIn(f'"{title}"', explorer)
+                    section = tips.split(f"## {title}")[1].split("\n## ")[0]
+                    cmds = [x for block in section.split("```")[1::2] for x in block.strip().splitlines()]
+                    self.assertEqual(len(cmds), commands, title)
+                    for cmd in cmds:
+                        for mark, value in fill.items():
+                            cmd = cmd.replace(mark, value)
+                        self.assertNotIn("<", cmd.split("--raw eval")[0], cmd)  # every placeholder has a stand-in here
+                        self.assertIsNone(g.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
+        self.assertIn(
+            "tab-select 0", tips.split("## Second tab or popup")[1].split("\n## ")[0]
+        )  # back to the first tab
+
     def test_filing_command_quotes_page_text(self):
         """A title quoting page text must not run `$(…)` or backticks in the user's shell."""
         cmd = re.search(r"`(acli jira workitem create [^`]+)`", text("references/run-setup.md")).group(1)

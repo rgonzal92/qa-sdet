@@ -4,6 +4,7 @@ Chrome or Edge, and it must not run beside a real QA run (a machine has one `qa`
 
 import json
 import os
+import shlex
 import shutil
 import threading
 import unittest
@@ -331,6 +332,77 @@ class Fixtures(BrowserBase):
         self.pw("fill", "getByLabel('Confirmation')", "delete")
         self.pw("click", "getByRole('dialog', { name: 'Delete note' }).getByRole('button', { name: 'Delete' })")
         self.assertNotIn("qa-sdet-slow", self.text("#rows"))
+
+
+class Probe(BrowserBase):
+    """The tips file's broken-output probe, run as written: in the page, and inside a frame with the `el => (…)` wrap."""
+
+    def probe(self, target=None):
+        tips = (ROOT / "references/playwright-cli-tips.md").read_text()
+        block = tips.split("## Look for broken output")[1].split("```")[1]
+        script = block.split('--raw eval "', 1)[1].rsplit('"', 1)[0]
+        return self.js(f"el => ({script})" if target else script, target)
+
+    def test_raw_machine_values_inside_a_frame_are_leads(self):
+        self.open("/leaks.html")
+        self.assertEqual(self.probe(), "none")  # the shell document holds none of it
+        hits = self.probe(crawl.FRAME.format(0))
+        for want in (
+            "raw timestamp: 2026-11-15T14:30:00Z",
+            "internal name: IN_PROGRESS",
+            "over 100%: 800%",
+            "no accessible name: <button>",
+        ):
+            self.assertIn(want, hits)
+
+    def test_a_percentage_over_100_is_a_lead(self):
+        self.open("/dashboard.html#/signals")
+        self.pw("fill", "getByRole('searchbox', { name: 'Filter signals' })", "Signal 10")
+        self.pw("click", "getByRole('link', { name: 'Summary' })")
+        self.assertIn("over 100%: Active: 8 (800%)", self.probe())
+
+
+class Recipes(BrowserBase):
+    """The tips file's recipes, run word for word on the fixture pages they are for."""
+
+    def recipe(self, title, n=0, **fill):
+        """The output of the last command of the n-th recipe under `## <title>`, its placeholders filled in."""
+        section = (ROOT / "references/playwright-cli-tips.md").read_text().split(f"## {title}")[1].split("\n## ")[0]
+        cmd = [x for block in section.split("```")[1::2] for x in block.strip().splitlines()][n]
+        for mark, value in fill.items():
+            cmd = cmd.replace(f"<{mark}>", value)
+        words, out = shlex.shlex(cmd, posix=True, punctuation_chars=";"), ""
+        words.whitespace_split = True
+        argv = []
+        for w in [*words, ";"]:
+            if w != ";":
+                argv.append(w)
+                continue
+            self.assertEqual(argv[:2], ["playwright-cli", "-s=qa"], cmd)
+            out, argv = self.pw(*argv[2:]), []
+        return out
+
+    def test_typing_key_by_key_shows_what_fill_hides(self):
+        self.open("/timefield.html")
+        self.pw("click", "getByRole('button', { name: 'Edit schedule' })")
+        shown = self.recipe(
+            "Type key by key", **{"locator of the first part": "getByLabel('Hours')", "css of the parts": "#time input"}
+        )
+        self.assertEqual(ops._unwrap_raw(shown), ":30")  # the hour typed first is gone
+
+    def test_a_count_is_read_once_it_stops_changing(self):
+        self.open("/grid.html")
+        self.assertEqual(
+            ops._unwrap_raw(self.recipe("Settled, not just loaded", **{"css of the count": "#range"})),
+            "Showing 1-20 of 65",
+        )
+
+    def test_a_popup_tab_is_read_and_closed(self):
+        self.open("/export.html")
+        self.pw("click", "getByRole('button', { name: 'Open daily report' })")
+        self.assertIn("Daily report | about:blank | Daily report", ops._unwrap_raw(self.recipe("Second tab or popup")))
+        self.assertIn("- 0: (current) [Reports]", self.recipe("Second tab or popup", 1))
+        self.assertNotIn("- 1:", self.pw("tab-list"))
 
 
 if __name__ == "__main__":

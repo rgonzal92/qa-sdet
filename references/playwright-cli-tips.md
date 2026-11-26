@@ -73,15 +73,18 @@ playwright-cli -s=qa --raw eval "(() => { const out = {links: [], states: []}, s
 ```
 
 ## Look for broken output (one call, read-only)
-Step 5 runs this once after the page loads and after each submit or big state change (explore and ticket mode alike). One `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text (a fixed toast, modal or banner included: visibility comes from the element's box and style, not `offsetParent`, which is `null` for every `position: fixed` element), leaked template or i18n text (`{{code}}`, `${price}`, `{0}`, `errors.settings.save_failed`), a count that says `0 … shown` (check the request behind it), broken images, a page wider than the window, a region still busy, controls with no accessible name, duplicate `id`s, and a visible button or field another element covers (a sticky bar or an overlay: `elementFromPoint` at its centre hits something else). Code blocks and text areas are skipped. Each hit is a lead, never a bug by itself: check it like any other result (oracle, 2/2 repro).
+Step 5 runs this once after the page loads and after each submit or big state change (explore and ticket mode alike). One `--raw eval` lists visible breakage the page doesn't report: `NaN`, `undefined`, `[object Object]` or `Invalid Date` in visible text (a fixed toast, modal or banner included: visibility comes from the element's box and style, not `offsetParent`, which is `null` for every `position: fixed` element), leaked template or i18n text (`{{code}}`, `${price}`, `{0}`, `errors.settings.save_failed`), a count that says `0 … shown` (check the request behind it), a value shown as the machine keeps it (a raw timestamp `2026-11-15T14:30:00Z`, an internal name `IN_PROGRESS`; the first two of each), a percentage over 100 (a part larger than its total: look for a filter or another page changing the total), broken images, a page wider than the window, a region still busy, controls with no accessible name, duplicate `id`s, and a visible button or field another element covers (a sticky bar or an overlay: `elementFromPoint` at its centre hits something else). Code blocks and text areas are skipped. Each hit is a lead, never a bug by itself: check it like any other result (oracle, 2/2 repro).
 ```
 playwright-cli -s=qa --raw eval "(() => { const out = [], vis = el => { if (!el || !el.isConnected) return false; const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
     return (r.width > 0 || r.height > 0) && cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; };
   const bad = /\b(NaN|undefined|Invalid Date)\b|\[object Object\]/, tpl = /\{\{[^}]{1,60}\}\}|\x24\{[^}]{1,60}\}|\{\d\}/,
-    key = /\b(?:errors?|labels?|common|messages?|validation|buttons?|tooltips?|placeholders?)(?:\.[a-z][a-z0-9_-]*)+\b/, zero = /\b0 \w+ (?:shown|found|loaded)\b/i;
+    key = /\b(?:errors?|labels?|common|messages?|validation|buttons?|tooltips?|placeholders?)(?:\.[a-z][a-z0-9_-]*)+\b/, zero = /\b0 \w+ (?:shown|found|loaded)\b/i,
+    iso = /\b\d{4}-\d\d-\d\dT\d\d:\d\d/, name = /\b[A-Z]{2,}(?:_[A-Z]{2,})+\b/, pct = /(\d{3,})(?:[.,]\d+)?\s?%/, seen = {};
+  const raw = (kind, t) => { seen[kind] = (seen[kind] || 0) + 1; if (seen[kind] < 3) out.push(kind + ': ' + t.slice(0, 60)); };
   const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let n; (n = w.nextNode());) { const t = n.textContent.trim(), p = n.parentElement; if (!t || !p || /^(SCRIPT|STYLE|TEXTAREA|PRE|CODE|NOSCRIPT)$/.test(p.tagName) || !vis(p)) continue;
-    if (bad.test(t)) out.push('text: ' + t.slice(0, 80)); if (tpl.test(t) || key.test(t)) out.push('leaked template or key: ' + t.slice(0, 80)); if (zero.test(t)) out.push('zero count (see the request behind it): ' + t.slice(0, 60)); }
+    if (bad.test(t)) out.push('text: ' + t.slice(0, 80)); if (tpl.test(t) || key.test(t)) out.push('leaked template or key: ' + t.slice(0, 80)); if (zero.test(t)) out.push('zero count (see the request behind it): ' + t.slice(0, 60));
+    if (iso.test(t)) raw('raw timestamp', t); if (name.test(t)) raw('internal name', t); const m = t.match(pct); if (m && +m[1] > 100) raw('over 100%', t); }
   for (const i of document.images) if (i.complete && !i.naturalWidth && vis(i)) out.push('broken image: ' + (i.alt || i.src).slice(0, 80));
   if (document.documentElement.scrollWidth > innerWidth + 2) out.push('wider than the window');
   for (const b of document.querySelectorAll('[aria-busy=true]')) if (vis(b)) out.push('still busy: ' + (b.id || b.tagName));
@@ -134,6 +137,31 @@ playwright-cli -s=qa upload '<refs>/upload-fixtures/qa-sdet-1x1.png'
 - `qa-sdet-fake.pdf` (plain text named `.pdf`): a page that promises PDFs must not take it on its name; the server answers a 4xx, not a saved "document" (check `requests`).
 - `qa-sdet-1x1.png` (a valid 1x1 image): accepted or refused for a stated limit (minimum size, dimensions); the preview must not break.
 Each upload that is saved creates a record: name it `qa-sdet-…` where the page lets you, and delete it in step 9 like any record you made. Never upload anything but these three files.
+
+## Second tab or popup
+A click that opens another tab (a report, a preview, a detached view): the tab opening is not the result. List the tabs, switch to the new one and read it; then close it and go back to tab 0, since every later command acts on the selected tab:
+```
+playwright-cli -s=qa tab-list; playwright-cli -s=qa tab-select 1; playwright-cli -s=qa --raw eval "document.title + ' | ' + location.href + ' | ' + document.body.innerText.slice(0, 200)"
+playwright-cli -s=qa tab-close 1; playwright-cli -s=qa tab-select 0
+```
+Oracle: the new tab shows what was asked for, or it closed and the first tab says why. A tab still `about:blank` with nothing in it after the call behind it ended (`requests` in tab 0), and no message in the first tab, is a bug. Take the evidence image in the tab that shows the problem.
+
+## Type key by key
+`fill` sets a whole value at once and the batch eval sets it without a keystroke: both skip what typing does to a field made of parts (a time or date with its own hour and minute boxes, a masked number). Type it as a user does, then read what the field shows:
+```
+playwright-cli -s=qa click "<locator of the first part>"; playwright-cli -s=qa press Control+a; playwright-cli -s=qa press Backspace; playwright-cli -s=qa type '09'; playwright-cli -s=qa press Tab; playwright-cli -s=qa type '30'; playwright-cli -s=qa --raw eval "[...document.querySelectorAll('<css of the parts>')].map(e => e.value).join(':')"
+```
+Oracle: the field shows the time typed (`09:30`). A part that empties or resets while you type the next is a bug (`keyboard-a11y`), even when `fill` gives the right value.
+
+## Settled, not just loaded
+A spinner or overlay going away means the request ended, not that the page finished drawing, and a count that streams in can change after you read it. Before judging a list against its count, read the value until two reads 300 ms apart agree:
+```
+playwright-cli -s=qa --raw eval "(async () => { const read = () => document.querySelector('<css of the count>').textContent.trim(); let a = read(); for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 300)); const b = read(); if (b === a) return a; a = b; } return a + ' (still changing)'; })()"
+```
+Compare values read at the same moment (the filter's own count and the list's total in one eval). A map is ready when its canvas is visible and the feature call has answered, not when its buttons show.
+
+## A control that moved
+A toolbar control the card names that `find` doesn't show: before calling it missing, open the toolbar's overflow menu (`More`, `…`) and look there; toolbars move controls in and out with the window's width and with counts. Keep the card's locator (role and name); a snapshot ref is never saved. Dialogs stack: act in the top one by naming it, `getByRole('dialog', { name: 'Delete note' }).getByRole('button', { name: 'Delete' })` (a bare `Delete` matches every row's button too), and close them one at a time: Escape must close only the top layer and leave the form under it as it was.
 
 ## Server-boundary probes (no secrets read)
 A limit the page enforces is not proof the server does: `max`, `required`, a `<select>` list and a disabled button stop a value before it is sent. Test the server in this order; `curl` carries no sign-in and the guard denies a write sent with `eval`.
