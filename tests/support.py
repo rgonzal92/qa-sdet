@@ -25,11 +25,20 @@ FIX = ROOT / "tests/fixture-src"
 
 def load_hook(name, path=ROOT / "hooks/guard.py"):
     """A hook script (the guard by default) as a fresh module named `name`, registered in sys.modules as an import
-    would. SourceFileLoader.load_module, which this replaces, is gone in Python 3.15."""
+    would. SourceFileLoader.load_module, which this replaces, is gone in Python 3.15. The guard's own modules
+    (guard_*.py beside it) are loaded fresh with it: each loaded guard reads the environment of its own test module,
+    and reaches them as its attributes (`g.guard_bash`)."""
+    folder = str(Path(path).resolve().parent)
+    for sibling in Path(folder).glob("guard_*.py"):
+        sys.modules.pop(sibling.stem, None)
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    sys.path.insert(0, folder)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.remove(folder)
     return mod
 
 

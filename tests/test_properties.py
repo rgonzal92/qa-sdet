@@ -111,7 +111,7 @@ else:
         """LibMirrorsGuard's hand-picked URLs, generated: lib's url_allowed (session-check, dispatch, api-probe) must
         decide as the guard's host_ok does, for http(s)."""
 
-        guard = load_hook("guard_properties")
+        guard = load_hook("guard_properties").guard_paths
 
         @given(URLS)
         def test_lib_and_guard_agree(self, url):

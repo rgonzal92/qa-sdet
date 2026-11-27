@@ -243,7 +243,7 @@ def classify(data, recs):
     cmd = " ".join(str(tin.get("command") or "").split())
     ok = data.get("hook_event_name") != "PostToolUseFailure"
     calls = PW_CALL.findall(cmd)
-    # never the text: it can hold a typed value (guard.call_key: the request line's key, so the trace pairs the two)
+    # never the text: it can hold a typed value (guard_log.call_key: the request line's key, so the trace pairs the two)
     key = hashlib.sha1(cmd.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:12]
     ran = " ".join(pw or f"qa-mem:{mem}" for pw, mem in VERBS.findall(cmd)[:12])
     verbs = {"v": ran} if ran else {}
@@ -289,20 +289,24 @@ def replay(recs):
     return spin, fails, given
 
 
-def slow_word(guard, data):
+def slow_word(data):
     """What kept the guard from approving this Bash call, so that Claude Code's own permission check ran (a program
     such as `jq`, or a shape such as a loop): None for an approved or a denied call."""
+    import guard_bash
+    import guard_log
+    import guard_paths
+
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     if data.get("tool_name") != "Bash":
         return None
-    cmd, cwd = guard.clean(tin.get("command") or ""), guard._cwd(data)
-    ctx = guard.Ctx(cwd, True, cmd)
-    if guard.check(cmd, cwd, ctx) or (ctx.approve and ctx.segments) or not ctx.blocker:
+    cmd, cwd = guard_paths.clean(tin.get("command") or ""), guard_paths.cwd_of(data)
+    ctx = guard_bash.Ctx(cwd, True, cmd)
+    if guard_bash.check(cmd, cwd, ctx) or (ctx.approve and ctx.segments) or not ctx.blocker:
         return None
-    return guard.blocker_word(ctx.blocker)
+    return guard_log.blocker_word(ctx.blocker)
 
 
-def cases_done(guard, data, m):
+def cases_done(data, m):
     """The explorer wrote this run's <run>/.data/run-<slug>.json: it does so once its given cases are done, so the
     trace's time after this line is what the run spent beyond them."""
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
@@ -310,23 +314,26 @@ def cases_done(guard, data, m):
     if data.get("tool_name") != "Write" or not isinstance(f, str) or not (m.get("run_dir") and m.get("slug")):
         return False
     want = os.path.join(str(m["run_dir"]), ".data", f"run-{m['slug']}.json")
-    return os.path.realpath(os.path.join(guard._cwd(data), guard.clean(f))) == os.path.realpath(want)
+    import guard_paths
+
+    return os.path.realpath(os.path.join(guard_paths.cwd_of(data), guard_paths.clean(f))) == os.path.realpath(want)
 
 
 def run_feedback(data, who):
     """Count this call in the run's progress file, then: the same failing call repeated, or a spin."""
     sys.path.insert(0, HERE)
-    import guard
+    import guard_bash
+    import guard_paths
 
-    path, m = guard.read_marker(guard._cwd(data))
+    path, m = guard_paths.read_marker(guard_paths.cwd_of(data))
     if not path:
         return None
     state, expires = path.with_name(".active.progress"), m.get("expires")
     recs = read_progress(state, expires)
     rec = classify(data, recs) | {"ts": round(time.time(), 3)}
     if data.get("tool_use_id"):
-        rec["id"] = guard.clean(data["tool_use_id"])[:64]
-    if cases_done(guard, data, m):
+        rec["id"] = guard_paths.clean(data["tool_use_id"])[:64]
+    if cases_done(data, m):
         rec["f"] = "run"
     append_progress(state, expires, rec)
     spin, fails, given = replay(recs + [rec])
@@ -363,12 +370,12 @@ def run_feedback(data, who):
                 "slug": m.get("slug"),
             },
         )
-    word = slow_word(guard, data)
+    word = slow_word(data)
     if word and f"slow:{word}" not in given:
         notes.append(
             "qa-sdet: a click on a control named Delete or Remove is never approved at once: Claude Code's own "
             "permission check decides it (about 5 s)."
-            if word == guard.RISKY_WORD
+            if word == guard_bash.RISKY_WORD
             else f"qa-sdet: `{word}` sent that call to Claude Code's own permission check (about 5 s, against under 1 "
             "for an approved call). Approved at once: `playwright-cli`, `qa-mem` and `sleep` up to 30, joined by `;` or "
             "`&&` and piped into `grep`, `head`, `tail`, `sed -n 'N,Mp'`, `cut`, `sort`, `uniq`, `wc`, `tr` or `awk`, "

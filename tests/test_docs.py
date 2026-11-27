@@ -205,10 +205,10 @@ class Docs(unittest.TestCase):
                     self.assertEqual(ev(""), (None, True), cmd)
                     self.assertIn("coordinator", ev("qa-sdet:qa-explorer")[0] or "", cmd)  # they set the run marker
                     self.assertIn(
-                        "host", g.check("playwright-cli -s=qa goto /form", str(proj))
+                        "host", g.guard_bash.check("playwright-cli -s=qa goto /form", str(proj))
                     )  # a bare path has no host
                     self.assertIn(
-                        "--faults", g.check("playwright-cli -s=qa route '**/api/*'", str(proj))
+                        "--faults", g.guard_bash.check("playwright-cli -s=qa route '**/api/*'", str(proj))
                     )  # also with no run
 
     def test_inbox_command_passes_a_custom_jql_whole(self):  # doctor's own example broke the double-quoted --jql
@@ -317,7 +317,7 @@ class Docs(unittest.TestCase):
             (proj / "qa-out/run/.data").mkdir(parents=True)
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                self.assertIsNone(g.check(cmd.replace("/p/", f"{proj}/"), str(proj), explorer=True), cmd)
+                self.assertIsNone(g.guard_bash.check(cmd.replace("/p/", f"{proj}/"), str(proj), explorer=True), cmd)
 
     def test_the_broken_output_probe_sees_fixed_elements_and_the_explorer_runs_it(self):
         """D#3: the probe was never called, and `offsetParent` is null for every position: fixed toast and modal."""
@@ -345,7 +345,7 @@ class Docs(unittest.TestCase):
             g, env = load_guard(os.path.realpath(d))
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                self.assertIsNone(g.check(probe, os.path.realpath(d), explorer=True), probe[:80])
+                self.assertIsNone(g.guard_bash.check(probe, os.path.realpath(d), explorer=True), probe[:80])
 
     def test_the_browser_condition_recipes_pass_the_guard_and_the_fixtures_are_the_ones_named(self):
         """Narrow window, dark mode, dirty-form dialog and uploads: every command the tips give is allowed to the explorer,
@@ -379,7 +379,7 @@ class Docs(unittest.TestCase):
                         .replace("<refs>", str(ROOT / "references"))
                         .replace("<the width> <the height>", "1280 800")
                     )
-                    self.assertIsNone(g.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
+                    self.assertIsNone(g.guard_bash.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
         self.assertIn("Never `dialog-accept`", section)
         self.assertIn("FOCUS:", section.split("**Dark mode**")[1].split("**Unsaved edits**")[0])
         self.assertIn("Browser conditions", text("agents/qa-explorer.md"))
@@ -416,7 +416,7 @@ class Docs(unittest.TestCase):
                         for mark, value in fill.items():
                             cmd = cmd.replace(mark, value)
                         self.assertNotIn("<", cmd.split("--raw eval")[0], cmd)  # every placeholder has a stand-in here
-                        self.assertIsNone(g.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
+                        self.assertIsNone(g.guard_bash.check(cmd, os.path.realpath(d), explorer=True), cmd[:120])
         self.assertIn(
             "tab-select 0", tips.split("## Second tab or popup")[1].split("\n## ")[0]
         )  # back to the first tab
@@ -456,7 +456,7 @@ class Docs(unittest.TestCase):
             g, env = load_guard(os.path.realpath(d))
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)
-                self.assertIsNone(g.check(cmd, os.path.realpath(d)), cmd)
+                self.assertIsNone(g.guard_bash.check(cmd, os.path.realpath(d)), cmd)
 
     def test_no_mcp_fallback_and_no_assumed_browser(self):
         for f in DOCS:
@@ -661,7 +661,7 @@ class Docs(unittest.TestCase):
         self.assertLessEqual(tools, g.EXPLORER_TOOLS)
         self.assertNotIn("Agent", tools)
         for name in re.findall(r"`<out>/(bugs|repro|evidence|\.data)/([^`]+)`", text("agents/qa-explorer.md")):
-            self.assertIn(name[0], g.EXPLORER_FILES)
+            self.assertIn(name[0], g.guard_paths.EXPLORER_FILES)
 
     def test_leftover_test_data_line_is_the_one_the_report_reads(self):
         explorer = text("agents/qa-explorer.md")
@@ -699,7 +699,7 @@ class Docs(unittest.TestCase):
         hooks = json.loads(text("hooks/hooks.json"))["hooks"]
         self.assertNotIn("qa-crawler", hooks["SubagentStop"][0]["matcher"])
         self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
-        for f in ALL + [ROOT / "hooks/guard.py", ROOT / "hooks/posttooluse.py"]:
+        for f in ALL + sorted((ROOT / "hooks").glob("*.py")):
             self.assertNotIn("qa-crawler", f.read_text(), f.name)
 
     def test_the_explorer_stops_on_every_page_start_blocker(self):  # found live: it reached a 404 target via goto
@@ -820,13 +820,13 @@ class Docs(unittest.TestCase):
     def test_plugin_log_and_feedback_skill_match_code(self):
         self.assertIn("plugin-log", usage.COMMANDS)
         self.assertTrue((ROOT / "skills/qa-feedback/SKILL.md").is_file())
-        for rel in ("README.md", "skills/qa-setup/SKILL.md", "hooks/guard.py", "hooks/denied.py"):
+        for rel in ("README.md", "skills/qa-setup/SKILL.md", "hooks/guard_log.py", "hooks/denied.py"):
             self.assertNotIn("guard-denials.log", text(rel), rel)
             self.assertIn("plugin-log.jsonl", text(rel), rel)
         self.assertIn("pluginLog", text("README.md"))
         with tempfile.TemporaryDirectory() as d:
             g, env = load_guard(os.path.realpath(d))
-            self.assertIn("plugin-log", g.MANUAL_WRITES)
+            self.assertIn("plugin-log", g.guard_bash.guard_tools.MANUAL_WRITES)
             proj = Path(os.path.realpath(d)) / "proj"
             proj.mkdir()
             with mock.patch.dict(os.environ, env):

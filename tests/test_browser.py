@@ -124,7 +124,7 @@ class PlaywrightCli(BrowserBase):
     def test_the_snapshot_the_browser_tool_saves_names_a_ref_for_the_guard(self):
         """The guard holds back a click on a ref a saved snapshot names Delete or Remove (guard.ref_label): this is the
         file it reads and the line it expects, as the browser tool writes them."""
-        guard = load_hook("guard_browser")
+        guard = load_hook("guard_browser").guard_bash
         self.open("/notes.html")
         self.pw("click", "getByRole('button', { name: 'Add note' })")
         self.pw("fill", "getByLabel('Name')", "qa-sdet-n1")
