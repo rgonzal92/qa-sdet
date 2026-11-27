@@ -1,9 +1,14 @@
 """What memory says is untested or risky: `gaps`, `blindspots`, `hotspots`, `history` and a page's entry chain."""
 
+from __future__ import annotations
+
 import json
-from types import SimpleNamespace
 
 from . import cards, codemap, core
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:  # NOSONAR
+    import sqlite3
 
 
 def _unrechecked_fixed(con, route, build):
@@ -73,7 +78,21 @@ def _pages_with_forms(con, bound):
     return forms
 
 
-def _ranked_page(ctx, pg):
+@core.record
+class Survey:
+    """What `gaps` reads once for every page, before it ranks each one."""
+
+    con: sqlite3.Connection
+    current: str | None  # the build memory has as the current one; None: no run has read it yet
+    bound: dict[str, tuple[str, str]]  # {shell route: (module id, module page)}: codemap.module_bindings
+    changed: dict[str, list[str]]  # {page: its source files a commit touched since its last visit}
+    changed_only: bool  # only the pages whose source changed are wanted
+    forms: set[str]  # the pages with something to submit
+    hot: dict[str, int]  # {page: its hotspot score, from its bug history}
+    regressed: set[str]  # the pages with a bug that regressed
+
+
+def _ranked_page(ctx: Survey, pg):
     """[(sort key, text line, JSON entry)] for one page; [] when only changed pages are wanted and its source did not change."""
     ranked = []
     r, b = pg["route"], ctx.current or pg["build"]
@@ -179,12 +198,12 @@ def gaps(con, changed_only=False, top=None, as_json=False):
     regressed = {p for (p,) in con.execute("SELECT DISTINCT page FROM bugs WHERE status='REGRESSED'")}
     forms = _pages_with_forms(con, bound)
     ranked = []
-    ctx = SimpleNamespace(
+    ctx = Survey(
+        con=con,
+        current=current,
         bound=bound,
         changed=changed,
         changed_only=changed_only,
-        con=con,
-        current=current,
         forms=forms,
         hot=hot,
         regressed=regressed,
