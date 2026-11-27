@@ -551,6 +551,7 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
             ran_again = lambda cid: cid in given and core.case_status(news[cid].get("status")) not in (None, "NOT_RUN")
             # a PASS of an attempt that ended BLOCKED is not trusted (dispatch gave its cases again): given again and
             # not run, the case has what the new file says of it, or no result
+            # shortcut: a case held back by hand (--cases) keeps that PASS, drop it too once a skill holds one back
             redo = {
                 cid
                 for cid, c in olds.items()
