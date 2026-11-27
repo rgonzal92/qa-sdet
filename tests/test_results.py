@@ -96,6 +96,7 @@ class Verdict(unittest.TestCase):
             v("T-1", "[blocking] no number here"),
             ("PASS WITH NOTES", "1 open blocking question"),  # its text is in What to do
         )
+        self.assertEqual(v("T-1", "[blocking] no number here", "[BLOCKING] nor here")[1], "2 open blocking questions")
         # it is named first, so the pass draft's Notes line never cuts it off
         busy = [self.case(f"TC-{i}", "QUESTION") for i in range(1, 5)]
         self.assertTrue(v("T-1", both, cs=busy)[1].startswith("Q1 open blocking question; TC-1 open question"))
@@ -150,6 +151,8 @@ class Verdict(unittest.TestCase):
             v("T-1", [self.case("TC-1", "NOT_RUN", route="/list")], []),
             ("BLOCKED", "TC-1 not run: no result reported for /list"),
         )
+        said = self.case("TC-1", "NOT_RUN", route="/list", actual="Not testable: faults are off")
+        self.assertEqual(v("T-1", [said], []), ("BLOCKED", "TC-1 not run"))  # what it saw is a result too
         # a re-sighted known bug (hash, no draft) says so
         self.assertEqual(
             v(
@@ -243,6 +246,39 @@ class Verdict(unittest.TestCase):
         self.assertEqual(results.verdict("T-1", cases, [], results.Testing(runs=[("list", other)]))[0], "PASS")
         incomplete = {**blocked, "status": "INCOMPLETE"}  # budget ran out after the cases: they stand
         self.assertEqual(results.verdict("T-1", cases, [], results.Testing(runs=[("form", incomplete)]))[0], "PASS")
+
+    def test_a_blocked_ticket_names_two_reasons_and_counts_the_rest(self):  # mutation testing: the cut was unchecked
+        silent = {"target": "/form", "status": "BLOCKED", "cases": []}  # a run that gave no summary
+        testing = results.Testing(runs=[("form", silent)])
+        passed = [self.case("TC-3", "PASS")]
+        self.assertEqual(results.verdict("T-1", passed, [], testing), ("BLOCKED", "the run on /form ended BLOCKED"))
+        stuck = [self.case("TC-1", "BLOCKED"), self.case("TC-2", "NOT_RUN", notes="time")]
+        self.assertEqual(
+            results.verdict("T-1", stuck + passed, [], testing), ("BLOCKED", "TC-1 blocked; TC-2 not run; +1 more")
+        )
+        unread = results.Testing(unread=["run-a.json", "run-b.json", "run-c.json"])
+        self.assertEqual(
+            results.verdict("T-1", passed, [], unread),
+            (
+                "BLOCKED",
+                "run-a.json unreadable: its results are not counted; "
+                "run-b.json unreadable: its results are not counted; +1 more",
+            ),
+        )
+
+    def test_a_case_marked_prior_counts_only_as_a_pass_not_re_run_here(self):  # mutation testing: the mark was unread
+        kept = self.case("TC-2", "PASS", prior=True, build="1.42")
+        cases = [self.case("TC-1", "PASS"), kept]
+        self.assertEqual(results.verdict("T-1", cases, []), ("PASS", "all 1 cases passed"))  # not one of this run's
+        self.assertEqual(
+            results.verdict("T-1", cases, [], results.Testing(prior_passed=[kept])),
+            ("PASS WITH NOTES", "1 case verified on prior build 1.42; not re-run here"),
+        )
+        older = self.case("TC-3", "PASS", prior=True, build="1.41")
+        self.assertEqual(
+            results.verdict("T-1", [*cases, older], [], results.Testing(prior_passed=[kept, older]))[1],
+            "2 cases verified on prior build 1.41, 1.42; not re-run here",
+        )
 
     def test_severity_and_classification_read_by_their_first_word(self):  # "Confirmed (2/2)" was no CONFIRMED
         cases = [self.case("TC-1", "PASS")]
