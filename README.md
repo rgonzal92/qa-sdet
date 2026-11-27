@@ -237,6 +237,8 @@ make check          # the routine gate: lint, typecheck, test, test-runtime, val
 | `make architecture` | import boundaries (the guard imports nothing from `lib/`) and lib's copy of the guard's host rules |
 | `make mutation` | a bounded mutmut trial on the redactor, the host rules and the verdict (`MUTANTS=...` to choose); a few minutes |
 
+**Layout:** `.claude/CLAUDE.md` ("Module map") lists each `lib/qa_sdet/` module with the commands it owns; `tests/test_docs.py` keeps that list in step with the files and with the order they import each other in.
+
 Dead-code check (by hand, not a gate): `uv run --group analysis vulture lib/qa_sdet hooks bin/qa-mem --min-confidence 60`. A long property run: `HYPOTHESIS_PROFILE=extended make test`.
 
 Without `make` or uv, the suite still runs as before: `python3 -m unittest discover -s tests` (property tests skip).

@@ -63,7 +63,8 @@ class Docs(unittest.TestCase):
             ):  # run outputs and the user's qa-rules.md are not plugin files
                 if name not in ("REPORT.md", "INBOX.md", "qa-rules.md", "plugin-digest-YYYY-MM-DD.md"):
                     self.assertTrue(
-                        any((ROOT / d / name).exists() for d in ("references", "agents", ".")), f"{f.name}: {name}"
+                        any((ROOT / d / name).exists() for d in ("references", "agents", ".", ".claude")),
+                        f"{f.name}: {name}",
                     )
             for link in re.findall(r"\]\(([^)#<>\s]+)\)", body):
                 self.assertTrue(link.startswith("http") or (f.parent / link).exists(), f"{f.name}: {link}")
@@ -843,6 +844,21 @@ class Docs(unittest.TestCase):
                         }
                     )[0]
                 )
+
+    def test_the_module_map_names_every_module_below_the_ones_it_imports(self):
+        import ast
+
+        doc = text(".claude/CLAUDE.md")
+        self.assertIn("## Module map", doc)
+        section = doc.split("## Module map")[1]
+        listed = re.findall(r"^- `(\w+)`:", section, re.M)
+        self.assertEqual(sorted(listed), sorted(p.stem for p in (ROOT / "lib/qa_sdet").glob("[!_]*.py")))
+        for i, name in enumerate(listed):  # imports that run as the module loads; a function may import any module
+            top = ast.parse(text(f"lib/qa_sdet/{name}.py")).body
+            needs = {n.module or a.name for n in top if isinstance(n, ast.ImportFrom) and n.level for a in n.names}
+            self.assertEqual(needs - set(listed[:i]), set(), f"{name} imports a module the map lists below it")
+        for hook in (ROOT / "hooks").glob("*.py"):
+            self.assertIn(f"`{hook.stem}`", section)
 
 
 if __name__ == "__main__":
