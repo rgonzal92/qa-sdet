@@ -10,7 +10,7 @@ from unittest import mock
 
 from support import PLAN, PLAN1, PLAN1_ANSWERED, RUN1, RUN_FORM, RUN_LIST, Base, Rendering, cli, spacing_problems
 
-from qa_sdet import cards, core, inbox, ingest, report
+from qa_sdet import cards, core, inbox, ingest, report, report_blocks
 
 
 class Report(Base):
@@ -356,15 +356,15 @@ class Report(Base):
             {"id": "TC-1", "route": "/a", "status": "PASS", "actual": "", "notes": ""},
             {"id": "TC-2", "route": "/b", "status": "PASS", "actual": "", "notes": "", "priority": "P1"},
         ]
-        self.assertIn("\n  Page: /a\n", report._case_item(cases[0], "/x", True))  # in the case's fold
-        self.assertIn("\n  Page: /b · priority P1\n", report._case_item(cases[1], "/x", False))
+        self.assertIn("\n  Page: /a\n", report_blocks.case_item(cases[0], "/x", True))  # in the case's fold
+        self.assertIn("\n  Page: /b · priority P1\n", report_blocks.case_item(cases[1], "/x", False))
 
     def test_header_browser_comes_from_the_runs(self):
         plan = {"kind": "ticket", "env": {"url": "https://qa", "browser": "chrome"}}
         runs = [("run-form.json", {"env": {"url": "https://qa/form", "browser": "firefox"}})]
-        self.assertEqual(report._env_line(plan, runs), "https://qa · browser firefox")
-        self.assertEqual(report._env_line(plan, []), "https://qa · browser chrome")
-        self.assertEqual(report._env_line({}, []), "")
+        self.assertEqual(report_blocks._env_line(plan, runs), "https://qa · browser firefox")
+        self.assertEqual(report_blocks._env_line(plan, []), "https://qa · browser chrome")
+        self.assertEqual(report_blocks._env_line({}, []), "")
 
     def test_header_says_what_the_runs_ran_as(self):  # a tenant or role changes what a page shows
         runs = [
@@ -375,8 +375,8 @@ class Report(Base):
                 {"env": {"url": "https://qa/c", "browser": "chrome", "context": "site South;\nrole viewer"}},
             ),
         ]
-        self.assertEqual(report._ran_as(runs), "as site North; role editor / site South; role viewer")
-        self.assertEqual(report._ran_as(runs[:0]), "")
+        self.assertEqual(report_blocks.ran_as(runs), "as site North; role editor / site South; role viewer")
+        self.assertEqual(report_blocks.ran_as(runs[:0]), "")
         d = self.rundir("2026-11-23-T", plan=PLAN1, runs=[(n[4:-5], {**RUN1, **r}) for n, r in runs])
         self.assertIn(" · as site North; role editor / site South; role viewer\n", report.render_report(d))
 

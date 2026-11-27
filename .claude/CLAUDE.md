@@ -38,7 +38,9 @@ Run folder
 - `results`: plan and run files merged into cases, bugs, questions and the verdict
 - `audit`: `audit-bugs`, the explorer's stop check
 - `signals`: `signals-triage`, `body-check`
-- `report`: `report` (REPORT.md, the Jira comment, the run index)
+- `report_blocks`: the pieces of REPORT.md (a case, an AC's results, a bug's entry, the checks before posting, notes, history)
+- `report_jira`: the Jira comment
+- `report`: `report` (REPORT.md assembled section by section, the run index)
 - `runstate`: `plan-find`, `next-action`, `explore-next`
 - `inbox`: `inbox`, `prep`, `trace`
 

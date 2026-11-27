@@ -6,7 +6,7 @@ import unittest
 
 from support import PLAN1, PLAN1_ANSWERED, RUN1, Base, Rendering
 
-from qa_sdet import report, results, runstate
+from qa_sdet import report, report_blocks, results, runstate
 
 
 class Verdict(unittest.TestCase):
@@ -131,7 +131,7 @@ class Verdict(unittest.TestCase):
         t = {"key": "T-1", "acs": [{"id": "AC-1"}, {"id": "AC-2"}, {"id": "AC-3", "text": "x"}]}
         two = [self.case("TC-1", "PASS", ac="AC-1, AC-2")]
         self.assertEqual(v(t, two, []), ("PASS WITH NOTES", "AC-3 has no test case"))
-        blocks = report._results(t, two, "/x", True, 3)
+        blocks = report_blocks.ac_results(t, two, "/x", True, 3)
         self.assertEqual(
             [b for b in blocks if b.startswith("#")],
             ["### AC-1: PASS", "### AC-2: PASS", "### AC-3 x: not covered by a case"],
@@ -181,7 +181,7 @@ class Verdict(unittest.TestCase):
             "TC-12", "NOT_RUN", actual="Not testable: faults are off", notes="The 0 seen comes from the 404"
         )
         self.assertEqual(results.verdict("T-1", [stuck], [])[1], "TC-12 not run")
-        item = report._case_item({**stuck, "title": "t"}, "/x", True)
+        item = report_blocks.case_item({**stuck, "title": "t"}, "/x", True)
         self.assertTrue(
             item.startswith("- **TC-12 t: NOT RUN.** Not testable: faults are off. Notes: The 0 seen"), item
         )

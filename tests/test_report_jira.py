@@ -7,7 +7,7 @@ from unittest import mock
 
 from support import PLAN, PLAN1, PLAN1_ANSWERED, RUN1, RUN_FORM, TEMPLATES, Rendering, cli
 
-from qa_sdet import core, inbox, ingest, report, results, runstate
+from qa_sdet import core, inbox, ingest, report, report_jira, results, runstate
 
 
 class JiraDraft(Rendering):
@@ -196,13 +196,13 @@ class JiraDraft(Rendering):
         self.assertIn("Fixed: Speed no longer accepts 131.\n", draft)
 
     def test_release_names_fill_the_version(self):
-        self.assertEqual(report._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
-        self.assertEqual(report._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
+        self.assertEqual(report_jira._release_names(["A-{version}"], "3.5"), (["A-3.5.0"], ""))
+        self.assertEqual(report_jira._release_names(["A-{version}"], "3.5.1"), (["A-3.5.1"], ""))
         self.assertEqual(
-            report._release_names(["A-{version}"], None)[1],
+            report_jira._release_names(["A-{version}"], None)[1],
             "the ticket has no single fix version (plan.json fix_version)",
         )
-        self.assertEqual(report._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
+        self.assertEqual(report_jira._release_names("x", "3.5")[1], "set releaseTemplates in the qa-sdet config")
 
     def test_round2_report_resilience_types_and_prefixes(self):
         # M2: broken symlink and deeply nested run JSON do not crash report or index
