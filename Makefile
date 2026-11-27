@@ -87,6 +87,6 @@ mutation: ## bounded mutation trial; mutmut only knows ./, src/, source/, so it 
 	work=$$(mktemp -d) && echo "mutation work dir: $$work" && \
 	git ls-files -co --exclude-standard -z | tar --null -T - -cf - | tar -xf - -C "$$work" && \
 	mv "$$work/lib" "$$work/src" && \
-	sed -i 's|ROOT / "lib"|ROOT / "src"|' "$$work/tests/support.py" "$$work/tests/test_guard.py" && \
+	sed -i 's|ROOT / "lib"|ROOT / "src"|' "$$work/tests/support.py" "$$work/tests/guard_support.py" "$$work/tests/test_guard.py" && \
 	cd "$$work" && HYPOTHESIS_PROFILE=mutation "$(CURDIR)/$(BIN)/mutmut" run $(foreach m,$(MUTANTS),'$(m)') && \
 	"$(CURDIR)/$(BIN)/mutmut" results

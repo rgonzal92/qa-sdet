@@ -54,7 +54,7 @@ known-first-party = ["qa_sdet", "guard"]
 section-order = ["future", "standard-library", "third-party", "test-support", "first-party", "local-folder"]
 
 [tool.ruff.lint.isort.sections]
-"test-support" = ["support"]  # tests/support.py puts lib/ on sys.path: it must be imported before qa_sdet
+"test-support" = ["support", "guard_support"]  # they put lib/ on sys.path: imported before qa_sdet
 
 [tool.ruff.lint.per-file-ignores]
 # reviewed 2026-11-25: only module constants and generated "?" placeholders are interpolated into SQL here

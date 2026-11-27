@@ -10,7 +10,7 @@ description = "Synthetic secrets in the tests of the redactor, the guard, the pl
 paths = [
     '''^tests/test_(scrub|guard|plugin_log|codemap|report|scan|inbox|memory)\.py$''',
     # 2026-11-27: one planted value each, moved unchanged out of test_memory and test_report when those were split
-    '''^tests/test_(ingest_pending|signals)\.py$''',
+    '''^tests/test_(ingest_pending|signals|guard_approval)\.py$''',  # guard_approval: out of test_guard, same day
     '''^tests/test_qa_mem\.py$''',  # deleted; still in history
     '''^tests/fixture-src/frontend/src/api/client\.js$''',  # "fake, planted: must never reach the memory DB in clear"
 ]
