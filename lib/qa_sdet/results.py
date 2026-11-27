@@ -334,6 +334,28 @@ def blocked_runs(cases, runs):
     ]
 
 
+def _failed_reason(fails):
+    """One entry for the failed cases: the case and its AC, or how many failed and on which ACs; [] for none."""
+    if len(fails) == 1:
+        c = fails[0]
+        failed = [f"{c['id']} failed" + (f" ({c['ac']})" if c.get("ac") else "")]
+    else:  # several: one entry naming them all
+        acs = sorted(
+            {a for c in fails for a in case_acs(c)},
+            key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)],
+        )
+        ids = [c["id"] for c in fails]
+        failed = (
+            [
+                f"{len(ids)} cases failed ({', '.join(ids[:6])}{f', +{len(ids) - 6}' if len(ids) > 6 else ''})"
+                + (f" on {', '.join(acs)}" if acs else "")
+            ]
+            if fails
+            else []
+        )
+    return failed
+
+
 def verdict(
     ticket: str | JsonObj,
     cases: list[JsonObj],
@@ -365,23 +387,7 @@ def verdict(
     )
     unsure = [c for c in cases if key in c.get("id_tickets", ())]  # its result may be another plan case's
     fails = [c for c in mine if st(c) == "FAIL" and c not in unsure]
-    if len(fails) == 1:
-        c = fails[0]
-        failed = [f"{c['id']} failed" + (f" ({c['ac']})" if c.get("ac") else "")]
-    else:  # several: one entry naming them all
-        acs = sorted(
-            {a for c in fails for a in case_acs(c)},
-            key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)],
-        )
-        ids = [c["id"] for c in fails]
-        failed = (
-            [
-                f"{len(ids)} cases failed ({', '.join(ids[:6])}{f', +{len(ids) - 6}' if len(ids) > 6 else ''})"
-                + (f" on {', '.join(acs)}" if acs else "")
-            ]
-            if fails
-            else []
-        )
+    failed = _failed_reason(fails)
     serious = [_bug_word(b) for b in its_bugs if is_serious(b)]
     if failed or serious:
         return "FAIL", _some(failed + serious)

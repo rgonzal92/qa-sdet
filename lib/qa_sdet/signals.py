@@ -324,6 +324,35 @@ def sweep_bodies(run_dir, slug):
     return {"checked": checked, "gone": gone, "unread": unread, "why": why, "left": left}
 
 
+def _probes(data, slug):
+    """The requests `qa-mem api-probe` sent in this run ([method, url, status]), and the URLs of those that failed."""
+    probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (probe._note_probe): the explorer's own
+    for line in results.read_text(data / f"probes-{slug}.jsonl").splitlines():
+        try:
+            p = json.loads(line)
+            probes.append([str(p["method"]), scrub.redact(str(p["url"])), str(p["status"])])
+        except (ValueError, KeyError, TypeError):
+            continue
+    probe_failed = {url for _, url, status in probes if status == "FAILED"}  # the console names these too
+    return probes, probe_failed
+
+
+def _console_errors(data, slug, probe_failed, found):
+    """Counts the console errors of the run in `found`; one that names a failed probe's URL is the explorer's own."""
+    for line in scrub.redact(results.read_text(data / f"console-{slug}.log")).splitlines():
+        if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
+            continue  # blank, stack lines, headers
+        level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
+        msg = re.sub(r"\s+@\s+\S*$", "", line[level.end() :] if level else line).strip()  # " @ <source>:1"
+        if any(url in msg for url in probe_failed):  # a probe the browser refused (CORS): its own error message
+            continue
+        if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
+            leaks = "".join(
+                f" [leak: {label}]" for label, rx in LEAKS if rx.search(msg)
+            )  # the server's own words in the page
+            found.setdefault(f"console: {msg}{leaks}", [msg[:60], 0, None])[1] += 1
+
+
 def triage_signals(run_dir, slug, run, hosts=None):
     """{"app": [(signal, count, first request index or None)], "third_party": count, "suspect_200": [(call, index)],
     "unchecked": [(index, method, path)] (every call whose body nobody has read yet, for `body-check --all`)} from
@@ -341,14 +370,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
     names, gone, unchecked = _body_ops(data, slug), _body_gone(data, slug), []
-    probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (probe._note_probe): the explorer's own
-    for line in results.read_text(data / f"probes-{slug}.jsonl").splitlines():
-        try:
-            p = json.loads(line)
-            probes.append([str(p["method"]), scrub.redact(str(p["url"])), str(p["status"])])
-        except (ValueError, KeyError, TypeError):
-            continue
-    probe_failed = {url for _, url, status in probes if status == "FAILED"}  # the console names these too
+    probes, probe_failed = _probes(data, slug)
     for line in scrub.redact(results.read_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
@@ -390,18 +412,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     for (method, shape), (n, index) in calls.items():
         if n >= STORM_CALLS:
             found[f"{method} {shape} ×{n} (the same call {n} times: a request loop?)"] = [(method, shape), 1, index]
-    for line in scrub.redact(results.read_text(data / f"console-{slug}.log")).splitlines():
-        if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
-            continue  # blank, stack lines, headers
-        level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
-        msg = re.sub(r"\s+@\s+\S*$", "", line[level.end() :] if level else line).strip()  # " @ <source>:1"
-        if any(url in msg for url in probe_failed):  # a probe the browser refused (CORS): its own error message
-            continue
-        if msg and not msg.startswith("Failed to load resource:") and (not level or level.group(1).upper() == "ERROR"):
-            leaks = "".join(
-                f" [leak: {label}]" for label, rx in LEAKS if rx.search(msg)
-            )  # the server's own words in the page
-            found.setdefault(f"console: {msg}{leaks}", [msg[:60], 0, None])[1] += 1
+    _console_errors(data, slug, probe_failed, found)
     drafts = "".join(map(results.read_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))
     named = (json.dumps(run, ensure_ascii=False) + drafts).lower()  # a console message: any mention in the run
     # a failed request: bugs, notes, non-PASS cases and drafts only; a passing fact or locator that mentions the path

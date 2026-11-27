@@ -79,24 +79,8 @@ def load_scan(cm, f):
     return scan
 
 
-def apply_codemap(con, cm, scan, ts=None):
-    """Upsert the rows of a code map (a qa-mapper's, or one built in memory like the shell menu's), using its scan for
-    the repos, commits and which files were read. Rows from re-read or deleted files replace their old rows. A map
-    whose rows don't fit the scan (wrong repo or file paths) is rejected, so the mapper is told and nothing is lost.
-    Returns {reason: count} of the rows dropped."""
-    ts = ts or core.now()
-    area = cm.get("area")
-    repos = {}
-    for r in scan.get("repos") or []:
-        path = r.get("path") if isinstance(r, dict) else None
-        if isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path):
-            repos[os.path.realpath(path)] = {**r, "files": core.strs(r, "files"), "deleted": core.strs(r, "deleted")}
-    rows = core.dicts(cm, "rows")
-    for x in rows:
-        for fld in ("page", "kind", "label", "value", "file", "repo"):
-            core.txt(x.get(fld), f"rows.{fld}")
-    with_files = [p for p, r in repos.items() if r.get("files")]
-    read = {path: set(r.get("files") or []) for path, r in repos.items()}
+def _placeable_rows(rows, with_files, repos, read, area):
+    """(rows that can be stored, each with its repo, kind, label and source file; {why dropped: count})."""
     kept, dropped = [], {}
     for x in rows:
         raw_repo = str(x.get("repo") or "").rstrip("/")
@@ -127,6 +111,28 @@ def apply_codemap(con, cm, scan, ts=None):
             dropped[why] = dropped.get(why, 0) + 1
         else:
             kept.append((x, repo, kind, label, src))
+    return kept, dropped
+
+
+def apply_codemap(con, cm, scan, ts=None):
+    """Upsert the rows of a code map (a qa-mapper's, or one built in memory like the shell menu's), using its scan for
+    the repos, commits and which files were read. Rows from re-read or deleted files replace their old rows. A map
+    whose rows don't fit the scan (wrong repo or file paths) is rejected, so the mapper is told and nothing is lost.
+    Returns {reason: count} of the rows dropped."""
+    ts = ts or core.now()
+    area = cm.get("area")
+    repos = {}
+    for r in scan.get("repos") or []:
+        path = r.get("path") if isinstance(r, dict) else None
+        if isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path):
+            repos[os.path.realpath(path)] = {**r, "files": core.strs(r, "files"), "deleted": core.strs(r, "deleted")}
+    rows = core.dicts(cm, "rows")
+    for x in rows:
+        for fld in ("page", "kind", "label", "value", "file", "repo"):
+            core.txt(x.get(fld), f"rows.{fld}")
+    with_files = [p for p, r in repos.items() if r.get("files")]
+    read = {path: set(r.get("files") or []) for path, r in repos.items()}
+    kept, dropped = _placeable_rows(rows, with_files, repos, read, area)
     path_drops = dropped.get("unknown repo", 0) + dropped.get("file not in the scan", 0)
     if path_drops:  # rows that can't be placed would be lost for good (their files count as read): have them fixed
         bad = sorted({str(x.get("file")) for x in rows if not any(x is k[0] for k in kept)})[:5]

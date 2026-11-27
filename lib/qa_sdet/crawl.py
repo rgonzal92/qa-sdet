@@ -283,18 +283,29 @@ def _check(idx, specs, target=None):
     return (found, invalid, state), None
 
 
+def _summary(rec, n, **more):
+    """Prints the pass's one JSON line (status, stop reason, build, run file, counts); the exit code is 1 when it ended
+    BLOCKED."""
+    d = rec.doc
+    print(
+        json.dumps(
+            {
+                "status": d["status"],
+                "stop_reason": d.get("stop_reason"),
+                "build": d["build"],
+                "run_file": str(rec.file),
+                **n,
+                **more,
+            }
+        )
+    )
+    return 1 if d["status"] == "BLOCKED" else 0
+
+
 # ---------- qa-mem crawl ----------
-def crawl(con, run, routes=()):
-    """`qa-mem crawl <run> [<route>...]`: open each static route (default: every one in the code map) and record which of
-    its mapped locators exist, in the top document and its shown iframes (one found in a frame is saved with that frame
-    in front, core.in_frame), in <run>/.data/run-init-crawl.json. On an app shell's route the locators of the module it
-    mounts are looked for in the frames only: the shell's own document matching one (a button of the same name in the
-    menu bar) says nothing about the module. Prints one JSON line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
-    run = _run_dir(run, "crawl")
-    cfg, hosts = session.qa_config("crawl")
-    base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
-    if not core.url_allowed(base, hosts):
-        raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
+def _crawl_plan(con, routes, base):
+    """(the routes to open, each with its code-map locators, their checks and which are the shown module's; the routes left
+    out, with why). No routes given: every static one in the code map, sign-in and sign-out pages left out."""
     routes_given = bool(routes)
     if routes:
         bad = next(
@@ -329,6 +340,21 @@ def crawl(con, run, routes=()):
             skipped.append(
                 f"{route}: " + (f"{len(locs)} locators, none checkable here" if locs else "no locators in the code map")
             )
+    return plan, skipped
+
+
+def crawl(con, run, routes=()):
+    """`qa-mem crawl <run> [<route>...]`: open each static route (default: every one in the code map) and record which of
+    its mapped locators exist, in the top document and its shown iframes (one found in a frame is saved with that frame
+    in front, core.in_frame), in <run>/.data/run-init-crawl.json. On an app shell's route the locators of the module it
+    mounts are looked for in the frames only: the shell's own document matching one (a button of the same name in the
+    menu bar) says nothing about the module. Prints one JSON line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
+    run = _run_dir(run, "crawl")
+    cfg, hosts = session.qa_config("crawl")
+    base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
+    if not core.url_allowed(base, hosts):
+        raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
+    plan, skipped = _crawl_plan(con, routes, base)
     n = dict(routes=len(plan), loaded=0, locators_checked=0, locators_confirmed=0, unchecked=0)
 
     def walk(rec):
@@ -404,23 +430,42 @@ def crawl(con, run, routes=()):
         }
 
     rec = _session(run, "init-crawl", base, cfg, hosts, walk, page_blocks=False)
-    d = rec.doc
-    print(
-        json.dumps(
-            {
-                "status": d["status"],
-                "stop_reason": d.get("stop_reason"),
-                "build": d["build"],
-                "run_file": str(rec.file),
-                **n,
-                "skipped": len(skipped),
-            }
-        )
-    )
-    return 1 if d["status"] == "BLOCKED" else 0
+    return _summary(rec, n, skipped=len(skipped))
 
 
 # ---------- qa-mem discover ----------
+def _frame_states(frames, rec, path, hosts, found_states):
+    """The page's states plus those of the module an app shell shows in its frames (frames of other hosts left out)."""
+    for f in range(min(frames, MAX_FRAMES)):  # an app shell: the tabs and menus of the module it shows
+        ok, out = pw(["--raw", "eval", FRAME_HARVEST_JS, FRAME.format(f)], EVAL_SECONDS)
+        fh = _parsed(out) if ok else None
+        if fh is None:  # no such frame (hidden, or it went away) is no failure
+            if "does not match any elements" not in out:
+                rec.notes.append(f"{path}: frame {f} failed ({core.short(' '.join(out.split()), 120)})")
+            break
+        # an embedded widget of another host is not the app. The frame's links are left out too: a module's
+        # own URL is no page users open (it may not load alone)
+        if core.url_allowed(f"https://{fh.get('host') or ''}/", hosts):
+            found_states = found_states + (fh.get("states") if isinstance(fh.get("states"), list) else [])
+    return found_states
+
+
+def _page_states(found_states, states):
+    """Fills `states` with the states found on the page, one per kind and trigger; one that deletes or signs out is left out."""
+    for st in found_states:  # a state that deletes or signs out is never opened (the harvester drops it too)
+        if (
+            isinstance(st, list)
+            and len(st) == 2
+            and all(isinstance(x, str) for x in st)
+            and st[1].strip()
+            and not SKIP_LINK_RE.search(st[1])
+        ):
+            states.setdefault(
+                f"{st[0]}: {st[1]}",
+                {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1], "status": "unvisited"},
+            )
+
+
 def discover(run, url=None, depth=2, max_pages=25):
     """`qa-mem discover <run> [<url>] [--depth D] [--max-pages N]`: breadth-first over same-host links from url (default
     qaBaseUrl), one sample per detail pattern, recording each page's states and links in <run>/.data/run-discover.json.
@@ -467,17 +512,7 @@ def discover(run, url=None, depth=2, max_pages=25):
                 continue
             frames = h.get("frames") if isinstance(h.get("frames"), int) else 0
             found_states = h.get("states") if isinstance(h.get("states"), list) else []
-            for f in range(min(frames, MAX_FRAMES)):  # an app shell: the tabs and menus of the module it shows
-                ok, out = pw(["--raw", "eval", FRAME_HARVEST_JS, FRAME.format(f)], EVAL_SECONDS)
-                fh = _parsed(out) if ok else None
-                if fh is None:  # no such frame (hidden, or it went away) is no failure
-                    if "does not match any elements" not in out:
-                        rec.notes.append(f"{path}: frame {f} failed ({core.short(' '.join(out.split()), 120)})")
-                    break
-                # an embedded widget of another host is not the app. The frame's links are left out too: a module's
-                # own URL is no page users open (it may not load alone)
-                if core.url_allowed(f"https://{fh.get('host') or ''}/", hosts):
-                    found_states = found_states + (fh.get("states") if isinstance(fh.get("states"), list) else [])
+            found_states = _frame_states(frames, rec, path, hosts, found_states)
             links, states = [], {}
             for link in h.get("links") if isinstance(h.get("links"), list) else []:
                 if not (isinstance(link, list) and len(link) == 2 and all(isinstance(x, str) for x in link)):
@@ -500,18 +535,7 @@ def discover(run, url=None, depth=2, max_pages=25):
                 ):  # one sample per pattern: /x/12 and /x/34 are /x/:id
                     seen.add(core.norm_route(to))
                     queue.append((to, level + 1))
-            for st in found_states:  # a state that deletes or signs out is never opened (the harvester drops it too)
-                if (
-                    isinstance(st, list)
-                    and len(st) == 2
-                    and all(isinstance(x, str) for x in st)
-                    and st[1].strip()
-                    and not SKIP_LINK_RE.search(st[1])
-                ):
-                    states.setdefault(
-                        f"{st[0]}: {st[1]}",
-                        {"key": f"{st[0]}: {st[1]}", "kind": st[0], "trigger": st[1], "status": "unvisited"},
-                    )
+            _page_states(found_states, states)
             rec.doc["pages"].append({"route": app(path), "states": list(states.values()), "transitions": links})
             n.update(pages=n["pages"] + 1, states=n["states"] + len(states), links=n["links"] + len(links))
             print(f"discover {n['pages']} {path}: {len(links)} links, {len(states)} states", file=sys.stderr)
@@ -519,16 +543,4 @@ def discover(run, url=None, depth=2, max_pages=25):
         return "COMPLETED", {"summary": f"{n['pages']} pages mapped, {n['states']} states, {n['links']} links"}
 
     rec = _session(run, "discover", start, cfg, hosts, walk, page_blocks=True)
-    d = rec.doc
-    print(
-        json.dumps(
-            {
-                "status": d["status"],
-                "stop_reason": d.get("stop_reason"),
-                "build": d["build"],
-                "run_file": str(rec.file),
-                **n,
-            }
-        )
-    )
-    return 1 if d["status"] == "BLOCKED" else 0
+    return _summary(rec, n)

@@ -128,6 +128,91 @@ def _wrap(draw, text, font, width):
     return lines + ([cur] if cur else [])
 
 
+def _draw_outlines(boxes, lw, W, H, draw):
+    """A red band on each side of every box, just outside it and clipped to the image; returns the areas now covered."""
+    drawn = []
+    for x, y, w, h in boxes:  # four bands just outside the element, each clipped to the image: at an image edge
+        bx0, by0, bx1, by1 = x, y, x + w - 1, y + h - 1  # the band there is thinner, never moved onto the element
+        ox0, oy0, ox1, oy1 = bx0 - lw, by0 - lw, bx1 + lw, by1 + lw
+        for r in (
+            (ox0, oy0, ox1, by0 - 1),
+            (ox0, by1 + 1, ox1, oy1),
+            (ox0, by0, bx0 - 1, by1),
+            (bx1 + 1, by0, ox1, by1),
+        ):
+            cx0, cy0, cx1, cy1 = max(r[0], 0), max(r[1], 0), min(r[2], W - 1), min(r[3], H - 1)
+            if cx0 <= cx1 and cy0 <= cy1:
+                draw.rectangle([cx0, cy0, cx1, cy1], fill=RED)
+        drawn.append((max(ox0, 0), max(oy0, 0), min(ox1, W - 1), min(oy1, H - 1)))
+    return drawn
+
+
+def _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey):
+    """The label as a red tag with white text: beside the first box on the quietest spot that covers no box, or where it
+    hides the least."""
+    font, pad = _font(ImageFont, round(18 * scale)), max(4, round(4 * scale))
+    lines = _wrap(draw, text, font, max(1, W - 2 * pad))
+    asc, desc = font.getmetrics() if hasattr(font, "getmetrics") else (11, 0)
+    lh = asc + desc + max(1, round(2 * scale))
+    room = max(1, (H - 2 * pad) // lh)  # a short screenshot: keep the lines that fit, say the rest was cut
+    if len(lines) > room:
+        lines = lines[:room]
+        while len(lines[-1]) > 1 and draw.textlength(lines[-1] + "…", font=font) > W - 2 * pad:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] = lines[-1].rstrip() + "…"
+    tw = min(max(round(draw.textlength(t, font=font)) for t in lines) + 2 * pad, W)
+    th = min(lh * len(lines) + 2 * pad, H)
+    corners = [(0, 0), (max(0, W - tw), 0), (0, max(0, H - th)), (max(0, W - tw), max(0, H - th))]
+    x0, y0, x1, y1 = drawn[0] if drawn else (0, 0, 0, 0)  # no box: a caption in the quietest corner
+    ux0, uy0, uy1 = (
+        (min(c[0] for c in drawn), min(c[1] for c in drawn), max(c[3] for c in drawn)) if drawn else (0, 0, 0)
+    )
+    fit = lambda tx, ty: (max(0, min(tx, W - tw)), max(0, min(ty, H - th)))
+    hits = lambda tx, ty: any(
+        tx < c[2] + gap and c[0] - gap < tx + tw and ty < c[3] + gap and c[1] - gap < ty + th for c in drawn
+    )
+
+    def busy(tx, ty):  # share of pixels that are page content (differ from the spot's commonest shade)
+        hist = grey.crop((tx, ty, tx + tw, ty + th)).histogram()
+        bg = max(range(256), key=hist.__getitem__)
+        return 1 - sum(hist[max(0, bg - 24) : bg + 25]) / max(1, sum(hist))
+
+    # around the first box (above, below, right, left; then above/below its right end), then above/below all
+    spots = (
+        [
+            fit(x0, y0 - th - gap),
+            fit(x0, y1 + gap + 1),
+            fit(x1 + gap + 1, y0),
+            fit(x0 - gap - tw, y0),
+            fit(x1 - tw, y0 - th - gap),
+            fit(x1 - tw, y1 + gap + 1),
+            fit(ux0, uy0 - th - gap),
+            fit(ux0, uy1 + gap + 1),
+            fit(0, 0),
+            fit(W, 0),
+            fit(0, H),
+            fit(W, H),
+        ]
+        if drawn
+        else corners
+    )  # corners: the last resort
+    cover = lambda tx, ty: sum(
+        max(0, min(tx + tw, c[2] + 1) - max(tx, c[0])) * max(0, min(ty + th, c[3] + 1) - max(ty, c[1])) for c in drawn
+    )  # box area hidden (no free spot: hide the least)
+    free = [xy for xy in spots if not hits(*xy)]
+    quiet = [xy for xy in free if busy(*xy) < 0.01]
+    tx, ty = (
+        quiet[0]
+        if quiet
+        else min(free, key=lambda xy: busy(*xy))
+        if free
+        else min(spots, key=lambda xy: (cover(*xy), busy(*xy)))
+    )
+    draw.rectangle([tx, ty, tx + tw - 1, ty + th - 1], fill=RED)
+    for i, t in enumerate(lines):
+        draw.text((tx + pad, ty + pad + i * lh), t, fill=WHITE, font=font)
+
+
 def annotate(path, boxes, label):
     """Red outline drawn just OUTSIDE each box (so the element's own text stays readable) and a red label tag
     with white text next to the first box, on the quietest nearby spot that covers no box (with no free spot, the one
@@ -162,84 +247,10 @@ def annotate(path, boxes, label):
     scale = min(max(W / 1280, 1.0), 4.0)
     lw, gap = max(2, round(3 * scale)), max(2, round(3 * scale))
     draw = ImageDraw.Draw(img)
-    drawn = []
-    for x, y, w, h in boxes:  # four bands just outside the element, each clipped to the image: at an image edge
-        bx0, by0, bx1, by1 = x, y, x + w - 1, y + h - 1  # the band there is thinner, never moved onto the element
-        ox0, oy0, ox1, oy1 = bx0 - lw, by0 - lw, bx1 + lw, by1 + lw
-        for r in (
-            (ox0, oy0, ox1, by0 - 1),
-            (ox0, by1 + 1, ox1, oy1),
-            (ox0, by0, bx0 - 1, by1),
-            (bx1 + 1, by0, ox1, by1),
-        ):
-            cx0, cy0, cx1, cy1 = max(r[0], 0), max(r[1], 0), min(r[2], W - 1), min(r[3], H - 1)
-            if cx0 <= cx1 and cy0 <= cy1:
-                draw.rectangle([cx0, cy0, cx1, cy1], fill=RED)
-        drawn.append((max(ox0, 0), max(oy0, 0), min(ox1, W - 1), min(oy1, H - 1)))
+    drawn = _draw_outlines(boxes, lw, W, H, draw)
     text = core.short(" ".join(str(label).split()), 80)
     if text:
-        font, pad = _font(ImageFont, round(18 * scale)), max(4, round(4 * scale))
-        lines = _wrap(draw, text, font, max(1, W - 2 * pad))
-        asc, desc = font.getmetrics() if hasattr(font, "getmetrics") else (11, 0)
-        lh = asc + desc + max(1, round(2 * scale))
-        room = max(1, (H - 2 * pad) // lh)  # a short screenshot: keep the lines that fit, say the rest was cut
-        if len(lines) > room:
-            lines = lines[:room]
-            while len(lines[-1]) > 1 and draw.textlength(lines[-1] + "…", font=font) > W - 2 * pad:
-                lines[-1] = lines[-1][:-1]
-            lines[-1] = lines[-1].rstrip() + "…"
-        tw = min(max(round(draw.textlength(t, font=font)) for t in lines) + 2 * pad, W)
-        th = min(lh * len(lines) + 2 * pad, H)
-        corners = [(0, 0), (max(0, W - tw), 0), (0, max(0, H - th)), (max(0, W - tw), max(0, H - th))]
-        x0, y0, x1, y1 = drawn[0] if drawn else (0, 0, 0, 0)  # no box: a caption in the quietest corner
-        ux0, uy0, uy1 = (
-            (min(c[0] for c in drawn), min(c[1] for c in drawn), max(c[3] for c in drawn)) if drawn else (0, 0, 0)
-        )
-        fit = lambda tx, ty: (max(0, min(tx, W - tw)), max(0, min(ty, H - th)))
-        hits = lambda tx, ty: any(
-            tx < c[2] + gap and c[0] - gap < tx + tw and ty < c[3] + gap and c[1] - gap < ty + th for c in drawn
-        )
-
-        def busy(tx, ty):  # share of pixels that are page content (differ from the spot's commonest shade)
-            hist = grey.crop((tx, ty, tx + tw, ty + th)).histogram()
-            bg = max(range(256), key=hist.__getitem__)
-            return 1 - sum(hist[max(0, bg - 24) : bg + 25]) / max(1, sum(hist))
-
-        # around the first box (above, below, right, left; then above/below its right end), then above/below all
-        spots = (
-            [
-                fit(x0, y0 - th - gap),
-                fit(x0, y1 + gap + 1),
-                fit(x1 + gap + 1, y0),
-                fit(x0 - gap - tw, y0),
-                fit(x1 - tw, y0 - th - gap),
-                fit(x1 - tw, y1 + gap + 1),
-                fit(ux0, uy0 - th - gap),
-                fit(ux0, uy1 + gap + 1),
-                fit(0, 0),
-                fit(W, 0),
-                fit(0, H),
-                fit(W, H),
-            ]
-            if drawn
-            else corners
-        )  # corners: the last resort
-        cover = lambda tx, ty: sum(
-            max(0, min(tx + tw, c[2] + 1) - max(tx, c[0])) * max(0, min(ty + th, c[3] + 1) - max(ty, c[1]))
-            for c in drawn
-        )  # box area hidden (no free spot: hide the least)
-        free = [xy for xy in spots if not hits(*xy)]
-        quiet = [xy for xy in free if busy(*xy) < 0.01]
-        tx, ty = (
-            quiet[0]
-            if quiet
-            else min(free, key=lambda xy: busy(*xy))
-            if free
-            else min(spots, key=lambda xy: (cover(*xy), busy(*xy)))
-        )
-        draw.rectangle([tx, ty, tx + tw - 1, ty + th - 1], fill=RED)
-        for i, t in enumerate(lines):
-            draw.text((tx + pad, ty + pad + i * lh), t, fill=WHITE, font=font)
+        _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey)
     # a fresh temp file (O_EXCL): a planted .tmp symlink must not redirect the write outside evidence/
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

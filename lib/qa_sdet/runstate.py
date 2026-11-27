@@ -30,28 +30,9 @@ def plan_folders(qa_out):
     return sorted(dirs, key=lambda p: (when(p), p.name), reverse=True)
 
 
-def _run_state(run_dir):
-    """Per-route and per-case state of one run folder, or None if plan.json is missing/unreadable."""
-    run_dir = Path(run_dir).resolve()
-    plan_file = run_dir / ".data" / "plan.json"
-    if not plan_file.is_file():
-        return None
-    d = results.load_run(run_dir)
-    plan, runs = d["plan"], d["runs"]
-    if not plan:
-        return None
-    tickets = [t["key"] for t in results.plan_tickets(plan)]
-    cases = results.merged_cases(plan, runs)
-    counts = {s: sum(c["status"] == s for c in cases) for s in core.CASE_STATUSES}
-    builds = sorted(
-        {core.norm_build(r.get("build")) for _, r in runs if core.norm_build(r.get("build")) != core.UNKNOWN}
-    )
-    case_build = {}
-    for _, r in runs:
-        b = core.norm_build(r.get("build"))
-        for x in results.entries(r, "cases"):
-            if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):  # a kept result: its own build
-                case_build[str(x["id"])] = core.norm_build(x["build"]) if isinstance(x.get("build"), str) else b
+def _route_progress(cases, runs):
+    """(routes still to finish, routes done), spelled as dispatch keys them. A route is unfinished when its run ended
+    blocked or incomplete, ran on an older build than the newest run, or left a case BLOCKED or NOT_RUN."""
     # routes as dispatch keys them (path and query: /list?a=1 and /list?a=2 are two briefs and run files), spelled so a
     # --resume dispatch of one finds its brief, cases and run file again
     routes_order = []
@@ -77,33 +58,12 @@ def _run_state(run_dir):
     spell = lambda k: k[0] + (f"?{k[1]}" if k[1] else "")
     completed = [spell(k) for k in routes_order if k not in incomplete]
     incomplete = [spell(k) for k in incomplete]
-    # verdict()'s rules per case: a PASS that a run ended BLOCKED reported (or ran on its page), or on the page of (or
-    # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
-    # not make it a prior pass and drop the reason the ticket didn't pass
-    bugs = results.run_bugs(runs)
-    rechecked = set().union(*(results.case_bugs(c) for c in cases if c["status"] != "PASS"))
-    tkey = lambda c: c.get("ticket") if isinstance(c.get("ticket"), str) else None  # a list ticket is no plan ticket's
-    serious = {
-        t: [
-            b
-            for b in results.ticket_bugs(t, cases, bugs, tickets)
-            if results.is_serious(b) and not results.bug_refs(b) & rechecked
-        ]
-        for t in {tkey(c) for c in cases}
-    }
+    return incomplete, completed
 
-    def trusted(c):
-        rt = core.norm_route(c.get("route"))
-        return (
-            c["status"] == "PASS"
-            and not d["unread"]
-            and not results.blocked_runs([c], runs)
-            and not any(
-                (rt and rt in (b.get("route"), b.get("target"))) or results.bug_refs(b) & results.case_bugs(c)
-                for b in serious[tkey(c)]
-            )
-        )
 
+def _retest_lists(cases, trusted, case_build, builds, plan, tickets):
+    """(the cases a retest runs again, the passes it carries on as prior passes: this run's trusted ones, then those an
+    earlier retest already carried)."""
     retest = [
         {
             "id": c["id"],
@@ -145,6 +105,60 @@ def _run_state(run_dir):
         and str(c["id"])
         and str(c["id"]) not in ids
     ]
+    return retest, passed
+
+
+def _run_state(run_dir):
+    """Per-route and per-case state of one run folder, or None if plan.json is missing/unreadable."""
+    run_dir = Path(run_dir).resolve()
+    plan_file = run_dir / ".data" / "plan.json"
+    if not plan_file.is_file():
+        return None
+    d = results.load_run(run_dir)
+    plan, runs = d["plan"], d["runs"]
+    if not plan:
+        return None
+    tickets = [t["key"] for t in results.plan_tickets(plan)]
+    cases = results.merged_cases(plan, runs)
+    counts = {s: sum(c["status"] == s for c in cases) for s in core.CASE_STATUSES}
+    builds = sorted(
+        {core.norm_build(r.get("build")) for _, r in runs if core.norm_build(r.get("build")) != core.UNKNOWN}
+    )
+    case_build = {}
+    for _, r in runs:
+        b = core.norm_build(r.get("build"))
+        for x in results.entries(r, "cases"):
+            if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):  # a kept result: its own build
+                case_build[str(x["id"])] = core.norm_build(x["build"]) if isinstance(x.get("build"), str) else b
+    incomplete, completed = _route_progress(cases, runs)
+    # verdict()'s rules per case: a PASS that a run ended BLOCKED reported (or ran on its page), or on the page of (or
+    # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
+    # not make it a prior pass and drop the reason the ticket didn't pass
+    bugs = results.run_bugs(runs)
+    rechecked = set().union(*(results.case_bugs(c) for c in cases if c["status"] != "PASS"))
+    tkey = lambda c: c.get("ticket") if isinstance(c.get("ticket"), str) else None  # a list ticket is no plan ticket's
+    serious = {
+        t: [
+            b
+            for b in results.ticket_bugs(t, cases, bugs, tickets)
+            if results.is_serious(b) and not results.bug_refs(b) & rechecked
+        ]
+        for t in {tkey(c) for c in cases}
+    }
+
+    def trusted(c):
+        rt = core.norm_route(c.get("route"))
+        return (
+            c["status"] == "PASS"
+            and not d["unread"]
+            and not results.blocked_runs([c], runs)
+            and not any(
+                (rt and rt in (b.get("route"), b.get("target"))) or results.bug_refs(b) & results.case_bugs(c)
+                for b in serious[tkey(c)]
+            )
+        )
+
+    retest, passed = _retest_lists(cases, trusted, case_build, builds, plan, tickets)
     zero_exec = (
         bool(runs)
         and all(c["status"] in ("BLOCKED", "NOT_RUN") for c in cases)
