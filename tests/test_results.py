@@ -347,6 +347,24 @@ class MergedCases(Base):
         )
         self.assertEqual(tie[0]["actual"], "new")
 
+    def test_a_pass_is_no_earlier_builds_pass_while_a_run_on_its_page_ended_blocked(self):  # the verdict skipped it
+        plan = {
+            "tickets": [{"key": "T-1"}],
+            "cases": [
+                {"id": "TC-1", "ticket": "T-1", "route": "/form"},
+                {"id": "TC-2", "ticket": "T-1", "route": "/list"},
+            ],
+        }
+        prior = lambda *runs: [c["id"] for c in results.merged_cases(plan, runs) if c.get("prior")]
+        newer = ("run-form.json", {"target": "/form", "build": "1.43", "cases": [{"id": "TC-1", "status": "PASS"}]})
+        older = {"target": "/list", "build": "1.42", "cases": [{"id": "TC-2", "status": "PASS"}]}
+        self.assertEqual(prior(("run-list.json", older), newer), ["TC-2"])
+        self.assertEqual(prior(("run-list.json", {**older, "status": "BLOCKED"}), newer), [])  # its PASS isn't trusted
+        # a pass carry_prior kept from build 1.42, then the page's next attempt ended BLOCKED
+        kept = {"target": "/form", "build": "1.43", "cases": [{"id": "TC-1", "status": "PASS", "build": "1.42"}]}
+        self.assertEqual(prior(("run-form.json", {**kept, "status": "INCOMPLETE"})), ["TC-1"])
+        self.assertEqual(prior(("run-form.json", {**kept, "status": "Blocked: session expired"})), [])
+
     def test_a_case_belongs_to_its_ticket_however_the_key_is_written(self):  # a FAIL outside the ticket hid it
         plan = {
             "kind": "ticket",
@@ -625,11 +643,24 @@ class CarryPrior(Rendering):
         self.assertIn(prior_entry + "  Saved\n", draft)  # the kept result says what it saw
         self.assertIn(prior_entry + "  Save 130\n", (d2 / "jira-comment.txt").read_text())  # a plan's: its title
 
-    def stopped_before_list(self, build="1.42"):
+    def stopped_before_list(self, build="1.42", **list_run):
         """A ticket's folder keeps every re-run's files: the 1.43 re-run stopped after /form, /list last ran on `build`."""
         plan = {**PLAN1_ANSWERED, "cases": [PLAN1["cases"][0], {**PLAN1["cases"][1], "route": "/list"}]}
-        older = {**RUN1, "target": "/list", "build": build, "cases": RUN1["cases"][1:]}
+        older = {**RUN1, "target": "/list", "build": build, "cases": RUN1["cases"][1:], **list_run}
         return self.render_run([("list", older), ("form", {**RUN1, "build": "1.43", "cases": RUN1["cases"][:1]})], plan)
+
+    def test_a_pass_of_a_run_that_ended_blocked_never_reads_as_verified_on_its_build(self):  # a false PASS WITH NOTES
+        d, r = self.stopped_before_list(status="BLOCKED", summary="session expired")
+        self.assertEqual(
+            r.split("\n\n")[1:3],
+            [
+                "⛔ BLOCKED · build 1.42, 1.43 · 2026-11-23 · 2 of 2 cases passed · no bugs",
+                "the run on /list ended BLOCKED: session expired",
+            ],
+        )
+        draft = (d / "jira-comment.txt").read_text()
+        self.assertIn("QA result: BLOCKED on build 1.42, 1.43 (", draft)
+        self.assertNotIn("not re-run", draft)  # it said: "passed on build 1.42, not re-run on 1.43"
 
     def test_a_page_the_new_build_never_reached_holds_passes_not_re_run_here(self):  # found in audit: a false PASS
         d, r = self.stopped_before_list()

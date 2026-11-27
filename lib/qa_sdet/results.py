@@ -141,7 +141,8 @@ def merged_cases(
     "not run" never hides its FAIL. A plan ticket's PASS whose own `build` is not its run file's (carry_prior kept it
     from an earlier attempt), or whose run file is from another known build than the newest run's (a ticket's folder
     keeps every re-run's files: a page the new build's run never reached), gets that build and `prior`: prior_passed
-    lists it as a pass not re-run here. A plan case with no id or a repeated one can't get a result: it is left out
+    lists it as a pass not re-run here. Not while a run on its page, or one reporting it, ended BLOCKED (blocked_runs):
+    that PASS is not trusted. A plan case with no id or a repeated one can't get a result: it is left out
     and named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
     blocks them)."""
     warnings = [] if warnings is None else warnings
@@ -203,6 +204,7 @@ def merged_cases(
             tk in keys
             and merged["status"] == "PASS"
             and (ran_on != core.norm_build(run_build.get(cid)) or older_build(ran_on, now))
+            and not blocked_runs([merged], runs)  # not trusted: it stays this run's, where verdict() blocks on that run
         ):
             merged.update(build=ran_on, prior=True)
         out.append(merged)
