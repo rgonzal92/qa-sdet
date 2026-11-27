@@ -237,16 +237,18 @@ def cmd_dispatch(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
                 con,
                 o["_"][0],
                 o["--route"],
-                mode=o.get("--mode"),
-                focus=o.get("--focus"),
-                faults=o.get("--faults", False),
-                known_bugs=o.get("--known-bugs") or "",
-                open_record=o.get("--open-record", False),
-                api_writes=o.get("--api-writes", False),
-                hypothesis=o.get("--hypothesis"),
-                target_route=o.get("--target-route"),
-                case_ids=ids,
-                all_cases=o.get("--all", False),
+                ops.Order(
+                    mode=o.get("--mode"),
+                    focus=o.get("--focus"),
+                    faults=o.get("--faults", False),
+                    known_bugs=o.get("--known-bugs") or "",
+                    open_record=o.get("--open-record", False),
+                    api_writes=o.get("--api-writes", False),
+                    hypothesis=o.get("--hypothesis"),
+                    target_route=o.get("--target-route"),
+                    case_ids=ids,
+                    all_cases=o.get("--all", False),
+                ),
             )
         )
     )

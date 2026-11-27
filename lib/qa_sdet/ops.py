@@ -398,21 +398,24 @@ def _brief_cases(job):
     return out
 
 
-def dispatch(
-    con: sqlite3.Connection,
-    run: str | Path,
-    route: str,
-    mode: str | None = None,
-    focus: str | None = None,
-    faults: bool = False,
-    known_bugs: str = "",
-    open_record: bool = False,
-    api_writes: bool = False,
-    hypothesis: str | None = None,
-    target_route: str | None = None,
-    case_ids: list[str] | None = None,
-    all_cases: bool = False,
-) -> dict[str, object]:
+@core.record
+class Order:
+    """What `qa-mem dispatch` asks of one explorer beyond its route: the command's options. dispatch() says what each
+    one does."""
+
+    mode: str | None = None  # "ticket" or "explore"; left out: the plan's kind decides
+    focus: str | None = None  # the charter
+    faults: bool = False  # the run marker lets the explorer inject faults
+    known_bugs: str = ""  # Jira bugs it names and never lists as its own
+    open_record: bool = False  # it starts on the list page and tests the detail page that leads to
+    api_writes: bool = False  # the run marker lets it write through the API
+    hypothesis: str | None = None  # why this page was chosen
+    target_route: str | None = None  # the detail page, named exactly
+    case_ids: list[str] | None = None  # the cases it gets
+    all_cases: bool = False  # it gets every case, also on a re-run
+
+
+def dispatch(con: sqlite3.Connection, run: str | Path, route: str, order: Order | None = None) -> dict[str, object]:
     """One explorer's setup: starts the run marker, picks the route's slug, writes <run>/.data/brief-<slug>.md (target,
     run_id, flags, config, card, the cases it gives and their tickets' AC, the project's qa-rules.md, the charter, known
     Jira bugs; scrubbed) and returns {slug, target, brief, mode, case_count (given), held}. Which cases: case_ids exactly,
@@ -427,40 +430,41 @@ def dispatch(
     was chosen (an earlier bug's pattern, a lead's reason): one scrubbed line of at most 400 characters, labelled as test data."""
     from . import scrub
 
+    order = order or Order()
     run, data, plan = _plan_of_run(run)
     cfg, hosts = session.qa_config("dispatch")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     target = route if "://" in route else base + ("" if route.startswith("/") else "/") + route
     if not core.url_allowed(target, hosts):
         raise core.BadInput(f"dispatch: {target!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
-    page, tag = _tested_page(con, route, target_route, open_record)
+    page, tag = _tested_page(con, route, order.target_route, order.open_record)
     cases = [c for c in _dicts(plan, "cases") if core.route_key(c.get("route")) == core.route_key(page)]
-    mode = mode or ("explore" if plan.get("kind") == "explore" else "ticket")
+    mode = order.mode or ("explore" if plan.get("kind") == "explore" else "ticket")
     slug = _brief_slug(data, page, tag)
     earlier, ran, done = _earlier_run(data, slug, run)
-    given, held = _given_cases(case_ids, all_cases, earlier, run, cases, done)
+    given, held = _given_cases(order.case_ids, order.all_cases, earlier, run, cases, done)
     brief = data / f"brief-{slug}.md"
     used = re.findall(r"^run_id: (\S+)$", _read_text(brief), re.M) + ([_flat(earlier.get("run_id"))] if earlier else [])
     job = SimpleNamespace(
-        api_writes=api_writes,
+        api_writes=order.api_writes,
         cfg=cfg,
         con=con,
-        faults=faults,
-        focus=focus,
-        hypothesis=hypothesis,
+        faults=order.faults,
+        focus=order.focus,
+        hypothesis=order.hypothesis,
         mode=mode,
-        open_record=open_record,
+        open_record=order.open_record,
         page=page,
         run=run,
         slug=slug,
         target=target,
-        target_route=target_route,
+        target_route=order.target_route,
         used=used,
         done=done,
         earlier=earlier,
         given=given,
         held=held,
-        known_bugs=known_bugs,
+        known_bugs=order.known_bugs,
         plan=plan,
     )
     out = _brief_head(job)
@@ -473,7 +477,7 @@ def dispatch(
     core.write(brief, scrub.redact("\n".join(out)) + "\n")
     if held:
         _held_notice(run, slug, len(given), len(held))
-    marker_start(run.parent.parent, faults, run_dir=run, slug=slug, api_writes=api_writes)
+    marker_start(run.parent.parent, order.faults, run_dir=run, slug=slug, api_writes=order.api_writes)
     return {
         "slug": slug,
         "target": target,
