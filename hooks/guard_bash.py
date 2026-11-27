@@ -57,9 +57,9 @@ def inline_code(name, rest, kind):
     return True
 
 
-def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None, cwds=()):
-    """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file or inline code."""
-    kind, val = run
+def explorer_runs_code(i, words, cwds, ctx, kind, ins, name, rest, wrappers):
+    """Deny reason when the explorer runs a script file, inline code or a package (a page it read could have steered it to
+    write or name one); None otherwise."""
     by_path = (
         i is not None
         and "/" in words[i]
@@ -84,6 +84,14 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             "the explorer installs and runs no packages (npm, npx, pip, ...: they download code from other hosts and run "
             "it); test through the browser, or curl to an allowed host"
         )
+
+
+def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None, cwds=()):
+    """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file or inline code."""
+    kind, val = run
+    reason = explorer_runs_code(i, words, cwds, ctx, kind, ins, name, rest, wrappers)
+    if reason is not None:
+        return reason
     if not ctx.guarded:
         return None
     pos = guard_tools.pw_args(rest)
