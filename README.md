@@ -234,7 +234,7 @@ make check          # the routine gate: lint, typecheck, test, test-runtime, val
 | `make coverage` | line and branch coverage, hook and `bin/qa-mem` subprocesses included; writes `coverage.xml` |
 | `make security` | `gitleaks` over the full history and the working tree (`.gitleaks.toml` lists the reviewed exceptions), `pip-audit` of the dev dependencies |
 | `make validate` | `claude plugin validate` (manifests, skills, agents, hooks) and `tests/test_docs.py` (docs and code agree) |
-| `make architecture` | import boundaries (the guard imports nothing from `lib/`) and lib's copy of the guard's host rules |
+| `make architecture` | import boundaries (the guard and its `guard_*.py` modules import nothing from `lib/`) and lib's copy of the guard's host rules |
 | `make mutation` | a bounded mutmut trial on the redactor, the host rules and the verdict (`MUTANTS=...` to choose); a few minutes |
 
 **Layout:** `.claude/CLAUDE.md` ("Module map") lists each `lib/qa_sdet/` module with the commands it owns; `tests/test_docs.py` keeps that list in step with the files and with the order they import each other in.

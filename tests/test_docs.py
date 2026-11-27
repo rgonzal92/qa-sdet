@@ -859,6 +859,11 @@ class Docs(unittest.TestCase):
             self.assertEqual(needs - set(listed[:i]), set(), f"{name} imports a module the map lists below it")
         for hook in (ROOT / "hooks").glob("*.py"):
             self.assertIn(f"`{hook.stem}`", section)
+        guards = re.findall(r"`(guard\w*)`", next(ln for ln in section.splitlines() if "`guard_paths`" in ln))
+        for i, name in enumerate(guards):  # the guard's modules, in the order the map gives them
+            top = ast.parse(text(f"hooks/{name}.py")).body
+            needs = {a.name for n in top if isinstance(n, ast.Import) for a in n.names if a.name.startswith("guard")}
+            self.assertEqual(needs - set(guards[:i]), set(), f"{name} imports a guard module the map lists after it")
 
 
 if __name__ == "__main__":

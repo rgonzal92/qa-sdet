@@ -1,6 +1,6 @@
-"""hooks/guard.py, the PreToolUse guard (or the file named in env GUARD): its 8 rules, the odd forms it won't read
-(denied when the call names a guarded tool or path), the run marker, the qa-mapper, approval, the denial log and the
-hook plumbing. Everything runs in temp folders: HOME, the config and the data folder."""
+"""hooks/guard.py, the PreToolUse guard (or the file named in env GUARD): the hook plumbing, lib's copies of its rules,
+its import boundaries and its known limits. The rules themselves are in test_guard_*.py; guard_support.py holds the
+sandbox they share (HOME, the config and the data folder in temp folders)."""
 
 import ast
 import contextlib
