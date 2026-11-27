@@ -4,6 +4,7 @@
 - The plugin runs on the user's system `python3` (3.9+) with the standard library only. Code in `lib/`, `hooks/` and `bin/` never imports a dev dependency and never relies on `.venv`; `make test-runtime` checks it on 3.9.
 - `hooks/guard.py` and its `guard_*.py` modules are the trust root and import nothing from `lib/` (`make architecture`). Rules lib keeps a copy of (host checks, plugin-log masks) are pinned to the guard's by `LibMirrorsGuard` in `tests/test_guard.py`.
 - Imports for annotations only go under a module-level `TYPE_CHECKING = False` / `if TYPE_CHECKING:` block: importing `typing` costs every `qa-mem` call about 5 ms. The JSON shapes agents write are typed in `lib/qa_sdet/contracts.py`; runtime validation stays in `ingest.check_run` and the hooks.
+- Arguments that travel together are a record: a class under `@core.record` (the guard has its own copy, `guard_paths.record`, pinned by `tests/test_record.py`) with one typed, commented field per line. mypy reads it as a dataclass; importing `dataclasses` costs every call about 6 ms. Its module starts with `from __future__ import annotations`, and a function that takes one annotates it (`stamp: Stamp`), so mypy checks every field it reads. `make lint` fails a function with 8 or more parameters.
 - A test that plants a secret-shaped string needs a reviewed entry in `.gitleaks.toml`.
 
 ## Module map

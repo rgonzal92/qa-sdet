@@ -23,7 +23,7 @@ BASE = CFG["qaBaseUrl"]
 FRAME_0 = "locator('iframe:visible').nth(0).contentFrame()."  # the first iframe a page shows
 
 
-def page(
+def page(  # noqa: PLR0913 - a fake: each knob has a default and is named where it is set
     found=(),
     frames=(),
     status=200,

@@ -35,7 +35,7 @@ extend-include = ["bin/qa-mem"]
 extend-exclude = ["*.md"]  # skills, agents and references are agent instructions: never auto-rewritten
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "S", "BLE", "RUF", "PLE", "PLW", "DTZ", "RET", "TRY"]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "S", "BLE", "RUF", "PLE", "PLW", "PLR0913", "DTZ", "RET", "TRY"]
 ignore = [
     "E501",     # the formatter owns layout; long messages and regexes stay whole
     "E731",     # small named lambdas are this codebase's local-helper idiom
@@ -48,6 +48,9 @@ ignore = [
     "PLW2901",  # loop variables are rebound to their normalised form on purpose
     "S603", "S607",  # argument lists only (S602 still flags shell=True) to git, playwright-cli, acli found on PATH
 ]
+
+[tool.ruff.lint.pylint]
+max-args = 7  # PLR0913: 8 or more travel as a record (core.record; .claude/CLAUDE.md)
 
 [tool.ruff.lint.isort]
 known-first-party = ["qa_sdet", "guard"]
