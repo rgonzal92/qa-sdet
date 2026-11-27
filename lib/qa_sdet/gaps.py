@@ -1,6 +1,7 @@
 """What memory says is untested or risky: `gaps`, `blindspots`, `hotspots`, `history` and a page's entry chain."""
 
 import json
+from types import SimpleNamespace
 
 from . import cards, codemap, core
 
@@ -43,6 +44,120 @@ def entry_chain(con, route, max_depth=ENTRY_DEPTH):
     return []
 
 
+def _last_visits(con, pages):
+    """{route: when it was last visited}: its last verification, or its last run when no run could read the build."""
+    verified = {pg["route"]: pg["last_verified"] for pg in pages if pg["last_verified"]}
+    visits = {}  # a page whose build was never read has no last_verified: its last run is the visit
+    for target, ts in con.execute("SELECT target, ts FROM runs WHERE ts IS NOT NULL"):
+        r = core.norm_route(target)
+        visits[r] = max(visits.get(r, ""), ts)
+    verified |= {
+        pg["route"]: visits[pg["route"]]
+        for pg in pages
+        if not pg["last_verified"] and pg["build"] == core.UNKNOWN and visits.get(pg["route"])
+    }
+    return verified
+
+
+def _pages_with_forms(con, bound):
+    """The pages with something to submit: a validation rule or a write call in the code map (a shell route for its module)."""
+    forms = set()  # pages with something to submit: a validation rule or a write call
+    for x in con.execute("SELECT page, kind, label, value FROM codemap WHERE page != '*' AND kind IN ('rule', 'api')"):
+        if (
+            x["kind"] == "rule"
+            or codemap.api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE")
+            or codemap.api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE")
+        ):
+            forms.add(x["page"])
+    forms |= {shell for shell, (_, module) in bound.items() if module in forms}
+    return forms
+
+
+def _ranked_page(ctx, pg):
+    """[(sort key, text line, JSON entry)] for one page; [] when only changed pages are wanted and its source did not change."""
+    ranked = []
+    r, b = pg["route"], ctx.current or pg["build"]
+    never, unread = pg["explored"] is None, pg["build"] == core.UNKNOWN
+    old = not never and not unread and pg["build"] != b
+    _, tried, targets = cards.coverage(ctx.con, r, b)
+    untried, untested = sum(h not in tried for h in core.HEURISTICS), len(cards.untested_rules(ctx.con, r, targets))
+    open_bugs = ctx.con.execute(
+        "SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)
+    ).fetchone()[0]
+    fixed_recheck = _unrechecked_fixed(ctx.con, r, b)
+    states = len(cards.due_states(ctx.con, r, b))
+    apis = cards.unexercised_apis(ctx.con, r, b, ctx.bound)
+    src = ctx.changed.get(r, [])
+    if ctx.changed_only and not src:
+        return ranked
+    parts = [
+        "never explored"
+        if never
+        else "build never read"
+        if unread
+        else f"verified on build {pg['build']}: re-verify"
+        if old
+        else f"build {b}"
+    ]
+    if src:
+        parts.append(f"source changed ({core.short(src[0], 60)}" + (f", +{len(src) - 1}" if len(src) > 1 else "") + ")")
+    if fixed_recheck:
+        parts.append(f"{fixed_recheck} fixed bug{'s' * (fixed_recheck != 1)} to re-check")
+    if not never:  # a page never explored has every heuristic untried
+        parts.append(f"{untried} untried")
+    if untested:
+        parts.append(f"{untested} untested field{'s' * (untested != 1)}")
+    if states:
+        parts.append(f"{states} unvisited state{'s' * (states != 1)}")
+    if apis:
+        parts.append(f"{len(apis)} unexercised endpoint{'s' * (len(apis) != 1)}")
+    if open_bugs:
+        parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
+    if r in ctx.regressed:
+        parts.append("a bug regressed")
+    if ctx.hot.get(r, 0) >= 3:
+        parts.append(f"hotspot {ctx.hot[r]} (bug history)")
+    chain = entry_chain(ctx.con, r)
+    if (
+        "/:id" in r
+    ):  # a detail page: opened from the page that leads to it (maybe through others), else it needs a record
+        parts.append(
+            f"(open from {chain[0]['from']}: " + ", then ".join(h["trigger"] or "a link" for h in chain) + ")"
+            if chain
+            else "(needs a record id)"
+        )
+    # tiers: what changed or broke again first, then unexplored pages with something to submit, then pages on an
+    # older build, then the rest; bug history (hotspot) and untried checks order each tier
+    tier = 0 if src or r in ctx.regressed or fixed_recheck else 1 if never and r in ctx.forms else 2 if old else 3
+    info = {
+        "route": r,
+        "name": pg["name"] or "",
+        "tier": TIERS[tier],
+        "hotspot": ctx.hot.get(r, 0),
+        "never_explored": never,
+        "old_build": old,
+        "changed": bool(src),
+        "changed_files": src,
+        "unrechecked_fixed": fixed_recheck,
+        "untried": untried,
+        "untested_fields": untested,
+        "unvisited_states": states,
+        "unexercised_apis": apis,
+        "open_bugs": open_bugs,
+        "risk_reasons": parts,
+    }
+    if chain:
+        info |= {"entry_route": chain[0]["from"], "entry_trigger": chain[0]["trigger"], "entry_chain": chain}
+    ranked.append(
+        (
+            (tier, -ctx.hot.get(r, 0), -(untried + untested + states + len(apis)), -open_bugs, r),
+            f'- {r} "{core.short(pg["name"] or "", 60)}": ' + "; ".join(parts),
+            info,
+        )
+    )
+    return ranked
+
+
 def gaps(con, changed_only=False, top=None, as_json=False):
     """`gaps`: every page, the most urgent to explore first: never explored, its source changed since the last visit,
     verified on an older build, un-rechecked FIXED bugs, then the most untried heuristics and untested fields, then open bugs."""
@@ -58,111 +173,24 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         if as_json:
             return json.dumps({"build": current or core.UNKNOWN, "pages": [], "unchecked_repos": []}, indent=1)
         return "no pages yet: /qa-sdet:qa-init maps them from the source, or /qa-sdet:qa-explore <route> visits one"
-    verified = {pg["route"]: pg["last_verified"] for pg in pages if pg["last_verified"]}
-    visits = {}  # a page whose build was never read has no last_verified: its last run is the visit
-    for target, ts in con.execute("SELECT target, ts FROM runs WHERE ts IS NOT NULL"):
-        r = core.norm_route(target)
-        visits[r] = max(visits.get(r, ""), ts)
-    verified |= {
-        pg["route"]: visits[pg["route"]]
-        for pg in pages
-        if not pg["last_verified"] and pg["build"] == core.UNKNOWN and visits.get(pg["route"])
-    }
+    verified = _last_visits(con, pages)
     changed, unchecked = cards.source_changes(con, verified)
     hot = _hotspots(con)
     regressed = {p for (p,) in con.execute("SELECT DISTINCT page FROM bugs WHERE status='REGRESSED'")}
-    forms = set()  # pages with something to submit: a validation rule or a write call
-    for x in con.execute("SELECT page, kind, label, value FROM codemap WHERE page != '*' AND kind IN ('rule', 'api')"):
-        if (
-            x["kind"] == "rule"
-            or codemap.api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE")
-            or codemap.api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE")
-        ):
-            forms.add(x["page"])
-    forms |= {shell for shell, (_, module) in bound.items() if module in forms}
+    forms = _pages_with_forms(con, bound)
     ranked = []
+    ctx = SimpleNamespace(
+        bound=bound,
+        changed=changed,
+        changed_only=changed_only,
+        con=con,
+        current=current,
+        forms=forms,
+        hot=hot,
+        regressed=regressed,
+    )
     for pg in pages:
-        r, b = pg["route"], current or pg["build"]
-        never, unread = pg["explored"] is None, pg["build"] == core.UNKNOWN
-        old = not never and not unread and pg["build"] != b
-        _, tried, targets = cards.coverage(con, r, b)
-        untried, untested = sum(h not in tried for h in core.HEURISTICS), len(cards.untested_rules(con, r, targets))
-        open_bugs = con.execute(
-            "SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)
-        ).fetchone()[0]
-        fixed_recheck = _unrechecked_fixed(con, r, b)
-        states = len(cards.due_states(con, r, b))
-        apis = cards.unexercised_apis(con, r, b, bound)
-        src = changed.get(r, [])
-        if changed_only and not src:
-            continue
-        parts = [
-            "never explored"
-            if never
-            else "build never read"
-            if unread
-            else f"verified on build {pg['build']}: re-verify"
-            if old
-            else f"build {b}"
-        ]
-        if src:
-            parts.append(
-                f"source changed ({core.short(src[0], 60)}" + (f", +{len(src) - 1}" if len(src) > 1 else "") + ")"
-            )
-        if fixed_recheck:
-            parts.append(f"{fixed_recheck} fixed bug{'s' * (fixed_recheck != 1)} to re-check")
-        if not never:  # a page never explored has every heuristic untried
-            parts.append(f"{untried} untried")
-        if untested:
-            parts.append(f"{untested} untested field{'s' * (untested != 1)}")
-        if states:
-            parts.append(f"{states} unvisited state{'s' * (states != 1)}")
-        if apis:
-            parts.append(f"{len(apis)} unexercised endpoint{'s' * (len(apis) != 1)}")
-        if open_bugs:
-            parts.append(f"{open_bugs} open bug{'s' * (open_bugs != 1)}")
-        if r in regressed:
-            parts.append("a bug regressed")
-        if hot.get(r, 0) >= 3:
-            parts.append(f"hotspot {hot[r]} (bug history)")
-        chain = entry_chain(con, r)
-        if (
-            "/:id" in r
-        ):  # a detail page: opened from the page that leads to it (maybe through others), else it needs a record
-            parts.append(
-                f"(open from {chain[0]['from']}: " + ", then ".join(h["trigger"] or "a link" for h in chain) + ")"
-                if chain
-                else "(needs a record id)"
-            )
-        # tiers: what changed or broke again first, then unexplored pages with something to submit, then pages on an
-        # older build, then the rest; bug history (hotspot) and untried checks order each tier
-        tier = 0 if src or r in regressed or fixed_recheck else 1 if never and r in forms else 2 if old else 3
-        info = {
-            "route": r,
-            "name": pg["name"] or "",
-            "tier": TIERS[tier],
-            "hotspot": hot.get(r, 0),
-            "never_explored": never,
-            "old_build": old,
-            "changed": bool(src),
-            "changed_files": src,
-            "unrechecked_fixed": fixed_recheck,
-            "untried": untried,
-            "untested_fields": untested,
-            "unvisited_states": states,
-            "unexercised_apis": apis,
-            "open_bugs": open_bugs,
-            "risk_reasons": parts,
-        }
-        if chain:
-            info |= {"entry_route": chain[0]["from"], "entry_trigger": chain[0]["trigger"], "entry_chain": chain}
-        ranked.append(
-            (
-                (tier, -hot.get(r, 0), -(untried + untested + states + len(apis)), -open_bugs, r),
-                f'- {r} "{core.short(pg["name"] or "", 60)}": ' + "; ".join(parts),
-                info,
-            )
-        )
+        ranked += _ranked_page(ctx, pg)
     ranked.sort(key=lambda x: x[0])
     shown = ranked[:top] if top is not None else ranked
     if as_json:  # for batch runs: only pages an explorer can open; detail pages are named apart

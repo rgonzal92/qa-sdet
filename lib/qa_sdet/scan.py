@@ -427,17 +427,8 @@ def classify_source(rel, text, folder=""):
 CHUNK_FILES, CHUNK_TOKENS = 40, 60_000  # what one qa-mapper can read well; bigger areas are split across mappers
 
 
-def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_FILES, chunk_tokens=CHUNK_TOKENS):
-    """List the source files each qa-mapper must read and write qa-out/init/scan-<area>[-<n>].json (one per mapper).
-    Incremental by content: per area and repo, a file is listed when its content differs from what was last mapped
-    (new, edited, uncommitted), which also lists files whose map never landed. Files with
-    rows that are gone or no longer this area's are listed as deleted. When a router (a file defining several routes)
-    changed or a route file is gone, frontend and tests are mapped in full (rows elsewhere sit on routes that may have
-    moved). A page renamed inside its own one-route file isn't noticed: its old rows stay until `--full`. Areas with
-    nothing to read are settled here. Returns a summary dict for the skill."""
-    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _clear_old_scans(out_dir):
+    """A new scan: the scan and code-map files of older scans go (only files with our names: the folder may hold others)."""
     own = re.compile(
         rf"(scan-({'|'.join(codemap.CODEMAP_AREAS)})(-\d+)?\.json|code-map-({'|'.join(codemap.CODEMAP_AREAS)})(-\d+)?\.json(\..+)?)"
     )
@@ -446,62 +437,67 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             old.unlink(
                 missing_ok=True
             )  # a new scan: maps of older scans are stale (and the Write tool won't overwrite them)
-    summary: dict[str, Any] = {"incremental": False, "total_files": 0, "tokens": 0, "areas": {}, "skipped": []}
-    repos = []
-    for raw in paths:
-        repo = os.path.realpath(os.path.expanduser(str(raw)))
-        if not os.path.isdir(repo):
-            summary["skipped"].append(f"{raw}: not a folder")
-            continue
-        if os.path.dirname(repo) == repo or repo == os.path.realpath(os.path.expanduser("~")):
-            # walking the whole disk or home folder takes minutes and maps unrelated code
-            summary["skipped"].append(f"{raw}: too broad (the whole disk or home folder); give the app's repo folders")
-            continue
-        if any(r[0] == repo for r in repos):
-            continue  # the same folder given twice (. and ./): listed once
-        head = (core.git(repo, "rev-parse", "HEAD") or "").strip()
-        head = head if core.COMMIT_RE.fullmatch(head) else ""
-        scanned = {}  # rel -> [area, bytes, text]
-        for rel in _rel_files(repo):
-            full_path = os.path.join(repo, rel)
-            try:
-                if (
-                    os.path.islink(full_path)
-                    or not os.path.isfile(full_path)
-                    or not os.path.realpath(full_path).startswith(repo.rstrip(os.sep) + os.sep)
-                ):
-                    continue  # links (also a linked parent folder) can point out of the repo or at /dev/zero; FIFOs hang
-                size = os.path.getsize(full_path)
-                if size > SCAN_MAX_BYTES:
-                    continue
-                with open(full_path, "rb") as fh:
-                    raw_bytes = fh.read()
-            except OSError:
+
+
+def _scan_repo(raw, summary, repos):
+    """One source folder: its files classified by area and hashed, added to `repos` as (repo, HEAD commit, {file: (area,
+    size, hash)}, router files); a folder that can't be scanned is noted in the summary instead."""
+    repo = os.path.realpath(os.path.expanduser(str(raw)))
+    if not os.path.isdir(repo):
+        summary["skipped"].append(f"{raw}: not a folder")
+        return
+    if os.path.dirname(repo) == repo or repo == os.path.realpath(os.path.expanduser("~")):
+        # walking the whole disk or home folder takes minutes and maps unrelated code
+        summary["skipped"].append(f"{raw}: too broad (the whole disk or home folder); give the app's repo folders")
+        return
+    if any(r[0] == repo for r in repos):
+        return  # the same folder given twice (. and ./): listed once
+    head = (core.git(repo, "rev-parse", "HEAD") or "").strip()
+    head = head if core.COMMIT_RE.fullmatch(head) else ""
+    scanned = {}  # rel -> [area, bytes, text]
+    for rel in _rel_files(repo):
+        full_path = os.path.join(repo, rel)
+        try:
+            if (
+                os.path.islink(full_path)
+                or not os.path.isfile(full_path)
+                or not os.path.realpath(full_path).startswith(repo.rstrip(os.sep) + os.sep)
+            ):
+                continue  # links (also a linked parent folder) can point out of the repo or at /dev/zero; FIFOs hang
+            size = os.path.getsize(full_path)
+            if size > SCAN_MAX_BYTES:
                 continue
-            text = _decode_source(raw_bytes)
-            area = classify_source(rel, text, os.path.basename(repo))
-            if area == "frontend" and _shell_menu(rel, text):
-                area = "shell"  # written by code (_write_shell_menu), not by a mapper
-            if area:
-                scanned[rel] = [area, size, text, hashlib.sha1(raw_bytes, usedforsecurity=False).hexdigest()]
-        # a server folder (a real route or server import, not a stray word): its schema files are request rules
-        # (in a repo with UI components too, only schemas in the server's own top folder: client/ form schemas stay)
-        be_pkgs = {_pkg(rel) for rel, c in scanned.items() if c[0] == "backend" and _strong_backend(c[2])}
-        if be_pkgs:
-            ui_pkgs = {
-                _pkg(rel) for rel, c in scanned.items() if c[0] == "frontend" and _ui_file(rel.rsplit("/", 1)[-1])
-            }
-            for rel, c in scanned.items():
-                if (
-                    c[0] == "frontend"
-                    and SCHEMA_RE.search(c[2])
-                    and not _strong_ui(rel, c[2])
-                    and (not ui_pkgs or (_pkg(rel) in be_pkgs and _pkg(rel) not in ui_pkgs))
-                ):
-                    c[0] = "backend"
-        # hashed by bytes: an edit to a non-UTF-8 character is still an edit
-        routers = {rel for rel, c in scanned.items() if c[0] == "frontend" and len(ROUTER_ENTRY_RE.findall(c[2])) > 1}
-        repos.append((repo, head, {rel: (c[0], c[1], c[3]) for rel, c in scanned.items()}, routers))
+            with open(full_path, "rb") as fh:
+                raw_bytes = fh.read()
+        except OSError:
+            continue
+        text = _decode_source(raw_bytes)
+        area = classify_source(rel, text, os.path.basename(repo))
+        if area == "frontend" and _shell_menu(rel, text):
+            area = "shell"  # written by code (_write_shell_menu), not by a mapper
+        if area:
+            scanned[rel] = [area, size, text, hashlib.sha1(raw_bytes, usedforsecurity=False).hexdigest()]
+    # a server folder (a real route or server import, not a stray word): its schema files are request rules
+    # (in a repo with UI components too, only schemas in the server's own top folder: client/ form schemas stay)
+    be_pkgs = {_pkg(rel) for rel, c in scanned.items() if c[0] == "backend" and _strong_backend(c[2])}
+    if be_pkgs:
+        ui_pkgs = {_pkg(rel) for rel, c in scanned.items() if c[0] == "frontend" and _ui_file(rel.rsplit("/", 1)[-1])}
+        for rel, c in scanned.items():
+            if (
+                c[0] == "frontend"
+                and SCHEMA_RE.search(c[2])
+                and not _strong_ui(rel, c[2])
+                and (not ui_pkgs or (_pkg(rel) in be_pkgs and _pkg(rel) not in ui_pkgs))
+            ):
+                c[0] = "backend"
+    # hashed by bytes: an edit to a non-UTF-8 character is still an edit
+    routers = {rel for rel, c in scanned.items() if c[0] == "frontend" and len(ROUTER_ENTRY_RE.findall(c[2])) > 1}
+    repos.append((repo, head, {rel: (c[0], c[1], c[3]) for rel, c in scanned.items()}, routers))
+
+
+def _routes_moved(con, repos):
+    """Did a router change, or a route file go, since frontend was last mapped? Then rows elsewhere may sit on routes
+    that moved."""
     routes_moved = False
     for (
         repo,
@@ -522,6 +518,12 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             for rel in routers
         ):
             routes_moved = True
+    return routes_moved
+
+
+def _area_entries(con, repos, full, routes_moved, summary):
+    """{area: one entry per repo}: the files a mapper must read and those whose rows must go. An area with nothing to
+    read is settled here."""
     areas = {a: [] for a in codemap.CODEMAP_AREAS}
     for repo, head, candidates, _ in repos:
         for a in codemap.CODEMAP_AREAS:
@@ -574,9 +576,11 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                     )
                 entry["settled"] = True
             areas[a].append(entry)
-    _apply_shell_menu(con, repos)
-    with con:
-        codemap.drop_code_only_pages(con)
+    return areas
+
+
+def _write_scans(areas, chunk_files, chunk_tokens, stamp, out_dir, summary):
+    """Writes scan-<area>[-<n>].json, one per mapper, and adds each area's counts to the summary."""
     for a, entries in areas.items():
         chunks = _chunk(entries, chunk_files, chunk_tokens)
         info = []
@@ -610,6 +614,30 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
         }
         summary["total_files"] += n
         summary["tokens"] += tokens
+
+
+def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_FILES, chunk_tokens=CHUNK_TOKENS):
+    """List the source files each qa-mapper must read and write qa-out/init/scan-<area>[-<n>].json (one per mapper).
+    Incremental by content: per area and repo, a file is listed when its content differs from what was last mapped
+    (new, edited, uncommitted), which also lists files whose map never landed. Files with
+    rows that are gone or no longer this area's are listed as deleted. When a router (a file defining several routes)
+    changed or a route file is gone, frontend and tests are mapped in full (rows elsewhere sit on routes that may have
+    moved). A page renamed inside its own one-route file isn't noticed: its old rows stay until `--full`. Areas with
+    nothing to read are settled here. Returns a summary dict for the skill."""
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _clear_old_scans(out_dir)
+    summary: dict[str, Any] = {"incremental": False, "total_files": 0, "tokens": 0, "areas": {}, "skipped": []}
+    repos = []
+    for raw in paths:
+        _scan_repo(raw, summary, repos)
+    routes_moved = _routes_moved(con, repos)
+    areas = _area_entries(con, repos, full, routes_moved, summary)
+    _apply_shell_menu(con, repos)
+    with con:
+        codemap.drop_code_only_pages(con)
+    _write_scans(areas, chunk_files, chunk_tokens, stamp, out_dir, summary)
     return summary
 
 

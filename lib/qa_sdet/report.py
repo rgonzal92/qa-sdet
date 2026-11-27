@@ -729,6 +729,32 @@ def _todo(rep, open_qs):
     return todo
 
 
+def _heading(t):
+    """A ticket's heading: its key, and its summary when it has one."""
+    return md.one_line(t["key"]) + (f": {md.one_line(t['summary'])}" if t.get("summary") else "")
+
+
+def _status_line(rep, t, folder):
+    """One ticket's status line. folder: it is the report's own (one ticket), so it also says what holds for the whole
+    folder."""
+    i = rep.info[t["key"]]
+    passed = sum(c["status"] == "PASS" for c in i["mine"]) + len(i["prior"])
+    total = len(i["mine"]) + len(i["prior"])
+    n = len(results.ticket_bugs(t["key"], rep.cases, rep.bugs, rep.keys))
+    return _line(
+        [
+            results.VERDICT_ICON[i["v"]],
+            "build " + (", ".join(i["builds"]) if rep.runs else "not run yet"),
+            rep.date if folder else "",
+            f"{passed} of {_plural(total, 'case')} passed"
+            + (f" ({len(i['prior'])} on an earlier build)" if i["prior"] else ""),
+            _plural(n, "bug") if n else "no bugs",
+            f"retest of {rep.retest_of}" if rep.retest_of and folder else "",
+            _ran_as(rep.runs) if folder else "",
+        ]
+    )
+
+
 def _head_blocks(rep, open_qs, resolved_fold):
     """The status line(s) under the title, then a plan's questions or a run's What to do."""
     blocks = []
@@ -738,7 +764,7 @@ def _head_blocks(rep, open_qs, resolved_fold):
             blocks.append(
                 _items(
                     [
-                        f"- {rep.heading(t)} — {len(results.entries(t, 'acs'))} AC, {_plural(len(rep.info[t['key']]['mine']), 'case')}"
+                        f"- {_heading(t)} — {len(results.entries(t, 'acs'))} AC, {_plural(len(rep.info[t['key']]['mine']), 'case')}"
                         for t in rep.tickets
                     ]
                 )
@@ -748,7 +774,7 @@ def _head_blocks(rep, open_qs, resolved_fold):
         blocks += resolved_fold
     else:
         if rep.single:
-            blocks += [rep.status(rep.tickets[0], True), _line([rep.info[rep.keys[0]]["why"]])]
+            blocks += [_status_line(rep, rep.tickets[0], True), _line([rep.info[rep.keys[0]]["why"]])]
         elif rep.multi:
             blocks.append(
                 _line(
@@ -796,8 +822,8 @@ def _ticket_blocks(rep):
     for t in rep.tickets:
         i = rep.info[t["key"]]
         if rep.multi:
-            blocks.append(f"## {rep.heading(t)}")
-            blocks += [rep.status(t, False)] if rep.with_status else []
+            blocks.append(f"## {_heading(t)}")
+            blocks += [_status_line(rep, t, False)] if rep.with_status else []
         res = _results(t, i["mine"] + i["prior"], rep.run_dir, rep.with_status, level + 1)
         if res:
             blocks += [f"{'#' * level} {'Results' if rep.with_status else 'Cases'}", *res]
@@ -891,6 +917,19 @@ def _history_blocks(rep):
     return blocks
 
 
+def _bug_context(run_dir, tickets, bugs, d):
+    """What the bug entries read beside the run files: each bug's state in memory, the saved Jira duplicate hits, the audit
+    of its draft and spec, and the reviewer's word."""
+    dups = results.load_json(run_dir / ".data" / "jira-dups.json", [])
+    ctx = {
+        "states": _db_bug_states() if bugs or tickets else {},
+        "dups": dups if isinstance(dups, dict) else {},
+        "audit": audit.audit_bugs(run_dir) if bugs else {},
+        "reviews": _reviews(run_dir, d["warnings"]) if bugs else {},
+    }
+    return ctx
+
+
 def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tuple[str, dict[str, str]]:
     """(REPORT.md text, {Jira comment file name: text}). One renderer for every kind: a ticket's report (status, what
     to do, results by AC, bugs, not tested, signals, exploration notes, history), an exploration's (the same without
@@ -914,13 +953,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     prior_all = [{**c, "id": str(c.get("id") or "?"), "status": "PASS", "prior": True} for c in prior_all]
     hosts, baseline = core.allowed_hosts(cfg), signals.signal_baseline()
     triaged = [(r.get("target") or name, signals.run_signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
-    dups = results.load_json(run_dir / ".data" / "jira-dups.json", [])
-    ctx = {
-        "states": _db_bug_states() if bugs or tickets else {},
-        "dups": dups if isinstance(dups, dict) else {},
-        "audit": audit.audit_bugs(run_dir) if bugs else {},
-        "reviews": _reviews(run_dir, d["warnings"]) if bugs else {},
-    }
+    ctx = _bug_context(run_dir, tickets, bugs, d)
     owners = results.bug_owners(bugs, cases, keys)
     single, multi, date = len(tickets) == 1, len(tickets) > 1, _run_date(run_dir, plan)
     drafts: dict[str, str] = {}
@@ -953,32 +986,12 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
             "name": name,
         }
 
-    def status(t, folder):  # folder: the report's own status line (one ticket), with what holds for the whole folder
-        i = info[t["key"]]
-        passed = sum(c["status"] == "PASS" for c in i["mine"]) + len(i["prior"])
-        total = len(i["mine"]) + len(i["prior"])
-        n = len(results.ticket_bugs(t["key"], cases, bugs, keys))
-        return _line(
-            [
-                results.VERDICT_ICON[i["v"]],
-                "build " + (", ".join(i["builds"]) if runs else "not run yet"),
-                date if folder else "",
-                f"{passed} of {_plural(total, 'case')} passed"
-                + (f" ({len(i['prior'])} on an earlier build)" if i["prior"] else ""),
-                _plural(n, "bug") if n else "no bugs",
-                f"retest of {retest_of}" if retest_of and folder else "",
-                _ran_as(runs) if folder else "",
-            ]
-        )
-
-    heading = lambda t: md.one_line(t["key"]) + (f": {md.one_line(t['summary'])}" if t.get("summary") else "")
     rep = SimpleNamespace(
         bugs=bugs,
         cases=cases,
         ctx=ctx,
         date=date,
         drafts=drafts,
-        heading=heading,
         info=info,
         keys=keys,
         kind=kind,
@@ -989,7 +1002,6 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
         run_dir=run_dir,
         runs=runs,
         single=single,
-        status=status,
         tickets=tickets,
         triaged=triaged,
         cfg=cfg,
@@ -997,7 +1009,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
         with_status=with_status,
     )
     blocks = [
-        f"# {heading(tickets[0])}" if single else f"# QA report: {md.one_line(plan.get('title') or run_dir.name)}"
+        f"# {_heading(tickets[0])}" if single else f"# QA report: {md.one_line(plan.get('title') or run_dir.name)}"
     ]
     if not plan and not runs:
         blocks.append("_Nothing recorded yet: no plan and no test run in this folder._")
