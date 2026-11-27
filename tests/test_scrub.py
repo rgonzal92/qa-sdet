@@ -1,8 +1,11 @@
 """Redaction (qa_sdet.scrub): secrets never reach the memory DB, the drafts or the reports."""
 
+import contextlib
 import json
+import locale
 import os
 import stat
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -11,6 +14,20 @@ from unittest import mock
 from support import MemBase, core, run, runfile
 
 from qa_sdet import ingest, scrub
+
+BEARER = "Authorization: Bearer abcdefghijklmnop1234\n"  # a draft line with a planted token
+HIDDEN = "Authorization: [REDACTED]\n"
+
+
+@contextlib.contextmanager
+def c_locale():
+    """The C locale for the block: a file opened without an encoding is then read and written as ASCII."""
+    before = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, before)
 
 
 class Redact(unittest.TestCase):
@@ -380,6 +397,134 @@ class ScrubFiles(MemBase):
         scrub.scrub_tree(self.proj / "qa-out")
         self.assertNotIn("abcdefghijklmnop1234", up.read_text(encoding="utf-8"))
         self.assertNotIn("hunter2secret", upj.read_text(encoding="utf-8"))
+
+
+class ScrubGaps(MemBase):
+    """What mutation testing found unchecked in scrub_file and scrub_tree (`make mutation`): each test fails when the
+    line it names is changed."""
+
+    def tree(self, *names, text=BEARER):
+        """qa-out with these files in its folder `a`, each holding `text`: (qa-out, the files)."""
+        root = self.proj / "qa-out"
+        files = [root / "a" / n for n in names]
+        for f in files:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text)
+        return root, files
+
+    def test_a_json_file_is_rewritten_only_to_hide_a_secret(self):  # its layout and its encoding
+        plain = self.t / "plan.json"
+        plain.write_text('{"note":"café","n":1}', encoding="utf-8")
+        scrub.scrub_file(plain)
+        self.assertEqual(plain.read_text(encoding="utf-8"), '{"note":"café","n":1}')  # as written: not re-indented
+        secret = self.t / "run-x.json"
+        secret.write_bytes(b"\xef\xbb\xbf" + '{"note":"café","token":"secret123456"}'.encode())  # a byte order mark
+        with c_locale():  # read and written as UTF-8, whatever the system's locale
+            scrub.scrub_file(secret)
+        self.assertEqual(secret.read_bytes(), '{\n  "note": "café",\n  "token": "[REDACTED]"\n}\n'.encode())
+
+    def test_a_json_key_no_encoding_can_write_does_not_keep_the_secret_beside_it(self):
+        root, (f,) = self.tree("run-x.json", text='{"\\ud800": 1, "token": "secret123456"}')  # a lone surrogate
+        scrub.scrub_tree(root)
+        self.assertEqual(json.loads(f.read_text(encoding="utf-8"))["token"], "[REDACTED]")
+
+    def test_the_rewrite_is_made_beside_the_file_not_in_the_systems_temp_folder(self):
+        root, (draft,) = self.tree("BUG-1.md")
+        with mock.patch.object(tempfile, "tempdir", str(self.t / "another-disk")):  # not there: nothing can use it
+            scrub.scrub_tree(root)
+        self.assertEqual(draft.read_text(), HIDDEN)
+        self.assertTrue((root / ".scrubbed").is_file())
+
+    def test_a_rename_that_fails_or_is_interrupted_leaves_no_temp_file(self):
+        root, (draft,) = self.tree("BUG-1.md")
+        names = lambda: sorted(f.name for folder in (root, draft.parent) for f in folder.iterdir())
+        with mock.patch.object(os, "replace", side_effect=PermissionError("read-only")):
+            with self.assertRaises(PermissionError):
+                scrub.scrub_file(draft)
+            scrub.scrub_tree(root)  # neither a draft nor a stamp that can't be written stops the hook
+        self.assertEqual((draft.read_text(), names()), (BEARER, ["BUG-1.md", "a"]))
+        real = os.replace
+
+        def renamed_then_interrupted(src, dst):
+            real(src, dst)
+            raise KeyboardInterrupt  # Ctrl-C lands right after the rename
+
+        with mock.patch.object(os, "replace", renamed_then_interrupted):
+            with self.assertRaises(KeyboardInterrupt):  # passed on as it is: no "file not found" in its place
+                scrub.scrub_file(draft)
+            with self.assertRaises(KeyboardInterrupt):
+                scrub.scrub_tree(root)
+        self.assertEqual((draft.read_text(), names()), (HIDDEN, [".scrubbed", "BUG-1.md", "a"]))
+
+    def test_a_finished_pass_spares_the_files_it_saw(self):  # the stamp was written, and nothing checked it was read
+        root, (draft,) = self.tree("BUG-1.md")
+        changed = max(draft.stat().st_mtime, draft.stat().st_ctime)
+        stamp = root / ".scrubbed"
+        stamp.write_text(str(changed + 2.5))  # the last pass started 2.5 s after the draft changed
+        with mock.patch.object(scrub, "scrub_file") as read_again:
+            scrub.scrub_tree(root)
+        read_again.assert_not_called()
+        stamp.write_text(str(changed + 1))  # within 2 s: the draft may have been written while that pass ran
+        started = time.time()
+        scrub.scrub_tree(root)
+        self.assertEqual(draft.read_text(), HIDDEN)
+        self.assertTrue(started <= float(stamp.read_text()) <= time.time())  # a finished pass stores its start time
+
+    def test_a_pass_that_stopped_early_goes_on_after_the_file_it_reached(self):  # the cursor
+        root = self.proj / "qa-out"
+        clean, dirty = root / "café" / "BUG-1.md", root / "café" / "BUG-2.md"
+        clean.parent.mkdir(parents=True)
+        clean.write_text("nothing to hide\n")  # first in line and never rewritten: only the cursor gets past it
+        dirty.write_text(BEARER)
+        with c_locale():  # the stamp is UTF-8, whatever the system's locale
+            scrub.scrub_tree(root, budget=0)  # one file, then out of time
+            self.assertEqual((root / ".scrubbed").read_text(encoding="utf-8").partition(" ")[2], str(clean))
+            scrub.scrub_tree(root, budget=0)
+        self.assertEqual(dirty.read_text(), HIDDEN)
+
+    def test_a_file_name_that_is_not_utf8_is_scrubbed_and_does_not_break_the_stamp(self):
+        root = self.proj / "qa-out"
+        odd = [root / "a" / (b"BUG-%d\xff.md" % n).decode("utf-8", "surrogateescape") for n in (1, 2)]
+        odd[0].parent.mkdir(parents=True)
+        for f in odd:
+            f.write_text(BEARER)
+        scrub.scrub_tree(root, budget=0)  # stopped after one: the stamp names a file no encoding can write
+        self.assertIn(" ", (root / ".scrubbed").read_text(encoding="utf-8"))
+        scrub.scrub_tree(root, budget=0)
+        self.assertEqual([f.read_text() for f in odd], [HIDDEN, HIDDEN])
+
+    def test_a_repro_spec_is_scrubbed_by_the_last_part_of_its_name(self):  # no test had a name with two dots
+        root, (spec,) = self.tree(
+            "repro/BUG-1.spec.ts", text="const t = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk';\n"
+        )
+        scrub.scrub_tree(root)
+        self.assertEqual(spec.read_text(), "const t = '[REDACTED-JWT]';\n")
+
+    def test_a_file_that_vanished_during_the_scan_does_not_hide_the_others(self):
+        root, drafts = self.tree("BUG-1.md", "BUG-2.md", "BUG-3.md")
+        real, gone = os.lstat, []
+
+        def lstat(path, *args, **kw):
+            if str(path).endswith(".md") and not gone:
+                gone.append(Path(path))
+                raise FileNotFoundError(path)  # deleted between the folder's listing and the look at it
+            return real(path, *args, **kw)
+
+        with mock.patch.object(os, "lstat", lstat):
+            scrub.scrub_tree(root)
+        self.assertEqual(
+            sorted(f.name for f in drafts if f.read_text() == HIDDEN), sorted(f.name for f in drafts if f != gone[0])
+        )
+
+    def test_a_file_of_twenty_million_bytes_or_more_is_left_alone(self):  # the limit itself
+        root, (log,) = self.tree("requests.log", text="")
+        os.truncate(log, 20_000_000)
+        with mock.patch.object(scrub, "scrub_file") as read:
+            scrub.scrub_tree(root)
+            read.assert_not_called()
+            os.truncate(log, 19_999_999)
+            scrub.scrub_tree(root)
+        read.assert_called_once_with(log)
 
 
 if __name__ == "__main__":
