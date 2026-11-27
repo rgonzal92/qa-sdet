@@ -1,5 +1,7 @@
 """Bug evidence images: `evidence` (a screenshot with the element boxed and labelled) and `annotate`."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -10,6 +12,10 @@ import tempfile
 from pathlib import Path
 
 from . import core, session
+
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:  # NOSONAR
+    from typing import Any
 
 RED, WHITE = (224, 0, 0), (255, 255, 255)
 NO_PILLOW = "annotate: Pillow not installed (python3 -m pip install --user pillow); image left as is"
@@ -128,39 +134,53 @@ def _wrap(draw, text, font, width):
     return lines + ([cur] if cur else [])
 
 
-def _draw_outlines(boxes, lw, W, H, draw):
+@core.record
+class Canvas:
+    """The screenshot being annotated, and how thick to draw on it."""
+
+    draw: Any  # Pillow's ImageDraw on the image
+    width: int  # the image's size, in pixels
+    height: int
+    grey: Any  # the page before drawing, in grey: where the label would hide the least
+    scale: float  # 1 up to a 1280px image, at most 4: the line width and the font grow with it
+    lw: int  # the outline's width, in pixels
+    gap: int  # the pixels kept free between an outline and the label
+
+
+def _draw_outlines(boxes, cv: Canvas):
     """A red band on each side of every box, just outside it and clipped to the image; returns the areas now covered."""
     drawn = []
     for x, y, w, h in boxes:  # four bands just outside the element, each clipped to the image: at an image edge
         bx0, by0, bx1, by1 = x, y, x + w - 1, y + h - 1  # the band there is thinner, never moved onto the element
-        ox0, oy0, ox1, oy1 = bx0 - lw, by0 - lw, bx1 + lw, by1 + lw
+        ox0, oy0, ox1, oy1 = bx0 - cv.lw, by0 - cv.lw, bx1 + cv.lw, by1 + cv.lw
         for r in (
             (ox0, oy0, ox1, by0 - 1),
             (ox0, by1 + 1, ox1, oy1),
             (ox0, by0, bx0 - 1, by1),
             (bx1 + 1, by0, ox1, by1),
         ):
-            cx0, cy0, cx1, cy1 = max(r[0], 0), max(r[1], 0), min(r[2], W - 1), min(r[3], H - 1)
+            cx0, cy0, cx1, cy1 = max(r[0], 0), max(r[1], 0), min(r[2], cv.width - 1), min(r[3], cv.height - 1)
             if cx0 <= cx1 and cy0 <= cy1:
-                draw.rectangle([cx0, cy0, cx1, cy1], fill=RED)
-        drawn.append((max(ox0, 0), max(oy0, 0), min(ox1, W - 1), min(oy1, H - 1)))
+                cv.draw.rectangle([cx0, cy0, cx1, cy1], fill=RED)
+        drawn.append((max(ox0, 0), max(oy0, 0), min(ox1, cv.width - 1), min(oy1, cv.height - 1)))
     return drawn
 
 
-def _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey):
+def _draw_label(ImageFont, text, drawn, cv: Canvas):
     """The label as a red tag with white text: beside the first box on the quietest spot that covers no box, or where it
     hides the least."""
-    font, pad = _font(ImageFont, round(18 * scale)), max(4, round(4 * scale))
-    lines = _wrap(draw, text, font, max(1, W - 2 * pad))
+    W, H, gap = cv.width, cv.height, cv.gap
+    font, pad = _font(ImageFont, round(18 * cv.scale)), max(4, round(4 * cv.scale))
+    lines = _wrap(cv.draw, text, font, max(1, W - 2 * pad))
     asc, desc = font.getmetrics() if hasattr(font, "getmetrics") else (11, 0)
-    lh = asc + desc + max(1, round(2 * scale))
+    lh = asc + desc + max(1, round(2 * cv.scale))
     room = max(1, (H - 2 * pad) // lh)  # a short screenshot: keep the lines that fit, say the rest was cut
     if len(lines) > room:
         lines = lines[:room]
-        while len(lines[-1]) > 1 and draw.textlength(lines[-1] + "…", font=font) > W - 2 * pad:
+        while len(lines[-1]) > 1 and cv.draw.textlength(lines[-1] + "…", font=font) > W - 2 * pad:
             lines[-1] = lines[-1][:-1]
         lines[-1] = lines[-1].rstrip() + "…"
-    tw = min(max(round(draw.textlength(t, font=font)) for t in lines) + 2 * pad, W)
+    tw = min(max(round(cv.draw.textlength(t, font=font)) for t in lines) + 2 * pad, W)
     th = min(lh * len(lines) + 2 * pad, H)
     corners = [(0, 0), (max(0, W - tw), 0), (0, max(0, H - th)), (max(0, W - tw), max(0, H - th))]
     x0, y0, x1, y1 = drawn[0] if drawn else (0, 0, 0, 0)  # no box: a caption in the quietest corner
@@ -173,7 +193,7 @@ def _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey):
     )
 
     def busy(tx, ty):  # share of pixels that are page content (differ from the spot's commonest shade)
-        hist = grey.crop((tx, ty, tx + tw, ty + th)).histogram()
+        hist = cv.grey.crop((tx, ty, tx + tw, ty + th)).histogram()
         bg = max(range(256), key=hist.__getitem__)
         return 1 - sum(hist[max(0, bg - 24) : bg + 25]) / max(1, sum(hist))
 
@@ -208,9 +228,9 @@ def _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey):
         if free
         else min(spots, key=lambda xy: (cover(*xy), busy(*xy)))
     )
-    draw.rectangle([tx, ty, tx + tw - 1, ty + th - 1], fill=RED)
+    cv.draw.rectangle([tx, ty, tx + tw - 1, ty + th - 1], fill=RED)
     for i, t in enumerate(lines):
-        draw.text((tx + pad, ty + pad + i * lh), t, fill=WHITE, font=font)
+        cv.draw.text((tx + pad, ty + pad + i * lh), t, fill=WHITE, font=font)
 
 
 def annotate(path, boxes, label):
@@ -246,11 +266,11 @@ def annotate(path, boxes, label):
     grey = img.convert("L")  # the page before drawing: where the label would hide the least
     scale = min(max(W / 1280, 1.0), 4.0)
     lw, gap = max(2, round(3 * scale)), max(2, round(3 * scale))
-    draw = ImageDraw.Draw(img)
-    drawn = _draw_outlines(boxes, lw, W, H, draw)
+    cv = Canvas(draw=ImageDraw.Draw(img), width=W, height=H, grey=grey, scale=scale, lw=lw, gap=gap)
+    drawn = _draw_outlines(boxes, cv)
     text = core.short(" ".join(str(label).split()), 80)
     if text:
-        _draw_label(ImageFont, scale, draw, text, W, H, drawn, gap, grey)
+        _draw_label(ImageFont, text, drawn, cv)
     # a fresh temp file (O_EXCL): a planted .tmp symlink must not redirect the write outside evidence/
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
