@@ -54,6 +54,18 @@ STOP_REASONS = (
 BLOCK_SCOPES = ("page", "session", "browser")  # what a BLOCKED run blocks: this page, the sign-in, the browser
 
 
+@core.record
+class Stamp:
+    """What the rows stored from one run file go by: the run's id and build, when it finished, and the file."""
+
+    rid: str  # the run's id
+    build: str  # the build it ran on
+    known: bool  # that build is known: only such a run verifies what it saw
+    ts: str  # when the run finished
+    run_dir: Path | None  # the folder of the run file: a bug's relative draft path starts there
+    src: str | Path  # the run file itself: a rewrite of it replaces its bugs
+
+
 def ingest(
     con: sqlite3.Connection, run: JsonObj, ts: str | None = None, run_dir: Path | None = None, src: str | Path = ""
 ) -> None:
@@ -62,7 +74,7 @@ def ingest(
     Raises ValueError on bad shape."""
     rid, build, known, pages, bug_list = check_run(run)
     ts = ts or core.now()
-    _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src)
+    _store(con, run, pages, bug_list, Stamp(rid=rid, build=build, known=known, ts=ts, run_dir=run_dir, src=src))
 
 
 def check_run(run: object) -> tuple[str, str, bool, list[JsonObj], list[JsonObj]]:
@@ -133,27 +145,29 @@ REGRESSES = (
 )
 
 
-def _store_page(con, pg, ts, known, build, explored, rid):
+def _store_page(con, pg, explored, stamp: Stamp):
     """One page of a run: the page row, its facts, locators, states and coverage. A run older than what memory holds
     (ingested late) adds what is new and never rolls the page back."""
     route = pg["route"]
     old = con.execute("SELECT build, last_verified FROM pages WHERE route=?", (route,)).fetchone()
     # A run older than what we already know (ingested late) must not roll the page back.
-    late = bool(old and old["last_verified"] and ts < old["last_verified"])
+    late = bool(old and old["last_verified"] and stamp.ts < old["last_verified"])
     # A late file of the page's current build still saw the current page: its new facts and locators count.
-    same_build = bool(known and old and old["build"] == build)
-    current = known and (not late or same_build)
-    if known and not late and old and old["build"] not in (build, core.UNKNOWN, None):  # new build: re-verify
+    same_build = bool(stamp.known and old and old["build"] == stamp.build)
+    current = stamp.known and (not late or same_build)
+    if (
+        stamp.known and not late and old and old["build"] not in (stamp.build, core.UNKNOWN, None)
+    ):  # new build: re-verify
         con.execute("UPDATE facts SET stale=1 WHERE page=? AND pinned=0", (route,))  # the user's own stay
         con.execute("UPDATE locators SET stale=1 WHERE page=?", (route,))
     if late:
-        con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
-    elif known:
+        con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, stamp.build))
+    elif stamp.known:
         con.execute(
             "INSERT INTO pages(route, name, build, last_verified) VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
             "name=coalesce(excluded.name, name), build=excluded.build, "
             "last_verified=excluded.last_verified",
-            (route, core.cap(pg.get("name")) or None, build, ts),
+            (route, core.cap(pg.get("name")) or None, stamp.build, stamp.ts),
         )
     else:  # e.g. a plan from a ticket: knows the page, verified nothing
         con.execute(
@@ -162,7 +176,7 @@ def _store_page(con, pg, ts, known, build, explored, rid):
             (route, core.cap(pg.get("name")) or None, core.UNKNOWN),
         )
     if explored:
-        con.execute("UPDATE pages SET explored=max(coalesce(explored, ''), ?) WHERE route=?", (ts, route))
+        con.execute("UPDATE pages SET explored=max(coalesce(explored, ''), ?) WHERE route=?", (stamp.ts, route))
     for f in pg.get("facts") or []:
         text = core.cap(f.get("text"))
         if text:
@@ -180,12 +194,12 @@ def _store_page(con, pg, ts, known, build, explored, rid):
                     core.cap(f.get("kind"))[:30] or "note",
                     text,
                     core.cap(f.get("source")),
-                    build,
-                    ts,
+                    stamp.build,
+                    stamp.ts,
                     int(late and not same_build),
                     int(current),
                     int(current),
-                    *(int(known and not late),) * 2,
+                    *(int(stamp.known and not late),) * 2,
                 ),
             )
     framed = set()  # what this run found in a frame, as the same element reads without the frame
@@ -197,10 +211,10 @@ def _store_page(con, pg, ts, known, build, explored, rid):
         )
         if (not late or same_build) and loc_name and loc_val and len(loc_val) <= core.MAX_TEXT:
             # late + same build, or unknown-build plan on a verified page: add, never overwrite/un-stale verified
-            keep_old = late or (not known and bool(old and old["build"] not in (core.UNKNOWN, None)))
+            keep_old = late or (not stamp.known and bool(old and old["build"] not in (core.UNKNOWN, None)))
             con.execute(
                 f"INSERT OR {'IGNORE' if keep_old else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
-                (route, loc_name, loc_val, build, ts),
+                (route, loc_name, loc_val, stamp.build, stamp.ts),
             )
             if not keep_old and core.FRAME_MARK in loc_val:
                 framed.add(core.frame_tail(loc_val))
@@ -215,7 +229,12 @@ def _store_page(con, pg, ts, known, build, explored, rid):
     ):
         if re.sub(r"^(?:[A-Za-z_$][\w$]*\.)+(?=getBy)", "", x["locator"]) in framed:
             con.execute("DELETE FROM locators WHERE page=? AND name=?", (route, x["name"]))
-    _store_states(con, route, pg, build, ts)
+    _store_states(con, route, pg, stamp)
+    _store_coverage(con, route, pg, stamp)
+
+
+def _store_coverage(con, route, pg, stamp: Stamp):
+    """A page's coverage as the run reports it: one row per target, heuristic and build."""
     for c in pg.get("coverage") or []:
         if core.norm(c.get("heuristic")):
             # the newest run's result stands: a run.json ingested late must not put its older one back
@@ -228,9 +247,9 @@ def _store_page(con, pg, ts, known, build, explored, rid):
                     core.cap(c.get("target")) or "*",
                     core.heuristic_id(c["heuristic"]),
                     core.coverage_result(c.get("result")),
-                    build,
-                    rid,
-                    ts,
+                    stamp.build,
+                    stamp.rid,
+                    stamp.ts,
                 ),
             )
 
@@ -255,15 +274,15 @@ def _cap_pages(con, pages):
         )
 
 
-def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
+def _store_bugs(con, bug_list, stamp: Stamp):
     """The run file's bugs: each is upserted and sighted; one that an earlier version of the file listed and this one
     doesn't is un-sighted, and dropped when only this file ever saw it."""
     # sightings = which bugs this run file reported. A rewritten run.json (or a sibling's hook ingesting it
     # mid-run) replaces its earlier version: a bug it no longer lists is un-sighted (dropped when only it ever
     # saw it), and seen_count counts distinct run ids even when runs are re-ingested interleaved.
-    src = str(src or "")
-    before = {r[0] for r in con.execute("SELECT hash FROM sightings WHERE run_id=? AND src=?", (rid, src))}
-    ran = lambda h: con.execute("SELECT 1 FROM sightings WHERE run_id=? AND hash=?", (rid, h)).fetchone()
+    src = str(stamp.src or "")
+    before = {r[0] for r in con.execute("SELECT hash FROM sightings WHERE run_id=? AND src=?", (stamp.rid, src))}
+    ran = lambda h: con.execute("SELECT 1 FROM sightings WHERE run_id=? AND hash=?", (stamp.rid, h)).fetchone()
     now_seen = set()
     for b in bug_list:
         symptom = core.cap(b.get("symptom")) or core.cap(b["title"])
@@ -278,12 +297,12 @@ def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
         h = h or core.bug_hash(b["route"], symptom)
         # a new sighting counts once; a bug from before sightings existed counts this run via last_run
         fresh = int(
-            not ran(h) and not con.execute("SELECT 1 FROM bugs WHERE hash=? AND last_run=?", (h, rid)).fetchone()
+            not ran(h) and not con.execute("SELECT 1 FROM bugs WHERE hash=? AND last_run=?", (h, stamp.rid)).fetchone()
         )
         now_seen.add(h)
         con.execute(
             "INSERT OR IGNORE INTO sightings(run_id,src,hash,page,build) VALUES(?,?,?,?,?)",
-            (rid, src, h, b["route"], build),
+            (stamp.rid, src, h, b["route"], stamp.build),
         )  # where it showed: a shared-endpoint bug on another page too
         # a FIXED bug seen again by another run becomes REGRESSED.
         con.execute(
@@ -312,17 +331,17 @@ def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
                 core.cap(b["title"]),
                 core.cap(b.get("severity"))[:20] or None,
                 core.cap(b.get("classification"))[:20] or None,
-                resolve_draft(b.get("draft_path"), run_dir),
-                ts,
-                ts,
-                rid,
+                resolve_draft(b.get("draft_path"), stamp.run_dir),
+                stamp.ts,
+                stamp.ts,
+                stamp.rid,
                 symptom,
                 core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
                 cards.endpoint(b.get("endpoint")),
                 memory.pattern_tag(b.get("pattern")),
                 core.cap(b.get("ticket"))[:30] or None,
-                build if known else None,
-                build if known else None,
+                stamp.build if stamp.known else None,
+                stamp.build if stamp.known else None,
                 fresh,
                 fresh,
                 fresh,
@@ -330,19 +349,19 @@ def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
             ),
         )
     for h in before - now_seen:  # listed by an earlier version of this run.json only
-        con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
+        con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (stamp.rid, src, h))
         if ran(h):
             continue  # another file of the same run id still lists it
         con.execute(
             "UPDATE bugs SET seen_count=max(seen_count - 1, 0), "
             "last_run=CASE WHEN last_run=? THEN NULL ELSE last_run END WHERE hash=?",
-            (rid, h),
+            (stamp.rid, h),
         )
         # the sighting that made a FIXED bug REGRESSED is gone (a checkpoint listed it, the final file didn't)
         con.execute(
             "UPDATE bugs SET status='FIXED', regressed_count=max(coalesce(regressed_count, 0) - 1, 0), "
             "regressed_by=NULL WHERE hash=? AND status='REGRESSED' AND regressed_by=?",
-            (h, rid),
+            (h, stamp.rid),
         )
         # only this run ever saw it and the user hasn't triaged it: it was never a bug
         page = con.execute("SELECT page FROM bugs WHERE hash=?", (h,)).fetchone()
@@ -352,23 +371,23 @@ def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
             (h, h),
         ).rowcount
         if gone:
-            _bug_dropped(src, h, page[0] if page else None, rid)
+            _bug_dropped(src, h, page[0] if page else None, stamp.rid)
 
 
-def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
+def _store(con, run, pages, bug_list, stamp: Stamp):
     with con:
         statuses = [core.case_status(c.get("status")) for c in core.dicts(run, "cases")]
         con.execute(
             "INSERT OR REPLACE INTO runs(id,mode,target,build,status,summary,ts,cases_pass,cases_fail,cases_blocked,"
             "bugs_found) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
-                rid,
+                stamp.rid,
                 core.cap(run.get("mode")) or None,
                 core.cap(run.get("target")),
-                build,
+                stamp.build,
                 core.cap(run.get("status")) or None,
                 core.cap(run.get("summary")),
-                ts,
+                stamp.ts,
                 statuses.count("PASS"),
                 statuses.count("FAIL"),
                 statuses.count("BLOCKED"),
@@ -376,23 +395,23 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
             ),
         )
         # The deployed build only moves forward in time: an old run.json ingested late must not roll it back.
-        if known and (core.meta(con, "build_ts") or "") <= ts:
-            core.set_meta(con, "build", build)
-            core.set_meta(con, "build_ts", ts)
+        if stamp.known and (core.meta(con, "build_ts") or "") <= stamp.ts:
+            core.set_meta(con, "build", stamp.build)
+            core.set_meta(con, "build_ts", stamp.ts)
         # the read-only map (qa-mem crawl and discover) and a blocked start test nothing
         explored = core.norm(run.get("mode")) != "map" and core.norm(run.get("status")) != "blocked"
         for pg in pages:
-            _store_page(con, pg, ts, known, build, explored, rid)
+            _store_page(con, pg, explored, stamp)
         _cap_pages(con, pages)
-        _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known)
+        _store_bugs(con, bug_list, stamp)
         target = (
             core.norm_route(core.cap(run.get("target")))
             if str(run.get("target") or "").startswith(("/", "http", "#"))
             else ""
         )
-        _store_questions(con, run.get("questions"), target or "*", ts)
+        _store_questions(con, run.get("questions"), target or "*", stamp.ts)
         if explored and target:
-            _store_blind_spots(con, run, target, rid, build, ts)
+            _store_blind_spots(con, run, target, stamp)
         con.execute("DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY ts DESC LIMIT ?)", (core.MAX_RUNS,))
         con.execute("DELETE FROM sightings WHERE run_id NOT IN (SELECT id FROM runs)")
 
@@ -413,7 +432,7 @@ def _bug_dropped(src, h, page, rid):
 BLIND_SPOTS_PER_PAGE = 50
 
 
-def _store_blind_spots(con, run, page, rid, build, ts):
+def _store_blind_spots(con, run, page, stamp: Stamp):
     """The ledger of what runs leave untested, per page: each `not_tested` line of the run counts once per run. A line
     a later COMPLETED run no longer repeats is marked resolved (covered, or no longer deferred); repeating it again
     reopens it. An unfinished run says nothing about what a finished one left out."""
@@ -425,11 +444,12 @@ def _store_blind_spots(con, run, page, rid, build, ts):
             "ON CONFLICT(page,category,text) DO UPDATE SET seen_runs=seen_runs + (last_run IS NOT excluded.last_run), "
             "last_run=excluded.last_run, build=excluded.build, last_seen=excluded.last_seen, resolved=0 "
             "WHERE excluded.last_seen >= coalesce(blind_spots.last_seen, '')",
-            (page, cat, core.cap(text), build, ts, ts, rid),
+            (page, cat, core.cap(text), stamp.build, stamp.ts, stamp.ts, stamp.rid),
         )
     if core.norm(run.get("status")) == "completed":
         con.execute(
-            "UPDATE blind_spots SET resolved=1 WHERE page=? AND last_run IS NOT ? AND last_seen <= ?", (page, rid, ts)
+            "UPDATE blind_spots SET resolved=1 WHERE page=? AND last_run IS NOT ? AND last_seen <= ?",
+            (page, stamp.rid, stamp.ts),
         )
     con.execute(
         "DELETE FROM blind_spots WHERE page=? AND rowid NOT IN (SELECT rowid FROM blind_spots WHERE page=? "
@@ -441,7 +461,7 @@ def _store_blind_spots(con, run, page, rid, build, ts):
 STATES_PER_PAGE = 60
 
 
-def _store_states(con, route, pg, build, ts):
+def _store_states(con, route, pg, stamp: Stamp):
     """A page's in-page states (tab, dialog, drawer, wizard step, query view) and the pages it leads to, as reported. A
     state visited on a build stays visited for that build; a new build makes it due again."""
     for st in core.dicts(pg, "states"):
@@ -467,8 +487,8 @@ def _store_states(con, route, pg, build, ts):
                 core.cap(st.get("kind"))[:30] or None,
                 core.cap(st.get("trigger"))[:200] or None,
                 status,
-                build,
-                ts,
+                stamp.build,
+                stamp.ts,
             ),
         )
     con.execute(
@@ -503,8 +523,8 @@ def _store_states(con, route, pg, build, ts):
                 core.cap(t.get("trigger"))[:120],
                 sample or None,
                 core.cap(t.get("kind"))[:30] or None,
-                build,
-                ts,
+                stamp.build,
+                stamp.ts,
             ),
         )
 
