@@ -43,5 +43,8 @@ Run folder
 - `inbox`: `inbox`, `prep`, `trace`
 
 Entry points
-- `cli`: `qa-mem` argument parsing; it calls the modules above
+- `usage`: the command table (`COMMANDS`), option parsing, usage errors
+- `cli_run`: one handler per command that needs no memory DB (run folders, browser, reports, plugin log)
+- `cli_memory`: one handler per command that opens the memory DB
+- `cli`: `qa-mem` entry: checks the arguments, routes to a handler; `ingest-pending`, the hooks' command
 - `hooks/`: `guard` (PreToolUse rules, entered through `pretooluse`), `posttooluse` (feedback after Bash and Write, the call trace), `denied` (logs Claude Code's own denials)

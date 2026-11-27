@@ -12,6 +12,8 @@ from unittest import mock
 
 from support import ROOT, Base, cli, cli_mod, core
 
+from qa_sdet import usage
+
 
 class Cli(Base):
     """Usage, help and the error messages of the commands."""
@@ -19,11 +21,11 @@ class Cli(Base):
     def test_every_command_answers_help_and_bad_options_with_usage(self):
         code, out, _ = cli()
         self.assertEqual(code, 2)
-        for name in cli_mod.COMMANDS:
+        for name in usage.COMMANDS:
             self.assertIn(f"  qa-mem {name}", out)
         self.assertEqual(cli("--help")[0], 2)
         self.assertEqual(cli("nope")[0], 2)
-        for name in cli_mod.COMMANDS:
+        for name in usage.COMMANDS:
             for args in (["--help"], ["-h"], ["--bogus"], ["x", "--help"]):
                 code, out, err = cli(name, *args)
                 self.assertEqual(code, 2, (name, args, out, err))
@@ -41,7 +43,7 @@ class Cli(Base):
 
     def test_rundir_usage_names_one_key(self):  # one folder per ticket: the usage must not invite K1,K2
         self.assertEqual(
-            cli_mod.COMMANDS["rundir"],
+            usage.COMMANDS["rundir"],
             "<project> (--keys KEY | --route <route> [--prefix plan-] | --label <text> [--prefix plan-])",
         )
         self.config(jiraKeyPrefix="PROJ")

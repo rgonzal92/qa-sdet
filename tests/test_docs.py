@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from support import load_hook
 
-from qa_sdet import cli, core, doctor, report, results, runstate
+from qa_sdet import core, doctor, report, results, runstate, usage
 
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
@@ -307,7 +307,7 @@ class Docs(unittest.TestCase):
 
     def test_the_body_check_pipeline_is_approved_and_named_by_the_explorer_and_the_tips(self):
         """Step 9 reads a body into `qa-mem body-check`: the verb exists, the guard lets the pipe through, both docs name it."""
-        self.assertIn("body-check", cli.COMMANDS)
+        self.assertIn("body-check", usage.COMMANDS)
         for doc in ("agents/qa-explorer.md", "references/playwright-cli-tips.md"):
             self.assertIn("| qa-mem body-check '<out>' --slug <slug> <#>", text(doc), doc)
         cmd = "playwright-cli -s=qa response-body 7 | qa-mem body-check '/p/qa-out/run' --slug form 7"
@@ -501,8 +501,8 @@ class Docs(unittest.TestCase):
             self.assertNotRegex(f.read_text(), r"video-show-actions[^\n`]*--cursor", f.name)
 
     def test_api_writes_flag_reaches_the_marker_the_brief_and_every_doc(self):
-        self.assertIn("--api-writes", cli.COMMANDS["dispatch"])
-        self.assertIn("--api-writes", cli.COMMANDS["marker"])
+        self.assertIn("--api-writes", usage.COMMANDS["dispatch"])
+        self.assertIn("--api-writes", usage.COMMANDS["marker"])
         for rel in ("skills/qa-explore/SKILL.md", "skills/qa-ticket/SKILL.md", "references/run-setup.md", "README.md"):
             self.assertIn("--api-writes", text(rel), rel)
         for rel in ("skills/qa-explore/SKILL.md", "skills/qa-ticket/SKILL.md"):
@@ -632,10 +632,10 @@ class Docs(unittest.TestCase):
         for doc in (skill, plan):
             self.assertIn("rundir '${CLAUDE_PROJECT_DIR}' --keys <KEY>", doc)
             self.assertNotRegex(doc, r"--keys K1,K2")  # the CLI refuses several keys: one folder per ticket
-        self.assertIn("--keys KEY", cli.COMMANDS["rundir"])
+        self.assertIn("--keys KEY", usage.COMMANDS["rundir"])
         table = skill.split("## 2. Plan and cases")[1].split("## 3. Test")[0]
         for flag in ("--all", "--cases"):
-            self.assertIn(flag, cli.COMMANDS["dispatch"])
+            self.assertIn(flag, usage.COMMANDS["dispatch"])
             self.assertIn(f"| `{flag}", table)
         state = text("lib/qa_sdet/runstate.py")
         for field in ("has_runs", "builds", "retest_cases", "incomplete_routes", "run_dir", "subset_of"):
@@ -694,8 +694,8 @@ class Docs(unittest.TestCase):
         self.assertIn("qa-mem discover '<run>'", explore)
         for skill in (init, explore):
             self.assertIn("run_in_background", skill)  # minutes long: a foreground Bash call ends at 10 minutes
-        self.assertIn("crawl", cli.COMMANDS)
-        self.assertIn("discover", cli.COMMANDS)
+        self.assertIn("crawl", usage.COMMANDS)
+        self.assertIn("discover", usage.COMMANDS)
         hooks = json.loads(text("hooks/hooks.json"))["hooks"]
         self.assertNotIn("qa-crawler", hooks["SubagentStop"][0]["matcher"])
         self.assertNotIn("Mode `map`", text("agents/qa-explorer.md"))
@@ -720,7 +720,7 @@ class Docs(unittest.TestCase):
     def test_the_graph_surfaces_are_documented(self):
         for doc in ("README.md", "skills/qa-memory/SKILL.md"):
             self.assertIn("impact <route|", text(doc))
-        self.assertIn("impact", cli.COMMANDS)
+        self.assertIn("impact", usage.COMMANDS)
         for doc in ("skills/qa-plan/SKILL.md", "skills/qa-ticket/SKILL.md"):
             self.assertIn("impacted_routes", text(doc))
         self.assertIn("impacted_routes", text("lib/qa_sdet/memory.py"))  # the key prep's context carries
@@ -729,7 +729,7 @@ class Docs(unittest.TestCase):
         for flag in ("--hypothesis", "--target-route"):
             for doc in ("README.md", "skills/qa-explore/SKILL.md", "references/run-setup.md"):
                 self.assertIn(flag, text(doc), f"{doc}: {flag}")
-            self.assertIn(flag, cli.COMMANDS["dispatch"])
+            self.assertIn(flag, usage.COMMANDS["dispatch"])
         skill = text("skills/qa-explore/SKILL.md")
         for word in ("`frontier`", "`run_patterns`", "`entry_route`", "`entry_chain`"):
             self.assertIn(word, skill)
@@ -746,8 +746,8 @@ class Docs(unittest.TestCase):
         for doc in [ROOT / "README.md", *DOCS]:
             self.assertIsNone(gone.search(doc.read_text()), doc.name)
         for name in ("marker", "dispatch"):
-            self.assertIsNone(gone.search(cli.COMMANDS[name]), name)
-        self.assertNotIn("spend", cli.COMMANDS)
+            self.assertIsNone(gone.search(usage.COMMANDS[name]), name)
+        self.assertNotIn("spend", usage.COMMANDS)
         # a run Claude Code or the user cuts short still keeps its results
         self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
 
@@ -787,7 +787,7 @@ class Docs(unittest.TestCase):
         self.assertNotIn("risks next to them", done)  # open-ended: the run never knew it was done
 
     def test_blindspots_is_a_command_and_documented(self):
-        self.assertIn("blindspots", cli.COMMANDS)
+        self.assertIn("blindspots", usage.COMMANDS)
         for doc in ("README.md", "skills/qa-memory/SKILL.md"):
             self.assertIn("blindspots", text(doc), doc)
         for section in (
@@ -818,7 +818,7 @@ class Docs(unittest.TestCase):
             self.assertIn(".data/review.json", body)
 
     def test_plugin_log_and_feedback_skill_match_code(self):
-        self.assertIn("plugin-log", cli.COMMANDS)
+        self.assertIn("plugin-log", usage.COMMANDS)
         self.assertTrue((ROOT / "skills/qa-feedback/SKILL.md").is_file())
         for rel in ("README.md", "skills/qa-setup/SKILL.md", "hooks/guard.py", "hooks/denied.py"):
             self.assertNotIn("guard-denials.log", text(rel), rel)
