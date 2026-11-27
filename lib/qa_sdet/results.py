@@ -514,11 +514,13 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
     """Merge .data/prior-<slug>.json (the earlier run file, the date it was written and the case ids given since, saved
     by dispatch) into run-<slug>.json: an explorer dispatched again writes only what it ran, and a rewrite must not lose
     what the earlier attempt found. A given case takes its new result unless that is NOT_RUN; any other case keeps its
-    earlier result (even one the explorer copied), stamped with the `build` and `ran` it came from. An earlier bug the
-    new file doesn't list (by BUG-n, else hash) stays when a case names it, or when no case ever named it and the build
-    is the same (a continuation): a bug whose cases ran again and no longer name it is not carried. Questions are joined
-    by text; everything else is the new file's. Idempotent and best effort: an unreadable run file is left as it is,
-    with its copy. The copy is removed unless `keep` (the stop hook: a bounced explorer may write its file again)."""
+    earlier result (even one the explorer copied), stamped with the `build` and `ran` it came from. Except a PASS of an
+    attempt that ended BLOCKED, which is not trusted: a case given again and not run has what the new file says of it
+    (NOT_RUN), or no result. An earlier bug the new file doesn't list (by BUG-n, else hash) stays when a case names it,
+    or when no case ever named it and the build is the same (a continuation): a bug whose cases ran again and no longer
+    name it is not carried. Questions are joined by text; everything else is the new file's. Idempotent and best effort:
+    an unreadable run file is left as it is, with its copy. The copy is removed unless `keep` (the stop hook: a bounced
+    explorer may write its file again)."""
     data = Path(run_dir) / ".data"
     pf, rf = data / f"prior-{slug}.json", data / f"run-{slug}.json"
     try:
@@ -547,7 +549,21 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
             news = {str(c.get("id")): c for c in entries(new, "cases")}
             olds = {str(c.get("id")): c for c in entries(old, "cases")}
             ran_again = lambda cid: cid in given and core.case_status(news[cid].get("status")) not in (None, "NOT_RUN")
-            cases = [news[cid] if cid in news and ran_again(cid) else {**stamp, **c} for cid, c in olds.items()]
+            # a PASS of an attempt that ended BLOCKED is not trusted (dispatch gave its cases again): given again and
+            # not run, the case has what the new file says of it, or no result
+            redo = {
+                cid
+                for cid, c in olds.items()
+                if first_word(old.get("status")) == "blocked"
+                and cid in given
+                and not (cid in news and ran_again(cid))
+                and core.case_status(c.get("status")) == "PASS"
+            }
+            cases = [
+                news[cid] if cid in news and (ran_again(cid) or cid in redo) else {**stamp, **c}
+                for cid, c in olds.items()
+                if cid in news or cid not in redo
+            ]
             cases += [c for c in entries(new, "cases") if str(c.get("id")) not in olds]
             if olds:
                 out["cases"] = cases
@@ -561,7 +577,10 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
                 for b in entries(old, "bugs")
                 if bug_id(b) not in listed
                 and not hash_of(b) & hashes
-                and (named(b, cases) or (same_build and not named(b, olds.values())))
+                and (
+                    named(b, [*cases, *(olds[cid] for cid in redo)])  # a case not run again still names its bug
+                    or (same_build and not named(b, olds.values()))
+                )
             ]
             # the explorer names an earlier bug it sees again by its memory hash, under the title the card gave it:
             # that entry and the carried draft are one bug

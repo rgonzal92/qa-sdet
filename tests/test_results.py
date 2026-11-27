@@ -662,6 +662,50 @@ class CarryPrior(Rendering):
         self.assertIn("QA result: BLOCKED on build 1.42, 1.43 (", draft)
         self.assertNotIn("not re-run", draft)  # it said: "passed on build 1.42, not re-run on 1.43"
 
+    def test_a_pass_of_an_attempt_that_ended_blocked_does_not_stand_for_a_case_not_run_again(self):  # a false PASS
+        # after a BLOCKED run dispatch gives every case again: its passes aren't trusted
+        f = self.earlier(
+            ["TC-1", "TC-2", "TC-3"],
+            status="BLOCKED",
+            cases=[
+                {"id": "TC-1", "status": "PASS", "actual": "Saved", "bug": "BUG-3"},
+                {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1"},
+                {"id": "TC-3", "status": "PASS", "actual": "Error shown", "bug": "BUG-4"},
+            ],
+            bugs=[self.BUG(1), self.BUG(3), self.BUG(4)],
+        )
+        prior = (f.parent / "prior-form.json").read_text()
+        late = {"status": "NOT_RUN", "notes": "time"}
+        again = {"id": "TC-3", "status": "PASS", "actual": "Error shown"}
+        run = self.merged(f, cases=[{"id": "TC-1", **late}, {"id": "TC-2", **late}, again])
+        kept = {"build": "1.42", "ran": "2026-11-20"}
+        self.assertEqual(
+            run["cases"],
+            [
+                {"id": "TC-1", **late},  # what the new attempt says, not the blocked run's PASS
+                {"id": "TC-2", "status": "FAIL", "actual": "Saved 131", "bug": "BUG-1", **kept},  # a failure seen stays
+                again,
+            ],
+        )
+        # BUG-3: its case did not run again. BUG-4: its case did, and no longer names it
+        self.assertEqual([b["title"] for b in run["bugs"]], ["bug 1", "bug 3"])
+        (f.parent / "prior-form.json").write_text(prior)
+        self.assertEqual(self.merged(f), run)  # the same copy merged twice: the same file
+
+    def test_a_ticket_stays_blocked_until_the_passes_of_its_blocked_run_ran_again(self):  # it read: all 3 cases passed
+        seen = [{"id": f"TC-{n}", "status": "PASS", "actual": "ok"} for n in (1, 2, 3)]
+        again = [{"id": "TC-1", "status": "NOT_RUN", "notes": "time"}, *seen[1:]]
+        why = lambda f: report.render_report(f.parent.parent).split("\n\n")[2]
+        f = self.earlier(["TC-1", "TC-2", "TC-3"], status="BLOCKED", cases=seen)
+        self.merged(f, cases=again)
+        self.assertEqual(why(f), "TC-1 not run")
+        f = self.earlier(["TC-1", "TC-2", "TC-3"], status="BLOCKED", cases=seen)
+        self.merged(f, cases=seen[1:])  # the explorer crashed before TC-1: its file doesn't list it
+        self.assertEqual(why(f), "TC-1 not run: no result reported for /form")
+        f = self.earlier(["TC-1", "TC-2", "TC-3"], status="INCOMPLETE", cases=seen)  # not blocked: its passes stand
+        self.merged(f, cases=again)
+        self.assertEqual(why(f), "all 3 cases passed")
+
     def test_a_page_the_new_build_never_reached_holds_passes_not_re_run_here(self):  # found in audit: a false PASS
         d, r = self.stopped_before_list()
         self.assertEqual(
