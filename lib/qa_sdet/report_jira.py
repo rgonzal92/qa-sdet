@@ -31,22 +31,22 @@ def _on_build(builds):
     return "build " + ", ".join(known) + (" and an unknown build" if len(known) < len(builds) else "")
 
 
-def comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg, states):
+def comment(t, i: report_blocks.TicketResult, folder: report_blocks.Folder):
     """A ticket's Jira comment, plain text: the result, build and date; the release and the fix when known; each AC with
     what its cases saw; the ticket's bugs by title, filed or not; its open blocking questions. No case or draft ids, no
     paths, no placeholders, nothing cut."""
     flat = lambda x: " ".join(core.as_text(x).split())
-    head = [f"QA result: {VERDICT_WORD[v]} on {_on_build(builds)}" + (f" ({date})" if date else "")]
+    head = [f"QA result: {VERDICT_WORD[i.v]} on {_on_build(i.builds)}" + (f" ({folder.date})" if folder.date else "")]
     fix = t.get("fix_version")
     fix = (
         flat(fix) if isinstance(fix, (str, int, float)) and not isinstance(fix, bool) else ""
     )  # JSON true is no version
-    names, _ = _release_names(cfg.get("releaseTemplates"), fix)
+    names, _ = _release_names(folder.cfg.get("releaseTemplates"), fix)
     head += ["Release: " + ", ".join(names)] if names else []
-    if flat(t.get("fixed_note")) and v in ("PASS", "PASS WITH NOTES"):
+    if flat(t.get("fixed_note")) and i.v in ("PASS", "PASS WITH NOTES"):
         head.append(f"Fixed: {flat(t.get('fixed_note'))}")
-    groups, placed, every = ["\n".join(head)], {}, mine + prior
-    now_build = ", ".join(b for b in builds if core.norm_build(b) != core.UNKNOWN)
+    groups, placed, every = ["\n".join(head)], {}, i.mine + i.prior
+    now_build = ", ".join(b for b in i.builds if core.norm_build(b) != core.UNKNOWN)
     title = lambda c: flat(c.get("title")) or "untitled check"
 
     def word(c):
@@ -91,22 +91,22 @@ def comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg, state
     if rest:
         groups.append("\n".join(["Other checks:"] + [f"  {title(c)}: {word(c)}. {said(c)}".rstrip() for c in rest]))
     found, filed = [], set()
-    for b in results.ticket_bugs(t["key"], cases, bugs, keys):
-        known = report_blocks.jira_of(b, states)[1]
+    for b in results.ticket_bugs(t["key"], folder.cases, folder.bugs, folder.keys):
+        known = report_blocks.jira_of(b, folder.states)[1]
         filed |= {known} if known else set()
         # a bug with no draft here goes by its hash in REPORT.md and in what a case says: the line says which it is
         ref = "" if known or b.get("id") or not b.get("hash") else f"{report_blocks.bug_label(b)}, "
         found.append(
             f"Bug: {flat(b.get('title')) or 'untitled'} ({report_blocks.severity(b)}), {ref}{known or 'not filed yet'}"
         )
-    named = {k for c in mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())}
+    named = {k for c in i.mine for k in ops.KEY_RE.findall(str(c.get("bug") or "").upper())}
     found += [
         f"Bug: {k}" for k in sorted(named - filed - {t["key"].upper()}) if not re.fullmatch(r"BUG-\d+", k)
     ]  # a case's BUG-n is this folder's draft, listed above: only a Jira key is one more
     groups += ["\n".join(found)] if found else []
     qs = [
         re.sub(r"^\s*(Q\d+\s*)?(\[[A-Z]+\]\s*)*", "", q["text"])
-        for q in results.question_items(plan, "test plan")
+        for q in results.question_items(folder.plan, "test plan")
         if not q["resolved"]
         and "[BLOCKING]" in q["text"].upper()
         and str(q.get("ticket") or t["key"]).strip().upper() == t["key"].upper()

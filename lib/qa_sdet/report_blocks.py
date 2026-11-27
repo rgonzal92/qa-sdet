@@ -2,6 +2,8 @@
 an AC's results, a bug's entry with its filing commands, the checks before a Jira comment is posted, exploration
 notes and the history table."""
 
+from __future__ import annotations
+
 import json
 import re
 import shlex
@@ -10,8 +12,45 @@ from urllib.parse import quote
 
 from . import core, md, ops, results, scrub, signals
 
+TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
+if TYPE_CHECKING:  # NOSONAR
+    from typing import Any
+
+    from .contracts import JsonObj, Verdict
+
 STATUS_RANK = ("FAIL", "BLOCKED", "QUESTION", "NOT_RUN", "PASS")  # worst first
 COVERAGE_ICON = {"pass": "✅", "fail": "❌", "blocked": "⛔"}
+
+
+@core.record
+class Folder:
+    """A run folder as the report reads it: what its files hold, and what the config, memory, Jira, the audit and the
+    reviewer say about its bugs."""
+
+    run_dir: Path
+    date: str  # the folder's day
+    plan: JsonObj  # .data/plan.json
+    keys: list[str]  # the plan's ticket keys
+    cases: list[JsonObj]  # the merged cases, without the passes kept from an earlier build
+    bugs: list[JsonObj]  # the bugs of its run files
+    cfg: JsonObj  # the qa-sdet config
+    states: dict[str, Any]  # each bug's state in memory
+    dups: dict[str, Any]  # the saved Jira duplicate hits, by bug id
+    audit: dict[str, Any]  # the audit of each bug's draft and spec
+    reviews: dict[str, Any]  # the reviewer's word on each bug
+
+
+@core.record
+class TicketResult:
+    """One ticket's results as render_report_parts gathers them."""
+
+    mine: list[JsonObj]  # its cases, as run here
+    prior: list[JsonObj]  # its passes from an earlier build, not re-run here
+    builds: list[str]  # the builds of the runs that tested it
+    v: Verdict
+    why: str  # the verdict's reason
+    signals: list[tuple[Any, Any]]  # the unexplained browser signals on its pages: (page, signal)
+    name: str  # the file name of its Jira comment
 
 
 def bug_link(bid, run_dir):
@@ -305,15 +344,17 @@ def _filing(b, owners, run_abs, cfg, states):
     return [f"- {say}:\n\n" + _indent(_sh(cmds), 2)]
 
 
-def bug_entry(b, owners, here, cases, run_dir, cfg, ctx, level):
+def bug_entry(b, owners, here, level, folder: Folder):
     """A bug's heading and its list: page, the cases that found it, its files and review, possible duplicates and the
     commands to file it. `here`: the plan tickets this part of the report is about (an owner outside them is named)."""
-    run_dir, bid = Path(run_dir), b.get("id") or ""
+    run_dir, bid = Path(folder.run_dir), b.get("id") or ""
     cls = " ".join(str(b.get("classification") or "").split()).upper()
     head = (
         f"{'#' * level} {bug_name(b, run_dir, linked=False)} ({md.one_line(severity(b) + (', ' + cls if cls else ''))})"
     )
-    found = [c for c in cases if results.bug_refs(b) & results.case_bugs(c)]  # the case that failed on it, and its AC
+    found = [
+        c for c in folder.cases if results.bug_refs(b) & results.case_bugs(c)
+    ]  # the case that failed on it, and its AC
     where = [
         f"Page {md.one_line(b['route'])}" if b.get("route") else "",
         "found by "
@@ -340,16 +381,16 @@ def bug_entry(b, owners, here, cases, run_dir, cfg, ctx, level):
         f"[network](evidence/{bid}-network.txt)"
         if bid and (run_dir / "evidence" / f"{bid}-network.txt").is_file()
         else "",
-        md.cell(_repro_badge(bid, b, ctx["audit"], ctx["reviews"])),
+        md.cell(_repro_badge(bid, b, folder.audit, folder.reviews)),
     ]
     lines = [f"- {x}" for x in (" · ".join(x for x in where if x), " · ".join(x for x in files if x)) if x]
-    if jira_of(b, ctx["states"])[1] is None:
+    if jira_of(b, folder.states)[1] is None:
         lines += [
             f"- possible duplicate: {md.one_line(x['key'])} {md.one_line(x.get('summary'))} (check it before filing)"
-            for x in ctx["dups"].get(bid, [])
+            for x in folder.dups.get(bid, [])
             if isinstance(x, dict) and x.get("key")
         ]
-    lines += _filing(b, owners, run_dir.resolve(), cfg, ctx["states"])
+    lines += _filing(b, owners, run_dir.resolve(), folder.cfg, folder.states)
     return [head, bullets(lines)] if lines else [head]
 
 
@@ -367,12 +408,12 @@ def _evidence_gaps(cases, run_dir):
     return out
 
 
-def post_checks(t, i, run_dir, retest_of):
+def post_checks(t, i: TicketResult, run_dir, retest_of):
     """What to check before posting a ticket's Jira comment (`i`: the ticket's verdict, cases, builds and signals as
     render_report_parts gathers them): an unknown build, passes not re-run here, cases without their image; for a pass,
     the image to add per page and the unexplained browser signals on its pages (a pass over a 5xx may hide a bug; the
     verdict never changes)."""
-    v, mine, prior, builds, unexplained = i["v"], i["mine"], i["prior"], i["builds"], i["signals"]
+    v, mine, prior, builds, unexplained = i.v, i.mine, i.prior, i.builds, i.signals
     out = []
     if not builds or any(core.norm_build(b) == core.UNKNOWN for b in builds):
         fix = t.get("fix_version")
