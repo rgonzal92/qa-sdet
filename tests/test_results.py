@@ -75,7 +75,12 @@ class Verdict(unittest.TestCase):
     def test_an_open_blocking_question_keeps_its_ticket_from_a_plain_pass(self):  # all cases passed, the rule undecided
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "PASS", ticket="T-2", route="/list")]
         v = lambda key, *qs, cs=cases: results.verdict(
-            key, cs, [], known=["T-1", "T-2"], questions=results.question_items({"questions": list(qs)}, "test plan")
+            key,
+            cs,
+            [],
+            results.Testing(
+                known=["T-1", "T-2"], questions=results.question_items({"questions": list(qs)}, "test plan")
+            ),
         )
         both = "Q1 [BLOCKING] Is 130 itself allowed?"  # untagged (a string can't name a ticket): every ticket's
         self.assertEqual([v(k, both) for k in ("T-1", "T-2")], [("PASS WITH NOTES", "Q1 open blocking question")] * 2)
@@ -97,7 +102,10 @@ class Verdict(unittest.TestCase):
         self.assertEqual(v("T-1", both, cs=[self.case("TC-1", "FAIL")])[0], "FAIL")  # worse verdicts still win
         self.assertEqual(
             results.verdict(
-                "T-1", cases, [], started=False, questions=results.question_items({"questions": [both]}, "")
+                "T-1",
+                cases,
+                [],
+                results.Testing(started=False, questions=results.question_items({"questions": [both]}, "")),
             )[0],
             "NOT STARTED",
         )
@@ -106,7 +114,7 @@ class Verdict(unittest.TestCase):
         bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
         own = self.case("TC-9", "FAIL", ticket=None, bug="BUG-1", actual="two zones saved")  # an explorer's own case
         for known in ((), ("T-1", "T-2")):
-            got = results.verdict("T-1", [self.case("TC-1", "PASS"), own], bug, known=known)
+            got = results.verdict("T-1", [self.case("TC-1", "PASS"), own], bug, results.Testing(known=known))
             self.assertEqual(got[0], "FAIL", known)
             self.assertIn("BUG-1 HIGH", got[1])
 
@@ -213,7 +221,9 @@ class Verdict(unittest.TestCase):
         cases = [case("TC-1", "S-1"), case("TC-3", "S-2")]
         bug = {"id": "BUG-1", "ticket": "S-3", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}
         keys = ["S-1", "S-2", "S-3"]
-        self.assertEqual([results.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
+        self.assertEqual(
+            [results.verdict(k, cases, [bug], results.Testing(known=keys))[0] for k in keys], ["PASS", "PASS", "FAIL"]
+        )
 
     def test_a_run_that_ended_blocked_blocks_its_tickets(self):  # its PASS results can't be trusted
         cases = [self.case("TC-1", "PASS")]
@@ -224,15 +234,15 @@ class Verdict(unittest.TestCase):
             "cases": [{"id": "TC-1", "status": "PASS"}],
         }
         self.assertEqual(
-            results.verdict("T-1", cases, [], runs=[("form", blocked)]),
+            results.verdict("T-1", cases, [], results.Testing(runs=[("form", blocked)])),
             ("BLOCKED", "the run on /form ended BLOCKED: session expired, run /qa-sdet:qa-login"),
         )
         by_id = {**blocked, "target": "https://qa.example/elsewhere"}  # it reported the ticket's case
-        self.assertEqual(results.verdict("T-1", cases, [], runs=[("x", by_id)])[0], "BLOCKED")
+        self.assertEqual(results.verdict("T-1", cases, [], results.Testing(runs=[("x", by_id)]))[0], "BLOCKED")
         other = {"target": "/list", "status": "BLOCKED", "cases": []}  # another ticket's page
-        self.assertEqual(results.verdict("T-1", cases, [], runs=[("list", other)])[0], "PASS")
+        self.assertEqual(results.verdict("T-1", cases, [], results.Testing(runs=[("list", other)]))[0], "PASS")
         incomplete = {**blocked, "status": "INCOMPLETE"}  # budget ran out after the cases: they stand
-        self.assertEqual(results.verdict("T-1", cases, [], runs=[("form", incomplete)])[0], "PASS")
+        self.assertEqual(results.verdict("T-1", cases, [], results.Testing(runs=[("form", incomplete)]))[0], "PASS")
 
     def test_severity_and_classification_read_by_their_first_word(self):  # "Confirmed (2/2)" was no CONFIRMED
         cases = [self.case("TC-1", "PASS")]

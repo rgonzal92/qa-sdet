@@ -140,7 +140,7 @@ class PlanFindAndRetest(Rendering):
                 ok = {"target": route, "status": "COMPLETED", "cases": [{"id": "TC-1", "status": "PASS"}]}
                 d = self.rundir("2026-11-20-PROJ-1", plan=plan, runs=[("a", ok), ("b", run)])
                 cases = results.merged_cases(plan, results.load_run(d)["runs"])
-                v = results.verdict({"key": "PROJ-1"}, cases, [], runs=results.load_run(d)["runs"])[0]
+                v = results.verdict({"key": "PROJ-1"}, cases, [], results.Testing(runs=results.load_run(d)["runs"]))[0]
                 retested = [c["id"] for c in runstate._run_state(d)["retest_cases"]]
                 self.assertEqual((v, retested), ("BLOCKED", ["TC-1"]) if v == "BLOCKED" else ("PASS", []))
 

@@ -356,28 +356,32 @@ def _failed_reason(fails):
     return failed
 
 
+@core.record
+class Testing:
+    """What the plan and the run files say beyond one ticket's own cases and bugs. verdicts() fills it once for every
+    ticket; left out, the testing has started and has nothing more to say."""
+
+    started: bool = True  # False while no test run has reported yet
+    known: Iterable[str] = ()  # the plan's ticket keys: a bug or question tagged with another key is every ticket's
+    runs: Sequence[tuple[str, JsonObj]] = ()  # [(file name, run)]: one that ended BLOCKED blocks what it tested
+    prior_passed: Sequence[JsonObj] = ()  # cases from an earlier build not re-run in this partial retest
+    questions: Sequence[JsonObj] = ()  # the plan's, as question_items gives them: an open [BLOCKING] one is a note
+    unread: Sequence[str] = ()  # run files that couldn't be read (load_run): nothing passes while one is unknown
+
+
 def verdict(
-    ticket: str | JsonObj,
-    cases: list[JsonObj],
-    bugs: list[JsonObj],
-    started: bool = True,
-    known: Iterable[str] = (),
-    runs: Sequence[tuple[str, JsonObj]] = (),
-    prior_passed: Sequence[JsonObj] = (),
-    questions: Sequence[JsonObj] = (),
-    unread: Sequence[str] = (),
+    ticket: str | JsonObj, cases: list[JsonObj], bugs: list[JsonObj], testing: Testing | None = None
 ) -> tuple[Verdict, str]:
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
-    NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
-    prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as question_items gives
-    them: an open [BLOCKING] one tagged with this ticket, or with no plan ticket, is a note. unread: run files that
-    couldn't be read (load_run): what they held, and for which ticket, is unknown, so nothing passes."""
-    if not started:
+    NOT STARTED while no test run has reported yet. An open [BLOCKING] question is the ticket's when it is tagged with
+    it or with no plan ticket."""
+    testing = testing or Testing()
+    if not testing.started:
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
     mine = [c for c in cases if c.get("ticket") == key and not c.get("prior")]  # a prior pass is in prior_passed
-    prior_mine = [c for c in prior_passed if c.get("ticket") == key]
-    its_bugs = ticket_bugs(key, cases, bugs, known)
+    prior_mine = [c for c in testing.prior_passed if c.get("ticket") == key]
+    its_bugs = ticket_bugs(key, cases, bugs, testing.known)
     st = lambda c: c.get("status") or "NOT_RUN"
     # a reason names cases, never quotes what they saw: REPORT.md shows that once, in full, under the case's AC
     why = lambda c: (
@@ -391,8 +395,8 @@ def verdict(
     serious = [_bug_word(b) for b in its_bugs if is_serious(b)]
     if failed or serious:
         return "FAIL", _some(failed + serious)
-    if unread:
-        return "BLOCKED", _some([f"{n} unreadable: its results are not counted" for n in unread], 2)
+    if testing.unread:
+        return "BLOCKED", _some([f"{n} unreadable: its results are not counted" for n in testing.unread], 2)
     if not mine and not prior_mine:
         return "BLOCKED", "no test cases"
     stuck = {}  # same reason → one entry naming all its cases, so 12 blocked cases don't repeat one error 12 times
@@ -404,7 +408,7 @@ def verdict(
     ended = [
         f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
         + (f": {' '.join(str(r['summary']).split())}" if r.get("summary") else "")
-        for name, r in blocked_runs(mine, runs)
+        for name, r in blocked_runs(mine, testing.runs)
     ]
     if stuck or ended:
         return "BLOCKED", _some(
@@ -417,13 +421,13 @@ def verdict(
         )
     covered = {a for c in mine for a in case_acs(c)} | {a for c in prior_mine for a in case_acs(c)}
     me = str(key).strip().upper()
-    plan_keys = {str(k).strip().upper() for k in known} | {me}
+    plan_keys = {str(k).strip().upper() for k in testing.known} | {me}
     owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
     qid = lambda q: re.match(r"\s*(Q\d+)\b", q["text"])
     drift = d if isinstance(ticket, dict) and isinstance(d := ticket.get("drift"), str) else ""
     blocking = [
         q
-        for q in questions
+        for q in testing.questions
         if not q["resolved"] and "[BLOCKING]" in q["text"].upper() and (owner(q) == me or owner(q) not in plan_keys)
     ]
     unnumbered = sum(not qid(q) for q in blocking)  # its text is in REPORT.md's What to do: counted here, not quoted
@@ -460,21 +464,15 @@ def verdicts(
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
     tickets = plan_tickets(plan)
     keys = [t["key"] for t in tickets]
-    prior_all, questions = prior_passed(plan, keys, cases), question_items(plan, "test plan")
-    return {
-        t["key"]: verdict(
-            t,
-            cases,
-            bugs,
-            bool(runs or unread),
-            keys,
-            runs,
-            [c for c in prior_all if c.get("ticket") == t["key"]],
-            questions,
-            unread,
-        )
-        for t in tickets
-    }
+    testing = Testing(
+        started=bool(runs or unread),
+        known=keys,
+        runs=runs,
+        prior_passed=prior_passed(plan, keys, cases),  # verdict() takes each ticket's own from them
+        questions=question_items(plan, "test plan"),
+        unread=unread,
+    )
+    return {t["key"]: verdict(t, cases, bugs, testing) for t in tickets}
 
 
 def prior_passed(plan, keys, cases=()):
