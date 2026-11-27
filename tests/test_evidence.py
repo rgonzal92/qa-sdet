@@ -1,15 +1,17 @@
-"""`qa-mem annotate`: red boxes and a label drawn on a bug's evidence image."""
+"""Bug evidence images (qa_sdet.evidence): `qa-mem evidence`, and the red boxes and label `qa-mem annotate` draws."""
 
 import builtins
 import importlib.util
+import json
 import os
 import stat
 import struct
+import subprocess
 import unittest
 import zlib
 from unittest import mock
 
-from support import Base, cli, core
+from support import Base, cli, core, done
 
 from qa_sdet import evidence
 
@@ -261,6 +263,76 @@ class Annotate(Base):
         Image.new("I;16", (40, 40), 32768).save(p)
         evidence.annotate(p, [(1, 1, 5, 5)], "x")
         self.assertEqual(Image.open(p).convert("RGB").getpixel((30, 30)), (128, 128, 128))
+
+
+class Evidence(Base):
+    """`qa-mem evidence <png> (--selector <css> | --ref <ref>) --label <text>`: the evidence image in one call."""
+
+    def setUp(self):
+        super().setUp()
+        self.png = self.proj / "qa-out/r/evidence/TC-1.png"
+        self.png.parent.mkdir(parents=True)
+
+    def run_evidence(self, *args, outputs=(), annotate=True):
+        calls, outs = [], list(outputs)
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            if "screenshot" in cmd:
+                self.png.write_bytes(b"png")
+            return outs.pop(0) if outs else done(0)
+
+        with (
+            mock.patch.object(subprocess, "run", side_effect=fake),
+            mock.patch.object(evidence, "annotate", return_value=annotate) as ann,
+        ):
+            code, out, err = cli("evidence", str(self.png), *args)
+        return code, (json.loads(out) if out.strip() else None), calls, ann, err
+
+    def test_a_ref_that_looks_like_an_option_is_refused(self):  # it would reach playwright-cli as one
+        code, out, calls, _, err = self.run_evidence("--ref", "--config=/tmp/x.json", "--label", "x")
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("--ref", err)
+
+    def test_selector_box_is_drawn_with_pillow(self):
+        sel = 'a[title="it\'s"]'
+        code, out, calls, ann, _ = self.run_evidence(
+            "--selector", sel, "--label", "TC-1 PASS: 130 saved", outputs=[done(0, out='"10,20,30,40"\n')]
+        )
+        self.assertEqual((code, out), (0, {"path": str(self.png), "annotated": True, "method": "pillow"}))
+        self.assertIn(json.dumps(sel), calls[0][-1])  # the selector reaches the page as a JS string, never as code
+        self.assertEqual(calls[1], ["playwright-cli", "-s=qa", "screenshot", f"--filename={self.png}"])
+        self.assertEqual(ann.call_args[0][1:], ([(10, 20, 30, 40)], "TC-1 PASS: 130 saved"))
+
+    def test_without_pillow_or_with_a_ref_the_browser_draws_the_box_and_always_hides_it(self):
+        code, out, calls, _, _ = self.run_evidence(
+            "--selector", "#msg", "--label", "x", outputs=[done(0, out="1,2,3,4")], annotate=False
+        )
+        self.assertEqual((code, out["method"], out["annotated"]), (0, "highlight", True))
+        self.assertEqual(calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"])
+        self.assertIn(["playwright-cli", "-s=qa", "highlight", "#msg", "--style", "outline: 3px solid red"], calls)
+        code, out, calls, _, err = self.run_evidence(
+            "--ref", "f1e15", "--label", "x", outputs=[done(0), done(0), done(1, err="screenshot failed")]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("screenshot failed", err)
+        self.assertEqual(
+            calls[-1], ["playwright-cli", "-s=qa", "highlight", "--hide"]
+        )  # no red box left for the next image
+
+    def test_a_ref_image_gets_its_label_as_a_caption_when_pillow_is_there(self):
+        code, out, calls, ann, _ = self.run_evidence("--ref", "f1e15", "--label", "Saved at 131")
+        self.assertEqual((code, out["method"]), (0, "highlight"))
+        self.assertEqual(ann.call_args[0][1:], ([], "Saved at 131"))
+
+    def test_refusals(self):
+        code, _, calls, _, err = self.run_evidence("--selector", "#none", "--label", "x", outputs=[done(0, out='""')])
+        self.assertEqual(code, 1)
+        self.assertIn("no element matches", err)
+        outside = self.proj / "qa-out/r/bugs/x.png"
+        for args in (["--selector", "#a"], ["--selector", "#a", "--ref", "e1", "--label", "x"]):
+            self.assertEqual(cli("evidence", str(self.png), *args)[0], 2, args)
+        self.assertEqual(cli("evidence", str(outside), "--selector", "#a", "--label", "x")[0], 2)
 
 
 if __name__ == "__main__":

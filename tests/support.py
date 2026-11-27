@@ -1,5 +1,6 @@
 """Shared test helpers: a sandbox (config, data folder, HOME and memory DB in a temp folder), the qa-mem runner, the
-sample plan and run files, and the git helpers of the code-map tests. Not a test module."""
+sample plan and run files, the git helpers of the code-map tests, and the fixtures the report tests share (a ticket
+plan and its run, a run folder rendered, a good bug draft and repro spec). Not a test module."""
 
 import contextlib
 import importlib.util
@@ -17,7 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from qa_sdet import cli as cli_mod
-from qa_sdet import core, ingest
+from qa_sdet import core, ingest, report
 
 FIX = ROOT / "tests/fixture-src"
 
@@ -302,3 +303,131 @@ class CodeMapCase(MemBase):
                 )
             )
         return s["areas"]["frontend"]["mappers"]
+
+
+SESSION_CFG = dict(  # a QA app behind a sign-in, its build read from the page
+    app="x",
+    browser="chrome",
+    qaBaseUrl="https://qa.example.com/app",
+    allowedHosts=["qa.example.com"],
+    ssoHost="login.microsoftonline.com",
+    buildSource={"type": "selector", "value": "footer .version"},
+)
+
+
+PLAN1 = {
+    "kind": "ticket",
+    "title": "PROJ-1",
+    "created": "2026-11-23T18:00:00Z",
+    "env": {"url": "https://qa.example", "browser": "chrome"},
+    "tickets": [
+        {
+            "key": "PROJ-1",
+            "summary": "Speed limit form",
+            "fix_version": "3.5",
+            "fixed_note": "Speed no longer accepts 131.",
+            "acs": [{"id": "AC-1", "text": "Saves 0-130"}, {"id": "AC-2", "text": "Rejects 131"}],
+        }
+    ],
+    "cases": [
+        {
+            "id": "TC-1",
+            "ticket": "PROJ-1",
+            "ac": "AC-1",
+            "title": "Save 130",
+            "route": "/form",
+            "priority": "P1",
+            "steps": ["Open form", "Type 130"],
+            "expected": "Saved",
+        },
+        {
+            "id": "TC-2",
+            "ticket": "PROJ-1",
+            "ac": "AC-2",
+            "title": "Reject 131",
+            "route": "/form",
+            "priority": "P1",
+            "steps": ["Type 131"],
+            "expected": "Error shown",
+        },
+    ],
+    "questions": ["Q1 [BLOCKING] Is 0 a valid speed?"],
+}
+RUN1 = {
+    "mode": "ticket",
+    "target": "/form",
+    "build": "1.42",
+    "status": "COMPLETED",
+    "notes": "Explored.",
+    "cases": [
+        {"id": "TC-1", "status": "PASS", "actual": "Saved"},
+        {"id": "TC-2", "status": "PASS", "actual": "Error shown"},
+    ],
+    "questions": [{"text": "Units?", "status": "resolved", "answer": "km/h, as the label says."}],
+}
+PLAN1_ANSWERED = {
+    **PLAN1,
+    "questions": [{"text": "Q1 [BLOCKING] Is 0 a valid speed?", "status": "resolved", "answer": "Yes"}],
+}
+TEMPLATES = ["Release-A-{version}", "Release-B-{version}"]
+
+
+class Rendering(Base):
+    """A plan and its runs written to a run folder and rendered."""
+
+    def render_run(self, runs, plan=PLAN1, templates=TEMPLATES):
+        if templates is not None:
+            self.config(releaseTemplates=templates)
+        d = self.rundir("2026-11-23-PROJ-1", plan=plan, runs=runs)
+        report.write_report(d)
+        return d, (d / "REPORT.md").read_text()
+
+
+GOOD_SPEC = """import { test, expect } from '@playwright/test';
+test.use({ baseURL: process.env.BASE_URL ?? 'https://qa.example',
+  ...(process.env.STORAGE_STATE ? { storageState: process.env.STORAGE_STATE } : {}) });
+test('speed above 130 is rejected', async ({ page }) => {
+  await page.goto('/form');
+  await page.getByLabel('Speed limit').fill('131');
+  await expect(page.getByRole('status')).toHaveText(/between 0 and 130/);
+});
+"""
+
+
+def good_draft(h, **change):
+    d = {
+        "title": "# Speed accepts 131",
+        "cls": "CONFIRMED",
+        "repro": "2/2",
+        "hash": h,
+        "step1": "1. Open https://qa.example/form",
+        "oracle": " — **Oracle:** AC-2",
+    }
+    d.update(change)
+    return (
+        f"{d['title']}\n\n**Classification:** {d['cls']} · **Severity:** HIGH · **Route:** /form\n"
+        f"**Ticket:** PROJ-1 · **Repro:** {d['repro']} · **qa-mem hash:** {d['hash']}\n\n## Steps\n{d['step1']}\n2. Type 131\n\n"
+        f"## Expected\nAn error{d['oracle']}\n\n## Actual\nSaved\n\n## Impact\nWrong data.\n\n## Evidence\n- Screenshot\n"
+    )
+
+
+def spacing_problems(text):
+    """Headings, tables, fences and <details> lines of a Markdown text without a blank line around them."""
+    lines, bad, fenced = text.split("\n"), [], False
+    blank = lambda i: i < 0 or i >= len(lines) or not lines[i].strip()
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("```"):
+            if not blank(i - 1 if not fenced else i + 1):
+                bad.append((i + 1, ln))
+            fenced = not fenced
+        elif fenced:
+            continue
+        elif ln.startswith("#") or s.startswith("<details") or s == "</details>":
+            if not (blank(i - 1) and blank(i + 1)):
+                bad.append((i + 1, ln))
+        elif s.startswith("|"):
+            table = lambda j: lines[j].strip().startswith("|")
+            if not (blank(i - 1) or table(i - 1)) or not (blank(i + 1) or table(i + 1)):
+                bad.append((i + 1, ln))
+    return bad

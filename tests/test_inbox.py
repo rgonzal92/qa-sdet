@@ -1,13 +1,14 @@
-"""`qa-mem inbox`: the open Jira tickets, newest first, new ones marked."""
+"""`qa-mem inbox`, `prep` and `trace` (qa_sdet.inbox): the open Jira tickets, one ticket's bundle, and each ticket's
+latest run."""
 
 import json
 import stat
 import unittest
 from unittest import mock
 
-from support import Base, cli, core
+from support import PLAN1, PLAN1_ANSWERED, RUN1, Base, Rendering, cli
 
-from qa_sdet import inbox
+from qa_sdet import core, inbox, runstate
 
 
 class Inbox(Base):
@@ -535,6 +536,114 @@ class Prep(Base):
         lr = json.loads(out)["plan_state"]["latest_run"]
         moved = next(c for c in lr["retest_cases"] if c["id"] == "TC-2")
         self.assertEqual(moved["case"]["steps"], ["Type 131"])  # the skill can put it back in the plan's cases
+
+
+class Traceability(Rendering):
+    """AC <-> case <-> evidence <-> bug both ways, requirement drift, one ticket out of a multi-ticket run, and trace."""
+
+    def test_acs_name_their_bugs_and_bugs_their_cases(self):
+        run = {
+            **RUN1,
+            "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "FAIL", "bug": "BUG-1"}],
+            "bugs": [
+                {
+                    "route": "/form",
+                    "title": "Speed accepts 131",
+                    "severity": "HIGH",
+                    "classification": "CONFIRMED",
+                    "draft_path": "bugs/BUG-1.md",
+                }
+            ],
+        }
+        d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
+        self.assertIn("### AC-2 Rejects 131: FAIL\n\n- **TC-2 Reject 131: FAIL (BUG-1).**", r)  # no draft: no link
+        self.assertIn("### BUG-1 Speed accepts 131 (HIGH, CONFIRMED)\n\n- Page /form · found by TC-2 (AC-2)\n", r)
+
+    def test_a_ticket_whose_requirements_changed_says_so(self):
+        plan = {
+            **PLAN1_ANSWERED,
+            "tickets": [{**PLAN1["tickets"][0], "drift": "description changed in Jira since 2026-11-20"}],
+        }
+        _, r = self.render_run([("form", RUN1)], plan=plan)
+        self.assertIn(
+            "\n\n⚠️ PASS WITH NOTES · build 1.42 · 2026-11-23 · 2 of 2 cases passed · no bugs\n\n"
+            "requirements changed: description changed in Jira since 2026-11-20\n\n",
+            r,
+        )
+
+    def test_one_ticket_is_found_inside_a_multi_ticket_run(self):
+        from support import PLAN
+
+        runs = [
+            (
+                "form",
+                {
+                    "target": "/form",
+                    "status": "COMPLETED",
+                    "build": "1",
+                    "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}],
+                },
+            ),
+            (
+                "list",
+                {
+                    "target": "/list",
+                    "status": "COMPLETED",
+                    "build": "1",
+                    "cases": [{"id": "TC-3", "status": "FAIL"}, {"id": "TC-4", "status": "PASS"}],
+                },
+            ),
+        ]
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=PLAN, runs=runs)
+        lr = runstate.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
+        self.assertEqual(lr["subset_of"], ["PROJ-1", "PROJ-2"])
+        self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
+        self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-4"])  # TC ids kept
+
+    def test_trace_rolls_up_each_tickets_latest_verdict(self):
+        from support import PLAN
+
+        plan = {
+            **PLAN,
+            "tickets": [{**PLAN["tickets"][0], "fix_version": "3.5"}, {**PLAN["tickets"][1], "fix_version": "3.6"}],
+        }
+        runs = [
+            (
+                "form",
+                {
+                    "target": "/form",
+                    "status": "COMPLETED",
+                    "build": "1",
+                    "cases": [{"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}],
+                },
+            )
+        ]
+        self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=plan, runs=runs)
+        code, out, _ = cli("trace", str(self.proj))
+        self.assertEqual(code, 0)
+        line = next(x for x in out.splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("✅ PASS", line)
+        self.assertIn("2/2 AC", line)
+        self.assertIn("2026-11-23-PROJ-1+PROJ-2", line)
+        rows = [
+            x for x in cli("trace", str(self.proj), "--fix-version", "3.6")[1].splitlines() if x.startswith("| PROJ")
+        ]
+        self.assertEqual([x.split(" | ")[0] for x in rows], ["| PROJ-2"])  # only the 3.6 ticket
+
+    def test_trace_counts_the_acs_a_partial_retest_carries_from_prior_passes(self):
+        plan = {
+            **PLAN1,
+            "retest_of": "2026-11-23-PROJ-1",
+            "cases": [PLAN1["cases"][1]],  # only TC-2 (AC-2) retested
+            "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}],
+        }  # TC-1 (AC-1) passed on the prior build
+        self.rundir(
+            "2026-11-24-PROJ-1",
+            plan=plan,
+            runs=[("form", {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "PASS"}]})],
+        )
+        line = next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
+        self.assertIn("2/2 AC", line)  # the verdict counts AC-1 too ("verified on prior build 1.42")
 
 
 if __name__ == "__main__":

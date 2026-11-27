@@ -109,6 +109,13 @@ pytest_add_cli_args_test_selection = [
     "tests/test_guard.py::LibMirrorsGuard",
     "tests/test_scrub.py",
     "tests/test_properties.py",
-    "tests/test_report.py",
+    "tests/test_report.py",  # with the seven below: one file until it was split by module
+    "tests/test_report_jira.py",
+    "tests/test_report_sample.py",
+    "tests/test_results.py",
+    "tests/test_signals.py",
+    "tests/test_audit.py",
+    "tests/test_runstate.py",
+    "tests/test_explore_next.py",
     "tests/test_inbox.py",
 ]
