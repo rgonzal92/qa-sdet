@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemBase, core, memory, run, runfile
+from support import MemBase, core, run, runfile
 
-from qa_sdet import scrub
+from qa_sdet import ingest, scrub
 
 
 class Redact(unittest.TestCase):
@@ -239,12 +239,12 @@ class ScrubFiles(MemBase):
         (out / "bugs").mkdir(parents=True)
         (out / "bugs/BUG-1.md").write_text("Network: GET /api -> 500\nAuthorization: Bearer abcdefghijklmnopqrst\n")
         runfile(out).write_text(json.dumps(run(facts=[{"kind": "api", "text": "API needs Cookie: sid=abc123def"}])))
-        self.assertEqual(memory.ingest_pending(out.parent), 1)
+        self.assertEqual(ingest.ingest_pending(out.parent), 1)
         draft = (out / "bugs/BUG-1.md").read_text()
         self.assertIn("[REDACTED]", draft)
         self.assertNotIn("abcdefghijklmnopqrst", draft)
         self.assertNotIn("abc123def", self.con.execute("SELECT group_concat(text) FROM facts").fetchone()[0])
-        self.assertEqual(memory.ingest_pending(out.parent), 0)  # redaction is idempotent: no re-ingest loop
+        self.assertEqual(ingest.ingest_pending(out.parent), 0)  # redaction is idempotent: no re-ingest loop
 
     def test_redaction_keeps_the_run_files_mtime_and_plain_prose(self):
         out = Path(self.tmp.name) / "qa-out" / "old"
@@ -252,13 +252,13 @@ class ScrubFiles(MemBase):
         newer = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 86400)
         )  # newer than the file, whatever today is
-        memory.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "new"}]), newer)
+        ingest.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "new"}]), newer)
         runfile(out).write_text(json.dumps(run("1.0", facts=[{"kind": "rule", "text": "cookie: sid=abc123"}])))
         old = time.time() - 3 * 86400
         os.utime(runfile(out), (old, old))
         (out / "bugs/BUG-1.md").write_text("Open Basic Settings; password: min 8 chars\n")
         (out / "evidence.json").write_text(json.dumps({"sessionId": 12345, "ok": True}))
-        memory.ingest_pending(out.parent)
+        ingest.ingest_pending(out.parent)
         self.assertEqual(core.meta(self.con, "build"), "1.1")  # redaction kept the old mtime: no rollback
         self.assertEqual((out / "bugs/BUG-1.md").read_text(), "Open Basic Settings; password: min 8 chars\n")
         self.assertEqual(json.loads((out / "evidence.json").read_text())["sessionId"], "[REDACTED]")
@@ -268,7 +268,7 @@ class ScrubFiles(MemBase):
         out.mkdir(parents=True)
         (out / "BUG-1.md").write_text("Authorization: Bearer abcdefghijklmnopqrst\n")
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "none" / "x.db")
-        memory.ingest_pending(out.parent.parent)
+        ingest.ingest_pending(out.parent.parent)
         self.assertNotIn("abcdefghijklmnopqrst", (out / "BUG-1.md").read_text())
         self.assertFalse((Path(self.tmp.name) / "none").exists())  # no run.json: no DB touched
 
@@ -277,7 +277,7 @@ class ScrubFiles(MemBase):
         (root / "qa-out" / "a").mkdir(parents=True)
         (root / "outside.txt").write_text("Authorization: Bearer Hunter2pass99abcdef\n")
         (root / "qa-out" / "a" / "notes.md").symlink_to(root / "outside.txt")
-        memory.ingest_pending(root / "qa-out")
+        ingest.ingest_pending(root / "qa-out")
         self.assertTrue((root / "qa-out" / "a" / "notes.md").is_symlink())
         self.assertIn("Hunter2", (root / "outside.txt").read_text())  # files outside qa-out are never rewritten
 

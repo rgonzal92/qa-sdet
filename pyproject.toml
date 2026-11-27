@@ -58,7 +58,7 @@ section-order = ["future", "standard-library", "third-party", "test-support", "f
 
 [tool.ruff.lint.per-file-ignores]
 # reviewed 2026-11-25: only module constants and generated "?" placeholders are interpolated into SQL here
-"lib/qa_sdet/{core,codemap,memory}.py" = ["S608"]
+"lib/qa_sdet/{cards,codemap,core,gaps,memory}.py" = ["S608"]
 # synthetic secrets, temp paths, asserts and subprocess calls are what the tests are made of
 "tests/**" = ["S101", "S103", "S105", "S106", "S108", "S608", "RUF012", "RUF059", "E402", "UP031"]  # UP031: % keeps JSON braces readable
 

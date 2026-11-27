@@ -8,7 +8,9 @@ import sys
 import unittest
 from pathlib import Path
 
-from support import ROOT, Base, memory, run, runfile
+from support import ROOT, Base, run, runfile
+
+from qa_sdet import ingest, memory
 
 
 class Hooks(Base):
@@ -64,7 +66,7 @@ class Hooks(Base):
 
     def test_hook_in_unrelated_project_creates_no_db(self):
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "fresh" / "x.db")
-        self.assertEqual(memory.ingest_pending(Path(self.tmp.name) / "nope"), 0)
+        self.assertEqual(ingest.ingest_pending(Path(self.tmp.name) / "nope"), 0)
         self.assertFalse((Path(self.tmp.name) / "fresh").exists())
 
     def test_parked_run_is_shown_to_the_agent_once(self):
@@ -282,7 +284,7 @@ class Hooks(Base):
     def stored(self, status, route="/zones/new", title="Speed label typo", symptom="speed field label typo", **extra):
         os.environ["QA_MEM_DB"] = str(Path(self.tmp.name) / "hook.db")  # the DB the hook subprocess opens
         con = memory.core.connect()
-        memory.ingest(
+        ingest.ingest(
             con,
             {
                 "run_id": f"r-{symptom}",

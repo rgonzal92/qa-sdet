@@ -372,12 +372,12 @@ class Prep(Base):
 
         from support import done, run
 
-        from qa_sdet import core, memory
+        from qa_sdet import core, ingest
 
         self.config(jiraKeyPrefix="PROJ")
         con = core.connect()
         r = lambda route, **page: {**run(**page), "target": route, "pages": [{"route": route, **page}]}
-        memory.ingest(
+        ingest.ingest(
             con,
             {
                 **r("/zones", facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]),
@@ -390,7 +390,7 @@ class Prep(Base):
                 ],
             },
         )
-        memory.ingest(
+        ingest.ingest(
             con,
             {
                 **r("/form", facts=[{"kind": "rule", "text": "Speed max 130"}]),

@@ -13,7 +13,7 @@ from unittest import mock
 
 from support import PLAN, RUN_FORM, RUN_LIST, Base, cli, done
 
-from qa_sdet import core, memory, report
+from qa_sdet import cards, core, ingest, memory, report
 
 PLAN1 = {
     "kind": "ticket",
@@ -570,10 +570,10 @@ class Report(Base):
                 )
             ],
         )
-        memory.ingest_pending(self.proj / "qa-out")
+        ingest.ingest_pending(self.proj / "qa-out")
         con = core.connect()
         try:
-            line = next(x for x in memory.card(con, "/form").splitlines() if "Speed accepts 131" in x)
+            line = next(x for x in cards.card(con, "/form").splitlines() if "Speed accepts 131" in x)
         finally:
             con.close()
         h, sev = re.match(r"- ([0-9a-f]{12}) \w+ \[([^\]]+)\]", line).groups()
@@ -2391,10 +2391,10 @@ class JiraBundles(Rendering):
         self.assertTrue((d2 / "jira-comment.txt").read_text().startswith("QA result: PASSED on build 1.42"))
 
     def test_a_bug_already_filed_gets_a_comment_and_a_new_one_a_link_when_configured(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         con = core.connect()
-        memory.ingest(
+        ingest.ingest(
             con,
             {
                 **RUN1,
@@ -2857,11 +2857,11 @@ class NextAction(Rendering):
         self.assertEqual(report.next_action(d, "c")["action"], "abort")
 
     def test_block_scope_is_checked_at_ingest(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         with self.assertRaises(ValueError):
-            memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "planet"})
-        memory.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
+            ingest.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "planet"})
+        ingest.check_run({"run_id": "r", "status": "BLOCKED", "block_scope": "session"})
 
 
 class CarryPrior(Rendering):
@@ -3104,10 +3104,10 @@ class Continuation(Rendering):
     """Leads an explorer leaves, and `qa-mem explore-next`: what an explore run left to do and what its bugs may reach."""
 
     def test_leads_are_checked_shown_and_explore_next_picks_up_the_rest(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         with self.assertRaises(ValueError):
-            memory.check_report_fields({"leads": "look at /zones"})
+            ingest.check_report_fields({"leads": "look at /zones"})
         con = core.connect()
         for page in ("/zones/new", "/zones/:id"):  # the bug's endpoint is called from both
             con.execute(
@@ -3157,12 +3157,12 @@ class Continuation(Rendering):
         self.assertEqual(nxt["blast_radius_routes"], ["/zones/:id"])  # shares POST /api/zones with the bug's page
 
     def test_stop_reason_is_checked_at_ingest_and_shown_in_the_exploration_notes(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
-        for ok in memory.STOP_REASONS:
-            memory.check_run({"run_id": "r", "stop_reason": ok})
+        for ok in ingest.STOP_REASONS:
+            ingest.check_run({"run_id": "r", "stop_reason": ok})
         self.assertEqual(
-            memory.STOP_REASONS,
+            ingest.STOP_REASONS,
             (
                 "saturated",
                 "charter_complete",
@@ -3170,11 +3170,11 @@ class Continuation(Rendering):
                 "blocked",
             ),
         )
-        memory.check_run({"run_id": "r"})  # a run file from before the field
-        memory.check_run({"run_id": "r", "stop_reason": ""})
+        ingest.check_run({"run_id": "r"})  # a run file from before the field
+        ingest.check_run({"run_id": "r", "stop_reason": ""})
         for bad in ("bored", "Saturated", 5, ["saturated"], "turn_limit", "budget_limit", "time_limit"):
             with self.assertRaises(ValueError, msg=bad):
-                memory.check_run({"run_id": "r", "stop_reason": bad})
+                ingest.check_run({"run_id": "r", "stop_reason": bad})
         d, r = self.render_run(
             [("form", {**RUN_FORM, "stop_reason": "diminishing_returns", "notes": "tried the form"})]
         )
@@ -3396,7 +3396,7 @@ class Frontier(Rendering):
         self.assertIs(out["expand_recommended"], False)
 
     def test_a_5xx_first_seen_in_this_run_recommends_expansion_a_known_one_does_not(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         self.config(allowedHosts=["localhost"])
         plan = {"kind": "explore", "title": "/form", "tickets": [], "cases": []}
@@ -3423,7 +3423,7 @@ class Frontier(Rendering):
                 f"4. [POST] http://localhost:8765/api/zones/7 => [{code}] Error\n"
             )
             os.utime(d / ".data/run-form.json", (ts, ts))
-            memory.ingest_pending(d.parent)
+            ingest.ingest_pending(d.parent)
             return report.explore_next(self.proj, d)
 
         first = explore("2026-11-25-a", "r1", time.time() - 3600, 500)
@@ -3552,7 +3552,7 @@ class FilingBundle(Rendering):
     def test_a_resighted_bugs_follow_up_names_the_hash_memory_stores(self):  # a reworded regression named no bug
         con = core.connect()
         try:
-            memory.ingest(
+            ingest.ingest(
                 con,
                 {
                     "run_id": "r-old",

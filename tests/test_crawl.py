@@ -9,7 +9,7 @@ from unittest import mock
 
 from support import Base, cli, done
 
-from qa_sdet import core, crawl, memory
+from qa_sdet import core, crawl, ingest
 
 CFG = dict(
     app="x",
@@ -290,7 +290,7 @@ class Crawl(Base):
         self.assertIn("1 unchecked", run["notes"])
         self.assertIn("/about", run["notes"])  # skipped without locators: said, not silent
         self.assertIn("crawl 2/2 /zones: 4 of 4 confirmed, 1 unchecked", err)  # progress, one line per route
-        memory.check_run(json.loads(json.dumps(run)))
+        ingest.check_run(json.loads(json.dumps(run)))
         self.assertEqual(cli("ingest", str(self.run_dir / ".data/run-init-crawl.json"))[0], 0)
         con = core.connect()
         self.assertEqual(con.execute("SELECT count(*) FROM locators WHERE page='/zones' AND stale=0").fetchone()[0], 4)
@@ -436,7 +436,7 @@ class Crawl(Base):
         code, out, run, b, _ = self.crawl()
         self.assertEqual((code, out["status"], run["status"], run["block_scope"]), (1, "BLOCKED", "BLOCKED", "session"))
         self.assertEqual(b.gotos(), [])
-        memory.check_run(run)
+        ingest.check_run(run)
 
     def test_http_error_route_is_noted_and_left_out(self):
         self.pages[f"{BASE}/alarms"] = page(status=500)
@@ -517,7 +517,7 @@ class Discover(Base):
         )
         self.assertEqual(run["pages"][1]["transitions"][0]["to"], "/zones/new")  # depth 2: recorded, not visited
         self.assertEqual((run["mode"], run["status"]), ("map", "COMPLETED"))
-        memory.check_run(run)
+        ingest.check_run(run)
 
     def test_query_string_dropped_and_one_sample_per_detail_pattern(self):
         pages = {
@@ -649,7 +649,7 @@ class LocatorCap(Base):
     def test_two_hundred_confirmed_locators_on_one_page_survive_ingest(self):
         con = core.connect()
         locs = [{"name": f"L{n}", "locator": f"getByTestId('l{n}')"} for n in range(200)]
-        memory.ingest(
+        ingest.ingest(
             con,
             {
                 "run_id": "map-1",

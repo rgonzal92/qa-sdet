@@ -1,5 +1,5 @@
 """The JSON shapes agents and qa-mem exchange, for the type checker. Descriptions only: these files come from agents,
-so memory.check_run, the PostToolUse hook and the readers validate them at run time, and a value can still be any
+so ingest.check_run, the PostToolUse hook and the readers validate them at run time, and a value can still be any
 JSON. Modules import this under TYPE_CHECKING (start-up time). Each Literal matches a runtime tuple; tests pin them
 (test_properties.ContractsMatchCode). References: references/run-json.md, references/planning.md, ops.marker_start."""
 
@@ -11,8 +11,8 @@ JsonObj = dict[str, Any]  # a parsed JSON object: agents and users write these f
 
 CaseStatus = Literal["PASS", "FAIL", "BLOCKED", "NOT_RUN", "QUESTION"]  # core.CASE_STATUSES
 BugStatus = Literal["OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"]  # core.STATUSES
-BlockScope = Literal["page", "session", "browser"]  # memory.BLOCK_SCOPES
-StopReason = Literal["saturated", "charter_complete", "diminishing_returns", "blocked"]  # memory.STOP_REASONS
+BlockScope = Literal["page", "session", "browser"]  # ingest.BLOCK_SCOPES
+StopReason = Literal["saturated", "charter_complete", "diminishing_returns", "blocked"]  # ingest.STOP_REASONS
 Verdict = Literal["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS", "NOT STARTED"]  # report.VERDICT_ICON
 
 

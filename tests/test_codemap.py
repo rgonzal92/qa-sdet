@@ -6,9 +6,9 @@ import os
 import shutil
 import unittest
 
-from support import FIX, CodeMapCase, core, git, git_repo, memory
+from support import FIX, CodeMapCase, core, git, git_repo
 
-from qa_sdet import codemap
+from qa_sdet import cards, codemap, ingest, memory
 
 
 class Apply(CodeMapCase):
@@ -116,10 +116,10 @@ class Apply(CodeMapCase):
     def test_ingest_rejects_maps_from_another_scan(self):
         self.scan(FIX / "frontend")
         self.write_map("frontend", [], scan_id="frontend-old")
-        memory.PARKED.clear()
-        memory.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(any("older scan" in p for p in memory.PARKED), memory.PARKED)
-        memory.PARKED.clear()
+        ingest.PARKED.clear()
+        ingest.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(any("older scan" in p for p in ingest.PARKED), ingest.PARKED)
+        ingest.PARKED.clear()
 
     def test_map_for_the_wrong_area_is_rejected(self):
         self.scan(FIX / "frontend", FIX / "backend")
@@ -127,17 +127,17 @@ class Apply(CodeMapCase):
         (self.out / "code-map-frontend.json").write_text(
             json.dumps({"scan_id": scan["scan_id"], "area": "backend", "rows": []})
         )
-        memory.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(memory.PARKED)
+        ingest.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(ingest.PARKED)
 
     def test_code_maps_outside_init_are_ignored(self):
         self.scan(FIX / "frontend")
         stray = self.dir / "qa-out" / "form" / "code-map-frontend.json"
         stray.parent.mkdir(parents=True)
         stray.write_text(json.dumps({"scan_id": "x", "area": "frontend", "rows": []}))
-        memory.PARKED.clear()
-        memory.ingest_pending(self.dir / "qa-out")
-        self.assertEqual(memory.PARKED, [])
+        ingest.PARKED.clear()
+        ingest.ingest_pending(self.dir / "qa-out")
+        self.assertEqual(ingest.PARKED, [])
         self.assertFalse((stray.parent / "code-map-frontend.json.ingested").exists())
 
     def test_ingest_pending_accepts_the_init_folder(self):  # qa-out/init loaded nothing, silently
@@ -147,7 +147,7 @@ class Apply(CodeMapCase):
             "backend",
             [{"page": "*", "kind": "api", "label": "POST /api/zones", "value": "x", "file": "routes/zones.js:1"}],
         )
-        self.assertEqual(memory.ingest_pending(self.out), 1)
+        self.assertEqual(ingest.ingest_pending(self.out), 1)
 
     def test_removed_routes_drop_code_only_pages(self):
         self.scan(FIX / "frontend")
@@ -203,7 +203,7 @@ class Apply(CodeMapCase):
             [{"page": "/form.html", "kind": "route", "label": "Speed zone", "value": "F", "file": "src/routes.js:4"}],
         )
         self.ingest_all()
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "p1",
@@ -215,7 +215,7 @@ class Apply(CodeMapCase):
         )
         self.con.execute("UPDATE pages SET build=NULL WHERE route='/form.html'")  # as if the map came last
         self.con.commit()
-        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/form.html"}]})
+        ingest.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/form.html"}]})
         self.assertEqual(self.con.execute("SELECT stale FROM facts").fetchone()[0], 0)
 
     def test_backend_rows_are_not_capped(self):
@@ -270,10 +270,10 @@ class Apply(CodeMapCase):
                 }
             ],
         )
-        memory.PARKED.clear()
-        memory.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(any("isn't in the scan file" in p for p in memory.PARKED), memory.PARKED)
-        memory.PARKED.clear()
+        ingest.PARKED.clear()
+        ingest.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(any("isn't in the scan file" in p for p in ingest.PARKED), ingest.PARKED)
+        ingest.PARKED.clear()
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 2)  # nothing lost
 
     def test_any_misplaced_row_parks_the_map(self):
@@ -287,8 +287,8 @@ class Apply(CodeMapCase):
             "frontend",
             rows + [{"page": "/a", "kind": "locator", "label": "X", "value": "#x", "file": "src/Other.jsx:1"}],
         )
-        memory.ingest_pending(self.dir / "qa-out")
-        self.assertTrue(memory.PARKED)
+        ingest.ingest_pending(self.dir / "qa-out")
+        self.assertTrue(ingest.PARKED)
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 0)
         self.assertEqual(codemap._hashes(self.con, "frontend", str(repo)), {})  # not marked read
 
@@ -487,14 +487,14 @@ class Card(CodeMapCase):
         ]
         self.write_map("frontend", rows)
         self.ingest_all()
-        c = memory.card(self.con, "speed zone")
+        c = cards.card(self.con, "speed zone")
         self.assertIn("NOTE: known from source code (or a link) only", c)
         self.assertNotIn("re-verify", c)
         self.assertIn("FROM CODE (hints from source, not requirements; unverified;", c)
         self.assertIn("speed: min 0, max 130", c)
         self.assertIn("+2 more", c)  # 17 locators, 15 shown
         self.assertNotIn("(from ", c.split("FROM CODE")[0])  # never shown as a stated requirement
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r1",
@@ -502,7 +502,7 @@ class Card(CodeMapCase):
                 "pages": [{"route": "/form.html", "locators": [{"name": "field 00", "locator": "#f0"}]}],
             },
         )
-        c = memory.card(self.con, "speed zone")
+        c = cards.card(self.con, "speed zone")
         self.assertIn("LOCATORS (fresh): field 00=#f0", c)
         self.assertNotIn("field 00=#f0;", c.split("FROM CODE")[1])  # confirmed: not repeated as a hint
         self.assertIn("+1 more", c)
@@ -532,7 +532,7 @@ class Card(CodeMapCase):
             (repo / f"n{i}.txt").write_text(str(i))
             git(repo, "add", "-A")
             git(repo, "commit", "-qm", f"c{i}")
-        self.assertIn("2 commits behind", memory.card(self.con, "/form.html"))
+        self.assertIn("2 commits behind", cards.card(self.con, "/form.html"))
 
     def test_behind_note_covers_the_backend_rows_on_the_card(self):
         """the note named only the page's own repo, so a backend 3 commits on looked current beside its rules."""
@@ -570,7 +570,7 @@ class Card(CodeMapCase):
             git(api, "commit", "-qam", f"c{i}")
         (ui / "src/routes.js").write_text("// x\n")
         git(ui, "commit", "-qam", "u")
-        c = memory.card(self.con, "/zones")
+        c = cards.card(self.con, "/zones")
         self.assertIn("POST /api/zones speed: max 130", c)
         self.assertRegex(c, r"api [0-9a-f]{7}, 3 commits behind; ui [0-9a-f]{7}, 1 commits behind")
         self.assertIn("api ", codemap.code(self.con, "/zones").splitlines()[0])
@@ -590,17 +590,17 @@ class Card(CodeMapCase):
         self.ingest_all()
         (mono / "api/r.js").write_text("y")  # a commit outside the mapped folder
         git(mono, "commit", "-qam", "api only")
-        self.assertNotIn("behind", memory.card(self.con, "/z"))
+        self.assertNotIn("behind", cards.card(self.con, "/z"))
         (web / "README.md").write_text("docs")  # inside the folder, but no mapped file changes
         git(mono, "add", "-A")
         git(mono, "commit", "-qm", "web docs")
-        self.assertIn("1 commits behind", memory.card(self.con, "/z"))
+        self.assertIn("1 commits behind", cards.card(self.con, "/z"))
         s = self.scan(web, stamp="s2")  # nothing to map: the scan settles it
         self.assertFalse(s["areas"]["frontend"]["needs_mapper"])
-        self.assertNotIn("behind", memory.card(self.con, "/z"))
+        self.assertNotIn("behind", cards.card(self.con, "/z"))
 
     def test_empty_map_tips(self):
-        self.assertIn("tip: /qa-sdet:qa-init", memory.card(self.con, "closures"))
+        self.assertIn("tip: /qa-sdet:qa-init", cards.card(self.con, "closures"))
         self.assertIn("no code map yet", codemap.code(self.con))
         self.scan(FIX / "frontend")
         self.write_map(
@@ -608,7 +608,7 @@ class Card(CodeMapCase):
             [{"page": "/form.html", "kind": "route", "label": "Speed zone", "value": "F", "file": "src/routes.js:4"}],
         )
         self.ingest_all()
-        self.assertNotIn("tip:", memory.card(self.con, "closures"))
+        self.assertNotIn("tip:", cards.card(self.con, "closures"))
         self.assertIn("/form.html  Speed zone", codemap.code(self.con))
 
     def test_route_params_meet_run_pages(self):
@@ -627,8 +627,8 @@ class Card(CodeMapCase):
             ],
         )
         self.ingest_all()
-        memory.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/incidents/4521"}]})
-        c = memory.card(self.con, "/incidents/4521")
+        ingest.ingest(self.con, {"run_id": "r1", "build": "1.0", "pages": [{"route": "/incidents/4521"}]})
+        c = cards.card(self.con, "/incidents/4521")
         self.assertIn("Title=getByTestId('title')", c)  # one page: /incidents/:id
         for r in ("/zones/{zoneId}", "/zones/[id]", "/zones/<int:pk>", "/zones/42"):
             self.assertEqual(core.norm_route(r), "/zones/:id", r)
@@ -651,7 +651,7 @@ class Card(CodeMapCase):
             ],
         )
         self.ingest_all()
-        self.assertIn("Rows=getByRole('row')", memory.card(self.con, "/zones"))
+        self.assertIn("Rows=getByRole('row')", cards.card(self.con, "/zones"))
 
     def test_crawl_names_dont_break_lookup_by_code_name(self):
         repo = git_repo(self.dir / "ui", {"src/routes.js": "export const routes = [{ path: '/zones' }]"})
@@ -706,8 +706,8 @@ class Card(CodeMapCase):
             "frontend", [{"page": "/map", "kind": "route", "label": "Map", "value": "M", "file": "src/routes.js:1"}]
         )
         self.ingest_all()
-        memory.ingest(self.con, {"run_id": "r1", "build": "", "pages": [{"route": "/map"}]})
-        self.assertNotIn("no run has visited", memory.card(self.con, "/map"))
+        ingest.ingest(self.con, {"run_id": "r1", "build": "", "pages": [{"route": "/map"}]})
+        self.assertNotIn("no run has visited", cards.card(self.con, "/map"))
 
 
 class Code(CodeMapCase):
@@ -969,7 +969,7 @@ class Code(CodeMapCase):
         )
         self.ingest_all()
         # 1. Stale build card still prints FROM CODE locators when LOCATORS (fresh) was skipped
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r1",
@@ -978,10 +978,10 @@ class Code(CodeMapCase):
             },
             "2026-01-01T00:00:00Z",
         )
-        memory.ingest(
+        ingest.ingest(
             self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/other"}]}, "2026-01-02T00:00:00Z"
         )
-        self.assertIn("getByTestId('save')", memory.card(self.con, "/a"))
+        self.assertIn("getByTestId('save')", cards.card(self.con, "/a"))
         # 2. code('*') returns backend rows even when a '/*' frontend route exists
         self.assertTrue(codemap.code(self.con, "*").startswith("CODE MAP * "))
         # 3. find_page resolves SPA hash routes without a leading slash
@@ -1013,7 +1013,7 @@ class SharedEndpoints(CodeMapCase):
                 )
 
     def bug(self, page, symptom, status="OPEN"):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{page}-{symptom}",
@@ -1036,7 +1036,7 @@ class SharedEndpoints(CodeMapCase):
         return h
 
     def shared(self, route):
-        card = memory.card(self.con, route)
+        card = cards.card(self.con, route)
         return card.split(self.SECTION, 1)[1] if self.SECTION in card else ""
 
     def test_card_shows_a_bug_from_a_page_calling_the_same_endpoint(self):
@@ -1072,7 +1072,7 @@ class SharedEndpoints(CodeMapCase):
         self.assertEqual(self.shared("/p1"), "")
 
     def endpoint_bug(self, page, symptom, endpoint, title=None):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{page}-{symptom}",
@@ -1109,7 +1109,7 @@ class SharedEndpoints(CodeMapCase):
     def test_a_bug_sighted_on_this_page_is_known_here(self):
         self.calls("/zones/new", "POST /api/zones")
         h = self.endpoint_bug("/zones/new", "speed 131 saved", "POST /api/zones")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r-edit",
@@ -1118,7 +1118,7 @@ class SharedEndpoints(CodeMapCase):
                 "bugs": [{"route": "/zones/:id", "title": "x", "hash": h}],
             },
         )
-        known = memory.card(self.con, "/zones/:id").split("KNOWN BUGS", 1)[1]
+        known = cards.card(self.con, "/zones/:id").split("KNOWN BUGS", 1)[1]
         self.assertIn(h, known)
         self.assertEqual(
             self.con.execute("SELECT page FROM sightings WHERE run_id='r-edit'").fetchone()[0], "/zones/:id"
@@ -1138,7 +1138,7 @@ class SharedEndpoints(CodeMapCase):
         self.calls("/zones/new", "POST /api/zones")
         self.calls("/zones/:id", "POST /api/zones")
         h = self.bug("/zones/new", "server accepts speed 131")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r-edit",

@@ -2612,10 +2612,10 @@ def plan_find(project, keys=None, run_dir=None):
 def block_scope(run):
     """What a BLOCKED run blocks: its block_scope, else read from its summary (the explorer's start reports the sign-in
     and browser failures in fixed words); anything else blocks just its page."""
-    from . import memory
+    from . import ingest
 
     said = str(run.get("block_scope") or "").strip().lower()
-    if said in memory.BLOCK_SCOPES:
+    if said in ingest.BLOCK_SCOPES:
         return said
     text = str(run.get("summary") or "").lower()
     if re.search(r"session expired|qa-login|\bsso\b|sign-?in", text):
@@ -2710,7 +2710,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
     cliff), the readers of what a write bug saved, pages sharing a call or component with a bug that names no endpoint,
     and the explorers' leads. [{route, entry_route, entry_chain, priority, score, source, hypothesis, focus_terms,
     endpoint, pattern}], a detail route with the chain of pages that opens it (none: nobody reached it). `con` may be None."""
-    from . import codemap, memory
+    from . import cards, codemap, gaps, memory
 
     found = {}
 
@@ -2753,7 +2753,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
                 continue
             route, weight = (
                 core.norm_route(b.get("route")),
-                memory.SEVERITY_WEIGHT.get((core.norm(b.get("severity")).split() or [""])[0], 1),
+                gaps.SEVERITY_WEIGHT.get((core.norm(b.get("severity")).split() or [""])[0], 1),
             )
             title, ref = (
                 _clip(b.get("title"), 100),
@@ -2786,7 +2786,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
                             pattern,
                         )
             else:
-                for page in memory._near_pages(con, route):
+                for page in cards._near_pages(con, route):
                     add(
                         page,
                         "shared",
@@ -2798,7 +2798,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
                     )
     out = sorted(found.values(), key=lambda x: (-x["score"], x["route"]))[:FRONTIER_CAP]
     for x in out:
-        chain = memory.entry_chain(con, x["route"]) if con is not None else []
+        chain = gaps.entry_chain(con, x["route"]) if con is not None else []
         chain = chain if chain and SAFE_ROUTE_RE.fullmatch(chain[0]["from"]) else []
         x["priority"] = "HIGH" if x["score"] >= 50 else "MEDIUM" if x["score"] >= 30 else "LOW"
         x |= {"entry_route": chain[0]["from"] if chain else None, "entry_chain": chain}

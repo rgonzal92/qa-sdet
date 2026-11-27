@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import PLAN, RUN_FORM, RUN_LIST, MemBase, core, git, git_repo, memory, run, runfile
+from support import PLAN, RUN_FORM, RUN_LIST, MemBase, core, git, git_repo, run, runfile
 from support import cli as qa_mem
 
-from qa_sdet import cli, scrub
+from qa_sdet import cards, cli, gaps, ingest, memory, scrub
 
 
 class Bugs(MemBase):
@@ -28,16 +28,16 @@ class Bugs(MemBase):
             "severity": "HIGH",
             "classification": "CONFIRMED",
         }
-        memory.ingest(self.con, run(bugs=[bug]))
-        memory.ingest(self.con, run(bugs=[{**bug, "symptom": "Speed  accepts 999!"}]))
+        ingest.ingest(self.con, run(bugs=[bug]))
+        ingest.ingest(self.con, run(bugs=[{**bug, "symptom": "Speed  accepts 999!"}]))
         rows = self.con.execute("SELECT seen_count FROM bugs").fetchall()
         self.assertEqual([r[0] for r in rows], [2])
 
     def test_reingesting_same_run_does_not_inflate_seen_count(self):
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         r = run(bugs=[bug])
-        memory.ingest(self.con, r)
-        memory.ingest(self.con, r)
+        ingest.ingest(self.con, r)
+        ingest.ingest(self.con, r)
         self.assertEqual(self.con.execute("SELECT seen_count FROM bugs").fetchone()[0], 1)
 
     def test_rewritten_run_replaces_its_bugs_and_counts_runs_once(self):
@@ -45,23 +45,23 @@ class Bugs(MemBase):
         bugs = lambda: [tuple(r) for r in self.con.execute("SELECT title, seen_count FROM bugs ORDER BY title")]
         x, y = {"route": "/f", "title": "X", "symptom": "x"}, {"route": "/f", "title": "Y", "symptom": "y"}
         a = lambda *b: {"run_id": "explore-f-1", "build": "1", "bugs": list(b)}
-        memory.ingest(self.con, a({**x, "symptom": "first guess"}))
-        memory.ingest(self.con, a(x))  # symptom corrected: the first guess was never a separate bug
+        ingest.ingest(self.con, a({**x, "symptom": "first guess"}))
+        ingest.ingest(self.con, a(x))  # symptom corrected: the first guess was never a separate bug
         self.assertEqual(bugs(), [("X", 1)])
-        memory.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [x]})
-        memory.ingest(self.con, a(x, y))  # run A rewritten after run B saw X: still two runs
+        ingest.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [x]})
+        ingest.ingest(self.con, a(x, y))  # run A rewritten after run B saw X: still two runs
         self.assertEqual(bugs(), [("X", 2), ("Y", 1)])
-        memory.ingest(self.con, a())  # A drops both: Y was only A's, X stays B's sighting
+        ingest.ingest(self.con, a())  # A drops both: Y was only A's, X stays B's sighting
         self.assertEqual(bugs(), [("X", 1)])
-        memory.ingest(self.con, a(x))  # and back again
+        ingest.ingest(self.con, a(x))  # and back again
         self.assertEqual(bugs(), [("X", 2)])
         self.con.execute("UPDATE bugs SET status='FILED'")
-        memory.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": [y]})
-        memory.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": []})
+        ingest.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": [y]})
+        ingest.ingest(self.con, {"run_id": "explore-h-1", "build": "1", "bugs": []})
         self.assertEqual(bugs(), [("X", 2)])
         # two files that reuse one run id are separate files, not rewrites of each other
-        memory.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [y]}, src="qa-out/r/.data/run-a.json")
-        memory.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [x]}, src="qa-out/r/.data/run-b.json")
+        ingest.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [y]}, src="qa-out/r/.data/run-a.json")
+        ingest.ingest(self.con, {"run_id": "same", "build": "1", "bugs": [x]}, src="qa-out/r/.data/run-b.json")
         self.assertEqual(bugs(), [("X", 3), ("Y", 1)])
 
     def test_a_re_run_under_a_new_run_id_keeps_the_bug_the_earlier_attempt_found(self):
@@ -69,8 +69,8 @@ class Bugs(MemBase):
         not a rewrite of the earlier one (reusing the id deleted a bug on a real machine)."""
         src = self.proj / "qa-out/2026-11-25-PROJ-1/.data/run-form.json"
         x = {"route": "/form", "title": "Saves 131", "symptom": "saves 131"}
-        memory.ingest(self.con, {"run_id": "ticket-form-20261125-1000", "build": "1", "bugs": [x]}, src=src)
-        memory.ingest(self.con, {"run_id": "ticket-form-20261125-1100", "build": "1", "bugs": []}, src=src)
+        ingest.ingest(self.con, {"run_id": "ticket-form-20261125-1000", "build": "1", "bugs": [x]}, src=src)
+        ingest.ingest(self.con, {"run_id": "ticket-form-20261125-1100", "build": "1", "bugs": []}, src=src)
         self.con.commit()
         code, out, _ = qa_mem("bugs")
         self.assertEqual(code, 0)
@@ -78,10 +78,10 @@ class Bugs(MemBase):
 
     def test_a_case_may_carry_the_build_and_date_it_ran_on(self):  # carry_prior writes them on a kept result
         case = lambda **kw: {"run_id": "r", "cases": [{"id": "TC-1", "status": "PASS", **kw}]}
-        memory.check_run(case(build="1.42", ran="2026-11-20"))
+        ingest.check_run(case(build="1.42", ran="2026-11-20"))
         for bad in ({"build": 1.42}, {"ran": ["2026-11-20"]}):
             with self.assertRaises(ValueError, msg=bad):
-                memory.check_run(case(**bad))
+                ingest.check_run(case(**bad))
 
     def test_a_bug_dropped_because_no_run_lists_it_leaves_a_notice(self):
         """Memory deletes it on its own (a checkpoint listed it, the final run file didn't): the plugin log says so."""
@@ -91,26 +91,26 @@ class Bugs(MemBase):
         notices = lambda: [r for r in map(json.loads, log.read_text().splitlines()) if r["type"] == "notice"]
         x, y = {"route": "/form/7", "title": "X", "symptom": "x"}, {"route": "/form", "title": "Y", "symptom": "y"}
         a = lambda *b: {"run_id": "explore-f-1", "build": "1", "bugs": list(b)}
-        memory.ingest(self.con, a(x, y), src=src)
-        memory.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [y]}, src="other")
-        memory.ingest(self.con, a(x, y), src=src)
+        ingest.ingest(self.con, a(x, y), src=src)
+        ingest.ingest(self.con, {"run_id": "explore-g-1", "build": "1", "bugs": [y]}, src="other")
+        ingest.ingest(self.con, a(x, y), src=src)
         self.assertFalse(log.exists())
-        memory.ingest(self.con, a(), src=src)  # X was only this run's: dropped; Y another run still lists
+        ingest.ingest(self.con, a(), src=src)  # X was only this run's: dropped; Y another run still lists
         (n,) = notices()
         self.assertEqual(
             (n["kind"], n["hash"], n["route"], n["run"]),
             ("bug_dropped", core.bug_hash("/form/:id", "x"), "/form/:id", "explore-f-1"),
         )
-        memory.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": [x]}, src="nowhere/run-x.json")
-        memory.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": []}, src="nowhere/run-x.json")
+        ingest.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": [x]}, src="nowhere/run-x.json")
+        ingest.ingest(self.con, {"run_id": "r2", "build": "1", "bugs": []}, src="nowhere/run-x.json")
         self.assertEqual(len(notices()), 1)  # no qa-out folder to tell: dropped all the same
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)
 
     def test_late_run_keeps_newer_coverage_and_bug_dates(self):
         cov = lambda r: [{"target": "speed", "heuristic": "boundary", "result": r}]
         bug = {"route": "/form", "title": "t", "symptom": "s"}
-        memory.ingest(self.con, run(coverage=cov("fail"), bugs=[bug]), ts="2026-02-01T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(self.con, run(coverage=cov("fail"), bugs=[bug]), ts="2026-02-01T00:00:00Z")
+        ingest.ingest(
             self.con, run(coverage=cov("pass"), bugs=[bug]), ts="2026-01-01T00:00:00Z"
         )  # an older file, ingested late
         self.assertEqual(
@@ -120,137 +120,137 @@ class Bugs(MemBase):
             tuple(self.con.execute("SELECT first_seen, last_seen, seen_count FROM bugs").fetchone()),
             ("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", 2),
         )
-        memory.ingest(self.con, run(coverage=cov("pass")), ts="2026-03-01T00:00:00Z")
+        ingest.ingest(self.con, run(coverage=cov("pass")), ts="2026-03-01T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT result FROM coverage").fetchone()[0], "pass")
 
     def test_a_sighting_older_than_the_last_one_predates_the_fix(self):
         # a sighting older than the last one (ingested late) predates the fix
         bug = {"route": "/form", "title": "t", "symptom": "s"}
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
         h = self.con.execute("SELECT hash FROM bugs").fetchone()[0]
         self.con.execute("UPDATE bugs SET status='FIXED'")
         newest = self.con.execute("SELECT last_run FROM bugs").fetchone()[0]
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-05T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-05T00:00:00Z")
         self.assertEqual(tuple(self.con.execute("SELECT status, last_run FROM bugs").fetchone()), ("FIXED", newest))
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-20T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-20T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0], "REGRESSED")
 
     def test_a_run_from_before_the_fix_ingested_late_does_not_regress(self):
         """A run that finished after the last sighting but before the fix, ingested after the fix, predates it."""
         bug = {"route": "/form", "title": "t", "symptom": "s"}
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-10T00:00:00Z")
         h = core.bug_hash("/form", "s")
         with mock.patch.object(core, "now", return_value="2026-11-15T00:00:00Z"):
             cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
         status = lambda: self.con.execute("SELECT status FROM bugs WHERE hash=?", (h,)).fetchone()[0]
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-12T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-12T00:00:00Z")
         self.assertEqual(status(), "FIXED")
-        memory.ingest(self.con, run(bugs=[bug]), ts="2026-11-16T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), ts="2026-11-16T00:00:00Z")
         self.assertEqual(status(), "REGRESSED")
 
     def test_reopening_a_bug_no_run_lists_removes_it(self):
         bug = {"route": "/form", "title": "t", "symptom": "s"}
         r = run(bugs=[bug])
-        memory.ingest(self.con, r, src="a")
+        ingest.ingest(self.con, r, src="a")
         h = self.con.execute("SELECT hash FROM bugs").fetchone()[0]
         cli.run_cmd(self.con, "bug-status", [h, "FILED"])
-        memory.ingest(self.con, {**r, "bugs": []}, src="a")  # the run file was rewritten without it; triaged, so kept
+        ingest.ingest(self.con, {**r, "bugs": []}, src="a")  # the run file was rewritten without it; triaged, so kept
         self.assertEqual(self.con.execute("SELECT status, seen_count FROM bugs").fetchone()[:], ("FILED", 0))
         cli.run_cmd(self.con, "bug-status", [h, "OPEN"])
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 0)
 
     def test_fixed_bug_seen_again_regresses_and_symptom_shown(self):
         bug = {"route": "/form", "title": "t", "symptom": "speed 999 saved"}
-        memory.ingest(self.con, run(bugs=[bug]))
+        ingest.ingest(self.con, run(bugs=[bug]))
         h = core.bug_hash("/form", "speed 999 saved")
         self.assertEqual(cli.main(["bug-status", h[:6], "fixed"]), 0)
         self.assertIn(
             f"PREVIOUSLY FIXED (seen again = regression: put its hash in run.json):\n- {h} FIXED",
-            memory.card(self.con, "/form"),
+            cards.card(self.con, "/form"),
         )
-        memory.ingest(self.con, run("1.1", bugs=[{"route": "/form", "title": "other words", "hash": h}]))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("1.1", bugs=[{"route": "/form", "title": "other words", "hash": h}]))
+        c = cards.card(self.con, "/form")
         self.assertIn(f"{h} REGRESSED", c)
         self.assertIn("symptom: speed 999 saved", c)
 
     def test_empty_or_numeric_draft_path(self):
         bug = {"route": "/form", "title": "t", "symptom": "s", "draft_path": "/abs/bugs/BUG-1.md"}
-        memory.ingest(self.con, run(bugs=[bug]))
-        memory.ingest(
+        ingest.ingest(self.con, run(bugs=[bug]))
+        ingest.ingest(
             self.con, run(bugs=[{**bug, "draft_path": ""}]), run_dir=Path(self.tmp.name)
         )  # a re-sighting without one
         self.assertEqual(self.con.execute("SELECT draft_path FROM bugs").fetchone()[0], "/abs/bugs/BUG-1.md")
-        memory.ingest(self.con, run(bugs=[{**bug, "symptom": "other", "draft_path": 7}]), run_dir=Path(self.tmp.name))
+        ingest.ingest(self.con, run(bugs=[{**bug, "symptom": "other", "draft_path": 7}]), run_dir=Path(self.tmp.name))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
 
     def test_a_hash_prefix_finds_the_bug(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
         h = core.bug_hash("/form", "s")
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "x", "hash": h[:8]}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "x", "hash": h[:8]}]))
         self.assertEqual(self.con.execute("SELECT count(*), max(seen_count) FROM bugs").fetchone()[:], (1, 2))
 
     def test_a_draft_id_in_hash_is_still_stored(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(bugs=[{"route": "/form", "title": "Save accepts 131", "symptom": "saved at 131", "hash": "BUG-2"}]),
         )
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 1)
 
     def test_jira_key_in_hash_creates_no_local_bug(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Known jira PROJ-9 bug", "hash": "PROJ-9"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "Known jira PROJ-9 bug", "hash": "PROJ-9"}]))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 0)
 
     def test_hash_field_variants(self):
         for i, junk in enumerate(["n/a", "none", "new", "TBD", ""]):
-            memory.ingest(self.con, run(bugs=[{"route": "/form", "title": f"t{i}", "symptom": f"s{i}", "hash": junk}]))
+            ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": f"t{i}", "symptom": f"s{i}", "hash": junk}]))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 5)
         h = core.bug_hash("/form", "s0")
         self.con.execute("UPDATE bugs SET status='FIXED' WHERE hash=?", (h,))
         self.con.commit()
         for variant in [f"{h} ", f"#{h}", f"{h} (known)"]:
-            memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "x", "hash": variant}]))
+            ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "x", "hash": variant}]))
         self.assertEqual(
             self.con.execute("SELECT status, seen_count FROM bugs WHERE hash=?", (h,)).fetchone()[:], ("REGRESSED", 4)
         )
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "jira dup", "hash": "PROJ-9"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "jira dup", "hash": "PROJ-9"}]))
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 5)
 
     def test_invalid_bugs_listed_as_not_bugs(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "plural wording"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "plural wording"}]))
         h = core.bug_hash("/form", "plural wording")
         self.con.close()
         cli.main(["bug-status", h, "INVALID"])
         self.con = core.connect()
         self.assertIn(
             f"NOT BUGS (the user marked these INVALID: don't report them):\n- {h} INVALID",
-            memory.card(self.con, "/form"),
+            cards.card(self.con, "/form"),
         )
 
     def test_filed_bugs_stay_visible(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t"}]))
         h = self.con.execute("SELECT hash FROM bugs").fetchone()[0]
         cli.main(["bug-status", h, "FILED"])
-        self.assertIn("FILED", memory.card(self.con, "/form"))
+        self.assertIn("FILED", cards.card(self.con, "/form"))
 
 
 class BugLines(MemBase):
     def test_bugs_lines_name_the_status(self):
         """prep joins OPEN, FILED and REGRESSED lists into one: each line must say which it is."""
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
         self.con.execute("UPDATE bugs SET status='REGRESSED'")
         self.assertIn(" REGRESSED ", memory.bugs(self.con, "REGRESSED"))
 
     def test_a_bug_without_severity_or_classification_prints_no_none(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "Bare bug"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "Bare bug"}]))
         self.assertNotIn("None", memory.bugs(self.con))
-        self.assertNotIn("None", memory.card(self.con, "/form"))
+        self.assertNotIn("None", cards.card(self.con, "/form"))
 
 
 class BugStatus(MemBase):
     """`qa-mem bug-status` and `qa-mem hash`."""
 
     def test_bug_status_requires_prefix_and_valid_status(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t"}]))
         self.assertEqual(cli.main(["bug-status", "", "FIXED"]), 2)
         self.assertEqual(cli.main(["bug-status", "abcd", "WHATEVER"]), 2)
         self.assertEqual(self.con.execute("SELECT status FROM bugs").fetchone()[0], "OPEN")
@@ -265,7 +265,7 @@ class BugStatus(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs WHERE status='FIXED'").fetchone()[0], 1)
 
     def test_bug_status_wildcards_and_stale_extra_args(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "a"}, {"route": "/form", "title": "b"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "a"}, {"route": "/form", "title": "b"}]))
         self.assertEqual(cli.main(["bug-status", "____", "INVALID"]), 2)
         self.assertEqual(cli.main(["stale", "2.0", "x"]), 0)
 
@@ -273,14 +273,14 @@ class BugStatus(MemBase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli.main(["hash", "http://localhost:8765/form/", "speed", "999"])
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999"}]))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999"}]))
         self.assertEqual(buf.getvalue().strip(), self.con.execute("SELECT hash FROM bugs").fetchone()[0])
 
     def test_hash_cli_redacts_like_ingest(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli.main(["hash", "/form", "500 with cookie: sid=abc123"])
-        memory.ingest(
+        ingest.ingest(
             self.con,
             scrub.redact_json(run(bugs=[{"route": "/form", "title": "t", "symptom": "500 with cookie: sid=abc123"}])),
         )
@@ -323,7 +323,7 @@ class BugSync(MemBase):
     """`qa-mem bug-sync`: read-only Jira status sync for FILED bugs."""
 
     def add_bug(self, route, symptom, status="FILED", jira_key=None):
-        memory.ingest(self.con, run(bugs=[{"route": route, "title": symptom, "symptom": symptom}]))
+        ingest.ingest(self.con, run(bugs=[{"route": route, "title": symptom, "symptom": symptom}]))
         h = core.bug_hash(route, symptom)
         with self.con:
             self.con.execute("UPDATE bugs SET status=?, jira_key=? WHERE hash=?", (status, jira_key, h))
@@ -430,12 +430,12 @@ class Builds(MemBase):
     """A new build marks old knowledge stale; a plan or an unreadable build never does."""
 
     def test_new_build_marks_old_knowledge_stale(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run("1.0", facts=[{"kind": "rule", "text": "old rule"}], locators=[{"name": "Save", "locator": "x"}]),
         )
-        memory.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "new rule"}]))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "new rule"}]))
+        c = cards.card(self.con, "/form")
         self.assertIn("old rule *", c)
         self.assertNotIn("new rule *", c)
         self.assertNotIn("LOCATORS", c)  # stale locator hidden
@@ -443,64 +443,64 @@ class Builds(MemBase):
         self.assertIn("boundary", c.split("UNTRIED: ")[1])
 
     def test_stale_command_resets_coverage_view(self):
-        memory.ingest(self.con, run("1.0", coverage=[{"target": "x", "heuristic": "boundary"}]))
+        ingest.ingest(self.con, run("1.0", coverage=[{"target": "x", "heuristic": "boundary"}]))
         cli.main(["stale", "2.0"])
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertIn("re-verify", c)
         self.assertIn("boundary", c.split("UNTRIED: ")[1])
 
     def test_a_corrected_build_makes_knowledge_current_again(self):
-        memory.ingest(self.con, run("1.43.0", facts=[{"kind": "rule", "text": "speed max 130"}]))
+        ingest.ingest(self.con, run("1.43.0", facts=[{"kind": "rule", "text": "speed max 130"}]))
         cli.main(["stale", "1.44.0"])
         self.assertEqual(self.con.execute("SELECT max(stale) FROM facts").fetchone()[0], 1)
         cli.main(["stale", "1.43.0"])  # corrected: what was verified on 1.43.0 is current again
         self.assertEqual(self.con.execute("SELECT max(stale) FROM facts").fetchone()[0], 0)
 
     def test_unknown_build_plan_does_not_stale_real_knowledge(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run("1.0", facts=[{"kind": "rule", "text": "real"}], coverage=[{"target": "x", "heuristic": "boundary"}]),
         )
-        memory.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "from ticket"}]))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "from ticket"}]))
+        c = cards.card(self.con, "/form")
         self.assertIn("build=1.0", c)
         self.assertNotIn("real *", c)
         self.assertIn("boundary(", c)
 
     def test_unreadable_build_spellings(self):
-        memory.ingest(self.con, run("1.42.0", facts=[{"kind": "rule", "text": "real"}]))
+        ingest.ingest(self.con, run("1.42.0", facts=[{"kind": "rule", "text": "real"}]))
         for b in ["undefined", "unknown (footer .version not found)", "Unknown", "UNKNOWN", "null", "N/A", ""]:
-            memory.ingest(self.con, run(b, coverage=[{"target": "t", "heuristic": "duplicate"}]))
-        c = memory.card(self.con, "/form")
+            ingest.ingest(self.con, run(b, coverage=[{"target": "t", "heuristic": "duplicate"}]))
+        c = cards.card(self.con, "/form")
         self.assertIn("build=1.42.0", c)
         self.assertNotIn("real *", c)
         self.assertEqual({r[0] for r in self.con.execute("SELECT DISTINCT build FROM coverage")}, {"unknown"})
         self.assertIn("duplicate(", c)  # unknown-build coverage visible (within the week)
 
     def test_build_whitespace_is_not_a_new_deploy(self):
-        memory.ingest(self.con, run("Build:\n   1.42", facts=[{"kind": "rule", "text": "real"}]))
-        memory.ingest(self.con, run("Build: 1.42", facts=[{"kind": "rule", "text": "other"}]))
-        self.assertNotIn("real *", memory.card(self.con, "/form"))
-        memory.ingest(self.con, run("x" * 5000, bugs=[{"route": "/form", "title": "t", "severity": "H" * 500}]))
+        ingest.ingest(self.con, run("Build:\n   1.42", facts=[{"kind": "rule", "text": "real"}]))
+        ingest.ingest(self.con, run("Build: 1.42", facts=[{"kind": "rule", "text": "other"}]))
+        self.assertNotIn("real *", cards.card(self.con, "/form"))
+        ingest.ingest(self.con, run("x" * 5000, bugs=[{"route": "/form", "title": "t", "severity": "H" * 500}]))
         self.assertLessEqual(len(core.meta(self.con, "build")), core.MAX_TEXT)
         self.assertLessEqual(len(self.con.execute("SELECT severity FROM bugs").fetchone()[0]), 20)
 
     def test_a_late_run_of_an_older_build_does_not_roll_back_the_page_or_the_build(self):
-        memory.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "fresh"}]), "2026-11-22T10:00:00Z")
-        memory.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "old"}]), "2026-11-21T10:00:00Z")
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("1.1", facts=[{"kind": "rule", "text": "fresh"}]), "2026-11-22T10:00:00Z")
+        ingest.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "old"}]), "2026-11-21T10:00:00Z")
+        c = cards.card(self.con, "/form")
         self.assertIn("build=1.1", c)
         self.assertEqual(core.meta(self.con, "build"), "1.1")
         self.assertIn("fresh\n", c + "\n")
         self.assertNotIn("fresh *", c)
 
     def test_late_run_of_the_current_build_still_adds_what_it_saw(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run("2.0", locators=[{"name": "Add", "locator": "getByRole('button', { name: 'Add' })"}]),
             "2026-11-22T10:00:00Z",
         )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 "2.0",
@@ -512,28 +512,28 @@ class Builds(MemBase):
         names = {r[0] for r in self.con.execute("SELECT name FROM locators")}
         self.assertEqual(names, {"Add", "Code"})
         self.assertEqual(self.con.execute("SELECT stale FROM facts WHERE text='code max 6'").fetchone()[0], 0)
-        memory.ingest(self.con, run("1.0", locators=[{"name": "Old", "locator": "#old"}]), "2026-11-21T09:00:00Z")
+        ingest.ingest(self.con, run("1.0", locators=[{"name": "Old", "locator": "#old"}]), "2026-11-21T09:00:00Z")
         self.assertNotIn("Old", {r[0] for r in self.con.execute("SELECT name FROM locators")})  # older build: skipped
 
     def test_a_plan_does_not_refresh_a_stale_fact(self):
-        memory.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "r"}]), "2026-11-20T10:00:00Z")
-        memory.ingest(self.con, run("1.1"), "2026-11-21T10:00:00Z")  # r now stale
-        memory.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "r"}]), "2026-11-22T10:00:00Z")
+        ingest.ingest(self.con, run("1.0", facts=[{"kind": "rule", "text": "r"}]), "2026-11-20T10:00:00Z")
+        ingest.ingest(self.con, run("1.1"), "2026-11-21T10:00:00Z")  # r now stale
+        ingest.ingest(self.con, run("unknown", facts=[{"kind": "rule", "text": "r"}]), "2026-11-22T10:00:00Z")
         self.assertEqual(self.con.execute("SELECT stale, build FROM facts").fetchone()[:], (1, "1.0"))
 
     def test_coverage_of_an_unreadable_build_expires_after_a_week(self):
-        memory.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "duplicate"}]))
-        self.assertIn("duplicate(", memory.card(self.con, "/form"))
-        memory.ingest(
+        ingest.ingest(self.con, run("unknown", coverage=[{"target": "t", "heuristic": "duplicate"}]))
+        self.assertIn("duplicate(", cards.card(self.con, "/form"))
+        ingest.ingest(
             self.con, run("unknown", coverage=[{"target": "t", "heuristic": "boundary"}]), "2020-01-01T00:00:00Z"
         )
-        self.assertNotIn("boundary(", memory.card(self.con, "/form"))
+        self.assertNotIn("boundary(", cards.card(self.con, "/form"))
 
     def test_locators_of_an_unreadable_build_expire_after_a_week(self):  # as its coverage: a later deploy may drop them
-        memory.ingest(self.con, run("unknown", locators=[{"name": "Old", "locator": "#old"}]), "2020-01-01T00:00:00Z")
-        memory.ingest(self.con, run("unknown", locators=[{"name": "New", "locator": "#new"}]))
-        self.assertIn("LOCATORS (fresh): New=#new\n", memory.card(self.con, "/form") + "\n")
-        memory.ingest(
+        ingest.ingest(self.con, run("unknown", locators=[{"name": "Old", "locator": "#old"}]), "2020-01-01T00:00:00Z")
+        ingest.ingest(self.con, run("unknown", locators=[{"name": "New", "locator": "#new"}]))
+        self.assertIn("LOCATORS (fresh): New=#new\n", cards.card(self.con, "/form") + "\n")
+        ingest.ingest(
             self.con,
             {
                 "run_id": "k",
@@ -542,14 +542,14 @@ class Builds(MemBase):
             },
             "2020-01-01T00:00:00Z",
         )
-        self.assertIn("LOCATORS (fresh): Layer=#layer", memory.card(self.con, "/map"))  # a read build: no age limit
+        self.assertIn("LOCATORS (fresh): Layer=#layer", cards.card(self.con, "/map"))  # a read build: no age limit
 
     def test_the_cards_locators_are_listed_once_and_frame_safe_ones_first(self):
         """An app shell loads its pages in an iframe: a locator saved without the frame in front fails as given, and the
         same locator saved under three names took three of the card's 20 places."""
         frame = "locator('iframe[name=\"module\"]').contentFrame()."
         locs = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
-        memory.ingest(
+        ingest.ingest(
             self.con, run("1.0", locators=locs(("Save", f"{frame}getByTestId('save')"))), "2026-11-20T10:00:00Z"
         )
         newer = locs(
@@ -558,11 +558,11 @@ class Builds(MemBase):
             ("Save (toolbar)", "getByTestId('save')"),
             ("Name field", "getByLabel('Name')"),
         )
-        memory.ingest(self.con, run("1.0", locators=newer), "2026-11-21T10:00:00Z")
-        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
+        ingest.ingest(self.con, run("1.0", locators=newer), "2026-11-21T10:00:00Z")
+        line = next(x for x in cards.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
         self.assertEqual(line.count("getByTestId('save')"), 2)  # once with the frame, once without: not four times
         self.assertLess(line.index(frame), line.index("Name field"))  # the one that works as given comes first
-        card = memory.card(self.con, "/form")
+        card = cards.card(self.con, "/form")
         self.assertIn(f"FRAME: this page loads in a frame: put `{frame}` in front of a locator that lacks it", card)
 
     def test_a_frame_spelled_two_ways_is_one_locator_and_no_code_hint(self):
@@ -571,8 +571,8 @@ class Builds(MemBase):
         shown, named = "locator('iframe:visible').nth(0).contentFrame().", "locator('#module').contentFrame()."
         locs = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
         crawled = locs(("Save", f"{shown}getByTestId('save')"), ("Msg", f"{shown}locator('#msg')"))
-        memory.ingest(self.con, run("1.0", locators=crawled), "2026-11-20T10:00:00Z")
-        memory.ingest(
+        ingest.ingest(self.con, run("1.0", locators=crawled), "2026-11-20T10:00:00Z")
+        ingest.ingest(
             self.con, run("1.0", locators=locs(("Save button", f"{named}getByTestId('save')"))), "2026-11-21T10:00:00Z"
         )
         with self.con:
@@ -581,7 +581,7 @@ class Builds(MemBase):
                     "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
                     ("/form", "locator", label, value, "src/F.jsx:1", "/repo", "frontend", core.now(), "src/F.jsx"),
                 )
-        card = memory.card(self.con, "/form")
+        card = cards.card(self.con, "/form")
         self.assertEqual(card.count("getByTestId('save')"), 1)
         self.assertIn(f"Save button={named}getByTestId('save')", card)  # the newest spelling
         self.assertEqual(card.count("#msg"), 1)
@@ -592,17 +592,15 @@ class Builds(MemBase):
         saved without it had no FRAME line, so the explorer acted by refs (21 `find` calls in one run)."""
         frame, widget = "locator('#module').contentFrame().", "locator('#chat').contentFrame()."
         page = lambda route, *pairs: {"route": route, "locators": [{"name": n, "locator": v} for n, v in pairs]}
-        ingest = lambda rid, build, *pages: memory.ingest(
-            self.con, {"run_id": rid, "build": build, "pages": list(pages)}
-        )
+        save = lambda rid, build, *pages: ingest.ingest(self.con, {"run_id": rid, "build": build, "pages": list(pages)})
         hint = (
             "FRAME: no locator of this page names a frame yet; {} in one: try `{}` in front of a locator that lacks "
             "it (a FROM CODE one too)"
         )
-        ingest("a", "1.0", page("/map", ("Layer", "#layer")))
-        self.assertNotIn("FRAME:", memory.card(self.con, "/map"))  # no page names a frame: nothing to say
-        self.assertNotIn("FRAME:", memory.card(self.con, "/never-seen"))
-        ingest(
+        save("a", "1.0", page("/map", ("Layer", "#layer")))
+        self.assertNotIn("FRAME:", cards.card(self.con, "/map"))  # no page names a frame: nothing to say
+        self.assertNotIn("FRAME:", cards.card(self.con, "/never-seen"))
+        save(
             "b",
             "1.0",
             page("/zones", ("Save", f"{frame}getByTestId('save')")),
@@ -610,13 +608,13 @@ class Builds(MemBase):
             page("/help", ("Send", f"{widget}getByTestId('send')")),
         )
         most = hint.format("2 other pages load", frame)  # the frame of most pages, not the help widget's
-        self.assertIn(most, memory.card(self.con, "/map").splitlines())
-        self.assertIn(most, memory.card(self.con, "/never-seen").splitlines())  # a first visit starts with it too
-        own = memory.card(self.con, "/alarms")
+        self.assertIn(most, cards.card(self.con, "/map").splitlines())
+        self.assertIn(most, cards.card(self.con, "/never-seen").splitlines())  # a first visit starts with it too
+        own = cards.card(self.con, "/alarms")
         self.assertIn(f"FRAME: this page loads in a frame: put `{frame}` in front", own)  # its own: no borrowing
         self.assertNotIn("other page", own)
-        ingest("c", "2.0", page("/zones"), page("/alarms"))  # a new build: their locators are stale until seen again
-        self.assertIn(hint.format("1 other page loads", widget), memory.card(self.con, "/map").splitlines())
+        save("c", "2.0", page("/zones"), page("/alarms"))  # a new build: their locators are stale until seen again
+        self.assertIn(hint.format("1 other page loads", widget), cards.card(self.con, "/map").splitlines())
 
     def test_a_page_whose_framed_locators_sit_in_a_second_frame_gets_the_apps_frame_first(self):
         """Found live: a page of an app shell opened a panel in a second iframe, a run saved the panel's locators with
@@ -624,17 +622,17 @@ class Builds(MemBase):
         the frame every page loads in: none of them matched."""
         frame, panel = "locator('#module').contentFrame().", "locator('#panel').contentFrame()."
         page = lambda route, *pairs: {"route": route, "locators": [{"name": n, "locator": v} for n, v in pairs]}
-        ingest = lambda rid, *pages: memory.ingest(self.con, {"run_id": rid, "build": "1.0", "pages": list(pages)})
-        line = lambda route: next(x for x in memory.card(self.con, route).splitlines() if x.startswith("FRAME:"))
+        save = lambda rid, *pages: ingest.ingest(self.con, {"run_id": rid, "build": "1.0", "pages": list(pages)})
+        line = lambda route: next(x for x in cards.card(self.con, route).splitlines() if x.startswith("FRAME:"))
         own = "FRAME: this page loads in a frame: put `{}` in front of a locator that lacks it (a FROM CODE one too)"
         billing = "locator('#billing').contentFrame()."
-        ingest(
+        save(
             "a",
             page("/billing", ("Pay", f"{billing}getByTestId('pay')")),
             page("/users", ("Add", "locator('#users').contentFrame().getByTestId('add')")),
         )
         self.assertEqual(line("/billing"), own.format(billing))  # no frame is the app's: the page's own stands
-        ingest(
+        save(
             "b",
             page("/zones", ("Save", f"{frame}getByTestId('save')")),
             page("/alarms", ("Ack", f"{frame}getByTestId('ack')")),
@@ -645,7 +643,7 @@ class Builds(MemBase):
             f"FRAME: 2 other pages load in a frame: try `{frame}` in front of a locator that lacks it (a FROM CODE one "
             f"too); only if that matches nothing, `{panel}`, which locators of this page name",
         )
-        ingest("c", page("/signals", ("Tab", f"{frame}getByText('Configuration')")))
+        save("c", page("/signals", ("Tab", f"{frame}getByText('Configuration')")))
         self.assertEqual(line("/signals"), own.format(frame))  # a locator of its own names the app's frame: no guess
 
     def test_a_locator_saved_with_its_frame_replaces_the_one_saved_without(self):
@@ -653,7 +651,7 @@ class Builds(MemBase):
         without it under other names. Both stayed fresh, and the one without matches nothing as written."""
         frame = "locator('iframe:visible').nth(0).contentFrame()."
         named = lambda *pairs: [{"name": n, "locator": v} for n, v in pairs]
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 locators=named(
@@ -665,7 +663,7 @@ class Builds(MemBase):
                 )
             ),
         )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 locators=named(
@@ -680,18 +678,18 @@ class Builds(MemBase):
 
     def test_the_card_says_how_to_reach_the_locators_it_has_no_room_for(self):
         many = [{"name": f"Row {n}", "locator": f"getByTestId('row-{n}')"} for n in range(25)]
-        memory.ingest(self.con, run("1.0", locators=many))
-        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
+        ingest.ingest(self.con, run("1.0", locators=many))
+        line = next(x for x in cards.card(self.con, "/form").splitlines() if x.startswith("LOCATORS (fresh)"))
         self.assertIn("(+5 more verified: `find '<name>'` gives a ref)", line)
         self.assertNotIn("snapshot", line)
 
     def test_plan_does_not_mark_verified(self):
-        memory.ingest(self.con, {"run_id": "p", "build": "unknown", "pages": [{"route": "/new"}]})
-        self.assertIn("verified=never", memory.card(self.con, "/new"))
+        ingest.ingest(self.con, {"run_id": "p", "build": "unknown", "pages": [{"route": "/new"}]})
+        self.assertIn("verified=never", cards.card(self.con, "/new"))
 
     def test_unknown_build_page_keeps_its_card(self):
-        memory.ingest(self.con, {"run_id": "a", "build": "1.42.0", "pages": [{"route": "/incidents"}]})
-        memory.ingest(
+        ingest.ingest(self.con, {"run_id": "a", "build": "1.42.0", "pages": [{"route": "/incidents"}]})
+        ingest.ingest(
             self.con,
             {
                 "run_id": "b",
@@ -705,7 +703,7 @@ class Builds(MemBase):
                 ],
             },
         )
-        c = memory.card(self.con, "/map")
+        c = cards.card(self.con, "/map")
         self.assertIn("LOCATORS (fresh): Layer=getByLabel('Layer')", c)
         self.assertIn("- [rule] layers switch\n", c + "\n")  # not marked stale
         # found live: "this page's build was never readable" on a page a plan had listed and no run had opened
@@ -729,8 +727,8 @@ class Facts(MemBase):
                 ("invalid-format", "Failed"),
             ]
         ]
-        memory.ingest(self.con, run(coverage=cov))
-        untried = memory.card(self.con, "/form").split("UNTRIED: ")[1].splitlines()[0]
+        ingest.ingest(self.con, run(coverage=cov))
+        untried = cards.card(self.con, "/form").split("UNTRIED: ")[1].splitlines()[0]
         for h in ("boundary", "duplicate", "empty-null", "keyboard-a11y"):
             self.assertIn(h, untried)
         for h in ("happy-path", "invalid-format"):
@@ -738,16 +736,16 @@ class Facts(MemBase):
         self.assertEqual({r[0] for r in self.con.execute("SELECT result FROM coverage")}, {"pass", "fail", "blocked"})
 
     def test_heuristic_ids_normalised(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(coverage=[{"target": "x", "heuristic": "Boundary"}, {"target": "y", "heuristic": "Traffic time zone"}]),
         )
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertIn("other:traffic-time-zone", c)
         self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])
 
     def test_blocked_stays_untried_and_paraphrased_facts_collapse(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 coverage=[{"target": "api", "heuristic": "error-handling", "result": "blocked"}],
@@ -755,12 +753,12 @@ class Facts(MemBase):
             ),
             "2026-11-22T10:00:00Z",
         )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(facts=[{"kind": "rule", "text": "ID, Road and Type header buttons sort ascending"}]),
             "2026-11-22T11:00:00Z",
         )
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertIn("error-handling", c.split("UNTRIED")[1])
         self.assertIn("header buttons", c)
         self.assertEqual(c.count("sort ascending"), 1)
@@ -774,30 +772,30 @@ class Facts(MemBase):
             "Speed limit must be between 0 and 130 km/h",
             "Speed limit must be between 0 and 120 km/h",
         ]
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": t} for t in facts]))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": t} for t in facts]))
+        c = cards.card(self.con, "/form")
         for t in facts:
             self.assertIn(t, c)
 
     def test_ticket_fact_becomes_observed(self):
-        memory.ingest(
+        ingest.ingest(
             self.con, run("unknown", facts=[{"kind": "rule", "text": "End date after start", "source": "PROJ-1"}])
         )
-        self.assertIn("(from PROJ-1)", memory.card(self.con, "/form"))
-        memory.ingest(
+        self.assertIn("(from PROJ-1)", cards.card(self.con, "/form"))
+        ingest.ingest(
             self.con, run("1.0", facts=[{"kind": "rule", "text": "End date after start", "source": "observed"}])
         )
-        self.assertNotIn("(from PROJ-1)", memory.card(self.con, "/form"))
-        memory.ingest(
+        self.assertNotIn("(from PROJ-1)", cards.card(self.con, "/form"))
+        ingest.ingest(
             self.con, run("unknown", facts=[{"kind": "rule", "text": "x", "source": "PROJ-2"}])
         )  # unverified stays 'from'
-        self.assertIn("(from PROJ-2)", memory.card(self.con, "/form"))
+        self.assertIn("(from PROJ-2)", cards.card(self.con, "/form"))
 
     def test_size_caps(self):
         core.MAX_FACTS = 5
         try:
             for n in range(8):
-                memory.ingest(
+                ingest.ingest(
                     self.con,
                     run(facts=[{"kind": "note", "text": f"fact number {n} " + "w" * n}]),
                     f"2026-11-22T10:0{n}:00Z",
@@ -827,7 +825,7 @@ class Facts(MemBase):
             {"run_id": "x", "cases": [{"id": "TC-1", "status": "PASS", "annotated": "false"}]},
         ):
             with self.assertRaises(ValueError, msg=str(bad)):
-                memory.ingest(self.con, bad)
+                ingest.ingest(self.con, bad)
 
     def test_round1_memory_and_core_fixes(self):
         # 1. cap/norm/short preserve numeric 0; norm preserves non-ASCII
@@ -835,7 +833,7 @@ class Facts(MemBase):
         self.assertNotEqual(core.bug_hash("/a", "日本語エラー"), core.bug_hash("/a", "한국어오류"))
         self.assertEqual(core.norm("Erreur: échec"), "erreur échec")
         # 2. whitespace symptom falls back to title (distinct bugs don't collide)
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "b1",
@@ -848,7 +846,7 @@ class Facts(MemBase):
         )
         self.assertEqual(self.con.execute("SELECT count(*) FROM bugs").fetchone()[0], 2)
         # 3. unknown-build plan does not overwrite/un-stale verified locators or store blank locators/heuristics
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r1",
@@ -857,8 +855,8 @@ class Facts(MemBase):
             },
             "2026-01-01T00:00:00Z",
         )
-        memory.ingest(self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/loc"}]}, "2026-01-02T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(self.con, {"run_id": "r2", "build": "2.0", "pages": [{"route": "/loc"}]}, "2026-01-02T00:00:00Z")
+        ingest.ingest(
             self.con,
             {
                 "run_id": "p1",
@@ -877,7 +875,7 @@ class Facts(MemBase):
         self.assertEqual(rows, [{"name": "Save", "locator": "#old", "build": "1.0", "stale": 1}])
         self.assertEqual(self.con.execute("SELECT count(*) FROM coverage WHERE page='/loc'").fetchone()[0], 0)
         # 4. fact dedup keeps numbers with attached units distinct
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "u1",
@@ -893,11 +891,11 @@ class Facts(MemBase):
                 ],
             },
         )
-        cu = memory.card(self.con, "/units")
+        cu = cards.card(self.con, "/units")
         self.assertIn("130km/h", cu)
         self.assertIn("120km/h", cu)
         # 5. search multi-word negation excludes only the phrase, not individual words
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "s1",
@@ -923,9 +921,9 @@ class Facts(MemBase):
         orig_max = core.MAX_RUNS
         core.MAX_RUNS = 2
         try:
-            memory.ingest(self.con, {"run_id": "m2", "build": "2.0", "bugs": []}, "2026-12-02T00:00:00Z")
-            memory.ingest(self.con, {"run_id": "m3", "build": "2.0", "bugs": []}, "2026-12-03T00:00:00Z")
-            memory.ingest(
+            ingest.ingest(self.con, {"run_id": "m2", "build": "2.0", "bugs": []}, "2026-12-02T00:00:00Z")
+            ingest.ingest(self.con, {"run_id": "m3", "build": "2.0", "bugs": []}, "2026-12-03T00:00:00Z")
+            ingest.ingest(
                 self.con,
                 {"run_id": "m1", "build": "2.0", "bugs": [{"route": "/m", "title": "old"}]},
                 "2026-01-01T00:00:00Z",
@@ -946,7 +944,7 @@ class Card(MemBase):
     """`qa-mem card`: what an explorer reads about a page."""
 
     def test_card_shows_facts_locators_coverage_untried(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 facts=[{"kind": "rule", "text": "Speed 0-130"}],
@@ -954,7 +952,7 @@ class Card(MemBase):
                 coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}],
             ),
         )
-        c = memory.card(self.con, "form")
+        c = cards.card(self.con, "form")
         self.assertIn("Speed 0-130", c)
         self.assertIn("Save=getByRole('button')", c)
         self.assertIn("boundary(speed:fail)", c)
@@ -978,17 +976,17 @@ class Card(MemBase):
     def test_card_lists_code_rule_fields_no_run_covered(self):
         """One boundary-tested field must not hide the page's other validated fields."""
         self.rules("/form", "speed", "name", "start date")
-        memory.ingest(
+        ingest.ingest(
             self.con, run(coverage=[{"target": "Speed limit field", "heuristic": "boundary", "result": "pass"}])
         )
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertEqual(self.untested(c), "name; start date")
         self.assertIn("covered on build 1.0", c)
         self.assertNotIn("boundary", c.split("UNTRIED: ")[1].splitlines()[0])  # the heuristic view is unchanged
 
     def test_untested_targets_match_one_way_and_ignore_blocked(self):
         self.rules("/form", "speed", "speed (2)", "start date", "name")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 coverage=[
@@ -998,10 +996,10 @@ class Card(MemBase):
             ),
         )
         self.assertEqual(
-            self.untested(memory.card(self.con, "/form")), "name; speed; start date"
+            self.untested(cards.card(self.con, "/form")), "name; speed; start date"
         )  # 'speed (2)': one field
-        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "name; start date")
+        ingest.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "fail"}]))
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "name; start date")
 
     def row(self, page, kind, label, value, src="src/F.jsx"):
         with self.con:
@@ -1022,18 +1020,18 @@ class Card(MemBase):
 
     def test_only_an_adversarial_check_clears_a_rule(self):  # a happy-path save of a valid speed proved nothing
         self.rules("/form", "speed")
-        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "happy-path", "result": "pass"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")
-        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "invalid-format", "result": "pass"}]))
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")
+        ingest.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "happy-path", "result": "pass"}]))
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "speed")
+        ingest.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "invalid-format", "result": "pass"}]))
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "")
 
     def test_linked_server_rules_are_targets_and_a_client_server_mismatch_is_hinted(self):
         self.row("/form", "api", "save", "POST /api/zones")
         self.row("/form", "rule", "speed", "max 130")
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         self.row("*", "rule", "POST /api/zones speed", "max 150", "api/zones.js")
-        memory.ingest(self.con, run())
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run())
+        c = cards.card(self.con, "/form")
         self.assertIn("[server] POST /api/zones speed", self.untested(c))
         hint = next(x for x in c.splitlines() if x.startswith("CLIENT/SERVER"))
         self.assertIn("speed", hint)
@@ -1047,8 +1045,8 @@ class Card(MemBase):
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         self.row("*", "rule", "POST /api/zones speedLimit", "integer, min 0, max 150, required (Joi)", "api/zones.js")
         self.row("*", "rule", "POST /api/zones offset", "min 5, max 5", "api/zones.js")  # -5 vs 5: the minus counts
-        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
-        differ = memory._client_server_differ(self.con, "/zones/new")
+        ingest.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        differ = cards._client_server_differ(self.con, "/zones/new")
         self.assertEqual(len(differ), 2, differ)
         self.assertTrue(any(d.startswith("speed:") and "max 150" in d for d in differ), differ)
         self.assertTrue(any(d.startswith("offset:") and "min -5" in d for d in differ), differ)
@@ -1060,8 +1058,8 @@ class Card(MemBase):
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         self.row("*", "rule", "POST /api/zones speedLimit", "min 0, max 130 (Joi)", "api/zones.js")
         self.row("*", "rule", "POST /api/zones startDate", "min 2024-01-01", "api/zones.js")
-        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
-        self.assertEqual(memory._client_server_differ(self.con, "/zones/new"), [])
+        ingest.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        self.assertEqual(cards._client_server_differ(self.con, "/zones/new"), [])
 
     def zones(self, client, server, endpoint=True):
         """A form page calling POST /api/zones: its rules, the backend's rules (and the endpoint row unless endpoint=False)."""
@@ -1072,8 +1070,8 @@ class Card(MemBase):
             self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         for label, value in server.items():
             self.row("*", "rule", f"POST /api/zones {label}", value, "api/zones.js")
-        memory.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
-        return memory._client_server_differ(self.con, "/zones/new")
+        ingest.ingest(self.con, {"run_id": "z", "build": "1", "pages": [{"route": "/zones/new"}]})
+        return cards._client_server_differ(self.con, "/zones/new")
 
     def test_the_fixture_rules_differ_in_what_the_client_leaves_out(self):  # tests/fixture-src: the real values
         differ = self.zones(
@@ -1131,13 +1129,13 @@ class Card(MemBase):
         self.assertTrue(differ[0].startswith("POST /api/zones approved") and "server only" in differ[0], differ)
         self.con.execute("DELETE FROM codemap WHERE page='/zones/new' AND kind='rule'")
         self.assertEqual(
-            memory._client_server_differ(self.con, "/zones/new"), []
+            cards._client_server_differ(self.con, "/zones/new"), []
         )  # a page with no rules: nothing to compare to
 
     def test_the_card_shows_at_most_four_hints_in_one_line(self):
         client = {f"f{i}": "required" for i in range(6)}
         self.zones(client, {f"f{i}": "min 3" for i in range(6)})
-        lines = [x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("CLIENT/SERVER")]
+        lines = [x for x in cards.card(self.con, "/zones/new").splitlines() if x.startswith("CLIENT/SERVER")]
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0].count("f0") + lines[0].count("f1") + lines[0].count("f2") + lines[0].count("f3"), 4)
         self.assertNotIn("f4:", lines[0])
@@ -1147,59 +1145,59 @@ class Card(MemBase):
         self.row("/form", "rule", "speed", "max 130")
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js")
         self.row("*", "rule", "POST /api/zones speed", "max 150", "api/zones.js")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(coverage=[{"target": "[server] POST /api/zones speed", "heuristic": "boundary", "result": "pass"}]),
         )
         self.assertEqual(
-            self.untested(memory.card(self.con, "/form")), "speed"
+            self.untested(cards.card(self.con, "/form")), "speed"
         )  # the form's own field is still untested
-        memory.ingest(
+        ingest.ingest(
             self.con, run(coverage=[{"target": "POST /api/zones speed", "heuristic": "boundary", "result": "pass"}])
         )
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")  # also without the [server] prefix
-        memory.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "pass"}]))
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "speed")  # also without the [server] prefix
+        ingest.ingest(self.con, run(coverage=[{"target": "speed", "heuristic": "boundary", "result": "pass"}]))
         self.assertEqual(
-            self.untested(memory.card(self.con, "/form")), ""
+            self.untested(cards.card(self.con, "/form")), ""
         )  # the form's check clears it; the server rule was checked
 
     def test_untested_targets_reset_on_a_new_build(self):
         self.rules("/form", "speed")
-        memory.ingest(
+        ingest.ingest(
             self.con, run("1.0", coverage=[{"target": "speed", "heuristic": "boundary"}]), "2026-01-01T00:00:00Z"
         )
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "")
-        memory.ingest(self.con, run("2.0"), "2026-01-02T00:00:00Z")
-        self.assertEqual(self.untested(memory.card(self.con, "/form")), "speed")
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "")
+        ingest.ingest(self.con, run("2.0"), "2026-01-02T00:00:00Z")
+        self.assertEqual(self.untested(cards.card(self.con, "/form")), "speed")
 
     def test_untested_targets_line_is_capped_and_absent_without_rules(self):
-        memory.ingest(self.con, run())
-        self.assertNotIn("UNTESTED TARGETS", memory.card(self.con, "/form"))
+        ingest.ingest(self.con, run())
+        self.assertNotIn("UNTESTED TARGETS", cards.card(self.con, "/form"))
         labels = [f"field {i:02} " + "x" * 41 for i in range(12)]  # 50 characters each
         self.rules("/form", *labels)
-        shown, more = self.untested(memory.card(self.con, "/form")).split("; +")
+        shown, more = self.untested(cards.card(self.con, "/form")).split("; +")
         self.assertEqual(shown.split("; "), labels[:7])  # whole labels, at most ~400 characters
         self.assertEqual(more, "5 more (qa-mem code '/form')")
 
     def test_untested_targets_on_a_code_only_page_name_no_build(self):
         self.rules("/zones/new", "speed")
         self.con.execute("INSERT INTO pages(route) VALUES('/zones/new')")
-        line = next(x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("UNTESTED TARGETS"))
+        line = next(x for x in cards.card(self.con, "/zones/new").splitlines() if x.startswith("UNTESTED TARGETS"))
         self.assertIn("covered on this build", line)
         self.assertNotIn("None", line)
 
     def test_unknown_page_card(self):
-        self.assertIn("NO CARD", memory.card(self.con, "/nope"))
+        self.assertIn("NO CARD", cards.card(self.con, "/nope"))
 
     def test_card_prefers_exact_then_shortest_route(self):
         for rt in ("/form/advanced", "/form"):
-            memory.ingest(self.con, {"run_id": rt, "build": "1", "pages": [{"route": rt}]})
-        self.assertIn("PAGE /form ", memory.card(self.con, "form"))
+            ingest.ingest(self.con, {"run_id": rt, "build": "1", "pages": [{"route": rt}]})
+        self.assertIn("PAGE /form ", cards.card(self.con, "form"))
 
     def test_route_query_is_exact(self):
-        memory.ingest(self.con, {"run_id": "a", "build": "1", "pages": [{"route": "/incidents/list"}]})
-        self.assertIn("NO CARD", memory.card(self.con, "/incidents"))
-        self.assertIn("matched from 'incidents'", memory.card(self.con, "incidents"))
+        ingest.ingest(self.con, {"run_id": "a", "build": "1", "pages": [{"route": "/incidents/list"}]})
+        self.assertIn("NO CARD", cards.card(self.con, "/incidents"))
+        self.assertIn("matched from 'incidents'", cards.card(self.con, "incidents"))
 
     def test_page_name_lookup_prefers_segment_and_exact_name(self):
         for route, name in [
@@ -1208,10 +1206,10 @@ class Card(MemBase):
             ("/zones", "Speed zones"),
             ("/z", "Zones"),
         ]:
-            memory.ingest(self.con, {"run_id": route, "build": "1", "pages": [{"route": route, "name": name}]})
-        self.assertIn("PAGE /map.html", memory.card(self.con, "map"))
-        self.assertIn("PAGE /zones ", memory.card(self.con, "zones"))  # the route itself first
-        self.assertIn("PAGE /map.html", memory.card(self.con, "live map"))  # then the exact page name
+            ingest.ingest(self.con, {"run_id": route, "build": "1", "pages": [{"route": route, "name": name}]})
+        self.assertIn("PAGE /map.html", cards.card(self.con, "map"))
+        self.assertIn("PAGE /zones ", cards.card(self.con, "zones"))  # the route itself first
+        self.assertIn("PAGE /map.html", cards.card(self.con, "live map"))  # then the exact page name
 
     def test_detail_routes_share_one_card(self):
         self.assertEqual(core.norm_route("http://h/incidents/4521/?x=1"), "/incidents/:id")
@@ -1222,7 +1220,7 @@ class Card(MemBase):
         self.assertEqual(core.norm_route("/app#section"), "/app")
         for r in ['"I #5ge', "a b ?x", "/x/ 12 /y#/z ?q"]:  # idempotent, so a stored route finds itself
             self.assertEqual(core.norm_route(core.norm_route(r)), core.norm_route(r))
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "d",
@@ -1230,36 +1228,36 @@ class Card(MemBase):
                 "pages": [{"route": "/incidents/4521", "facts": [{"kind": "rule", "text": "detail shows road"}]}],
             },
         )
-        self.assertIn("detail shows road", memory.card(self.con, "/incidents/77"))
+        self.assertIn("detail shows road", cards.card(self.con, "/incidents/77"))
         self.assertEqual(
             core.bug_hash(core.norm_route("/incidents/1"), "x"), core.bug_hash(core.norm_route("/incidents/2"), "x")
         )
 
     def test_route_spellings_find_the_same_card(self):
-        memory.ingest(self.con, run())
+        ingest.ingest(self.con, run())
         for q in ("/form/", "/form?x=1", "http://localhost:8765/form"):
-            self.assertIn("PAGE /form ", memory.card(self.con, q), q)
+            self.assertIn("PAGE /form ", cards.card(self.con, q), q)
         self.assertEqual(core.norm_route("/#/map"), "/#/map")
         with self.assertRaises(ValueError):
-            memory.ingest(self.con, run(bugs=[{"title": "no route"}]))
+            ingest.ingest(self.con, run(bugs=[{"title": "no route"}]))
 
     def test_unparseable_url_is_no_route_not_a_traceback(self):
         self.assertEqual(core.norm_route("http://[x"), "")
-        self.assertIn("NO CARD", memory.card(self.con, "http://[x"))
+        self.assertIn("NO CARD", cards.card(self.con, "http://[x"))
         with self.assertRaises(ValueError):
-            memory.ingest(self.con, {"run_id": "r", "pages": [{"route": "http://[x"}]})
+            ingest.ingest(self.con, {"run_id": "r", "pages": [{"route": "http://[x"}]})
 
     def test_card_says_when_verified_locators_did_not_fit(self):
         locs = [
             {"name": f"btn{i}", "locator": f"getByRole('button', {{ name: 'Button number {i} {'x' * 60}' }})"}
             for i in range(25)
         ]
-        memory.ingest(self.con, run("1.0", locators=locs))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("1.0", locators=locs))
+        c = cards.card(self.con, "/form")
         self.assertRegex(c, r"\(\+\d+ more verified")
 
     def fixed_bug(self, draft="/proj/qa-out/run/bugs/BUG-1.md"):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(bugs=[{"route": "/form", "title": "t", "symptom": "speed 999 saved", "draft_path": draft}]),
             "2026-01-01T00:00:00Z",
@@ -1279,21 +1277,21 @@ class Card(MemBase):
 
     def test_fixed_bug_rechecked_on_this_build_is_marked(self):
         h = self.fixed_bug(draft=None)
-        memory.ingest(
+        ingest.ingest(
             self.con, run(coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), "2026-01-02T00:00:00Z"
         )
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertTrue(self.fixed_line(c, h).endswith(" | re-checked on build 1.0"), c)
         self.assertIn(f"other:regression({h}:pass)", c)
         self.assertEqual(
             c.split("UNTRIED: ")[1].splitlines()[0], ", ".join(core.HEURISTICS)
         )  # regression is no heuristic
-        memory.ingest(self.con, run("2.0"), "2026-01-03T00:00:00Z")  # a new build: check it again
-        self.assertNotIn("re-checked", self.fixed_line(memory.card(self.con, "/form"), h))
+        ingest.ingest(self.con, run("2.0"), "2026-01-03T00:00:00Z")  # a new build: check it again
+        self.assertNotIn("re-checked", self.fixed_line(cards.card(self.con, "/form"), h))
 
     def test_a_newly_fixed_older_bug_is_on_the_card_gaps_counts(self):
         """bug-status and bug-sync don't touch last_seen: an older bug fixed today must still be listed to re-check."""
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run("2.0", bugs=[{"route": "/form", "title": "old", "symptom": "old bug"}]),
             "2026-01-01T00:00:00Z",
@@ -1301,37 +1299,37 @@ class Card(MemBase):
         h_old = core.bug_hash("/form", "old bug")
         for i in range(6):
             s = f"newer {i}"
-            memory.ingest(
+            ingest.ingest(
                 self.con, run("2.0", bugs=[{"route": "/form", "title": s, "symptom": s}]), f"2026-01-0{i + 2}T00:00:00Z"
             )
             h = core.bug_hash("/form", s)
             cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
-            memory.ingest(
+            ingest.ingest(
                 self.con,
                 run("2.0", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]),
                 f"2026-01-0{i + 2}T01:00:00Z",
             )
         cli.run_cmd(self.con, "bug-status", [h_old, "FIXED"])
-        self.assertIn("1 fixed bug to re-check", memory.gaps(self.con))
-        c = memory.card(self.con, "/form")
+        self.assertIn("1 fixed bug to re-check", gaps.gaps(self.con))
+        c = cards.card(self.con, "/form")
         self.assertFalse(self.fixed_line(c, h_old).endswith("re-checked on build 2.0"), c)
         self.assertIn("(+2 more FIXED: qa-mem bugs FIXED)", c)
 
     def test_a_recheck_on_an_unreadable_build_counts_for_a_week(self):
         """Like coverage: a re-check from a run that couldn't read the build holds for 7 days, then is due again."""
-        memory.ingest(self.con, run("unknown", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), core.now())
+        ingest.ingest(self.con, run("unknown", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), core.now())
         h = core.bug_hash("/form", "s")
         cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
-        memory.ingest(
+        ingest.ingest(
             self.con, run("unknown", coverage=[{"target": h, "heuristic": "regression", "result": "pass"}]), core.now()
         )
-        self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 0)
-        self.assertTrue(self.fixed_line(memory.card(self.con, "/form"), h).endswith("| re-checked"))
+        self.assertEqual(gaps._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 0)
+        self.assertTrue(self.fixed_line(cards.card(self.con, "/form"), h).endswith("| re-checked"))
         self.con.execute("UPDATE coverage SET ts='2020-01-01T00:00:00Z'")
-        self.assertEqual(memory._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 1)
+        self.assertEqual(gaps._unrechecked_fixed(self.con, "/form", core.UNKNOWN), 1)
 
     def test_card_size_is_bounded(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 facts=[{"kind": "rule", "text": f"fact {i} " + "y" * 280} for i in range(30)],
@@ -1356,7 +1354,7 @@ class Card(MemBase):
                 "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
                 (page, "api", "save", "POST /api/x", "a.js:1", "/repo", "frontend", core.now(), "a.js"),
             )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "other",
@@ -1365,7 +1363,7 @@ class Card(MemBase):
                 "bugs": [{"route": "/other", "title": "o" * 300, "symptom": f"o{i} " + "q" * 280} for i in range(8)],
             },
         )
-        c = memory.card(self.con, "/form")
+        c = cards.card(self.con, "/form")
         self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT", c)
         self.assertLess(len(c), 15000)  # ~3.5k tokens at worst
 
@@ -1383,7 +1381,7 @@ class Gaps(MemBase):
             )
 
     def visit(self, route, build, ts):
-        memory.ingest(self.con, {"run_id": f"r-{route}-{ts}", "build": build, "pages": [{"route": route}]}, ts)
+        ingest.ingest(self.con, {"run_id": f"r-{route}-{ts}", "build": build, "pages": [{"route": route}]}, ts)
 
     @staticmethod
     def lines(out):
@@ -1395,14 +1393,14 @@ class Gaps(MemBase):
         git(repo, "commit", "-qam", when)
 
     def test_no_pages_is_a_hint(self):
-        self.assertIn("/qa-sdet:qa-init", memory.gaps(self.con))
+        self.assertIn("/qa-sdet:qa-init", gaps.gaps(self.con))
 
     def test_order_never_explored_then_old_build_then_the_rest(self):
         self.row("/new", "rule", "speed", "max 130", "src/New.jsx")
         self.visit("/old", "1.0", "2026-01-01T00:00:00Z")
         self.visit("/cur", "2.0", "2026-01-02T00:00:00Z")
         self.visit("/unread", "unknown", "2026-01-03T00:00:00Z")
-        out = memory.gaps(self.con)
+        out = gaps.gaps(self.con)
         self.assertIn("current build 2.0", out.splitlines()[0])
         lines = self.lines(out)
         self.assertTrue(lines[0].startswith('- /new "": never explored; 1 untested field'), lines)
@@ -1419,11 +1417,11 @@ class Gaps(MemBase):
         self.row("*", "api", "POST /api/zones", "create zone", "api/zones.js", rp, "backend")
         self.visit("/form", "1.0", "2026-01-05T00:00:00Z")  # after the first commit: nothing changed since
         self.commit(repo, "src/Other.jsx", "2026-01-06T00:00:00Z")  # another page's file
-        self.assertNotIn("source changed", memory.gaps(self.con))
+        self.assertNotIn("source changed", gaps.gaps(self.con))
         self.commit(repo, "api/zones.js", "2026-01-07T00:00:00Z")  # the backend of an endpoint the page calls
-        self.assertIn("source changed (api/zones.js)", memory.gaps(self.con))
+        self.assertIn("source changed (api/zones.js)", gaps.gaps(self.con))
         self.commit(repo, "src/Form.jsx", "2026-01-08T00:00:00Z")
-        self.assertIn("source changed (api/zones.js, +1)", memory.gaps(self.con))
+        self.assertIn("source changed (api/zones.js, +1)", gaps.gaps(self.con))
 
     def test_a_change_inside_a_submodule_counts(self):
         """The scan maps a submodule's files under the parent repo; the parent's log names only the submodule folder."""
@@ -1441,7 +1439,7 @@ class Gaps(MemBase):
         git(app / "lib/kit", "checkout", "-q", "FETCH_HEAD")
         os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-07T00:00:00Z"
         git(app, "commit", "-qam", "bump kit")  # the parent's log lists only 'lib/kit'
-        out = memory.gaps(self.con)
+        out = gaps.gaps(self.con)
         self.assertIn(
             "source changed (lib/kit/Button.jsx)", next(x for x in out.splitlines() if x.startswith("- /form "))
         )
@@ -1454,23 +1452,23 @@ class Gaps(MemBase):
         os.environ["GIT_AUTHOR_DATE"] = os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00Z"
         repo = git_repo(self.t / "app", {"src/Form.jsx": "a"})
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", os.path.realpath(repo))
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {"run_id": "r1", "target": "http://qa/form", "build": "unknown", "pages": [{"route": "/form"}]},
             "2026-01-05T00:00:00Z",
         )
-        self.assertNotIn("source changed", memory.gaps(self.con))
+        self.assertNotIn("source changed", gaps.gaps(self.con))
         self.commit(repo, "src/Form.jsx", "2026-01-06T00:00:00Z")
-        self.assertIn("source changed (src/Form.jsx)", memory.gaps(self.con))
+        self.assertIn("source changed (src/Form.jsx)", gaps.gaps(self.con))
 
     def test_routes_with_an_id_are_not_batch_picks(self):
         """'/incidents/:id' can't be opened as is: gaps marks it, Next: and --json skip it."""
         self.row("/incidents/:id", "rule", "title", "required", "src/Detail.jsx")
         self.row("/incidents", "rule", "q", "max 50", "src/List.jsx")
-        out = memory.gaps(self.con)
+        out = gaps.gaps(self.con)
         self.assertIn("(needs a record id)", next(x for x in self.lines(out) if "/incidents/:id" in x))
         self.assertTrue(out.rstrip().endswith("Next: /qa-sdet:qa-explore '/incidents'"), out)
-        data = json.loads(memory.gaps(self.con, top=1, as_json=True))
+        data = json.loads(gaps.gaps(self.con, top=1, as_json=True))
         self.assertEqual(([p["route"] for p in data["pages"]], data["needs_id"]), (["/incidents"], ["/incidents/:id"]))
 
     def test_the_card_names_what_changed_since_the_last_visit(self):
@@ -1478,9 +1476,9 @@ class Gaps(MemBase):
         repo = git_repo(self.t / "app", {"src/Form.jsx": "a"})
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", os.path.realpath(repo))
         self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
-        self.assertNotIn("CHANGED SINCE", memory.card(self.con, "/form"))
+        self.assertNotIn("CHANGED SINCE", cards.card(self.con, "/form"))
         self.commit(repo, "src/Form.jsx", "2026-01-06T00:00:00Z")
-        line = next(x for x in memory.card(self.con, "/form").splitlines() if x.startswith("CHANGED SINCE"))
+        line = next(x for x in cards.card(self.con, "/form").splitlines() if x.startswith("CHANGED SINCE"))
         self.assertIn("src/Form.jsx", line)
         self.assertIn("speed", line)  # the rule defined in the changed file
 
@@ -1490,7 +1488,7 @@ class Gaps(MemBase):
         self.visit("/old", "1.0", "2026-01-01T00:00:00Z")
         for route in ("/quiet", "/fragile", "/regressed"):
             self.visit(route, "2.0", "2026-01-02T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "b",
@@ -1502,7 +1500,7 @@ class Gaps(MemBase):
             },
             "2026-01-02T00:00:00Z",
         )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "c",
@@ -1514,17 +1512,17 @@ class Gaps(MemBase):
         )
         self.con.execute("UPDATE bugs SET status='REGRESSED' WHERE page='/regressed'")
         self.con.execute("UPDATE bugs SET status='FILED' WHERE page='/fragile'")
-        routes = [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
+        routes = [p["route"] for p in json.loads(gaps.gaps(self.con, as_json=True))["pages"]]
         self.assertEqual(routes[:3], ["/regressed", "/new-form", "/old"])
         self.assertLess(routes.index("/fragile"), routes.index("/quiet"))  # 2 HIGH bugs: a hotspot first in its tier
         self.assertEqual(routes[-1], "/static")
-        info = json.loads(memory.gaps(self.con, as_json=True))["pages"][0]
+        info = json.loads(gaps.gaps(self.con, as_json=True))["pages"][0]
         self.assertEqual((info["tier"], info["hotspot"] >= 0), ("changed or regressed", True))
 
     def test_a_repo_git_cannot_read_is_named_not_fatal(self):
         self.row("/form", "rule", "speed", "max 130", "src/Form.jsx", "/nowhere/repo")
         self.visit("/form", "1.0", "2026-01-05T00:00:00Z")
-        out = memory.gaps(self.con)
+        out = gaps.gaps(self.con)
         self.assertIn("/form", out)
         self.assertIn("source changes not checked for /nowhere/repo", out)
 
@@ -1550,7 +1548,7 @@ class Gaps(MemBase):
         # Modify A and C; mark a FIXED bug on B (un-rechecked)
         self.commit(repo, "src/A.jsx", "2026-01-06T00:00:00Z")
         self.commit(repo, "src/C.jsx", "2026-01-07T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "fb",
@@ -1582,22 +1580,22 @@ class Search(MemBase):
     """`qa-mem search`."""
 
     def test_text_capped_and_fts_search(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "closure schedule " + "x" * 500}]))
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": "closure schedule " + "x" * 500}]))
         t = self.con.execute("SELECT text FROM facts").fetchone()[0]
         self.assertEqual(len(t), core.MAX_TEXT)
         self.assertIn("closure", memory.search(self.con, "closure"))
         self.assertFalse(memory.search(self.con, "closure").endswith("*"))
-        memory.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "other"}]))  # new build stales old facts
+        ingest.ingest(self.con, run("2.0", facts=[{"kind": "rule", "text": "other"}]))  # new build stales old facts
         self.assertTrue(memory.search(self.con, "closure").endswith(" *"))
 
     def test_search_with_broken_fts_syntax_falls_back_to_words(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "I-5 N closure: lane 2 (a-b) 50% done"}]))
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": "I-5 N closure: lane 2 (a-b) 50% done"}]))
         for q in ["closure AND", "NEAR(closure", "a-b", "I-5", "closure lane"]:
             self.assertIn("closure", memory.search(self.con, q), q)
         self.assertIn("no facts match", memory.search(self.con, "*"))
 
     def test_operators_in_the_query_are_words(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 "1.43.0",
@@ -1609,7 +1607,7 @@ class Search(MemBase):
         self.assertIn("max 130", memory.search(self.con, 'speed "130'))
 
     def test_symbols_in_the_query(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 facts=[
@@ -1627,7 +1625,7 @@ class Retrieval(MemBase):
     """Stemmed search over facts and bugs, a relaxed match when nothing matches all words, and card ranking/focus."""
 
     def test_word_forms_match_and_bugs_are_searched(self):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(
                 facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}],
@@ -1643,7 +1641,7 @@ class Retrieval(MemBase):
         self.assertIn("[bug:FILED PROJ-9]", memory.search(self.con, "proj-9"))  # the update reached the index
 
     def test_no_match_of_all_words_relaxes_to_two_of_them_and_says_so(self):
-        memory.ingest(
+        ingest.ingest(
             self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC instead of local time"}])
         )
         out = memory.search(self.con, "date filter timezone UTC")
@@ -1653,7 +1651,7 @@ class Retrieval(MemBase):
         self.assertIn("no facts match", memory.search(self.con, "date filter UTC -corridor"))  # exclusions still hold
 
     def test_an_old_database_index_is_upgraded_in_place(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]))
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": "Corridor dates display in UTC"}]))
         self.con.executescript(
             "DROP TRIGGER facts_ai; DROP TRIGGER facts_ad; DROP TABLE facts_fts; "
             "CREATE VIRTUAL TABLE facts_fts USING fts5(text, content='facts', content_rowid='id'); "
@@ -1666,31 +1664,31 @@ class Retrieval(MemBase):
 
     def test_a_precondition_outranks_newer_notes(self):  # what a page needs before it can be judged
         need = "Edit is off for records another system owns: a limit of the record, not a bug"
-        memory.ingest(self.con, run(facts=[{"kind": "precondition", "text": need}]), "2026-01-01T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(self.con, run(facts=[{"kind": "precondition", "text": need}]), "2026-01-01T00:00:00Z")
+        ingest.ingest(
             self.con,
             run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
             "2026-01-02T00:00:00Z",
         )
-        self.assertIn(f"- [precondition] {need}", memory.card(self.con, "/form"))
+        self.assertIn(f"- [precondition] {need}", cards.card(self.con, "/form"))
 
     def test_rules_outrank_newer_notes_and_a_focus_comes_first(self):
-        memory.ingest(self.con, run(facts=[{"kind": "rule", "text": "date filter uses UTC"}]), "2026-01-01T00:00:00Z")
-        memory.ingest(
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": "date filter uses UTC"}]), "2026-01-01T00:00:00Z")
+        ingest.ingest(
             self.con,
             run(facts=[{"kind": "note", "text": f"layout note {i} {'x' * i}"} for i in range(20)]),
             "2026-01-02T00:00:00Z",
         )
         facts = lambda c: c.split("FACTS", 1)[1].split("\n")[1:]
         self.assertTrue(
-            any("date filter uses UTC" in x for x in facts(memory.card(self.con, "/form")))
+            any("date filter uses UTC" in x for x in facts(cards.card(self.con, "/form")))
         )  # not evicted by notes
-        memory.ingest(
+        ingest.ingest(
             self.con,
             run(facts=[{"kind": "rule", "text": f"rule {i} {'y' * i}"} for i in range(20)]),
             "2026-01-03T00:00:00Z",
         )
-        self.assertIn("date filter uses UTC", facts(memory.card(self.con, "/form", focus="date filters"))[0])
+        self.assertIn("date filter uses UTC", facts(cards.card(self.con, "/form", focus="date filters"))[0])
         code, out, _ = qa_mem("card", "/form", "--focus", "date filters")
         self.assertEqual(code, 0)
         self.assertIn("date filter uses UTC", out)
@@ -1701,17 +1699,17 @@ class Curation(MemBase):
 
     def test_an_answered_question_becomes_a_decision_on_the_card(self):
         q = "Is 130 inclusive?"
-        memory.ingest(self.con, {**run(), "questions": [q, "Units?"]}, "2026-01-01T00:00:00Z")
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, {**run(), "questions": [q, "Units?"]}, "2026-01-01T00:00:00Z")
+        c = cards.card(self.con, "/form")
         self.assertIn("OPEN QUESTIONS", c)
         self.assertIn(q, c.split("OPEN QUESTIONS")[1])
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {**run(), "questions": [{"text": q, "status": "resolved", "answer": "Yes, 0..130"}]},
             "2026-01-02T00:00:00Z",
         )
-        memory.ingest(self.con, {**run(), "questions": [q]}, "2026-01-03T00:00:00Z")  # asked again: stays answered
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, {**run(), "questions": [q]}, "2026-01-03T00:00:00Z")  # asked again: stays answered
+        c = cards.card(self.con, "/form")
         self.assertIn(f"- {q} → Yes, 0..130", c.split("DECISIONS")[1])
         qid = self.con.execute("SELECT id FROM questions WHERE text='Units?'").fetchone()[0]
         self.assertEqual(qa_mem("answer", str(qid), "km/h. Authorization: Bearer abcdefghijklmnopqrst")[0], 0)
@@ -1736,7 +1734,7 @@ class Curation(MemBase):
                 }
             )
         )
-        memory.ingest_pending(d.parent.parent)
+        ingest.ingest_pending(d.parent.parent)
         self.assertEqual(
             tuple(self.con.execute("SELECT page, ticket, status, answer FROM questions").fetchone()),
             ("*", "PROJ-1", "resolved", "No"),
@@ -1746,15 +1744,15 @@ class Curation(MemBase):
         )
 
     def test_remembered_facts_are_pinned_and_forget_cleans_up(self):
-        memory.ingest(self.con, run("1.0"))  # the page is on build 1.0
+        ingest.ingest(self.con, run("1.0"))  # the page is on build 1.0
         code, out, _ = qa_mem(
             "remember", "/form", "flow", "Create a corridor first. Authorization: Bearer abcdefghijklmnopqrst"
         )
         self.assertEqual(code, 0)
         qa_mem("remember", "/form", "note", "Header is blue", "--build-scoped")
         self.assertEqual(qa_mem("remember", "/form", "wish", "x")[0], 2)
-        memory.ingest(self.con, run("2.0", facts=[{"kind": "note", "text": f"n{i} {'z' * i}"} for i in range(110)]))
-        c = memory.card(self.con, "/form")
+        ingest.ingest(self.con, run("2.0", facts=[{"kind": "note", "text": f"n{i} {'z' * i}"} for i in range(110)]))
+        c = cards.card(self.con, "/form")
         pinned = next(x for x in c.splitlines() if "Create a corridor first" in x)
         self.assertIn("[pinned]", pinned)
         self.assertFalse(pinned.endswith("*"))  # a new build doesn't make it stale; the 100-fact cap kept it
@@ -1763,8 +1761,8 @@ class Curation(MemBase):
         fid = self.con.execute("SELECT id FROM facts WHERE text LIKE 'Create a corridor%'").fetchone()[0]
         self.assertIn(f"#{fid}", qa_mem("card", "/form", "--ids")[1])
         self.assertEqual(qa_mem("forget", "fact", str(fid))[0], 0)
-        self.assertNotIn("Create a corridor", memory.card(self.con, "/form"))
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
+        self.assertNotIn("Create a corridor", cards.card(self.con, "/form"))
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]))
         code, out, _ = qa_mem("forget", "page", "/form")
         self.assertEqual(code, 1)
         self.assertIn("open bug", out)
@@ -1775,8 +1773,8 @@ class Curation(MemBase):
 
     def test_forget_page_also_drops_its_states_transitions_signals_and_questions(self):
         ts = core.now()
-        memory.ingest(self.con, run())
-        memory.ingest(self.con, {"run_id": "o", "build": "1", "pages": [{"route": "/other"}]})
+        ingest.ingest(self.con, run())
+        ingest.ingest(self.con, {"run_id": "o", "build": "1", "pages": [{"route": "/other"}]})
         with self.con:
             for page in ("/form", "/other"):
                 self.con.execute(
@@ -1800,7 +1798,7 @@ class Patterns(MemBase):
     """`qa-mem patterns`: how this app breaks again and again, from the heuristic and pattern each bug was recorded with."""
 
     def bug(self, page, symptom, **extra):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{page}-{symptom}",
@@ -1825,7 +1823,7 @@ class Patterns(MemBase):
         )
         self.assertNotIn("boundary", out)  # one page only once the INVALID one is out
         self.assertEqual(json.loads(qa_mem("patterns", "--json")[1])[0]["pages"], 3)
-        self.assertIn("RECURRING APP PATTERNS", memory.card(self.con, "/schedules") + memory.card(self.con, "/zones"))
+        self.assertIn("RECURRING APP PATTERNS", cards.card(self.con, "/schedules") + cards.card(self.con, "/zones"))
         self.assertIn(
             "silent-error-as-empty", memory.ticket_context(self.con, "Schedules list error states")["patterns"][0]
         )
@@ -1846,7 +1844,7 @@ class BugMatch(MemBase):
                 )
 
     def bug(self, page, title, symptom, status="OPEN", **extra):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{symptom}",
@@ -1890,7 +1888,7 @@ class History(MemBase):
     """Bug build lifecycle, run counters, `qa-mem history` (build over build, a page's timeline) and `qa-mem hotspots`."""
 
     def go(self, build, ts, cases=(), bugs=(), route="/form", status="COMPLETED"):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{route}-{ts}",
@@ -1941,16 +1939,16 @@ class History(MemBase):
             [{"route": "/form", "title": "b", "symptom": "b", "severity": "LOW"}],
         )
         self.go("1.1", "2026-01-05T01:00:00Z", route="/list")
-        out = memory.history(self.con)
+        out = gaps.history(self.con)
         lines = [x for x in out.splitlines() if x.startswith("- build")]
         self.assertTrue(
             lines[0].startswith("- build 1.1: 2 runs on 2 pages; cases 0 pass / 1 fail / 0 blocked; 1 new bug"), out
         )
         self.assertTrue(lines[1].startswith("- build 1.0: 1 run on 1 page"), out)
-        page = memory.history(self.con, "/form")
+        page = gaps.history(self.con, "/form")
         self.assertLess(page.index("build 1.1"), page.index("build 1.0"))  # newest first
         self.assertEqual(json.loads(qa_mem("history", "--json")[1])["builds"][0]["build"], "1.1")
-        hot = memory.hotspots(self.con)
+        hot = gaps.hotspots(self.con)
         self.assertTrue(hot.splitlines()[1].startswith("- /form: 4"), hot)  # HIGH 3 + LOW 1
         self.assertEqual(json.loads(qa_mem("hotspots", "--json")[1])[0]["page"], "/form")
 
@@ -1967,7 +1965,7 @@ class SignalBaseline(MemBase):
         f = d / "run-form.json"
         f.write_text(json.dumps({**run(), "run_id": run_id, "target": "/form"}))
         os.utime(f, (ts, ts))
-        memory.ingest_pending(d.parent.parent)
+        ingest.ingest_pending(d.parent.parent)
         return d.parent
 
     def test_signals_are_new_then_recurring_and_can_be_ignored(self):
@@ -1980,7 +1978,7 @@ class SignalBaseline(MemBase):
         r = report.render_report(second)
         self.assertNotIn("[NEW]", r)
         self.assertIn("POST /api/zones/7 → 500 (seen in 2 runs)", r)
-        card = memory.card(self.con, "/form")
+        card = cards.card(self.con, "/form")
         self.assertIn("RECURRING UNEXPLAINED SIGNALS", card)
         self.assertIn("POST /api/zones/:id 500", card)
         self.assertIn("console: Zone N failed to load", card)
@@ -1996,7 +1994,7 @@ class States(MemBase):
     """In-page states (tabs, dialogs, query views) and page-to-page transitions, recorded by explorers as they go."""
 
     def visit(self, build, ts, states=(), transitions=()):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{ts}",
@@ -2017,7 +2015,7 @@ class States(MemBase):
         )
         row = self.con.execute("SELECT to_route, sample_path FROM transitions").fetchone()
         self.assertEqual(tuple(row), ("/#/zones/:id", "/#/zones/12"))
-        self.assertIn("e.g. /#/zones/12", memory.card(self.con, "/#/zones/:id"))
+        self.assertIn("e.g. /#/zones/12", cards.card(self.con, "/#/zones/:id"))
 
     def test_unvisited_states_leads_and_the_entry_of_a_detail_page(self):
         tab = lambda name, status: {
@@ -2043,7 +2041,7 @@ class States(MemBase):
                 }
             ],
         )
-        card = memory.card(self.con, "/incidents")
+        card = cards.card(self.con, "/incidents")
         line = next(x for x in card.splitlines() if x.startswith("UNVISITED STATES"))
         self.assertIn(
             "tab: Scheduled (getByRole('tab', { name: 'Scheduled' }))", line
@@ -2051,38 +2049,38 @@ class States(MemBase):
         self.assertIn("dialog: Filter (getByRole('button', { name: 'Filter' }))", line)
         self.assertNotIn("tab: Active", line)
         self.assertIn("/incidents/:id (row click)", next(x for x in card.splitlines() if x.startswith("LEADS TO")))
-        detail = memory.card(self.con, "/incidents/:id")
+        detail = cards.card(self.con, "/incidents/:id")
         self.assertIn("ENTRY: from /incidents (row click; e.g. /incidents/4521)", detail)
         self.assertNotIn("abc123secretvalue", detail)
-        data = json.loads(memory.gaps(self.con, as_json=True))
+        data = json.loads(gaps.gaps(self.con, as_json=True))
         listing = next(p for p in data["pages"] if p["route"] == "/incidents")
         self.assertEqual(listing["unvisited_states"], 2)
         self.assertIn("2 unvisited states", listing["risk_reasons"])
-        self.assertIn("2 unvisited states", memory.gaps(self.con))
+        self.assertIn("2 unvisited states", gaps.gaps(self.con))
         page = next(p for p in data["pages"] if p["route"] == "/incidents/:id")
         self.assertEqual((page["entry_route"], page["entry_trigger"]), ("/incidents", "row click"))
         self.assertNotIn("/incidents/:id", data["needs_id"])  # it can be opened from its list page now
 
     def test_a_new_build_makes_visited_states_due_again(self):
         self.visit("1.0", "2026-01-01T00:00:00Z", [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
-        self.assertNotIn("UNVISITED STATES", memory.card(self.con, "/incidents"))
+        self.assertNotIn("UNVISITED STATES", cards.card(self.con, "/incidents"))
         self.visit("2.0", "2026-01-02T00:00:00Z")
-        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+        self.assertIn("tab: Active", cards.card(self.con, "/incidents"))
 
     def test_a_state_visited_on_an_unreadable_build_stays_visited_for_a_week(self):
         # the user recorded build 2.0 (qa-mem stale) and runs can't read the live build: each run's visit is stored
         # on `unknown`, which never equals 2.0, so every visited state was listed again on every run
         self.visit(core.UNKNOWN, core.now(), [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
         core.set_meta(self.con, "build", "2.0")
-        self.assertNotIn("UNVISITED STATES", memory.card(self.con, "/incidents"))
-        self.assertEqual(json.loads(memory.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 0)
+        self.assertNotIn("UNVISITED STATES", cards.card(self.con, "/incidents"))
+        self.assertEqual(json.loads(gaps.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 0)
         self.con.execute("UPDATE page_states SET ts='2026-01-01T00:00:00Z'")  # older than a week: due again
-        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+        self.assertIn("tab: Active", cards.card(self.con, "/incidents"))
 
     def test_a_state_visited_on_another_known_build_is_due(self):
         self.visit("1.0", core.now(), [{"key": "tab: Active", "kind": "tab", "status": "visited"}])
         core.set_meta(self.con, "build", "2.0")  # after the run: a run that reads its build records it
-        self.assertIn("tab: Active", memory.card(self.con, "/incidents"))
+        self.assertIn("tab: Active", cards.card(self.con, "/incidents"))
 
     def test_a_state_that_deletes_or_signs_out_is_never_listed(self):  # an explorer opened "Delete" on a record
         self.visit(
@@ -2099,11 +2097,11 @@ class States(MemBase):
                 {"key": "tab: Scheduled", "kind": "tab"},
             ],
         )
-        line = next(x for x in memory.card(self.con, "/incidents").splitlines() if x.startswith("UNVISITED STATES"))
+        line = next(x for x in cards.card(self.con, "/incidents").splitlines() if x.startswith("UNVISITED STATES"))
         self.assertIn("tab: Scheduled", line)
         for gone in ("Delete", "Actions 3", "Sign out"):
             self.assertNotIn(gone, line)
-        self.assertEqual(json.loads(memory.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 1)
+        self.assertEqual(json.loads(gaps.gaps(self.con, as_json=True))["pages"][0]["unvisited_states"], 1)
 
 
 class ObservedEndpoints(MemBase):
@@ -2143,7 +2141,7 @@ class ObservedEndpoints(MemBase):
         )
         t = ts or time.time() - 1000 + self.n
         os.utime(f, (t, t))
-        memory.ingest_pending(d.parent.parent)
+        ingest.ingest_pending(d.parent.parent)
         return d.parent
 
     def seen(self, route="/map"):
@@ -2189,7 +2187,7 @@ class ObservedEndpoints(MemBase):
         )
         os.utime(d / ".data/run-x.json", (time.time(), time.time() + 1))
         (d / ".data/run-x.json.ingested").unlink()
-        memory.ingest_pending(d.parent)
+        ingest.ingest_pending(d.parent)
         self.assertEqual(
             {x[1] for x in self.seen()}, {"/api/x", "/api/mine"}
         )  # /api/x: the first ingest of this folder
@@ -2225,35 +2223,35 @@ class ObservedEndpoints(MemBase):
             "GET /api/c",
         )
         self.explore(["GET /api/incidents.json => [200]", "POST /api/zones => [200]"])
-        card = memory.card(self.con, "/map")
+        card = cards.card(self.con, "/map")
         line = next(x for x in card.splitlines() if x.startswith("UNEXERCISED ENDPOINTS"))
         self.assertIn("not yet observed on build 1.0", line)
         self.assertIn("DELETE /api/zones/:id", line)  # writes first
         self.assertNotIn("incidents", line)  # seen, though the code writes it .json-less
         self.assertEqual(line.split("oracle): ")[1].count(";"), 3)  # at most 4 named
         self.assertIn("(+1 more)", line)
-        listing = next(p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/map")
+        listing = next(p for p in json.loads(gaps.gaps(self.con, as_json=True))["pages"] if p["route"] == "/map")
         self.assertEqual(len(listing["unexercised_apis"]), 5)
         self.assertEqual(listing["unexercised_apis"][0], "DELETE /api/zones/:id")
-        self.assertIn("5 unexercised endpoints", memory.gaps(self.con))
+        self.assertIn("5 unexercised endpoints", gaps.gaps(self.con))
         self.assertIn("5 unexercised endpoints", listing["risk_reasons"])
 
     def test_nothing_is_flagged_for_a_page_with_no_observations_on_this_build_or_after_the_call_is_made(self):
         self.calls("/map", "GET /api/closures.json")
         self.assertNotIn(
-            "UNEXERCISED", memory.card(self.con, "/map")
+            "UNEXERCISED", cards.card(self.con, "/map")
         )  # never explored with a request log: unknown, not a gap
         self.explore(["GET /api/other => [200]"])
-        self.assertIn("UNEXERCISED ENDPOINTS", memory.card(self.con, "/map"))
+        self.assertIn("UNEXERCISED ENDPOINTS", cards.card(self.con, "/map"))
         self.explore(["GET /api/closures.json => [200]"])
-        self.assertNotIn("UNEXERCISED", memory.card(self.con, "/map"))
+        self.assertNotIn("UNEXERCISED", cards.card(self.con, "/map"))
         self.explore(["GET /api/other => [200]"], build="2.0")  # a new build: the call is due again
-        self.assertIn("GET /api/closures", memory.card(self.con, "/map"))
+        self.assertIn("GET /api/closures", cards.card(self.con, "/map"))
 
     def test_a_method_the_code_does_not_show_matches_any_observed_method(self):
         self.calls("/map", "api.get('zones')", "fetch(`${BASE}/units/${id}`)")
         self.explore(["GET /api/zones => [200]"])
-        line = next(x for x in memory.card(self.con, "/map").splitlines() if x.startswith("UNEXERCISED"))
+        line = next(x for x in cards.card(self.con, "/map").splitlines() if x.startswith("UNEXERCISED"))
         self.assertNotIn("zones", line)
         self.assertIn("units", line)
 
@@ -2262,7 +2260,7 @@ class ObservedEndpoints(MemBase):
             self.calls(r, *[f"GET /api/{r[1]}{i}" for i in range(n)])
         self.explore(["GET /api/other => [200]"], target="/a")
         self.explore(["GET /api/other => [200]"], target="/b")
-        order = lambda: [p["route"] for p in json.loads(memory.gaps(self.con, as_json=True))["pages"]]
+        order = lambda: [p["route"] for p in json.loads(gaps.gaps(self.con, as_json=True))["pages"]]
         self.assertEqual(order(), ["/b", "/a"])  # the same tier: more unexercised calls first
         with self.con:
             self.con.execute(
@@ -2304,7 +2302,7 @@ class BlindSpots(ObservedEndpoints):
             self.rows(), [("needs_setup", "error-handling needs --faults", 1, 0), ("other", "no second account", 1, 0)]
         )
         (d / ".data/run-x.json.ingested").unlink()
-        memory.ingest_pending(d.parent)  # the same run again: not a second sighting
+        ingest.ingest_pending(d.parent)  # the same run again: not a second sighting
         self.assertEqual(self.rows()[0][2], 1)
         self.defer({**item, "text": "Error-handling  needs --faults"})  # a later run, the same words
         self.assertEqual(self.rows()[0], ("needs_setup", "error-handling needs --faults", 2, 0))
@@ -2344,7 +2342,7 @@ class BlindSpots(ObservedEndpoints):
             not_tested=[faults, {"category": "safety", "text": "bulk delete"}],
         )
         self.defer(faults)
-        out = memory.blindspots(self.con, "/map")
+        out = gaps.blindspots(self.con, "/map")
         self.assertIn("/map", out)
         self.assertIn("GET /api/closures", out)  # mapped, never observed
         self.assertIn(
@@ -2354,7 +2352,7 @@ class BlindSpots(ObservedEndpoints):
         self.assertIn("tab: Layers", out)
         self.assertIn("error-handling needs --faults (2 runs)", out)
         self.assertNotIn("bulk delete", out)  # told once only: not recurring
-        page = json.loads(memory.blindspots(self.con, "/map", as_json=True))["pages"][0]
+        page = json.loads(gaps.blindspots(self.con, "/map", as_json=True))["pages"][0]
         self.assertEqual(page["route"], "/map")
         self.assertEqual(page["unexercised_apis"], ["GET /api/closures"])
         self.assertEqual(page["untested_write_errors"], ["POST /api/zones"])
@@ -2369,15 +2367,15 @@ class BlindSpots(ObservedEndpoints):
         for page in ("/a", "/b", "/c"):
             self.defer(faults, target=page)
         self.defer(faults, {"category": "needs_setup", "text": "another"}, target="/a")
-        data = json.loads(memory.blindspots(self.con, as_json=True))
+        data = json.loads(gaps.blindspots(self.con, as_json=True))
         self.assertEqual(
             data["systemic"], [{"category": "needs_setup", "text": "error-handling needs --faults", "pages": 3}]
         )
-        self.assertIn("error-handling needs --faults (3 pages)", memory.blindspots(self.con))
-        self.assertEqual(memory.blindspots(self.con, "/nope"), "no blind spots recorded for /nope")
+        self.assertIn("error-handling needs --faults (3 pages)", gaps.blindspots(self.con))
+        self.assertEqual(gaps.blindspots(self.con, "/nope"), "no blind spots recorded for /nope")
 
     def test_nothing_recorded_says_so_and_an_old_database_gains_the_table(self):
-        self.assertEqual(memory.blindspots(self.con), "no blind spots recorded yet")
+        self.assertEqual(gaps.blindspots(self.con), "no blind spots recorded yet")
         self.con.execute("DROP TABLE blind_spots")
         self.con.commit()
         con = core.connect()
@@ -2422,14 +2420,14 @@ class AuditFollowUps(MemBase):
 
     def test_a_regression_its_run_no_longer_lists_is_undone(self):  # a checkpoint listed it, the final file dropped it
         bug = {"route": "/form", "title": "t", "symptom": "s"}
-        memory.ingest(self.con, run(bugs=[bug]), "2026-01-01T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[bug]), "2026-01-01T00:00:00Z")
         h = core.bug_hash("/form", "s")
         with mock.patch.object(core, "now", return_value="2026-01-02T00:00:00Z"):
             cli.run_cmd(self.con, "bug-status", [h, "FIXED"])
         later = {**run("1.1", bugs=[{**bug, "hash": h}]), "run_id": "r-later", "status": "INCOMPLETE"}
-        memory.ingest(self.con, later, "2026-01-03T00:00:00Z")
+        ingest.ingest(self.con, later, "2026-01-03T00:00:00Z")
         self.assertEqual(self.con.execute("SELECT status FROM bugs").fetchone()[0], "REGRESSED")
-        memory.ingest(self.con, {**later, "status": "COMPLETED", "bugs": []}, "2026-01-03T00:05:00Z")
+        ingest.ingest(self.con, {**later, "status": "COMPLETED", "bugs": []}, "2026-01-03T00:05:00Z")
         self.assertEqual(tuple(self.con.execute("SELECT status, regressed_count FROM bugs").fetchone()), ("FIXED", 0))
 
     def test_a_page_only_the_crawler_mapped_is_still_never_explored(self):  # --discover / qa-init --crawl test nothing
@@ -2437,7 +2435,7 @@ class AuditFollowUps(MemBase):
             "INSERT INTO codemap(page,kind,label,value,file,repo,area,ts,src) VALUES(?,?,?,?,?,?,?,?,?)",
             ("/zones", "rule", "speed max 130", "", "a.js:1", "/repo", "frontend", core.now(), "a.js"),
         )
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "map-1",
@@ -2449,23 +2447,21 @@ class AuditFollowUps(MemBase):
             },
             "2026-01-01T00:00:00Z",
         )
-        page = lambda: next(
-            p for p in json.loads(memory.gaps(self.con, as_json=True))["pages"] if p["route"] == "/zones"
-        )
+        page = lambda: next(p for p in json.loads(gaps.gaps(self.con, as_json=True))["pages"] if p["route"] == "/zones")
         self.assertEqual((page()["never_explored"], page()["tier"]), (True, "new, with forms"))
-        memory.ingest(self.con, {**run(), "target": "/zones", "pages": [{"route": "/zones"}]}, "2026-01-02T00:00:00Z")
+        ingest.ingest(self.con, {**run(), "target": "/zones", "pages": [{"route": "/zones"}]}, "2026-01-02T00:00:00Z")
         self.assertFalse(page()["never_explored"])
 
     def test_bugs_from_before_build_tracking_are_not_new_on_a_later_build(self):
-        memory.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-01T00:00:00Z")
+        ingest.ingest(self.con, run(bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-01T00:00:00Z")
         self.con.execute("ALTER TABLE bugs DROP COLUMN first_build")  # as a database from before the column
         self.con.commit()
         self.con.close()
         self.con = core.connect()
-        memory.ingest(
+        ingest.ingest(
             self.con, run("2.0", bugs=[{"route": "/form", "title": "t", "symptom": "s"}]), "2026-01-05T00:00:00Z"
         )
-        b2 = next(x for x in json.loads(memory.history(self.con, as_json=True))["builds"] if x["build"] == "2.0")
+        b2 = next(x for x in json.loads(gaps.history(self.con, as_json=True))["builds"] if x["build"] == "2.0")
         self.assertEqual(b2["new_bugs"], 0)  # it was found before 2.0
 
     def test_a_locked_database_while_keeping_signals_retries_the_whole_file(self):
@@ -2475,10 +2471,10 @@ class AuditFollowUps(MemBase):
         f = runfile(out / "a")
         f.write_text(json.dumps(run()))
         (f.parent / "requests-x.log").write_text("1. [POST] http://localhost/api/z => [500] err\n")
-        with mock.patch.object(memory, "_store_signals", side_effect=sqlite3.OperationalError("database is locked")):
-            self.assertEqual(memory.ingest_pending(out), 0)
+        with mock.patch.object(ingest, "_store_signals", side_effect=sqlite3.OperationalError("database is locked")):
+            self.assertEqual(ingest.ingest_pending(out), 0)
         self.assertFalse(f.with_name(f.name + ".ingested").exists())  # not marked: the next hook run keeps its signals
-        self.assertEqual(memory.ingest_pending(out), 1)
+        self.assertEqual(ingest.ingest_pending(out), 1)
 
     def test_adding_a_column_twice_is_harmless(self):  # two processes upgrading one database at once
         core._add_column(self.con, "bugs", "x_test_col", "TEXT")
@@ -2495,10 +2491,10 @@ class IngestPending(MemBase):
         (out / "b").mkdir()
         runfile(out / "a").write_text(json.dumps(run(facts=[{"kind": "note", "text": "hi"}])))
         runfile(out / "b").write_text("{not json")
-        self.assertEqual(memory.ingest_pending(out), 1)
+        self.assertEqual(ingest.ingest_pending(out), 1)
         self.assertTrue((out / "a/.data/run-x.json.ingested").exists())
         self.assertTrue((out / "b/.data/run-x.json.error").exists())
-        self.assertEqual(memory.ingest_pending(out), 0)
+        self.assertEqual(ingest.ingest_pending(out), 0)
 
     def test_odd_text_and_paths_are_ingested_not_parked(self):  # a sliced emoji, a BOM, `~user/` in draft_path
         out = Path(self.tmp.name) / "qa-out"
@@ -2513,7 +2509,7 @@ class IngestPending(MemBase):
         ]:
             (out / name).mkdir(parents=True)
             runfile(out / name).write_text(data, encoding="utf-8")
-        self.assertEqual(memory.ingest_pending(out), 3, list(out.rglob("*.error")))
+        self.assertEqual(ingest.ingest_pending(out), 3, list(out.rglob("*.error")))
         self.assertNotIn(
             "abcdefghijklmnop1234", runfile(out / "b").read_text(encoding="utf-8")
         )  # the file is scrubbed too
@@ -2523,14 +2519,14 @@ class IngestPending(MemBase):
         out = Path(self.tmp.name) / "qa-out" / "a"
         out.mkdir(parents=True)
         runfile(out).write_text(json.dumps(run()))
-        real = memory.ingest
-        memory.ingest = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
+        real = ingest.ingest
+        ingest.ingest = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
         try:
-            self.assertEqual(memory.ingest_pending(out.parent), 0)
+            self.assertEqual(ingest.ingest_pending(out.parent), 0)
         finally:
-            memory.ingest = real
+            ingest.ingest = real
         self.assertFalse((out / ".data/run-x.json.error").exists())
-        self.assertEqual(memory.ingest_pending(out.parent), 1)
+        self.assertEqual(ingest.ingest_pending(out.parent), 1)
 
     def test_wrongly_typed_fields_are_parked_not_retried(self):
         out = Path(self.tmp.name) / "qa-out"
@@ -2545,7 +2541,7 @@ class IngestPending(MemBase):
             d = out / str(i)
             d.mkdir(parents=True)
             runfile(d).write_text(json.dumps({"run_id": f"r{i}", "build": "1", **bad}))
-        memory.ingest_pending(out)
+        ingest.ingest_pending(out)
         errors = sorted(p.parent.parent.name for p in out.rglob("run-x.json.error"))
         self.assertEqual(errors[:3], ["0", "1", "2"])
 
@@ -2557,7 +2553,7 @@ class IngestPending(MemBase):
         self.assertEqual(self.con.execute("SELECT count(*) FROM runs").fetchone()[0], 1)
         future = time.time() + 3600  # skewed mtime must not cause re-ingest loops
         os.utime(runfile(out), (future, future))
-        self.assertEqual(memory.ingest_pending(out.parent), 0)
+        self.assertEqual(ingest.ingest_pending(out.parent), 0)
         self.assertLessEqual(self.con.execute("SELECT max(ts) FROM runs").fetchone()[0], core.now())
 
     def test_draft_paths_stored_absolute(self):
@@ -2575,7 +2571,7 @@ class IngestPending(MemBase):
                 )
             )
         )
-        memory.ingest_pending(proj / "qa-out")
+        ingest.ingest_pending(proj / "qa-out")
         paths = {r[0] for r in self.con.execute("SELECT draft_path FROM bugs")}
         self.assertEqual(paths, {str((out / "bugs/BUG-1.md").resolve())})
 
@@ -2591,14 +2587,14 @@ class IngestPending(MemBase):
         os.utime(f, (1, 1))
         (out.parent / ".scrubbed").write_text(str(time.time()))  # scrub skips the old file
         self.con.close()
-        memory.ingest_pending(out.parent)
+        ingest.ingest_pending(out.parent)
         self.con = core.connect()
         self.assertNotIn("eyJhbGci", " ".join(r[0] for r in self.con.execute("SELECT text FROM facts")))
 
     def test_run_json_in_data_with_drafts_in_bugs(self):
         d = self.rundir(plan=PLAN, runs=[("form", RUN_FORM)])
         (d / "bugs/BUG-1.md").write_text("draft")
-        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 2)
+        self.assertEqual(ingest.ingest_pending(self.proj / "qa-out"), 2)
         self.assertTrue((d / ".data/run-form.json.ingested").exists())
         self.assertTrue(
             (d / ".data/plan.json.ingested").exists()
@@ -2610,7 +2606,7 @@ class IngestPending(MemBase):
             )
         finally:
             con.close()
-        self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 0)
+        self.assertEqual(ingest.ingest_pending(self.proj / "qa-out"), 0)
 
     def test_bad_report_fields_are_parked(self):
         for bad in (
@@ -2630,9 +2626,9 @@ class IngestPending(MemBase):
             d = self.rundir("bad")
             f = d / ".data/run-x.json"
             f.write_text(json.dumps({**RUN_LIST, "bugs": [], **bad}))
-            memory.PARKED.clear()
+            ingest.PARKED.clear()
             with contextlib.redirect_stderr(io.StringIO()):
-                memory.ingest_pending(self.proj / "qa-out")
+                ingest.ingest_pending(self.proj / "qa-out")
             self.assertTrue(f.with_name("run-x.json.error").exists(), bad)
             f.with_name("run-x.json.error").unlink()
         good = {
@@ -2644,18 +2640,18 @@ class IngestPending(MemBase):
             "not_tested": ["c", {"category": "safety", "text": "d"}],
         }
         f.write_text(json.dumps(good))
-        self.assertEqual(memory.ingest_pending(d), 1)  # a run folder finds its qa-out
+        self.assertEqual(ingest.ingest_pending(d), 1)  # a run folder finds its qa-out
 
     def test_deep_json_does_not_stop_other_ingests(self):  # a RecursionError in scrub used to abort the whole hook
         bad = self.rundir("a") / ".data/run-deep.json"
         bad.write_text("[" * 50000 + "]" * 50000)
         good = self.rundir("b", runs=[("ok", RUN_LIST)]) / ".data/run-ok.json"
-        memory.PARKED.clear()
+        ingest.PARKED.clear()
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(memory.ingest_pending(self.proj / "qa-out"), 1)
+            self.assertEqual(ingest.ingest_pending(self.proj / "qa-out"), 1)
         self.assertTrue(good.with_name("run-ok.json.ingested").exists())
         self.assertTrue(bad.with_name("run-deep.json.error").exists())
-        self.assertEqual(len(memory.PARKED), 1)
+        self.assertEqual(len(ingest.PARKED), 1)
 
     def test_concurrent_ingest_pending_rereads_under_lock(self):
         import fcntl
@@ -2682,14 +2678,14 @@ class IngestPending(MemBase):
 
         results = []
         with mock.patch.object(fcntl, "flock", side_effect=waiting_flock):
-            t = threading.Thread(target=lambda: results.append(memory.ingest_pending(out)))
+            t = threading.Thread(target=lambda: results.append(ingest.ingest_pending(out)))
             t.start()
             self.assertTrue(entered_lock.wait(5))
             # While B is blocked on flock, rewrite the run file and ingest it as A (holding lock_fd already).
             rf.write_text(json.dumps(run(facts=[{"kind": "note", "text": "NEW_FIXED_FACT"}])))
             con_a = core.connect()
             try:
-                memory._ingest_files(con_a, memory._pending(out))
+                ingest._ingest_files(con_a, ingest._pending(out))
             finally:
                 con_a.close()
             lock_fd.close()

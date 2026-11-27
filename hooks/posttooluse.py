@@ -64,14 +64,14 @@ def code_map_feedback(data):
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
     from pathlib import Path
 
-    from qa_sdet import memory
+    from qa_sdet import ingest
 
     p = Path(str(data.get("cwd") or os.getcwd()), f)
     with contextlib.redirect_stderr(
         io.StringIO()
     ):  # its notes are for the user's terminal; the agent gets the error below
-        memory.ingest_pending(p.parent)
-    err = memory.parked(p)  # whoever read it first: a sibling's hook may have parked it a moment ago
+        ingest.ingest_pending(p.parent)
+    err = ingest.parked(p)  # whoever read it first: a sibling's hook may have parked it a moment ago
     if not err:
         return None
     _log_event(
@@ -166,7 +166,7 @@ def file_lint(data):
     except OSError:
         return None
     _lib()
-    from qa_sdet import memory, report
+    from qa_sdet import ingest, report
 
     qa_out, run_name = p.parent.parent.parent, p.parent.parent.name
     note = None
@@ -188,7 +188,7 @@ def file_lint(data):
         else:
             if kind == "run":
                 try:
-                    memory.check_run(doc)
+                    ingest.check_run(doc)
                 except ValueError as e:
                     rules = os.path.join(os.path.dirname(HERE), "references", "run-json.md")
                     note = f"qa-sdet: memory can't save {name}: {e}. Fix that field (rules: {rules}) and Write the whole file again."

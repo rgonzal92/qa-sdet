@@ -228,7 +228,7 @@ def dispatch(
     `<route>-record`. target_route names that
     detail page exactly (a list page may lead to several, or to one through another detail page). hypothesis: why this page
     was chosen (an earlier bug's pattern, a lead's reason): one scrubbed line of at most 400 characters, labelled as test data."""
-    from . import memory, report, scrub
+    from . import cards, gaps, report, scrub
 
     run = Path(run).resolve()
     data = run / ".data"
@@ -313,7 +313,7 @@ def dispatch(
             "open a record: the target is a list page; open one record (one you created, if the test edits it) "
             "and test its detail page"
         )
-        chain = memory.entry_chain(con, page) if target_route else []
+        chain = gaps.entry_chain(con, page) if target_route else []
         if chain:
             out.append(
                 f"open it from {chain[0]['from']}: "
@@ -332,7 +332,7 @@ def dispatch(
     rules = run.parent.parent / "qa-rules.md"
     if rules.is_file() and not rules.is_symlink():
         out += ["", "RULES:", rules.read_text(encoding="utf-8", errors="replace").strip()[:4000]]
-    card = memory.card(con, page, focus=focus)
+    card = cards.card(con, page, focus=focus)
     if mode == "ticket":  # a ticket run stops after its cases: the card's open-ended lists kept it going for an hour
         card = "\n".join(
             x for x in card.splitlines() if not x.startswith(("UNVISITED STATES (", "UNEXERCISED ENDPOINTS ("))

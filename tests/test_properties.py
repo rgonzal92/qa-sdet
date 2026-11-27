@@ -9,7 +9,7 @@ import unittest
 
 from support import load_hook
 
-from qa_sdet import contracts, core, memory, report, scrub
+from qa_sdet import contracts, core, ingest, report, scrub
 
 
 class ContractsMatchCode(unittest.TestCase):
@@ -18,8 +18,8 @@ class ContractsMatchCode(unittest.TestCase):
     def test_each_literal_is_its_runtime_tuple(self):
         self.assertEqual(typing.get_args(contracts.CaseStatus), core.CASE_STATUSES)
         self.assertEqual(set(typing.get_args(contracts.BugStatus)), core.STATUSES)
-        self.assertEqual(typing.get_args(contracts.StopReason), memory.STOP_REASONS)
-        self.assertEqual(typing.get_args(contracts.BlockScope), memory.BLOCK_SCOPES)
+        self.assertEqual(typing.get_args(contracts.StopReason), ingest.STOP_REASONS)
+        self.assertEqual(typing.get_args(contracts.BlockScope), ingest.BLOCK_SCOPES)
         self.assertEqual(set(typing.get_args(contracts.Verdict)), set(report.VERDICT_ICON))
 
 

@@ -148,7 +148,7 @@ class Docs(unittest.TestCase):
 
     def test_code_map_examples_ingest_whole(self):
         """Each example in code-map.md is one mapper's file: the hook ingests it with no row rejected or dropped."""
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         blocks = re.findall(r"```json\n(.*?)```", text("references/code-map.md"), re.S)
         self.assertTrue(blocks)
@@ -176,7 +176,7 @@ class Docs(unittest.TestCase):
                     )
                 )
                 (init / f"code-map-{cm['area']}.json").write_text(json.dumps(cm))
-                self.assertEqual(memory.ingest_pending(init.parent), 1, memory.PARKED)
+                self.assertEqual(ingest.ingest_pending(init.parent), 1, ingest.PARKED)
                 self.assertTrue(Path(d, "t.db").exists())
                 self.assertNotIn("dropped rows", (init / f"code-map-{cm['area']}.json.ingested").read_text())
 
@@ -649,7 +649,7 @@ class Docs(unittest.TestCase):
         """`gaps --json` lists detail routes under `needs_id`; the batch must leave them out, not open '/x/:id'."""
         skill = text("skills/qa-explore/SKILL.md")
         self.assertIn("`needs_id`", skill)
-        self.assertIn('"needs_id"', text("lib/qa_sdet/memory.py"))  # the key gaps --json writes
+        self.assertIn('"needs_id"', text("lib/qa_sdet/gaps.py"))  # the key gaps --json writes
 
     def test_explorer_tools_are_the_ones_the_guard_allows(self):  # a denylist inherited every MCP server of the session
         meta = dict(re.findall(r"^([\w-]+): (.*)$", text("agents/qa-explorer.md").split("---\n")[1], re.M))
@@ -751,9 +751,9 @@ class Docs(unittest.TestCase):
         self.assertIn("INCOMPLETE", text("agents/qa-explorer.md").split("**Cases, then the check loop.**")[1])
 
     def test_stop_reason_and_the_expansion_gate_are_documented(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
-        for reason in memory.STOP_REASONS:
+        for reason in ingest.STOP_REASONS:
             self.assertIn(reason, text("references/run-json.md"), reason)
         self.assertIn("stop_reason", text("agents/qa-explorer.md"))
         skill = text("skills/qa-explore/SKILL.md")
@@ -766,7 +766,7 @@ class Docs(unittest.TestCase):
         self.assertIn("unexercised_apis", text("README.md"))
         self.assertIn("unexercised_apis", text("skills/qa-memory/SKILL.md"))
         self.assertIn("UNEXERCISED ENDPOINTS", text("agents/qa-explorer.md"))
-        self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/memory.py"))  # the card line the explorer prompt names
+        self.assertIn("UNEXERCISED ENDPOINTS", text("lib/qa_sdet/cards.py"))  # the card line the explorer prompt names
 
     def test_a_ticket_run_stops_after_its_cases(self):  # 20 of 63 post-case minutes went to the card's open lists
         explorer = text("agents/qa-explorer.md")
@@ -795,7 +795,7 @@ class Docs(unittest.TestCase):
             "UNTESTED TARGETS",
         ):  # what the stop check reads in the brief
             self.assertIn(section, text("lib/qa_sdet/report.py"))
-            self.assertIn(section, text("README.md") + text("lib/qa_sdet/memory.py"))
+            self.assertIn(section, text("README.md") + text("lib/qa_sdet/cards.py"))
 
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
         from qa_sdet import report

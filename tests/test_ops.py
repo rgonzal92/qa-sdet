@@ -1121,10 +1121,10 @@ class Dispatch(Base):
             self.assertIn("not a JSON object", r.stderr)
 
     def test_a_ticket_brief_drops_the_cards_open_ended_lists(self):  # 20 of 63 post-case minutes went to them
-        from qa_sdet import memory
+        from qa_sdet import cards
 
         card = "PAGE /list\nUNVISITED STATES (on this page: …): tab: Active\nUNEXERCISED ENDPOINTS (…): GET /api/x\nNOTE: kept"
-        with mock.patch.object(memory, "card", return_value=card):
+        with mock.patch.object(cards, "card", return_value=card):
             briefs = {
                 m: Path(self.dispatch("/list?a=1", "--mode", m)[1]["brief"]).read_text() for m in ("ticket", "explore")
             }
@@ -1304,11 +1304,11 @@ class Dispatch(Base):
         self.assertEqual(len(set(ids)), 3, ids)
 
     def seed_list_and_detail(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         con = core.connect()
         try:
-            memory.ingest(
+            ingest.ingest(
                 con,
                 {
                     "run_id": "r",
@@ -1364,11 +1364,11 @@ class Dispatch(Base):
         self.assertNotIn("HYPOTHESIS", Path(self.dispatch("/list?a=2")[1]["brief"]).read_text())
 
     def seed_two_detail_pages(self):
-        from qa_sdet import memory
+        from qa_sdet import ingest
 
         con = core.connect()
         try:
-            memory.ingest(
+            ingest.ingest(
                 con,
                 {
                     "run_id": "r",

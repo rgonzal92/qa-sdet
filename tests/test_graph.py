@@ -4,9 +4,9 @@ the stored transitions; and what cards, gaps, `prep` and `qa-mem impact` show fr
 import json
 import unittest
 
-from support import MemBase, cli, core, memory
+from support import MemBase, cli, core
 
-from qa_sdet import codemap
+from qa_sdet import cards, codemap, gaps, ingest, memory
 
 
 class GraphCase(MemBase):
@@ -27,7 +27,7 @@ class GraphCase(MemBase):
         self.row(shell, "route", "Daily", f"module {mid} at {module}", "public/config.json")
 
     def bug(self, page, symptom, endpoint=None, status="OPEN"):
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": f"r-{page}-{symptom}",
@@ -77,7 +77,7 @@ class ShellModules(GraphCase):
         self.mount("/b", "/a")
         self.assertEqual(codemap.module_target(self.con, "/a"), "/b")
         self.assertEqual(len(codemap._codemap_rows(self.con, "/a")), 2)  # /a's route row and /b's: nothing chained
-        self.assertIn("PAGE /a", memory.card(self.con, "/a"))
+        self.assertIn("PAGE /a", cards.card(self.con, "/a"))
 
     def test_the_shell_route_has_its_modules_rows_and_the_backend_rules(self):
         rows = codemap._codemap_rows(self.con, "/reports/daily")
@@ -94,17 +94,17 @@ class ShellModules(GraphCase):
         self.assertIn("/m/daily", codemap.code(self.con, "/reports/daily"))
 
     def test_the_card_of_the_shell_route_is_not_empty(self):
-        card = memory.card(self.con, "/reports/daily")
+        card = cards.card(self.con, "/reports/daily")
         self.assertIn("MODULE: m1 at /m/daily", card)
         self.assertIn("getByLabel('Date from')", card)
         self.assertIn("speed: min 0, max 130", card)
         self.assertIn("UNTESTED TARGETS", card)
         self.assertIn("CLIENT/SERVER RULES DIFFER", card)
-        self.assertNotIn("MODULE:", memory.card(self.con, "/m/daily"))
+        self.assertNotIn("MODULE:", cards.card(self.con, "/m/daily"))
 
     def test_a_bug_on_an_endpoint_the_module_calls_shows_on_the_shell_card(self):
         self.calls("/zones/new", "POST /api/zones")
-        memory.ingest(
+        ingest.ingest(
             self.con,
             {
                 "run_id": "r1",
@@ -122,14 +122,14 @@ class ShellModules(GraphCase):
                 ],
             },
         )
-        self.assertIn(core.bug_hash("/zones/new", "speed 131 saved"), memory.card(self.con, "/reports/daily"))
+        self.assertIn(core.bug_hash("/zones/new", "speed 131 saved"), cards.card(self.con, "/reports/daily"))
 
     def test_the_module_page_is_hidden_from_gaps_and_the_shell_route_stands_for_both(self):
-        out = memory.gaps(self.con)
+        out = gaps.gaps(self.con)
         self.assertNotIn("/m/daily", out)
         self.assertIn("/reports/daily", out)
         self.assertIn("untested field", next(x for x in out.splitlines() if "/reports/daily" in x))
-        pages = json.loads(memory.gaps(self.con, as_json=True))["pages"]
+        pages = json.loads(gaps.gaps(self.con, as_json=True))["pages"]
         self.assertEqual([p["route"] for p in pages], ["/reports/daily"])
         self.assertEqual(
             pages[0]["tier"], "new, with forms"
@@ -137,7 +137,7 @@ class ShellModules(GraphCase):
 
     def test_a_module_nobody_mounts_still_shows_in_gaps(self):
         self.row("/other", "rule", "name", "required", "src/Other.jsx")
-        self.assertIn("/other", memory.gaps(self.con))
+        self.assertIn("/other", gaps.gaps(self.con))
 
     def test_sharing_pages_treat_the_pair_as_one_page(self):
         self.calls("/zones/new", "POST /api/zones")
@@ -272,44 +272,44 @@ class CrossPageRules(GraphCase):
         self.row("/zones", "rule", "speed limit", "max 999", "src/List.jsx")  # a reader: not compared
 
     def test_the_same_field_with_another_limit_on_the_edit_page_is_a_hint(self):
-        hints = memory._cross_page_rules_differ(self.con, "/zones/new")
+        hints = cards._cross_page_rules_differ(self.con, "/zones/new")
         self.assertEqual(hints, ["Speed limit: here max 130 vs /zones/:id max 150"])
         self.assertEqual(
-            memory._cross_page_rules_differ(self.con, "/zones/:id"), ["speedLimit: here max 150 vs /zones/new max 130"]
+            cards._cross_page_rules_differ(self.con, "/zones/:id"), ["speedLimit: here max 150 vs /zones/new max 130"]
         )
 
     def test_a_flag_one_page_lacks_is_named(self):
         self.row("/zones/new", "rule", "name", "required, max 40", "src/New.jsx")
         self.row("/zones/:id", "rule", "Name", "max 40", "src/Edit.jsx")
-        self.assertIn("name: here only: required", memory._cross_page_rules_differ(self.con, "/zones/new"))
+        self.assertIn("name: here only: required", cards._cross_page_rules_differ(self.con, "/zones/new"))
 
     def test_agreeing_rules_fields_on_one_page_only_and_other_resources_say_nothing(self):
         self.row("/zones/new", "rule", "color", "required", "src/New.jsx")  # no counterpart on the edit page
         self.row("/zones/:id", "rule", "Speed limit", "min 0, max 130", "src/Edit.jsx")  # the same rule, a second label
         self.assertEqual(
-            memory._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"]
+            cards._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"]
         )
         self.calls("/closures/new", "POST /api/closures")
         self.row("/closures/new", "rule", "speed limit", "max 5", "src/Closure.jsx")
-        self.assertEqual(len(memory._cross_page_rules_differ(self.con, "/zones/new")), 1)
-        self.assertEqual(memory._cross_page_rules_differ(self.con, "/closures/new"), [])
+        self.assertEqual(len(cards._cross_page_rules_differ(self.con, "/zones/new")), 1)
+        self.assertEqual(cards._cross_page_rules_differ(self.con, "/closures/new"), [])
 
     def test_the_backend_rules_are_not_compared_here(self):
         self.row("*", "rule", "POST /api/zones speed", "max 1", "routes/zones.js", area="backend")
-        self.assertEqual(len(memory._cross_page_rules_differ(self.con, "/zones/new")), 1)
+        self.assertEqual(len(cards._cross_page_rules_differ(self.con, "/zones/new")), 1)
 
     def test_the_card_names_them_as_a_hint(self):
-        card = memory.card(self.con, "/zones/new")
+        card = cards.card(self.con, "/zones/new")
         line = next(x for x in card.splitlines() if x.startswith("CROSS-PAGE RULES DIFFER"))
         self.assertIn("not an oracle", line)
         self.assertIn("max 130 vs /zones/:id max 150", line)
-        self.assertNotIn("CROSS-PAGE", memory.card(self.con, "/zones"))
+        self.assertNotIn("CROSS-PAGE", cards.card(self.con, "/zones"))
 
     def test_the_card_shows_three_hints_at_most(self):
         for i in range(5):
             self.row("/zones/new", "rule", f"field{i}", "max 1", "src/New.jsx")
             self.row("/zones/:id", "rule", f"field{i}", "max 2", "src/Edit.jsx")
-        line = next(x for x in memory.card(self.con, "/zones/new").splitlines() if x.startswith("CROSS-PAGE"))
+        line = next(x for x in cards.card(self.con, "/zones/new").splitlines() if x.startswith("CROSS-PAGE"))
         self.assertEqual(line.count(" vs /zones/:id"), 3)
 
 
@@ -326,7 +326,7 @@ class Related(GraphCase):
             self.row(page, "locator", "Date range", "getByLabel('Range')", "src/components/DateRangePicker.tsx")
 
     def line(self, route):
-        return next((x for x in memory.card(self.con, route).splitlines() if x.startswith("RELATED PAGES")), "")
+        return next((x for x in cards.card(self.con, route).splitlines() if x.startswith("RELATED PAGES")), "")
 
     def test_the_card_lists_the_related_pages_with_why(self):
         line = self.line("/zones/new")
@@ -355,7 +355,7 @@ class Related(GraphCase):
 
     def test_an_open_bug_on_a_page_sharing_a_component_shows_on_the_card_and_in_bug_match(self):
         h = self.bug("/incidents", "range picker drops the end date")
-        card = memory.card(self.con, "/schedules")
+        card = cards.card(self.con, "/schedules")
         self.assertIn("BUGS ON PAGES SHARING AN ENDPOINT OR COMPONENT", card)
         self.assertIn(h, card.split("BUGS ON PAGES SHARING", 1)[1])
         self.assertIn(h, memory.bug_match(self.con, "/schedules", "the range picker drops the end date"))
@@ -364,7 +364,7 @@ class Related(GraphCase):
         for i in range(20):
             self.row(f"/p{i}", "locator", "Menu", "getByRole('navigation')", "src/AppLayout.tsx")
         self.bug("/p0", "menu overlaps the title")
-        self.assertNotIn("BUGS ON PAGES SHARING", memory.card(self.con, "/p1"))
+        self.assertNotIn("BUGS ON PAGES SHARING", cards.card(self.con, "/p1"))
 
     def test_prep_context_names_the_impacted_routes(self):
         ctx = memory.ticket_context(self.con, "Speed limit can be a decimal on /zones/new")
@@ -429,28 +429,28 @@ class EntryChain(GraphCase):
         self.go("/incidents", "/incidents/:id", "row click")
         self.go("/incidents/:id", "/incidents/:id/history", "History tab")
         self.assertEqual(
-            memory.entry_chain(self.con, "/incidents/:id/history"),
+            gaps.entry_chain(self.con, "/incidents/:id/history"),
             [
                 {"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"},
                 {"from": "/incidents/:id", "to": "/incidents/:id/history", "trigger": "History tab"},
             ],
         )
         self.assertEqual(
-            memory.entry_chain(self.con, "/incidents/:id"),
+            gaps.entry_chain(self.con, "/incidents/:id"),
             [{"from": "/incidents", "to": "/incidents/:id", "trigger": "row click"}],
         )
 
     def test_a_route_with_no_id_needs_no_chain_and_an_unreached_one_has_none(self):
         self.go("/incidents", "/incidents/:id")
-        self.assertEqual(memory.entry_chain(self.con, "/incidents"), [])
-        self.assertEqual(memory.entry_chain(self.con, "/zones/:id"), [])
+        self.assertEqual(gaps.entry_chain(self.con, "/incidents"), [])
+        self.assertEqual(gaps.entry_chain(self.con, "/zones/:id"), [])
 
     def test_cycles_stop(self):
         self.go("/a/:id", "/b/:id")
         self.go("/b/:id", "/a/:id")
-        self.assertEqual(memory.entry_chain(self.con, "/a/:id"), [])
+        self.assertEqual(gaps.entry_chain(self.con, "/a/:id"), [])
         self.go("/home", "/a/:id")
-        self.assertEqual([h["from"] for h in memory.entry_chain(self.con, "/b/:id")], ["/home", "/a/:id"])
+        self.assertEqual([h["from"] for h in gaps.entry_chain(self.con, "/b/:id")], ["/home", "/a/:id"])
 
     def test_the_chain_is_four_hops_at_most_and_the_shortest_way_wins(self):
         for a, b in (
@@ -461,33 +461,31 @@ class EntryChain(GraphCase):
             ("/x4/:id", "/x5/:id"),
         ):
             self.go(a, b)
-        self.assertEqual(len(memory.entry_chain(self.con, "/x4/:id")), 4)
-        self.assertEqual(memory.entry_chain(self.con, "/x5/:id"), [])  # five hops
+        self.assertEqual(len(gaps.entry_chain(self.con, "/x4/:id")), 4)
+        self.assertEqual(gaps.entry_chain(self.con, "/x5/:id"), [])  # five hops
         self.go("/shortcut", "/x4/:id")
-        self.assertEqual(
-            memory.entry_chain(self.con, "/x4/:id"), [{"from": "/shortcut", "to": "/x4/:id", "trigger": ""}]
-        )
+        self.assertEqual(gaps.entry_chain(self.con, "/x4/:id"), [{"from": "/shortcut", "to": "/x4/:id", "trigger": ""}])
 
     def test_an_entry_on_another_host_is_never_used(self):
         self.go("https://evil.example/list", "/x/:id")
-        self.assertEqual(memory.entry_chain(self.con, "/x/:id"), [])
+        self.assertEqual(gaps.entry_chain(self.con, "/x/:id"), [])
 
     def test_gaps_gives_a_deep_route_its_static_entry_page(self):
         self.go("/incidents", "/incidents/:id", "row click")
         self.go("/incidents/:id", "/incidents/:id/history", "History tab")
         self.row("/incidents/:id/history", "rule", "from", "required", "src/History.jsx")
-        data = json.loads(memory.gaps(self.con, as_json=True))
+        data = json.loads(gaps.gaps(self.con, as_json=True))
         deep = next(p for p in data["pages"] if p["route"] == "/incidents/:id/history")
         self.assertEqual((deep["entry_route"], deep["entry_trigger"]), ("/incidents", "row click"))
         self.assertEqual([h["to"] for h in deep["entry_chain"]], ["/incidents/:id", "/incidents/:id/history"])
         self.assertNotIn("/incidents/:id/history", data["needs_id"])
-        line = next(x for x in memory.gaps(self.con).splitlines() if "/incidents/:id/history" in x)
+        line = next(x for x in gaps.gaps(self.con).splitlines() if "/incidents/:id/history" in x)
         self.assertIn("(open from /incidents: row click, then History tab)", line)
 
     def test_gaps_names_a_detail_route_nothing_leads_to_as_needing_an_id(self):
         self.go("/a/:id", "/a/:id/x")  # reached only from a detail page nobody reached
         self.row("/a/:id/x", "rule", "from", "required", "src/X.jsx")
-        data = json.loads(memory.gaps(self.con, as_json=True))
+        data = json.loads(gaps.gaps(self.con, as_json=True))
         self.assertIn("/a/:id/x", data["needs_id"])
 
 

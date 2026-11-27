@@ -25,7 +25,15 @@ import sys
 import time
 from pathlib import Path
 
-from . import codemap, core, memory, scrub  # the rest load in the commands that use them (start-up time)
+from . import (  # the rest load in the commands that use them (start-up time)
+    cards,
+    codemap,
+    core,
+    gaps,
+    ingest,
+    memory,
+    scrub,
+)
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:
@@ -655,7 +663,7 @@ def _main(argv: list[str]) -> int:
     if cmd == "ingest-pending":  # runs from hooks: must never break the session
         from . import plugin_log
 
-        memory.PARKED.clear()
+        ingest.PARKED.clear()
         roots = list(dict.fromkeys(os.path.realpath(a) for a in (args or ["qa-out"]) if a))  # cwd + project dir
         marker = _run_marker(roots)  # an explorer's run (dispatch wrote run_dir and slug)
         hin = hook_input() if marker else None
@@ -676,7 +684,7 @@ def _main(argv: list[str]) -> int:
                 )
         for root in roots:
             try:
-                memory.ingest_pending(root)
+                ingest.ingest_pending(root)
             except Exception as e:  # noqa: BLE001
                 plugin_log.append_event(
                     root,
@@ -689,14 +697,14 @@ def _main(argv: list[str]) -> int:
         stale = [
             x
             for root in roots
-            for x in memory.parked_codemaps(root)
-            if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in memory.PARKED)
+            for x in ingest.parked_codemaps(root)
+            if not any(p.startswith(x.split(": ", 1)[0] + ":") for p in ingest.PARKED)
         ]
         if hin is None:  # stdin is read once: above when a marker is active
-            hin = hook_input() if memory.PARKED or stale else {}
+            hin = hook_input() if ingest.PARKED or stale else {}
             role = str(hin.get("agent_type") or "").strip().lower().split(":")[-1].strip()
         if stale and hin.get("hook_event_name") == "SubagentStop" and role == "qa-mapper":
-            memory.PARKED.extend(stale)
+            ingest.PARKED.extend(stale)
         todo = []
         if explorer_stops and not hin.get("stop_hook_active"):
             from . import ops, report  # the marker was started MARKER_HOURS before it expires
@@ -721,9 +729,9 @@ def _main(argv: list[str]) -> int:
                 "qa-sdet: before you stop, finish these (then stop again):\n" + "\n".join(f"- {t}" for t in todo),
                 file=sys.stderr,
             )
-            if not memory.PARKED:
+            if not ingest.PARKED:
                 return 2
-        if memory.PARKED and not hin.get("stop_hook_active"):
+        if ingest.PARKED and not hin.get("stop_hook_active"):
             qa_out = next((Path(r) for r in roots if Path(r).is_dir()), None)
             if qa_out:
                 plugin_log.append_event(
@@ -732,7 +740,7 @@ def _main(argv: list[str]) -> int:
                     {
                         "agent": role or "main",
                         "kind": "parked",
-                        "items": memory.PARKED[:5],
+                        "items": ingest.PARKED[:5],
                     },
                     create=False,
                 )
@@ -742,7 +750,7 @@ def _main(argv: list[str]) -> int:
                 f"qa-sdet memory could not save this (file(s) below). For each one YOU wrote this run: fix the field the "
                 f"error names (rules: {refs / 'run-json.md'} for run JSON, {refs / 'code-map.md'} for code-map-*.json) "
                 "and rewrite the whole file; it is re-read automatically. A file you did not write belongs to another "
-                "agent: leave it.\n" + "\n".join(memory.PARKED),
+                "agent: leave it.\n" + "\n".join(ingest.PARKED),
                 file=sys.stderr,
             )
             return 2
@@ -750,7 +758,7 @@ def _main(argv: list[str]) -> int:
     if cmd == "init-status":
         if len(args) != 1:
             return usage_error(cmd)
-        print(json.dumps(memory.init_status(args[0]), indent=1))
+        print(json.dumps(ingest.init_status(args[0]), indent=1))
         return 0
     if cmd == "doctor":
         from . import doctor
@@ -820,7 +828,7 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
         o = _opts(args, flags=("--ids",), valued=("--focus",))
         if not o["_"]:
             return usage_error(cmd)
-        print(memory.card(con, " ".join(o["_"]), o.get("--focus"), o.get("--ids", False)))
+        print(cards.card(con, " ".join(o["_"]), o.get("--focus"), o.get("--ids", False)))
     elif cmd == "bug-match":
         o = _opts(args, valued=("--endpoint",))
         if len(o["_"]) < 2:
@@ -835,12 +843,12 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
         o = _opts(args, flags=("--json",), valued=("--builds",))
         if len(o["_"]) > 1:
             return usage_error(cmd)
-        print(memory.history(con, o["_"][0] if o["_"] else None, _count(o, "--builds") or 5, o.get("--json", False)))
+        print(gaps.history(con, o["_"][0] if o["_"] else None, _count(o, "--builds") or 5, o.get("--json", False)))
     elif cmd == "hotspots":
         o = _opts(args, flags=("--json",), valued=("--top",))
         if o["_"]:
             return usage_error(cmd)
-        print(memory.hotspots(con, _count(o, "--top") or 10, o.get("--json", False)))
+        print(gaps.hotspots(con, _count(o, "--top") or 10, o.get("--json", False)))
     elif cmd == "signals":
         o = _opts(args, valued=("--status",))
         status = str(o.get("--status") or "ACTIVE").upper()
@@ -942,7 +950,7 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
         o = _opts(args, flags=("--json",))
         if len(o["_"]) > 1:
             raise core.BadOption("blindspots takes at most one route")
-        print(memory.blindspots(con, o["_"][0] if o["_"] else None, o.get("--json", False)))
+        print(gaps.blindspots(con, o["_"][0] if o["_"] else None, o.get("--json", False)))
     elif cmd == "gaps":
         o = _opts(args, flags=("--changed", "--json"), valued=("--top",))
         if o["_"]:
@@ -952,7 +960,7 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
             top = _count(o, "--top")
             if top < 1:
                 raise core.BadInput("--top must be a whole number >= 1")
-        print(memory.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
+        print(gaps.gaps(con, changed_only=o.get("--changed", False), top=top, as_json=o.get("--json", False)))
     elif cmd == "crawl":
         if not args:
             return usage_error(cmd)
@@ -1048,7 +1056,7 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
     elif cmd == "ingest" and len(args) == 1:
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:
-            memory.ingest(
+            ingest.ingest(
                 con,
                 scrub.redact_json(json.loads(Path(args[0]).read_text(encoding="utf-8-sig"))),
                 run_dir=Path(args[0]).resolve().parent,

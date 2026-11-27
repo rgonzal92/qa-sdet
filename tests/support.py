@@ -17,7 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from qa_sdet import cli as cli_mod
-from qa_sdet import core, memory
+from qa_sdet import core, ingest
 
 FIX = ROOT / "tests/fixture-src"
 
@@ -272,7 +272,7 @@ class CodeMapCase(MemBase):
         super().setUp()
         self.dir = self.t
         self.out = self.dir / "qa-out" / "init"
-        memory.PARKED.clear()  # a module-level list: one test's parked file must not leak into the next
+        ingest.PARKED.clear()  # a module-level list: one test's parked file must not leak into the next
 
     def scan(self, *paths, full=False, stamp="s1"):
         from qa_sdet import scan
@@ -286,8 +286,8 @@ class CodeMapCase(MemBase):
         return f
 
     def ingest_all(self):
-        self.assertEqual(memory.PARKED, [], memory.PARKED)
-        memory.ingest_pending(self.dir / "qa-out")
+        self.assertEqual(ingest.PARKED, [], ingest.PARKED)
+        ingest.ingest_pending(self.dir / "qa-out")
         self.con.close()
         self.con = core.connect()
 

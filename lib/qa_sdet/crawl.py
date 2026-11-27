@@ -238,11 +238,11 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
                 core._write(rec.file.with_name(f"{name}-{slug}.log"), out if ok else "")
             session._close_qa(session._pw_env())
         rec.save(status=status, **fields)
-        from . import memory
+        from . import ingest
 
         # the skill runs this call in the background: the session's Stop hook reads a half-written run file, and no
         # hook reads the finished one before the reply counts what memory holds
-        memory.ingest_pending(rec.file.resolve())
+        ingest.ingest_pending(rec.file.resolve())
     return rec
 
 
