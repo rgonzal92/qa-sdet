@@ -269,47 +269,9 @@ def _group_counts(rows, key_fn, sample_fn):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])), samples
 
 
-def render_digest(events, anon, bad_lines=0):
-    """Render anonymized Markdown digest from a non-empty list of event dicts."""
-    versions = sorted({str(e.get("v") or core.UNKNOWN) for e in events})
-    tss = [str(e.get("ts") or "") for e in events if e.get("ts")]
-    by_type = defaultdict(list)
-    for e in events:
-        by_type[str(e.get("type"))].append(e)
-
-    runs = by_type["run_summary"]
-    notes = by_type["user_note"]
-    lines = [
-        "# qa-sdet Plugin Digest",
-        "",
-        f"- **Plugin version(s):** {', '.join(versions)}",
-        f"- **Window:** {min(tss) if tss else '?'} to {max(tss) if tss else '?'} ({len(events)} events, {len(runs)} run summaries, {len(notes)} user notes)",
-        "- **Anonymized:** hosts, Jira keys, local paths, emails, and CLI input values redacted",
-    ]
-    if bad_lines:
-        lines.append(f"- **Malformed log lines skipped:** {bad_lines}")
-
-    # 1. User Notes first (highest human signal)
-    kind_rank = {"bug": 0, "nuisance": 1, "idea": 2}
-    sev_rank = {"high": 0, "med": 1, "low": 2, "": 3}
-    lines += ["", f"## User Notes ({len(notes)})"]
-    if not notes:
-        lines.append("- None.")
-    else:
-        ordered = sorted(
-            notes,
-            key=lambda n: (
-                kind_rank.get(n.get("kind"), 9),
-                sev_rank.get(n.get("severity") or "", 9),
-                n.get("ts") or "",
-            ),
-        )
-        for n in ordered:
-            tag = f"{n.get('kind', 'nuisance')}" + (f" / {n['severity']}" if n.get("severity") else "")
-            ctx_parts = [anon.text(n["run"]) if n.get("run") else "", anon.route(n["route"]) if n.get("route") else ""]
-            ctx = f" ({', '.join(p for p in ctx_parts if p)})" if any(ctx_parts) else ""
-            lines.append(f"- **[{tag}]** `{n.get('ts', '?')}`{ctx}: {anon.text(n.get('text', ''))}")
-
+def _friction_sections(by_type, anon):
+    """Recurring Friction & Failures: one section per kind of automatic event that has entries."""
+    lines = []
     # 2. Recurring Friction & Failures
     lines += ["", "## Recurring Friction & Failures"]
     sections = []
@@ -398,7 +360,12 @@ def render_digest(events, anon, bad_lines=0):
         sections.append("\n".join(sec))
 
     lines.append("\n\n".join(sections) if sections else "- No friction or failure events in this window.")
+    return lines
 
+
+def _run_health(runs, anon):
+    """Run Health Summary: the runs in a table, then what slowed them."""
+    lines = []
     # 3. Run Health Summary
     lines += ["", f"## Run Health Summary ({len(runs)} runs)"]
     if not runs:
@@ -466,6 +433,53 @@ def render_digest(events, anon, bad_lines=0):
                     f"| {r.get('turns', '-')} | {r.get('duration_s', '-')}s "
                     f"| {r.get('bugs_found', 0)} | {r.get('audit_issues', 0)} |"
                 )
+    return lines
+
+
+def render_digest(events, anon, bad_lines=0):
+    """Render anonymized Markdown digest from a non-empty list of event dicts."""
+    versions = sorted({str(e.get("v") or core.UNKNOWN) for e in events})
+    tss = [str(e.get("ts") or "") for e in events if e.get("ts")]
+    by_type = defaultdict(list)
+    for e in events:
+        by_type[str(e.get("type"))].append(e)
+
+    runs = by_type["run_summary"]
+    notes = by_type["user_note"]
+    lines = [
+        "# qa-sdet Plugin Digest",
+        "",
+        f"- **Plugin version(s):** {', '.join(versions)}",
+        f"- **Window:** {min(tss) if tss else '?'} to {max(tss) if tss else '?'} ({len(events)} events, {len(runs)} run summaries, {len(notes)} user notes)",
+        "- **Anonymized:** hosts, Jira keys, local paths, emails, and CLI input values redacted",
+    ]
+    if bad_lines:
+        lines.append(f"- **Malformed log lines skipped:** {bad_lines}")
+
+    # 1. User Notes first (highest human signal)
+    kind_rank = {"bug": 0, "nuisance": 1, "idea": 2}
+    sev_rank = {"high": 0, "med": 1, "low": 2, "": 3}
+    lines += ["", f"## User Notes ({len(notes)})"]
+    if not notes:
+        lines.append("- None.")
+    else:
+        ordered = sorted(
+            notes,
+            key=lambda n: (
+                kind_rank.get(n.get("kind"), 9),
+                sev_rank.get(n.get("severity") or "", 9),
+                n.get("ts") or "",
+            ),
+        )
+        for n in ordered:
+            tag = f"{n.get('kind', 'nuisance')}" + (f" / {n['severity']}" if n.get("severity") else "")
+            ctx_parts = [anon.text(n["run"]) if n.get("run") else "", anon.route(n["route"]) if n.get("route") else ""]
+            ctx = f" ({', '.join(p for p in ctx_parts if p)})" if any(ctx_parts) else ""
+            lines.append(f"- **[{tag}]** `{n.get('ts', '?')}`{ctx}: {anon.text(n.get('text', ''))}")
+
+    lines += _friction_sections(by_type, anon)
+
+    lines += _run_health(runs, anon)
 
     md = "\n".join(lines) + "\n"
     return scrub.redact_json_text(scrub.redact(md))
