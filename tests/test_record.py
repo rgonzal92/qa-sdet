@@ -5,11 +5,10 @@ import dataclasses
 import inspect
 import unittest
 
-from support import load_hook
+from guard_support import gp as guard_paths  # the guard's modules, loaded once in the guard tests' sandbox
 
 from qa_sdet import core
 
-guard_paths = load_hook("guard_for_record").guard_paths
 BOTH = (("core", core.record), ("guard_paths", guard_paths.record))
 
 
