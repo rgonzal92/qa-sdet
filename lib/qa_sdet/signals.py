@@ -27,7 +27,7 @@ def _names_request(named, method, path):
     """Whether lower-cased text names a call by method and path: 'POST /api/zones' or 'POST http://host/api/zones'.
     A path alone (the run's own target, a passing note's 'GET /api/zones') explains no other call failing there.
     A draft naming the record placeholder ('GET /api/zones/:id') names the call on a record ('/api/zones/42')."""
-    paths = {path.lower(), core._ids(path).lower() or path.lower()}
+    paths = {path.lower(), core.mask_ids(path).lower() or path.lower()}
     return any(
         re.search(rf"\b{re.escape(method.lower())}\s+(?:https?://[^/\s]+)?{re.escape(p)}(?![\w/.-])", named)
         for p in paths
@@ -84,7 +84,7 @@ PROFILE_SEGMENTS = {
 
 def _credential_call(path):
     """Whether a path is a login, session, token or user-profile call, whose body carries credentials."""
-    return bool(probe._auth_segment(path)) or any(
+    return bool(probe.auth_segment(path)) or any(
         re.sub(r"[-_]", "", x.lower()) in PROFILE_SEGMENTS for x in path.split("/")
     )
 
@@ -211,7 +211,7 @@ def check_body(run_dir, slug, index, text, op="", mutation=False):
     line = next(
         (
             m
-            for m in map(REQUEST_LINE.fullmatch, results._text(data / f"requests-{slug}.log").splitlines())
+            for m in map(REQUEST_LINE.fullmatch, results.read_text(data / f"requests-{slug}.log").splitlines())
             if m and m.group(1) == index
         ),
         None,
@@ -292,9 +292,9 @@ def sweep_bodies(run_dir, slug):
     from . import crawl  # the playwright-cli runner; crawl imports nothing from this module
 
     log = Path(run_dir) / ".data" / f"requests-{slug}.log"
-    ok, listed = crawl._pw(["requests", "--all"], SWEEP_CALL_SECONDS)
+    ok, listed = crawl.pw(["requests", "--all"], SWEEP_CALL_SECONDS)
     if ok:
-        core._write(log, listed)
+        core.write(log, listed)
     elif not log.is_file():
         raise core.BadInput(
             f"body-check --all: the browser isn't open and there is no {log} ({core.short(' '.join(listed.split()), 120)})"
@@ -306,10 +306,10 @@ def sweep_bodies(run_dir, slug):
             break
         op, mutation, body = "", False, "{}"  # (a sign-in operation is settled as an empty answer, unread)
         if RPC_PATH.search(path):
-            ok, sent = crawl._pw(["--raw", "request-body", index], SWEEP_CALL_SECONDS)
+            ok, sent = crawl.pw(["--raw", "request-body", index], SWEEP_CALL_SECONDS)
             op, mutation = _gql_operation(sent) if ok else ("", False)
         if not _sign_in_operation(op):
-            ok, body = crawl._pw(["--raw", "response-body", index], SWEEP_CALL_SECONDS)
+            ok, body = crawl.pw(["--raw", "response-body", index], SWEEP_CALL_SECONDS)
             if not ok:  # the browser dropped the request, or it is closed: the call stays a suspect
                 unread, why = unread + 1, why or core.short(" ".join(body.split()), 120)
                 continue
@@ -342,14 +342,14 @@ def triage_signals(run_dir, slug, run, hosts=None):
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
     names, gone, unchecked = _body_ops(data, slug), _body_gone(data, slug), []
     probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (probe._note_probe): the explorer's own
-    for line in results._text(data / f"probes-{slug}.jsonl").splitlines():
+    for line in results.read_text(data / f"probes-{slug}.jsonl").splitlines():
         try:
             p = json.loads(line)
             probes.append([str(p["method"]), scrub.redact(str(p["url"])), str(p["status"])])
         except (ValueError, KeyError, TypeError):
             continue
     probe_failed = {url for _, url, status in probes if status == "FAILED"}  # the console names these too
-    for line in scrub.redact(results._text(data / f"requests-{slug}.log")).splitlines():
+    for line in scrub.redact(results.read_text(data / f"requests-{slug}.log")).splitlines():
         m = REQUEST_LINE.fullmatch(line)
         if not m:
             continue
@@ -364,7 +364,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
         if hosts and url.lower().startswith(("http://", "https://")) and not core.url_allowed(url, hosts):
             third += code == "FAILED" or int(code) >= 400
             continue
-        shape = core._ids(path) or path
+        shape = core.mask_ids(path) or path
         if method == "GET":  # a POST many times is a user (or a test) saving records, not a fetch loop
             calls.setdefault((method, shape), [0, index])[0] += 1
         notes = f" [{'; '.join(checked[index])}]" if checked.get(index) else ""  # what body-check saw in its body
@@ -390,7 +390,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     for (method, shape), (n, index) in calls.items():
         if n >= STORM_CALLS:
             found[f"{method} {shape} ×{n} (the same call {n} times: a request loop?)"] = [(method, shape), 1, index]
-    for line in scrub.redact(results._text(data / f"console-{slug}.log")).splitlines():
+    for line in scrub.redact(results.read_text(data / f"console-{slug}.log")).splitlines():
         if not line.strip() or line[:1].isspace() or line.startswith(("###", "Total messages:", "Returning ")):
             continue  # blank, stack lines, headers
         level = re.match(r"\[(\w+)\]\s*", line)  # a page error (uncaught exception) has no [LEVEL]
@@ -402,12 +402,14 @@ def triage_signals(run_dir, slug, run, hosts=None):
                 f" [leak: {label}]" for label, rx in LEAKS if rx.search(msg)
             )  # the server's own words in the page
             found.setdefault(f"console: {msg}{leaks}", [msg[:60], 0, None])[1] += 1
-    drafts = "".join(map(results._text, sorted((Path(run_dir) / "bugs").glob("*.md"))))
+    drafts = "".join(map(results.read_text, sorted((Path(run_dir) / "bugs").glob("*.md"))))
     named = (json.dumps(run, ensure_ascii=False) + drafts).lower()  # a console message: any mention in the run
     # a failed request: bugs, notes, non-PASS cases and drafts only; a passing fact or locator that mentions the path
     # (`POST /form saves the zone`) must not hide `POST /form → 500`
-    cases = [c for c in results._list(run, "cases") if core.case_status(c.get("status")) != "PASS"]
-    explains = (json.dumps([results._list(run, "bugs"), run.get("notes"), cases], ensure_ascii=False) + drafts).lower()
+    cases = [c for c in results.entries(run, "cases") if core.case_status(c.get("status")) != "PASS"]
+    explains = (
+        json.dumps([results.entries(run, "bugs"), run.get("notes"), cases], ensure_ascii=False) + drafts
+    ).lower()
     explained = lambda w: _names_request(explains, *w) if isinstance(w, tuple) else w.lower() in named
     rank = lambda c: 0 if RPC_PATH.search(c[1]) else 1
     suspects = {}
@@ -427,7 +429,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     }
 
 
-def _signal_baseline():
+def signal_baseline():
     """{(page, kind, key): (status, runs seen, first run)} from the memory DB, opened read-only; {} without one (the
     report renders without a DB too)."""
     import sqlite3
@@ -448,7 +450,7 @@ def _signal_baseline():
         return {}
 
 
-def _signals(run_dir, name, run, hosts=None, baseline=None):
+def run_signals(run_dir, name, run, hosts=None, baseline=None):
     """([(signal, count)], third-party count) of run file `name` (triage_signals). With the memory's baseline: a signal
     the user ignored is left out, one first seen in this run is marked [NEW], one seen before says in how many runs."""
     from . import memory

@@ -10,7 +10,7 @@ def _unrechecked_fixed(con, route, build):
     rows = [r[0] for r in con.execute("SELECT hash FROM bugs WHERE page=? AND status='FIXED'", (route,))]
     if not rows:
         return 0
-    checked = cards._rechecked(con, route, build)
+    checked = cards.rechecked(con, route, build)
     return sum(h.lower() not in checked for h in rows)
 
 
@@ -68,15 +68,15 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         for pg in pages
         if not pg["last_verified"] and pg["build"] == core.UNKNOWN and visits.get(pg["route"])
     }
-    changed, unchecked = cards._source_changes(con, verified)
+    changed, unchecked = cards.source_changes(con, verified)
     hot = _hotspots(con)
     regressed = {p for (p,) in con.execute("SELECT DISTINCT page FROM bugs WHERE status='REGRESSED'")}
     forms = set()  # pages with something to submit: a validation rule or a write call
     for x in con.execute("SELECT page, kind, label, value FROM codemap WHERE page != '*' AND kind IN ('rule', 'api')"):
         if (
             x["kind"] == "rule"
-            or codemap._api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE")
-            or codemap._api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE")
+            or codemap.api_ref(x["value"])[0] in ("POST", "PUT", "PATCH", "DELETE")
+            or codemap.api_ref(x["label"])[0] in ("POST", "PUT", "PATCH", "DELETE")
         ):
             forms.add(x["page"])
     forms |= {shell for shell, (_, module) in bound.items() if module in forms}
@@ -85,14 +85,14 @@ def gaps(con, changed_only=False, top=None, as_json=False):
         r, b = pg["route"], current or pg["build"]
         never, unread = pg["explored"] is None, pg["build"] == core.UNKNOWN
         old = not never and not unread and pg["build"] != b
-        _, tried, targets = cards._coverage(con, r, b)
-        untried, untested = sum(h not in tried for h in core.HEURISTICS), len(cards._untested_rules(con, r, targets))
+        _, tried, targets = cards.coverage(con, r, b)
+        untried, untested = sum(h not in tried for h in core.HEURISTICS), len(cards.untested_rules(con, r, targets))
         open_bugs = con.execute(
             "SELECT count(*) FROM bugs WHERE page=? AND status IN (?,?,?)", (r, *core.VISIBLE)
         ).fetchone()[0]
         fixed_recheck = _unrechecked_fixed(con, r, b)
-        states = len(cards._due_states(con, r, b))
-        apis = cards._unexercised_apis(con, r, b, bound)
+        states = len(cards.due_states(con, r, b))
+        apis = cards.unexercised_apis(con, r, b, bound)
         src = changed.get(r, [])
         if changed_only and not src:
             continue
@@ -201,7 +201,7 @@ def _write_errors_untried(con, route, build, bound=None):
     for m, p, k in con.execute(
         f"SELECT method, path, status_class FROM observed_endpoints WHERE route IN "
         f"({','.join('?' * len(group))}) AND {cards.ON_BUILD}",
-        (*group, build, cards._week_ago()),
+        (*group, build, cards.week_ago()),
     ):
         seen.setdefault((m, p), set()).add(k)
     return sorted(
@@ -230,9 +230,9 @@ def blindspots(con, route=None, as_json=False):
         item = {
             "route": r,
             "build": b,
-            "unexercised_apis": cards._unexercised_apis(con, r, b, bound),
+            "unexercised_apis": cards.unexercised_apis(con, r, b, bound),
             "untested_write_errors": _write_errors_untried(con, r, b, bound),
-            "unvisited_states": [x["state_key"] for x in cards._due_states(con, r, b)],
+            "unvisited_states": [x["state_key"] for x in cards.due_states(con, r, b)],
             "not_tested": [
                 {"category": x["category"], "text": x["text"], "runs": x["seen_runs"]}
                 for x in con.execute(

@@ -101,11 +101,11 @@ class Inbox(Base):
         self.assertIn("6000 open, 0 new", cli("inbox", str(self.proj), stdin=big)[1])  # was 1000 new forever
 
     def test_failed_write_keeps_tickets_new(self):  # keys were remembered before INBOX.md was written
-        with mock.patch.object(core, "_write", side_effect=OSError("disk full")), self.assertRaises(OSError):
+        with mock.patch.object(core, "write", side_effect=OSError("disk full")), self.assertRaises(OSError):
             cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))
         self.assertIn("2 open, 2 new", cli("inbox", str(self.proj), stdin=json.dumps(self.ACLI))[1])
 
-    def test_planted_temp_link_is_not_written_through(self):  # _write opened .INBOX.md.tmp following links
+    def test_planted_temp_link_is_not_written_through(self):  # core.write opened .INBOX.md.tmp following links
         victim = self.t / "victim"
         victim.write_text("keep")
         (self.proj / "qa-out").mkdir()
@@ -123,14 +123,14 @@ class Inbox(Base):
         a, b = core.connect(), core.connect()
         self.addCleanup(a.close)
         self.addCleanup(b.close)
-        real = core._write
+        real = core.write
 
         def b_runs_meanwhile(path, text):
-            core._write = real
+            core.write = real
             inbox.inbox(b, self.proj, [{"key": "OPS-2"}])
             real(path, text)
 
-        with mock.patch.object(core, "_write", b_runs_meanwhile):
+        with mock.patch.object(core, "write", b_runs_meanwhile):
             inbox.inbox(a, self.proj, [{"key": "OPS-1"}])
         self.assertEqual(sorted(json.loads(core.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
 

@@ -149,7 +149,7 @@ def doctor():
         line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost", f"add {missing}")
         bs = cfg.get("buildSource")
         if bs is None or bs == "":  # no build the browser can read: session._read_build takes the stored one
-            stored = session._stored_build()
+            stored = session.stored_build()
             line(
                 bool(stored),
                 f"buildSource unset: using the stored build {stored} (qa-mem stale)"

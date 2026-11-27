@@ -290,7 +290,7 @@ class Apply(CodeMapCase):
         ingest.ingest_pending(self.dir / "qa-out")
         self.assertTrue(ingest.PARKED)
         self.assertEqual(self.con.execute("SELECT count(*) FROM codemap").fetchone()[0], 0)
-        self.assertEqual(codemap._hashes(self.con, "frontend", str(repo)), {})  # not marked read
+        self.assertEqual(codemap.file_hashes(self.con, "frontend", str(repo)), {})  # not marked read
 
     def test_cap_evictions_dont_cause_endless_rereads(self):
         """Rows past a page's cap are dropped (documented), and their files are not re-read on every run."""
@@ -814,7 +814,7 @@ class Code(CodeMapCase):
         self.assertIn("GET /zones = list", c)  # single segment, absolute URL on the frontend side
         self.assertNotIn("DELETE /zones", c)  # different method
         self.assertNotIn("POST /zones name", c)
-        self.assertEqual(codemap._api_ref("fetch(`${BASE}/zones/${id}`)"), ("GET", "zones/:id"))  # complete, no method
+        self.assertEqual(codemap.api_ref("fetch(`${BASE}/zones/${id}`)"), ("GET", "zones/:id"))  # complete, no method
 
     def test_backend_links_need_the_same_resource(self):
         ui = git_repo(self.dir / "ui", {"src/I.jsx": "fetch('/api/incidents/1/status', {method: 'PATCH'})"})
@@ -886,19 +886,19 @@ class Code(CodeMapCase):
         self.assertNotIn("admin", z)
 
     def test_api_path_shapes(self):
-        p = lambda text: codemap._api_ref(text)[1]
+        p = lambda text: codemap.api_ref(text)[1]
         self.assertEqual(p("GET /api/incidents?x=1"), "api/incidents")
         self.assertEqual(p("fetch('api/incidents.json')"), "api/incidents")
         self.assertEqual(p("PUT /api/zones/{id}"), "api/zones/:id")
         self.assertEqual(p("getIncidents"), "")
-        r = codemap._api_ref
+        r = codemap.api_ref
         self.assertEqual(r("fetch('/api/zones/' + id + '/detours')"), ("", "api/zones/:id/detours"))
         self.assertEqual(r("api.get<Zone[]>('/zones')"), ("GET", "zones"))
         self.assertEqual(r("http.post<Zone>('/api/zones', z)"), ("POST", "api/zones"))
 
     def test_fetch_methods(self):
         """A method in the options is read; a complete fetch without one is a GET; a cut or variable call stays open."""
-        r = codemap._api_ref
+        r = codemap.api_ref
         self.assertEqual(r("fetch(`${API}/zones`, {method: 'PUT'})"), ("PUT", "zones"))
         self.assertEqual(r("axios({ method: 'delete', url: '/api/zones' })"), ("DELETE", "api/zones"))
         self.assertEqual(r("fetch('api/incidents.json', { headers: { 'x-api-key': k } })"), ("GET", "api/incidents"))

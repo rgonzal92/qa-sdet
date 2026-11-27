@@ -353,7 +353,7 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         except (OSError, ValueError):
             saved = {}
         saved[args[1]] = hits
-        core._write(f, json.dumps(saved, indent=1) + "\n")
+        core.write(f, json.dumps(saved, indent=1) + "\n")
         print(f"{args[1]}: {len(hits)} possible duplicate(s) saved; REPORT.md shows them above its filing command")
     elif cmd == "audit-bugs":
         if len(args) != 1 or not Path(args[0]).is_dir():

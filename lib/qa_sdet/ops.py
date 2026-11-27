@@ -76,7 +76,7 @@ def run_label(keys=None, route=None, label=None, prefix=""):
 
 def git_exclude(project, entries=("qa-out/", ".playwright-cli/")):
     """Keep run output out of commits: list it in the repo's info/exclude (works in worktrees and submodules)."""
-    out = core._git(project, "rev-parse", "--git-path", "info/exclude")
+    out = core.git(project, "rev-parse", "--git-path", "info/exclude")
     if not out or not out.strip():
         return
     path = Path(out.strip())
@@ -96,7 +96,7 @@ def git_exclude(project, entries=("qa-out/", ".playwright-cli/")):
             pass  # an unwritable .git: the run still works, the output just isn't git-ignored
 
 
-def _project(project):
+def project_dir(project):
     """The project folder, or BadInput (a typo must not create a stray folder or report a silent no-op)."""
     project = Path(project).resolve()
     if not project.is_dir():
@@ -109,7 +109,7 @@ RUN_SUBDIRS = ("bugs", "evidence", "repro", "scratch", ".data")
 
 def make_rundir(project, label, day=None):
     """<project>/qa-out/<YYYY-MM-DD>-<label>[-n]/ with bugs/ evidence/ repro/ scratch/ .data/; a fresh folder every run."""
-    project = _project(project)
+    project = project_dir(project)
     root = project / "qa-out"
     root.mkdir(exist_ok=True)
     base = f"{day or datetime.now().strftime('%Y-%m-%d')}-{label}"  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
@@ -131,7 +131,7 @@ def make_rundir(project, label, day=None):
 def ticket_rundir(project, key):
     """<project>/qa-out/<KEY>/: one folder per ticket, made once and reused by every re-run (results stay in its run
     files). A path of that name that is no real folder is refused: a planted link must not take the run's files."""
-    project = _project(project)
+    project = project_dir(project)
     root = project / "qa-out"
     root.mkdir(exist_ok=True)
     run = root / run_label(keys=[key])
@@ -164,12 +164,12 @@ def marker_start(
     hooks. faults and api_writes are the run's opt-in flags (route / network-state-set; POST, PUT, PATCH, DELETE through
     api-probe). A run has no limit: it goes until the agent reaches its verdict."""
     t = time.time() if t is None else t
-    root = _project(project) / "qa-out"
+    root = project_dir(project) / "qa-out"
     root.mkdir(exist_ok=True)
     data: Marker = {"expires": int(t + MARKER_HOURS * 3600), "faults": bool(faults), "api_writes": bool(api_writes)}
     if run_dir:
         data |= {"run_dir": str(run_dir), "slug": str(slug)}
-    core._write(root / ".active", json.dumps(data) + "\n")
+    core.write(root / ".active", json.dumps(data) + "\n")
     return data
 
 
@@ -241,7 +241,7 @@ def dispatch(
         plan, why = None, type(e).__name__
     if not isinstance(plan, dict):
         raise core.BadInput(f"dispatch: {data / 'plan.json'} is missing or not a JSON object ({why})")
-    cfg, hosts = session._qa_config("dispatch")
+    cfg, hosts = session.qa_config("dispatch")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     target = route if "://" in route else base + ("" if route.startswith("/") else "/") + route
     if not core.url_allowed(target, hosts):
@@ -285,8 +285,8 @@ def dispatch(
     elif (
         all_cases
         or earlier is None
-        or results._first_word(earlier.get("status")) == "blocked"
-        or results._older_build(earlier.get("build"), results._now_build(results.load_run(run)["runs"]))
+        or results.first_word(earlier.get("status")) == "blocked"
+        or results.older_build(earlier.get("build"), results.now_build(results.load_run(run)["runs"]))
     ):
         given = cases
     else:
@@ -380,8 +380,8 @@ def dispatch(
     (run / "scratch").mkdir(exist_ok=True)  # a run folder older than scratch/ gets one with its next explorer
     if earlier:  # outside run-*.json, which the loaders glob; the guard keeps the explorer from writing it
         prior = {"given": [text(c.get("id")) for c in given], "ran": ran, "run": earlier}
-        core._write(data / f"prior-{slug}.json", json.dumps(prior, ensure_ascii=False) + "\n")
-    core._write(brief, scrub.redact("\n".join(out)) + "\n")
+        core.write(data / f"prior-{slug}.json", json.dumps(prior, ensure_ascii=False) + "\n")
+    core.write(brief, scrub.redact("\n".join(out)) + "\n")
     if held:
         _held_notice(run, slug, len(given), len(held))
     marker_start(run.parent.parent, faults, run_dir=run, slug=slug, api_writes=api_writes)
@@ -428,7 +428,7 @@ def _held_notice(run, slug, given, held):
         pass
 
 
-def _run_of(root):
+def run_of(root):
     """(marker, run folder, slug) of the explorer run the marker names, or None (crawl, discover, a malformed marker)."""
     try:
         m = json.loads((root / ".active").read_text())
@@ -589,8 +589,8 @@ def _log_run_summary(root, run, lines):
 
 
 def marker_stop(project: str | Path) -> None:
-    root = _project(project) / "qa-out"
-    run = _run_of(root)
+    root = project_dir(project) / "qa-out"
+    run = run_of(root)
     lines = _trace_lines(root, run[0].get("expires")) if run else []
     _log_run_summary(root, run, lines)
     if run:

@@ -76,11 +76,11 @@ class ShellModules(GraphCase):
         self.mount("/a", "/b")
         self.mount("/b", "/a")
         self.assertEqual(codemap.module_target(self.con, "/a"), "/b")
-        self.assertEqual(len(codemap._codemap_rows(self.con, "/a")), 2)  # /a's route row and /b's: nothing chained
+        self.assertEqual(len(codemap.codemap_rows(self.con, "/a")), 2)  # /a's route row and /b's: nothing chained
         self.assertIn("PAGE /a", cards.card(self.con, "/a"))
 
     def test_the_shell_route_has_its_modules_rows_and_the_backend_rules(self):
-        rows = codemap._codemap_rows(self.con, "/reports/daily")
+        rows = codemap.codemap_rows(self.con, "/reports/daily")
         self.assertEqual(
             {(x["page"], x["kind"]) for x in rows},
             {
@@ -272,31 +272,31 @@ class CrossPageRules(GraphCase):
         self.row("/zones", "rule", "speed limit", "max 999", "src/List.jsx")  # a reader: not compared
 
     def test_the_same_field_with_another_limit_on_the_edit_page_is_a_hint(self):
-        hints = cards._cross_page_rules_differ(self.con, "/zones/new")
+        hints = cards.cross_page_rules_differ(self.con, "/zones/new")
         self.assertEqual(hints, ["Speed limit: here max 130 vs /zones/:id max 150"])
         self.assertEqual(
-            cards._cross_page_rules_differ(self.con, "/zones/:id"), ["speedLimit: here max 150 vs /zones/new max 130"]
+            cards.cross_page_rules_differ(self.con, "/zones/:id"), ["speedLimit: here max 150 vs /zones/new max 130"]
         )
 
     def test_a_flag_one_page_lacks_is_named(self):
         self.row("/zones/new", "rule", "name", "required, max 40", "src/New.jsx")
         self.row("/zones/:id", "rule", "Name", "max 40", "src/Edit.jsx")
-        self.assertIn("name: here only: required", cards._cross_page_rules_differ(self.con, "/zones/new"))
+        self.assertIn("name: here only: required", cards.cross_page_rules_differ(self.con, "/zones/new"))
 
     def test_agreeing_rules_fields_on_one_page_only_and_other_resources_say_nothing(self):
         self.row("/zones/new", "rule", "color", "required", "src/New.jsx")  # no counterpart on the edit page
         self.row("/zones/:id", "rule", "Speed limit", "min 0, max 130", "src/Edit.jsx")  # the same rule, a second label
         self.assertEqual(
-            cards._cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"]
+            cards.cross_page_rules_differ(self.con, "/zones/new"), ["Speed limit: here max 130 vs /zones/:id max 150"]
         )
         self.calls("/closures/new", "POST /api/closures")
         self.row("/closures/new", "rule", "speed limit", "max 5", "src/Closure.jsx")
-        self.assertEqual(len(cards._cross_page_rules_differ(self.con, "/zones/new")), 1)
-        self.assertEqual(cards._cross_page_rules_differ(self.con, "/closures/new"), [])
+        self.assertEqual(len(cards.cross_page_rules_differ(self.con, "/zones/new")), 1)
+        self.assertEqual(cards.cross_page_rules_differ(self.con, "/closures/new"), [])
 
     def test_the_backend_rules_are_not_compared_here(self):
         self.row("*", "rule", "POST /api/zones speed", "max 1", "routes/zones.js", area="backend")
-        self.assertEqual(len(cards._cross_page_rules_differ(self.con, "/zones/new")), 1)
+        self.assertEqual(len(cards.cross_page_rules_differ(self.con, "/zones/new")), 1)
 
     def test_the_card_names_them_as_a_hint(self):
         card = cards.card(self.con, "/zones/new")

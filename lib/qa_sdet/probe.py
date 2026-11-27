@@ -66,7 +66,7 @@ def _api_writes_on():
     return False
 
 
-def _auth_segment(url):
+def auth_segment(url):
     """The login/session/token word a path segment of the URL is, or None (`/api/Sign-In.json` -> signin)."""
     parts = [unquote(x).lower() for x in urlsplit(url).path.split("/") if x]
     if parts:
@@ -101,7 +101,7 @@ def _note_probe(method, url, status):
     it as it logs the page's own, and the report's signals leave it out (found live: a probe that failed on CORS was
     listed as a new severe app signal). Best effort: no run, or a file that can't be written, changes nothing."""
     for base in dict.fromkeys(b for b in (os.getcwd(), os.environ.get("CLAUDE_PROJECT_DIR")) if b):
-        run = ops._run_of(Path(base) / "qa-out")
+        run = ops.run_of(Path(base) / "qa-out")
         if run:
             try:
                 with open(run[1] / ".data" / f"probes-{run[2]}.jsonl", "a", encoding="utf-8") as f:
@@ -132,7 +132,7 @@ def _probe_page(method, url, headers, body, needle=None):
     try:
         r = subprocess.run(
             ["playwright-cli", "-s=qa", "--raw", "eval", js],
-            env=session._pw_env(),
+            env=session.pw_env(),
             capture_output=True,
             text=True,
             errors="replace",
@@ -143,9 +143,9 @@ def _probe_page(method, url, headers, body, needle=None):
     if r.returncode != 0:
         detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
         return None, f"api-probe: browser tool failed ({detail}); {hint}"
-    res = session._unwrap_raw(r.stdout)
+    res = session.unwrap_raw(r.stdout)
     if isinstance(res, str):
-        res = session._unwrap_raw(res)
+        res = session.unwrap_raw(res)
     if isinstance(res, dict) and res.get("error"):
         _note_probe(method, url, "FAILED")
         return None, f"api-probe: the request failed in the browser: {core.short(str(res['error']), 200)}"
@@ -207,10 +207,10 @@ def api_probe(method, url, body=None, content_type=None, headers=()):
     method = str(method).upper()
     if method not in API_READS + API_WRITES:
         raise core.BadInput(f"api-probe: method must be one of {', '.join(API_READS + API_WRITES)} (got {method!r})")
-    _, hosts = session._qa_config("api-probe")
+    _, hosts = session.qa_config("api-probe")
     if not core.url_allowed(url, hosts):
         raise core.BadInput(f"api-probe: {url!r} must be a full http(s) URL in allowedHosts ({sorted(hosts)})")
-    if word := _auth_segment(url):
+    if word := auth_segment(url):
         raise core.BadInput(
             f"api-probe: {urlsplit(url).path!r} looks like a login, session or token endpoint ({word}); "
             "credentials stay out of agent output, so it is not probed"

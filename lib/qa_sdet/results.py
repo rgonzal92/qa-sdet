@@ -26,7 +26,7 @@ VERDICT_ICON = {
 }
 
 
-def _load_json(path, warnings):
+def load_json(path, warnings):
     try:
         # not a vulnerability (S2083): callers pass fixed names inside the run folder; bug ids are validated BUG-n
         return scrub.redact_json(json.loads(Path(path).read_text(encoding="utf-8-sig")))  # NOSONAR
@@ -37,7 +37,7 @@ def _load_json(path, warnings):
         return None
 
 
-def _mtime(path):
+def mtime(path):
     try:
         return path.stat().st_mtime
     except OSError:
@@ -48,17 +48,17 @@ def load_run(run_dir: str | Path) -> dict[str, Any]:
     """{'plan': {...}, 'runs': [(file name, run dict)], 'warnings': [...], 'unread': [run file names that couldn't be
     read: verdict() blocks on them]}; missing pieces are simply absent."""
     data, warnings, unread = Path(run_dir) / ".data", [], []
-    plan = _load_json(data / "plan.json", warnings)
+    plan = load_json(data / "plan.json", warnings)
     if plan is not None and not isinstance(plan, dict):
         warnings.append("plan.json is not an object")
         plan = None
     runs = []
-    for f in sorted(data.glob("run-*.json"), key=lambda x: (_mtime(x), x.name)):
+    for f in sorted(data.glob("run-*.json"), key=lambda x: (mtime(x), x.name)):
         if f.is_symlink() and not f.exists():
             warnings.append(f"{f.name} unreadable (FileNotFoundError)")
             unread.append(f.name)
             continue
-        r = _load_json(f, warnings)
+        r = load_json(f, warnings)
         if not isinstance(r, dict):  # the file is there, its results are not
             unread.append(f.name)
         if isinstance(r, dict):
@@ -74,14 +74,14 @@ def load_run(run_dir: str | Path) -> dict[str, Any]:
     return {"plan": plan or {}, "runs": runs, "warnings": warnings, "unread": unread}
 
 
-def _list(obj, key):
+def entries(obj, key):
     v = obj.get(key) if isinstance(obj, dict) else None
     return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
 
-def _plan_tickets(plan):
+def plan_tickets(plan):
     """The plan's tickets that can get a verdict: those with a text key."""
-    return [t for t in _list(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
+    return [t for t in entries(plan, "tickets") if isinstance(t.get("key"), str) and t["key"]]
 
 
 # Not tested items are grouped in this order. A plain string (older runs) goes under "other".
@@ -95,7 +95,7 @@ NOT_TESTED_CATEGORIES = [
 ]
 
 
-def _not_tested(obj):
+def not_tested(obj):
     """[(category key, text)] for run['not_tested']: a string (category other) or {"category", "text"}."""
     out = []
     items = obj.get("not_tested") if isinstance(obj, dict) else None
@@ -120,15 +120,15 @@ def bug_id(b):
 MERGE_RANK = ("NOT_RUN", "BLOCKED", "PASS", "QUESTION", "FAIL")  # weakest first: what a run actually saw beats a skip
 
 
-def _now_build(runs):
+def now_build(runs):
     """The build of the newest run (load_run's order) that read one, else None. A ticket's folder keeps every re-run's
     files: a run file from another known build holds results the new build's run has not repeated."""
     known = [b for _, r in runs if (b := core.norm_build(r.get("build"))) != core.UNKNOWN]
     return known[-1] if known else None
 
 
-def _older_build(build, now):
-    """A known build that is not `now` (_now_build's): an unknown one can't be compared."""
+def older_build(build, now):
+    """A known build that is not `now` (now_build's): an unknown one can't be compared."""
     return bool(now) and core.norm_build(build) not in (core.UNKNOWN, now)
 
 
@@ -140,7 +140,7 @@ def merged_cases(
     QUESTION over PASS over BLOCKED over NOT_RUN; the newest run on a tie), so another route listing a case as
     "not run" never hides its FAIL. A plan ticket's PASS whose own `build` is not its run file's (carry_prior kept it
     from an earlier attempt), or whose run file is from another known build than the newest run's (a ticket's folder
-    keeps every re-run's files: a page the new build's run never reached), gets that build and `prior`: _prior_passed
+    keeps every re-run's files: a page the new build's run never reached), gets that build and `prior`: prior_passed
     lists it as a pass not re-run here. A plan case with no id or a repeated one can't get a result: it is left out
     and named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
     blocks them)."""
@@ -149,16 +149,16 @@ def merged_cases(
     results, run_build = {}, {}
     rank = lambda c: MERGE_RANK.index(core.case_status(c.get("status")) or "NOT_RUN")
     for _, r in runs:
-        for c in _list(r, "cases"):
+        for c in entries(r, "cases"):
             if valid_id(c.get("id")):
                 cid = str(c["id"])
                 if cid not in results or rank(c) >= rank(results[cid]):
                     results[cid], run_build[cid] = c, r.get("build")
-    now = _now_build(runs)
+    now = now_build(runs)
     out, seen = [], set()
-    plan_cases = _list(plan, "cases")
+    plan_cases = entries(plan, "cases")
     plan_ids = {str(p["id"]) for p in plan_cases if valid_id(p.get("id"))}
-    keys = [t["key"] for t in _plan_tickets(plan)]
+    keys = [t["key"] for t in plan_tickets(plan)]
     canon = {k.strip().upper(): k for k in keys}
     repeated = {}  # id -> the tickets of every plan case under it: which one a result belongs to can't be told
     for n, c in enumerate(plan_cases + [c for c in results.values() if str(c["id"]) not in plan_ids]):
@@ -192,9 +192,9 @@ def merged_cases(
             "ac": ac,
             "ticket": tk,
             "status": core.case_status(res.get("status")) or "NOT_RUN",
-            "actual": core._s(res.get("actual")),
-            "notes": core._s(res.get("notes")),
-            "bug": core._s(res.get("bug")),
+            "actual": core.as_text(res.get("actual")),
+            "notes": core.as_text(res.get("notes")),
+            "bug": core.as_text(res.get("bug")),
         }
         if "annotated" in res:
             merged["annotated"] = res["annotated"]
@@ -202,7 +202,7 @@ def merged_cases(
         if (
             tk in keys
             and merged["status"] == "PASS"
-            and (ran_on != core.norm_build(run_build.get(cid)) or _older_build(ran_on, now))
+            and (ran_on != core.norm_build(run_build.get(cid)) or older_build(ran_on, now))
         ):
             merged.update(build=ran_on, prior=True)
         out.append(merged)
@@ -218,7 +218,7 @@ def run_bugs(runs: Sequence[tuple[str, JsonObj]], warnings: list[str] | None = N
     out, seen = [], {}
     for name, r in runs:
         route = core.norm_route(r.get("target")) if str(r.get("target") or "").startswith(("/", "http", "#")) else ""
-        for b in _list(r, "bugs"):
+        for b in entries(r, "bugs"):
             b = {**b, "id": bug_id(b), "route": core.norm_route(b.get("route")) or route, "target": route}
             key = b["id"] or (b["route"], core.norm(b.get("title")))
             first = seen.get(key)
@@ -235,13 +235,13 @@ def run_bugs(runs: Sequence[tuple[str, JsonObj]], warnings: list[str] | None = N
     return out
 
 
-def _case_bugs(c):
+def case_bugs(c):
     """Bugs a case names in `bug`: BUG-n ids and known bugs' 12-char hashes ("BUG-2", "BUG-2, 3f9a…", "see BUG-2")."""
     t = str(c.get("bug") or "")
     return set(re.findall(r"BUG-\d+", t)) | {h.lower() for h in re.findall(r"\b[0-9a-fA-F]{12}\b", t)}
 
 
-def _bug_refs(b):
+def bug_refs(b):
     """What a case may call this bug by: its BUG-n id and, for a known bug, its hash."""
     m = re.match(r"#?\s*([0-9a-fA-F]{4,})\b", str(b.get("hash") or "").strip())
     h = m.group(1)[:12].lower() if m else ""
@@ -252,8 +252,8 @@ def ticket_bugs(key, cases, bugs, known=()):
     """Bugs that belong to one ticket: tagged with it, referenced by one of its cases, or untagged on one of its routes
     (unless a case of another ticket names it: then it is that ticket's bug, not every ticket's on a shared page)."""
     mine = [c for c in cases if c.get("ticket") == key]
-    refs = set().union(*map(_case_bugs, mine))
-    named = set().union(*(_case_bugs(c) for c in cases if c.get("ticket") and c.get("ticket") != key))
+    refs = set().union(*map(case_bugs, mine))
+    named = set().union(*(case_bugs(c) for c in cases if c.get("ticket") and c.get("ticket") != key))
     routes = {core.norm_route(c.get("route")) for c in mine if c.get("route")}
     tickets = {str(c.get("ticket")).strip().upper() for c in cases if c.get("ticket")} | {
         str(k).strip().upper() for k in known
@@ -264,16 +264,16 @@ def ticket_bugs(key, cases, bugs, known=()):
         b
         for b in bugs
         if tag(b) == str(key).strip().upper()
-        or (_bug_refs(b) & refs)
+        or (bug_refs(b) & refs)
         or (
             tag(b) not in tickets
             and (b.get("route") in routes or b.get("target") in routes)
-            and not (_bug_refs(b) & named)
+            and not (bug_refs(b) & named)
         )
     ]
 
 
-def _bug_owners(bugs, cases, tickets):
+def bug_owners(bugs, cases, tickets):
     """Per bug, the plan tickets it counts for (as their verdicts count it), else the ticket it names (not 'none').
     One ticket_bugs pass per ticket: each pass reads every case."""
     owned = [(str(t), {id(x) for x in ticket_bugs(t, cases, bugs, tickets)}) for t in tickets]
@@ -284,13 +284,13 @@ def _bug_owners(bugs, cases, tickets):
     ]
 
 
-def _first_word(v):
+def first_word(v):
     """'confirmed' from 'Confirmed (2/2)', 'high' from 'High ': agents add words to the value."""
     return (core.norm(v).split() or [""])[0]
 
 
-def _serious(b):
-    return _first_word(b.get("classification")) == "confirmed" and _first_word(b.get("severity")) in (
+def is_serious(b):
+    return first_word(b.get("classification")) == "confirmed" and first_word(b.get("severity")) in (
         "critical",
         "high",
     )
@@ -298,8 +298,8 @@ def _serious(b):
 
 def _bug_word(b):
     sev = " ".join(str(b.get("severity") or "").split()).upper() or "unrated"
-    extra = "" if _first_word(b.get("classification")) in ("confirmed", "") else f" {str(b['classification']).lower()}"
-    name = b.get("id") or ("known bug " if b.get("hash") else "") + " ".join(core._s(b.get("title")).split())
+    extra = "" if first_word(b.get("classification")) in ("confirmed", "") else f" {str(b['classification']).lower()}"
+    name = b.get("id") or ("known bug " if b.get("hash") else "") + " ".join(core.as_text(b.get("title")).split())
     return f"{name} {sev}{extra}"
 
 
@@ -307,30 +307,30 @@ def _some(parts, n=3):
     return "; ".join(parts[:n]) + (f"; +{len(parts) - n} more" if len(parts) > n else "")
 
 
-def _ac_id(ac):
+def ac_id(ac):
     """An AC's id as text ('' when missing or not a string or number: a list there must not break the report)."""
     return str(ac["id"]).strip() if isinstance(ac.get("id"), (str, int)) and not isinstance(ac["id"], bool) else ""
 
 
-def _ac_key(a):
+def ac_key(a):
     """An AC id as compared: case and spaces don't count ('ac-1 ' is AC-1)."""
     return re.sub(r"\s+", "", str(a)).upper()
 
 
-def _case_acs(c):
-    """The AC ids a case covers, as _ac_key gives them: "AC-1" or "AC-1, AC-2"."""
-    return {_ac_key(a) for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
+def case_acs(c):
+    """The AC ids a case covers, as ac_key gives them: "AC-1" or "AC-1, AC-2"."""
+    return {ac_key(a) for a in re.split(r"[,;]", str(c.get("ac") or "")) if a.strip()}
 
 
-def _blocked_runs(cases, runs):
+def blocked_runs(cases, runs):
     """[(file name, run)] of the runs that ended BLOCKED on one of these cases' pages or reporting one of them: their
     PASS results can't be trusted. The one rule for verdict() and for what a partial --retest must re-run."""
     ids, routes = {c["id"] for c in cases}, {core.norm_route(c.get("route")) for c in cases if c.get("route")}
     return [
         (name, r)
         for name, r in runs
-        if _first_word(r.get("status")) == "blocked"
-        and (core.norm_route(r.get("target")) in routes or any(str(x.get("id")) in ids for x in _list(r, "cases")))
+        if first_word(r.get("status")) == "blocked"
+        and (core.norm_route(r.get("target")) in routes or any(str(x.get("id")) in ids for x in entries(r, "cases")))
     ]
 
 
@@ -347,7 +347,7 @@ def verdict(
 ) -> tuple[Verdict, str]:
     """(verdict, reason) for one ticket: FAIL, BLOCKED, PASS WITH NOTES or PASS (rules: README, "Reading REPORT.md");
     NOT STARTED while no test run has reported yet. runs: [(file name, run)], for runs that ended BLOCKED.
-    prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as _q_items gives
+    prior_passed: cases from an earlier build not re-run in this partial retest. questions: the plan's, as question_items gives
     them: an open [BLOCKING] one tagged with this ticket, or with no plan ticket, is a note. unread: run files that
     couldn't be read (load_run): what they held, and for which ticket, is unknown, so nothing passes."""
     if not started:
@@ -370,7 +370,7 @@ def verdict(
         failed = [f"{c['id']} failed" + (f" ({c['ac']})" if c.get("ac") else "")]
     else:  # several: one entry naming them all
         acs = sorted(
-            {a for c in fails for a in _case_acs(c)},
+            {a for c in fails for a in case_acs(c)},
             key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)],
         )
         ids = [c["id"] for c in fails]
@@ -382,7 +382,7 @@ def verdict(
             if fails
             else []
         )
-    serious = [_bug_word(b) for b in its_bugs if _serious(b)]
+    serious = [_bug_word(b) for b in its_bugs if is_serious(b)]
     if failed or serious:
         return "FAIL", _some(failed + serious)
     if unread:
@@ -398,7 +398,7 @@ def verdict(
     ended = [
         f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
         + (f": {' '.join(str(r['summary']).split())}" if r.get("summary") else "")
-        for name, r in _blocked_runs(mine, runs)
+        for name, r in blocked_runs(mine, runs)
     ]
     if stuck or ended:
         return "BLOCKED", _some(
@@ -409,7 +409,7 @@ def verdict(
             + ended,
             2,
         )
-    covered = {a for c in mine for a in _case_acs(c)} | {a for c in prior_mine for a in _case_acs(c)}
+    covered = {a for c in mine for a in case_acs(c)} | {a for c in prior_mine for a in case_acs(c)}
     me = str(key).strip().upper()
     plan_keys = {str(k).strip().upper() for k in known} | {me}
     owner = lambda q: str(q.get("ticket") or "").strip().upper()  # '' or a key outside the plan: every ticket's
@@ -428,9 +428,9 @@ def verdict(
         + [f"{c['id']} open question" for c in mine if st(c) == "QUESTION"]
         + [_bug_word(b) for b in its_bugs]
         + [
-            f"{_ac_id(a)} has no test case"
-            for a in _list(ticket, "acs")
-            if _ac_id(a) and _ac_key(_ac_id(a)) not in covered
+            f"{ac_id(a)} has no test case"
+            for a in entries(ticket, "acs")
+            if ac_id(a) and ac_key(ac_id(a)) not in covered
         ]
     )
     if prior_mine:
@@ -443,7 +443,7 @@ def verdict(
     return "PASS", f"all {len(mine)} cases passed"
 
 
-def _verdicts(
+def verdicts(
     plan: JsonObj,
     runs: Sequence[tuple[str, JsonObj]],
     cases: list[JsonObj],
@@ -452,9 +452,9 @@ def _verdicts(
 ) -> dict[str, tuple[Verdict, str]]:
     """{ticket key: (verdict, reason)} for every plan ticket: the one place verdict() gets its inputs, so REPORT.md,
     the run index and the inbox's Last QA can't disagree. cases and bugs: merged_cases() and run_bugs() of `runs`."""
-    tickets = _plan_tickets(plan)
+    tickets = plan_tickets(plan)
     keys = [t["key"] for t in tickets]
-    prior_all, questions = _prior_passed(plan, keys, cases), _q_items(plan, "test plan")
+    prior_all, questions = prior_passed(plan, keys, cases), question_items(plan, "test plan")
     return {
         t["key"]: verdict(
             t,
@@ -471,13 +471,13 @@ def _verdicts(
     }
 
 
-def _prior_passed(plan, keys, cases=()):
+def prior_passed(plan, keys, cases=()):
     """Normalized prior_passed entries from a partial --retest plan.json, then the merged `cases` marked `prior` (a pass
     carry_prior kept from an earlier build): both are passes not re-run here."""
     canon = {k.strip().upper(): k for k in keys}
     kept = [c for c in cases if c.get("prior")]
     ids, out = {c["id"] for c in kept}, []
-    for c in _list(plan, "prior_passed"):
+    for c in entries(plan, "prior_passed"):
         if str(c.get("id")) in ids:
             continue
         tk = c.get("ticket")
@@ -495,12 +495,12 @@ def _prior_passed(plan, keys, cases=()):
     return out + kept
 
 
-def _stored_hash(b):
+def stored_hash(b):
     """The hash memory keeps the bug under: a re-sighting (a regression's draft) the hash it names, else one from its
     route and symptom (as ingest: a blank symptom falls back to the title)."""
     return core.given_hash(b.get("hash")) or core.bug_hash(
         core.norm_route(b.get("route")),
-        core.cap(scrub.redact(core._s(b.get("symptom")))) or core.cap(scrub.redact(core._s(b.get("title")))),
+        core.cap(scrub.redact(core.as_text(b.get("symptom")))) or core.cap(scrub.redact(core.as_text(b.get("title")))),
     )
 
 
@@ -538,33 +538,33 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
             stamp = {"build": core.norm_build(old.get("build"))}
             if isinstance(prior.get("ran"), str):
                 stamp["ran"] = prior["ran"]
-            news = {str(c.get("id")): c for c in _list(new, "cases")}
-            olds = {str(c.get("id")): c for c in _list(old, "cases")}
+            news = {str(c.get("id")): c for c in entries(new, "cases")}
+            olds = {str(c.get("id")): c for c in entries(old, "cases")}
             ran_again = lambda cid: cid in given and core.case_status(news[cid].get("status")) not in (None, "NOT_RUN")
             cases = [news[cid] if cid in news and ran_again(cid) else {**stamp, **c} for cid, c in olds.items()]
-            cases += [c for c in _list(new, "cases") if str(c.get("id")) not in olds]
+            cases += [c for c in entries(new, "cases") if str(c.get("id")) not in olds]
             if olds:
                 out["cases"] = cases
-            hash_of = lambda b: _bug_refs({"hash": b.get("hash")})
-            listed = {bug_id(b) for b in _list(new, "bugs")} - {""}
-            hashes = set().union(*map(hash_of, _list(new, "bugs")))
-            named = lambda b, cs: any(_case_bugs(c) & _bug_refs({**b, "id": bug_id(b)}) for c in cs)
+            hash_of = lambda b: bug_refs({"hash": b.get("hash")})
+            listed = {bug_id(b) for b in entries(new, "bugs")} - {""}
+            hashes = set().union(*map(hash_of, entries(new, "bugs")))
+            named = lambda b, cs: any(case_bugs(c) & bug_refs({**b, "id": bug_id(b)}) for c in cs)
             same_build = core.norm_build(new.get("build")) == core.norm_build(old.get("build"))
             carried = [
                 b
-                for b in _list(old, "bugs")
+                for b in entries(old, "bugs")
                 if bug_id(b) not in listed
                 and not hash_of(b) & hashes
                 and (named(b, cases) or (same_build and not named(b, olds.values())))
             ]
             # the explorer names an earlier bug it sees again by its memory hash, under the title the card gave it:
             # that entry and the carried draft are one bug
-            title = lambda b: " ".join(core._s(b.get("title")).split())
-            again = {title(b): b for b in _list(new, "bugs") if b.get("hash") and not bug_id(b)}
+            title = lambda b: " ".join(core.as_text(b.get("title")).split())
+            again = {title(b): b for b in entries(new, "bugs") if b.get("hash") and not bug_id(b)}
             same = {title(b) for b in carried if not b.get("hash")} & set(again)
             carried = [{**b, "hash": again[title(b)]["hash"]} if title(b) in same else b for b in carried]
             if carried:
-                out["bugs"] = [b for b in _list(new, "bugs") if again.get(title(b)) is not b or title(b) not in same]
+                out["bugs"] = [b for b in entries(new, "bugs") if again.get(title(b)) is not b or title(b) not in same]
                 out["bugs"] += carried
             text = lambda q: str(q.get("text") if isinstance(q, dict) else q)
             qs = lambda r: r["questions"] if isinstance(r.get("questions"), list) else []
@@ -572,7 +572,7 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
             if more := [q for q in qs(old) if text(q) not in asked]:
                 out["questions"] = qs(new) + more
         if out != new or not rf.exists():
-            core._write(rf, json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+            core.write(rf, json.dumps(out, indent=2, ensure_ascii=False) + "\n")
     if not keep:
         pf.unlink(missing_ok=True)
 
@@ -580,12 +580,12 @@ def carry_prior(run_dir: str | Path, slug: str, keep: bool = False) -> None:
 LEAD_RANK = {"HIGH": 0, "MEDIUM": 1}
 
 
-def _leads(runs, skip=()):
+def leads(runs, skip=()):
     """Follow-up leads the explorers left (`leads` in their run files), one per route and target, HIGH first; routes in
     `skip` (already explored) left out."""
     seen, out = set(), []
     for _, r in runs:
-        for lead in _list(r, "leads"):
+        for lead in entries(r, "leads"):
             route = core.norm_route(lead.get("route"))
             key = (route, core.norm(lead.get("target")))
             if route and route not in skip and key not in seen:
@@ -594,7 +594,7 @@ def _leads(runs, skip=()):
     return sorted(out, key=lambda x: LEAD_RANK.get(x["priority"], 2))
 
 
-def _text(path):
+def read_text(path):
     try:
         # not a vulnerability (S2083): callers pass fixed names inside the run folder; bug ids are validated BUG-n
         return Path(path).read_text(encoding="utf-8", errors="replace")  # NOSONAR
@@ -603,7 +603,7 @@ def _text(path):
 
 
 # ---------- questions: plan, runs and QUESTION cases, merged; a string is open, {"text","status","answer"} as written ----
-def _q_items(obj, label):
+def question_items(obj, label):
     out = []
     raw = obj.get("questions") if isinstance(obj, dict) else None
     for x in raw if isinstance(raw, list) else []:
@@ -632,7 +632,7 @@ def _q_items(obj, label):
     return out
 
 
-def _merge_questions(items):
+def merge_questions(items):
     """Equal text (case and spaces ignored) becomes one entry listing every place it came from. Open wins over resolved."""
     merged, index = [], {}
     for q in items:
@@ -648,10 +648,10 @@ def _merge_questions(items):
     return merged
 
 
-def _asked(c, open_qs):
+def asked(c, open_qs):
     """Whether an open question is this QUESTION case's own: it names the case, or one says what the other says.
     Found live: What to do listed one question twice, by its text and by its case."""
-    flat = lambda x: " ".join(re.sub(r"[^\w\s]", " ", core._s(x).lower()).split())
+    flat = lambda x: " ".join(re.sub(r"[^\w\s]", " ", core.as_text(x).lower()).split())
     said = [t for t in (flat(c.get("notes")), flat(c.get("actual"))) if len(t) >= 12]
     for q in open_qs:
         text = flat(q["text"])
@@ -662,5 +662,5 @@ def _asked(c, open_qs):
     return False
 
 
-def _q_rank(q):
+def question_rank(q):
     return 0 if "[BLOCKING]" in q["text"].upper() else 1 if "[HIGH]" in q["text"].upper() else 2

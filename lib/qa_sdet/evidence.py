@@ -43,7 +43,7 @@ def evidence(path, label, selector=None, ref=None):
     if ref is not None and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", ref):  # an option would reach playwright-cli
         raise core.BadInput(f"evidence: --ref takes a snapshot ref such as e12 (from find or a snapshot), not {ref!r}")
     png = evidence_png(path, must_exist=False)
-    env = session._pw_env()
+    env = session.pw_env()
     pw = lambda *a: subprocess.run(
         ["playwright-cli", "-s=qa", *a], env=env, capture_output=True, text=True, errors="replace", timeout=60
     )
@@ -60,7 +60,7 @@ def evidence(path, label, selector=None, ref=None):
             "return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })()"
         )
         r = pw("--raw", "eval", js)
-        box = session._unwrap_raw(r.stdout) if r.returncode == 0 else None
+        box = session.unwrap_raw(r.stdout) if r.returncode == 0 else None
         if r.returncode:
             return fail("the element lookup failed", r)
         if not isinstance(box, str) or not box.strip():

@@ -266,10 +266,10 @@ def norm_route(r: object) -> str:
         parts = urlsplit(r if "://" in r else "http://x" + ("" if r.startswith(("/", "#")) else "/") + r)
     except ValueError:  # 'http://[x': no route in it (ingest then reports the missing route; card finds no page)
         return ""
-    path = _ids(parts.path) or "/"
+    path = mask_ids(parts.path) or "/"
     f = parts.fragment.split("?")[0]
     bang = "!" if f.startswith("!/") else ""  # AngularJS hashbang routes: #!/incidents
-    frag = _ids(f[len(bang) :]) if f[len(bang) :].startswith("/") else ""
+    frag = mask_ids(f[len(bang) :]) if f[len(bang) :].startswith("/") else ""
     return path + (f"#{bang}{frag}" if frag else "")
 
 
@@ -296,18 +296,18 @@ ID_SEGMENT = re.compile(
 )  # route params: :id, {id}, [id], <id>
 
 
-def _ids(path: str) -> str:
+def mask_ids(path: str) -> str:
     """'/incidents/4521//' -> '/incidents/:id': one card and one bug hash for every record's detail page."""
     segs = [":id" if ID_SEGMENT.fullmatch(x) else x for x in (y.strip() for y in path.split("/")) if x]
     return ("/" + "/".join(segs)) if segs else ""
 
 
-def _s(v: object) -> str:
+def as_text(v: object) -> str:
     return "" if v is None or isinstance(v, bool) else str(v)
 
 
 def cap(s: object) -> str:
-    return " ".join(_s(s).split())[:MAX_TEXT]
+    return " ".join(as_text(s).split())[:MAX_TEXT]
 
 
 LOOPBACK = {"localhost", "127.0.0.1", "::1"}
@@ -328,7 +328,7 @@ def allowed_hosts(cfg: object) -> set[str]:
 def url_allowed(url: object, hosts: Iterable[str]) -> bool:
     """An http(s) URL on one of `hosts` (or under one), refused wherever the guard's host_ok refuses: a backslash,
     user@host or a %-escaped host, which browsers resolve to another host than urlsplit reads."""
-    url = _s(url).strip()
+    url = as_text(url).strip()
     if "\\" in url or "@" in re.split(r"[/?#]", url.split("://", 1)[-1])[0]:
         return False
     try:
@@ -354,7 +354,7 @@ def norm_build(v: object) -> str:
 
 
 def norm(s: object) -> str:
-    return " ".join(re.sub(r"[\W_]+", " ", _s(s).lower()).split())
+    return " ".join(re.sub(r"[\W_]+", " ", as_text(s).lower()).split())
 
 
 def bug_hash(route: object, symptom: object) -> str:
@@ -364,7 +364,7 @@ def bug_hash(route: object, symptom: object) -> str:
 def given_hash(raw: object) -> str:
     """The hash (or 4-12 char prefix) a run's bug names, as ingest looks it up: '<hash>', '#<hash>', '<hash> (known)';
     '' for none, 'n/a' or a Jira key ('CAFE-12' is no prefix 'cafe')."""
-    raw = _s(raw).strip()
+    raw = as_text(raw).strip()
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw):
         return ""
     m = re.match(r"#?\s*([0-9a-fA-F]{4,12})\b", raw)
@@ -422,7 +422,7 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 GIT_SLOW: list[str | Path] = []
 
 
-def _git(repo: str | Path, *args: str, timeout: float = 30) -> str | None:
+def git(repo: str | Path, *args: str, timeout: float = 30) -> str | None:
     """git output (text) or None. Paths stay unquoted (core.quotePath=false) so non-ASCII names round-trip."""
     try:
         r = subprocess.run(
@@ -441,7 +441,7 @@ def _git(repo: str | Path, *args: str, timeout: float = 30) -> str | None:
 
 
 def short(s: object, n: int) -> str:
-    s = _s(s)
+    s = as_text(s)
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
@@ -472,12 +472,12 @@ class BadOption(BadInput):
     """An unknown, repeated or empty --option: printed with the command's usage."""
 
 
-def _strs(obj: object, key: str) -> list[str]:
+def strs(obj: object, key: str) -> list[str]:
     v = obj.get(key) if isinstance(obj, dict) else None
     return [str(x) for x in v if isinstance(x, (str, int, float))] if isinstance(v, list) else []
 
 
-def _write(path: str | Path, text: str) -> None:
+def write(path: str | Path, text: str) -> None:
     """Atomic write via a fresh temp file (O_EXCL): a planted `.<name>.tmp` link can't redirect it outside qa-out."""
     path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")

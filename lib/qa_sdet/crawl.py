@@ -159,12 +159,12 @@ FRAME_HARVEST_JS = f"el => JSON.stringify({{...JSON.parse({HARVESTER_JS}), host:
 
 
 # ---------- the browser and the run file ----------
-def _pw(args, timeout):
+def pw(args, timeout):
     """(ok, output) of one `playwright-cli -s=qa` command: its stdout, or the error text."""
     try:
         r = subprocess.run(
             ["playwright-cli", "-s=qa", *args],
-            env=session._pw_env(),
+            env=session.pw_env(),
             capture_output=True,
             text=True,
             errors="replace",
@@ -178,8 +178,8 @@ def _pw(args, timeout):
 
 
 def _parsed(out):
-    v = session._unwrap_raw(out)
-    v = session._unwrap_raw(v) if isinstance(v, str) else v  # --raw prints the JSON string, quoted or not
+    v = session.unwrap_raw(out)
+    v = session.unwrap_raw(v) if isinstance(v, str) else v  # --raw prints the JSON string, quoted or not
     return v if isinstance(v, dict) else None
 
 
@@ -202,7 +202,7 @@ class _Run:
 
     def save(self, **fields):
         self.doc.update(fields, notes=core.short("; ".join(self.notes), NOTES_CAP))
-        core._write(self.file, json.dumps(self.doc, indent=1) + "\n")
+        core.write(self.file, json.dumps(self.doc, indent=1) + "\n")
 
 
 def _run_dir(run, what):
@@ -219,7 +219,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
     rec, opened = _Run(run, slug, url, cfg), False
     status, fields = "INCOMPLETE", {}
     try:
-        started = session._start_page(cfg, hosts, url)
+        started = session.start_at(cfg, hosts, url)
         opened = started["status"] == "ok" or started["block_scope"] == "page"
         rec.doc["build"] = started.get("build") or core.UNKNOWN
         if started["status"] != "ok" and (started["block_scope"] != "page" or page_blocks):
@@ -234,9 +234,9 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
     finally:
         if opened:
             for name, args in (("requests", ["requests", "--all"]), ("console", ["console", "error", "--all"])):
-                ok, out = _pw(args, EVAL_SECONDS)
-                core._write(rec.file.with_name(f"{name}-{slug}.log"), out if ok else "")
-            session._close_qa(session._pw_env())
+                ok, out = pw(args, EVAL_SECONDS)
+                core.write(rec.file.with_name(f"{name}-{slug}.log"), out if ok else "")
+            session.close_qa(session.pw_env())
         rec.save(status=status, **fields)
         from . import ingest
 
@@ -248,7 +248,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
 
 def _land(rec, cfg, hosts, where, state):
     """None when the page is a signed-in, allowed, loaded page; else ('blocked', fields) or ('skip', None)."""
-    signed_in, status = session._signed_in(cfg, state)
+    signed_in, status = session.page_signed_in(cfg, state)
     if not signed_in:
         return "blocked", {
             "block_scope": "session",
@@ -270,7 +270,7 @@ def _check(idx, specs, target=None):
     found, invalid, state = set(), set(), {}
     for k in range(0, len(idx), CHUNK):
         part = idx[k : k + CHUNK]
-        ok, out = _pw(
+        ok, out = pw(
             ["--raw", "eval", check_js([specs[i] for i in part], frame=bool(target))] + ([target] if target else []),
             EVAL_SECONDS,
         )
@@ -291,7 +291,7 @@ def crawl(con, run, routes=()):
     mounts are looked for in the frames only: the shell's own document matching one (a button of the same name in the
     menu bar) says nothing about the module. Prints one JSON line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
     run = _run_dir(run, "crawl")
-    cfg, hosts = session._qa_config("crawl")
+    cfg, hosts = session.qa_config("crawl")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     if not core.url_allowed(base, hosts):
         raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
@@ -314,12 +314,12 @@ def crawl(con, run, routes=()):
             if ":" not in x[0]
         ]
     # a sign-in page blocks the run and a sign-out page ends the session: only when the user names them
-    auth = [] if routes_given else [r for r in routes if probe._auth_segment(base + r) or SKIP_LINK_RE.search(r)]
+    auth = [] if routes_given else [r for r in routes if probe.auth_segment(base + r) or SKIP_LINK_RE.search(r)]
     routes = [r for r in routes if r not in auth]
     plan, skipped = [], [f"{r}: sign-in or sign-out page, not opened" for r in auth]
     for route in routes:
         module = codemap.module_target(con, route)
-        rows = [x for x in codemap._codemap_rows(con, route) if x["kind"] == "locator" and x["value"]]
+        rows = [x for x in codemap.codemap_rows(con, route) if x["kind"] == "locator" and x["value"]]
         locs = list(dict.fromkeys((x["label"], x["value"]) for x in rows))
         own = {(x["label"], x["value"]) for x in rows if x["page"] != module}  # the route's own rows: the shell's
         specs = [parse_locator(v) for _, v in locs]
@@ -336,7 +336,7 @@ def crawl(con, run, routes=()):
         fails = 0
         for k, (route, locs, specs, framed) in enumerate(plan, 1):
             todo = [i for i, s in enumerate(specs) if s]
-            ok, out = _pw(["goto", base + route], GOTO_SECONDS)
+            ok, out = pw(["goto", base + route], GOTO_SECONDS)
             res, err = _check(todo, specs) if ok else (None, out)
             if res is None:
                 fails += 1
@@ -427,7 +427,7 @@ def discover(run, url=None, depth=2, max_pages=25):
     The states of the iframes a page shows are the page's (an app shell's module); a frame's links are not followed.
     Never follows logout, delete or sign-in links; never clicks or types. Prints one JSON line; exit 0, or 1 BLOCKED."""
     run = _run_dir(run, "discover")
-    cfg, hosts = session._qa_config("discover")
+    cfg, hosts = session.qa_config("discover")
     start = url or str(cfg.get("qaBaseUrl") or "").rstrip("/")
     if not core.url_allowed(start, hosts):
         raise core.BadInput(f"discover: {start!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
@@ -448,10 +448,10 @@ def discover(run, url=None, depth=2, max_pages=25):
             path, level = queue.popleft()
             ok, out = True, ""
             if not opened:  # page-start already opened the first page
-                ok, out = _pw(["goto", origin + path], GOTO_SECONDS)
+                ok, out = pw(["goto", origin + path], GOTO_SECONDS)
             opened = False
             if ok:
-                ok, out = _pw(["--raw", "eval", HARVEST_JS], EVAL_SECONDS)
+                ok, out = pw(["--raw", "eval", HARVEST_JS], EVAL_SECONDS)
             h = _parsed(out) if ok else None
             if h is None:
                 fails += 1
@@ -468,7 +468,7 @@ def discover(run, url=None, depth=2, max_pages=25):
             frames = h.get("frames") if isinstance(h.get("frames"), int) else 0
             found_states = h.get("states") if isinstance(h.get("states"), list) else []
             for f in range(min(frames, MAX_FRAMES)):  # an app shell: the tabs and menus of the module it shows
-                ok, out = _pw(["--raw", "eval", FRAME_HARVEST_JS, FRAME.format(f)], EVAL_SECONDS)
+                ok, out = pw(["--raw", "eval", FRAME_HARVEST_JS, FRAME.format(f)], EVAL_SECONDS)
                 fh = _parsed(out) if ok else None
                 if fh is None:  # no such frame (hidden, or it went away) is no failure
                     if "does not match any elements" not in out:
@@ -489,8 +489,8 @@ def discover(run, url=None, depth=2, max_pages=25):
                 to = urlsplit(raw).path + hash_route
                 if (
                     not core.url_allowed(origin + to, hosts)
-                    or probe._auth_segment(origin + to)
-                    or probe._auth_segment(origin + hash_route[1:].lstrip("!"))  # #/login is a sign-in page too
+                    or probe.auth_segment(origin + to)
+                    or probe.auth_segment(origin + hash_route[1:].lstrip("!"))  # #/login is a sign-in page too
                     or SKIP_LINK_RE.search(f"{to} {label}")
                 ):
                     continue

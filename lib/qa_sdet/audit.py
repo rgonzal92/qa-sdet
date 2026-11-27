@@ -55,16 +55,16 @@ def audit_bugs(run_dir):
     out = {}
     for b in results.run_bugs(results.load_run(run_dir)["runs"]):
         bid = b.get("id")
-        if not bid or results._first_word(b.get("classification")) not in ("confirmed", "suspected"):
+        if not bid or results.first_word(b.get("classification")) not in ("confirmed", "suspected"):
             continue
         draft, spec, issues = run_dir / "bugs" / f"{bid}.md", run_dir / "repro" / f"{bid}.spec.ts", []
         if not draft.is_file():
             issues.append((True, f"no draft bugs/{bid}.md"))
         else:
-            text = results._text(draft)
+            text = results.read_text(draft)
             issues += draft_issues(text)
             m = re.search(r"\*\*qa-mem hash:\*\*\s*`?([0-9a-fA-F]{4,12})\b", text)
-            want = results._stored_hash(b)
+            want = results.stored_hash(b)
             if not m:
                 issues.append((False, "draft has no **qa-mem hash:** line"))
             elif not (want.startswith(m.group(1).lower()) or m.group(1).lower().startswith(want)):
@@ -74,7 +74,7 @@ def audit_bugs(run_dir):
         if not spec.is_file():
             issues.append((True, f"no repro spec repro/{bid}.spec.ts"))
         else:
-            issues += spec_issues(results._text(spec))
+            issues += spec_issues(results.read_text(spec))
         if not (run_dir / "evidence" / f"{bid}.png").is_file():
             issues.append((False, f"no evidence image evidence/{bid}.png"))
         if issues:
@@ -102,20 +102,20 @@ def verify_run(run_dir, slug, since=0):
         for k in ("requests", "console")
         if not (data / f"{k}-{slug}.log").is_file()
     ]
-    route = re.search(r"^route: (.*)$", results._text(data / f"brief-{slug}.md"), re.M)
-    plan = results._load_json(data / "plan.json", [])
+    route = re.search(r"^route: (.*)$", results.read_text(data / f"brief-{slug}.md"), re.M)
+    plan = results.load_json(data / "plan.json", [])
     given = [
         str(c["id"])
-        for c in results._list(plan, "cases")
+        for c in results.entries(plan, "cases")
         if c.get("id") not in (None, "") and route and core.route_key(c.get("route")) == core.route_key(route.group(1))
     ]
-    told = {str(c.get("id")) for c in results._list(run, "cases")}
+    told = {str(c.get("id")) for c in results.entries(run, "cases")}
     if missing := [cid for cid in given if cid not in told]:
         todo.append(
             f"give every case of your brief a status in `cases`: {', '.join(missing)} missing "
             "(NOT_RUN with why, when the run ended before you reached it)"
         )
-    done = [(str(c.get("id")), core.case_status(c.get("status")), c) for c in results._list(run, "cases")]
+    done = [(str(c.get("id")), core.case_status(c.get("status")), c) for c in results.entries(run, "cases")]
     if blank := [
         cid for cid, status, c in done if status in ("PASS", "FAIL") and not str(c.get("actual") or "").strip()
     ]:
@@ -124,7 +124,7 @@ def verify_run(run_dir, slug, since=0):
         todo.append(
             f"a FAIL names its bug in `bug` (BUG-<n>, a known bug's hash or a Jira key): {', '.join(no_bug)} failed without a `bug`"
         )
-    brief = results._text(data / f"brief-{slug}.md")
+    brief = results.read_text(data / f"brief-{slug}.md")
     open_items = [
         k
         for k in ("UNVISITED STATES", "UNEXERCISED ENDPOINTS", "UNTESTED TARGETS")
@@ -132,17 +132,17 @@ def verify_run(run_dir, slug, since=0):
     ]
     if (
         open_items
-        and results._first_word(run.get("status")) == "completed"
+        and results.first_word(run.get("status")) == "completed"
         and re.search(r"^mode: explore$", brief, re.M)
-        and not any(results._list(pg, "coverage") for pg in results._list(run, "pages"))
-        and not results._not_tested(run)
+        and not any(results.entries(pg, "coverage") for pg in results.entries(run, "pages"))
+        and not results.not_tested(run)
     ):
         todo.append(
             f"your card listed {', '.join(open_items)}, but `coverage` and `not_tested` are both empty: check them, or add a "
             "`not_tested` line for each saying why you did not"
         )
-    listed = {results.bug_id(b) for b in results._list(run, "bugs")} - {""}
-    drafts = [p.stem for p in sorted((run_dir / "bugs").glob("BUG-*.md")) if p.is_file() and results._mtime(p) >= since]
+    listed = {results.bug_id(b) for b in results.entries(run, "bugs")} - {""}
+    drafts = [p.stem for p in sorted((run_dir / "bugs").glob("BUG-*.md")) if p.is_file() and results.mtime(p) >= since]
     if unlisted := [x for x in drafts if x not in listed]:
         todo.append(f"list each bug you drafted in `bugs` (draft_path bugs/<id>.md): {', '.join(unlisted)}")
     todo += [

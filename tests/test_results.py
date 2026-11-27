@@ -75,7 +75,7 @@ class Verdict(unittest.TestCase):
     def test_an_open_blocking_question_keeps_its_ticket_from_a_plain_pass(self):  # all cases passed, the rule undecided
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "PASS", ticket="T-2", route="/list")]
         v = lambda key, *qs, cs=cases: results.verdict(
-            key, cs, [], known=["T-1", "T-2"], questions=results._q_items({"questions": list(qs)}, "test plan")
+            key, cs, [], known=["T-1", "T-2"], questions=results.question_items({"questions": list(qs)}, "test plan")
         )
         both = "Q1 [BLOCKING] Is 130 itself allowed?"  # untagged (a string can't name a ticket): every ticket's
         self.assertEqual([v(k, both) for k in ("T-1", "T-2")], [("PASS WITH NOTES", "Q1 open blocking question")] * 2)
@@ -96,7 +96,9 @@ class Verdict(unittest.TestCase):
         self.assertTrue(v("T-1", both, cs=busy)[1].startswith("Q1 open blocking question; TC-1 open question"))
         self.assertEqual(v("T-1", both, cs=[self.case("TC-1", "FAIL")])[0], "FAIL")  # worse verdicts still win
         self.assertEqual(
-            results.verdict("T-1", cases, [], started=False, questions=results._q_items({"questions": [both]}, ""))[0],
+            results.verdict(
+                "T-1", cases, [], started=False, questions=results.question_items({"questions": [both]}, "")
+            )[0],
             "NOT STARTED",
         )
 

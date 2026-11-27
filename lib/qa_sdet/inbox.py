@@ -61,12 +61,12 @@ def _qa_verdicts_by_key(qa_out, keys):
     """Newest local QA status/verdict per ticket key from `<project>/qa-out/`."""
     if not keys or not qa_out.is_dir():
         return {}
-    dirs = runstate._plan_folders(qa_out)
+    dirs = runstate.plan_folders(qa_out)
     found = {}
     for p in dirs:
         d = results.load_run(p)
         plan, runs = d["plan"], d["runs"]
-        tickets = results._plan_tickets(plan)
+        tickets = results.plan_tickets(plan)
         matching = [t for t in tickets if t["key"].strip().upper() in keys and t["key"].strip().upper() not in found]
         if not matching:
             continue
@@ -74,7 +74,7 @@ def _qa_verdicts_by_key(qa_out, keys):
         vmap = (
             {}
             if kind == "plan"
-            else results._verdicts(plan, runs, results.merged_cases(plan, runs), results.run_bugs(runs), d["unread"])
+            else results.verdicts(plan, runs, results.merged_cases(plan, runs), results.run_bugs(runs), d["unread"])
         )
         for t in matching:
             found[t["key"].strip().upper()] = "plan" if kind == "plan" else results.VERDICT_ICON[vmap[t["key"]][0]]
@@ -85,7 +85,7 @@ def _qa_verdicts_by_key(qa_out, keys):
 
 def inbox(con, project, data, prefix=None, today=None):
     """Markdown for INBOX.md (also printed); tracks {key: status} in meta inbox_seen and cross-references qa-out/."""
-    out = ops._project(project) / "qa-out"  # a typo must not create a stray folder
+    out = ops.project_dir(project) / "qa-out"  # a typo must not create a stray folder
     items = list({x["key"]: x for x in inbox_items(data)}.values())  # a key listed twice (paged search) is one ticket
     seen = _seen_map(core.meta(con, "inbox_seen"))
     for x in items:
@@ -128,7 +128,7 @@ def inbox(con, project, data, prefix=None, today=None):
     lines += ["", f"Next: /qa-sdet:qa-ticket {' '.join(nums)}" if nums else "Next: nothing to test"]
     text = "\n".join(lines) + "\n"
     out.mkdir(exist_ok=True)
-    core._write(out / "INBOX.md", text)
+    core.write(out / "INBOX.md", text)
     # remembered only once INBOX.md is written (a failed write keeps them NEW); today's keys are always kept, older
     # ones up to 5000 (a cap on sorted keys dropped the alphabetically last, so a big inbox stayed NEW forever)
     with con:
@@ -253,7 +253,7 @@ def _with_drift(state, tickets):
     requirements."""
     plan = next(
         (
-            results._load_json(Path(x["plan_file"]), [])
+            results.load_json(Path(x["plan_file"]), [])
             for x in (state.get("latest_run"), state.get("reusable_plan"))
             if x and x.get("plan_file")
         ),
@@ -261,7 +261,7 @@ def _with_drift(state, tickets):
     )
     before = {
         str(t.get("key")).upper(): t.get("source_snapshot")
-        for t in results._list(plan, "tickets")
+        for t in results.entries(plan, "tickets")
         if isinstance(t.get("source_snapshot"), dict)
     }
     drift = {}
@@ -286,9 +286,9 @@ def _case_in_chain(run_dir, cid, hops=10):
     retest_of back (a pass an earlier partial retest carried is only a summary in prior_passed)."""
     d = Path(run_dir)
     for _ in range(hops):
-        plan = results._load_json(d / ".data" / "plan.json", [])
+        plan = results.load_json(d / ".data" / "plan.json", [])
         plan = plan if isinstance(plan, dict) else {}
-        hit = next((c for c in results._list(plan, "cases") if str(c.get("id")) == str(cid)), None)
+        hit = next((c for c in results.entries(plan, "cases") if str(c.get("id")) == str(cid)), None)
         prev = str(plan.get("retest_of") or "")
         if hit or not prev or Path(prev).name != prev or prev in (".", ".."):  # a sibling run folder only
             return hit
@@ -299,28 +299,28 @@ def _case_in_chain(run_dir, cid, hops=10):
 def trace(project, keys=None, fix_version=None):
     """Each ticket's latest run across qa-out (newest folder that ran it): verdict, date, builds, AC coverage, bugs,
     and what it retested: a release or sprint sign-off view. Read-only."""
-    qa_out = ops._project(project) / "qa-out"
+    qa_out = ops.project_dir(project) / "qa-out"
     want = {k.strip().upper() for k in keys or []}
     rows, versions = {}, {}  # each ticket's newest run's row; the fix versions any of its runs gave it
-    for p in runstate._plan_folders(qa_out) if qa_out.is_dir() else []:
+    for p in runstate.plan_folders(qa_out) if qa_out.is_dir() else []:
         d = results.load_run(p)
         plan, runs = d["plan"], d["runs"]
         if not runs or str(plan.get("kind")) == "plan":
             continue
         cases, bugs = results.merged_cases(plan, runs), results.run_bugs(runs)
-        vmap = results._verdicts(plan, runs, cases, bugs, d["unread"])
-        prior = results._prior_passed(plan, [t["key"] for t in results._plan_tickets(plan)], cases)
+        vmap = results.verdicts(plan, runs, cases, bugs, d["unread"])
+        prior = results.prior_passed(plan, [t["key"] for t in results.plan_tickets(plan)], cases)
         builds = ", ".join(sorted({core.norm_build(r.get("build")) for _, r in runs}))
-        for t in results._plan_tickets(plan):
+        for t in results.plan_tickets(plan):
             k = t["key"].upper()
             if want and k not in want:
                 continue
             versions.setdefault(k, set()).add(str(t.get("fix_version") or ""))
             if k in rows:
                 continue
-            acs = [results._ac_key(results._ac_id(a)) for a in results._list(t, "acs") if results._ac_id(a)]
+            acs = [results.ac_key(results.ac_id(a)) for a in results.entries(t, "acs") if results.ac_id(a)]
             covered = {
-                a for c in cases + prior if c.get("ticket") == t["key"] for a in results._case_acs(c)
+                a for c in cases + prior if c.get("ticket") == t["key"] for a in results.case_acs(c)
             }  # as verdict() counts
             v, why = vmap[t["key"]]
             rows[k] = md.row(
@@ -350,7 +350,7 @@ def prep(con, project, key_args):
     and memory routes/bugs in one scrubbed JSON dict."""
     from . import codemap, memory
 
-    proj = ops._project(project)
+    proj = ops.project_dir(project)
     cfg = core.config()
     keys = ops.expand_keys(key_args, cfg.get("jiraKeyPrefix"))
     ac_field = str(cfg.get("jiraAcField") or "").strip()

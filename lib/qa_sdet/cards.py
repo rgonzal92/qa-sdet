@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from . import codemap, core
 
 
-def _endpoint(raw):
+def endpoint(raw):
     """'POST api/zones' (method and the call shape the code map uses) from 'POST /api/zones/42', or None."""
-    method, path = codemap._api_ref(raw) if raw else ("", "")
+    method, path = codemap.api_ref(raw) if raw else ("", "")
     return f"{method} {path}".strip() if path else None
 
 
-def _endpoint_ref(stored):
+def endpoint_ref(stored):
     m, _, path = str(stored or "").partition(" ")
     return (m, path) if path and re.fullmatch(codemap.HTTP_METHODS, m) else ("", str(stored or ""))
 
@@ -96,7 +96,7 @@ def card(con, q, focus=None, ids=False):
         con.execute(
             "SELECT f.id,f.kind,f.text,f.stale,f.source FROM facts_fts JOIN facts f ON f.id=facts_fts.rowid "
             "WHERE facts_fts MATCH ? AND f.page=? ORDER BY rank LIMIT 15",
-            (_fts_query([[w] for w in focus_words], []), r),
+            (fts_query([[w] for w in focus_words], []), r),
         ).fetchall()
         if focus_words
         else []
@@ -159,7 +159,7 @@ def card(con, q, focus=None, ids=False):
         rows = con.execute(
             "SELECT name,locator FROM locators WHERE page=? AND stale=0 AND (build IS NOT 'unknown' OR "
             "last_verified >= ?) ORDER BY last_verified DESC",
-            (r, _week_ago()),
+            (r, week_ago()),
         ).fetchall()
         # one locator saved under several names, or behind its frame spelled two ways (a crawl's and
         # `generate-locator`'s), is one locator (its newest); the ones that carry their frame come first: in an app
@@ -185,8 +185,8 @@ def card(con, q, focus=None, ids=False):
             # as `generate-locator` prints it: locator('iframe[name="module"]').contentFrame().getByTestId('save')
             own = list(dict.fromkeys(_frame(x["locator"]) for x in rows if core.FRAME_MARK in x["locator"]))
     out += _frame_line(con, r, own)
-    cov, tried, targets = _coverage(con, r, b)
-    untested = _untested_rules(con, r, targets)
+    cov, tried, targets = coverage(con, r, b)
+    untested = untested_rules(con, r, targets)
     changed, in_changed = _changed_here(con, r, pg)
     out += codemap.codemap_block(
         con, r, shown, first=set(untested) | {x.removeprefix("[server] ") for x in untested} | in_changed
@@ -222,13 +222,13 @@ def card(con, q, focus=None, ids=False):
         out.append(
             "CLIENT/SERVER RULES DIFFER (a hint to verify through the page, not an oracle): " + "; ".join(differ[:4])
         )
-    cross = _cross_page_rules_differ(con, r)
+    cross = cross_page_rules_differ(con, r)
     if cross:
         out.append(
             "CROSS-PAGE RULES DIFFER (a page writing the same resource states them otherwise: a hint to verify on both "
             "pages, not an oracle): " + "; ".join(cross[:3])
         )
-    related = _related(con, r)
+    related = related_pages(con, r)
     if related:
         out.append(
             "RELATED PAGES (a change here may show there; from the code map): "
@@ -241,7 +241,7 @@ def card(con, q, focus=None, ids=False):
         out += [
             "BUGS ON PAGES SHARING AN ENDPOINT OR COMPONENT (re-check here; seen here = put its hash in run.json, no new "
             "draft):"
-        ] + [_bug_line(x, True, 60) + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "") for x in shared]
+        ] + [bug_line(x, True, 60) + (f" | endpoint {x['endpoint']}" if x["endpoint"] else "") for x in shared]
     noisy = con.execute(
         "SELECT sig_key, seen_runs, first_build FROM signals WHERE page=? AND status='ACTIVE' AND "
         "seen_runs >= 2 ORDER BY seen_runs DESC, last_seen DESC LIMIT 3",
@@ -252,7 +252,7 @@ def card(con, q, focus=None, ids=False):
             "RECURRING UNEXPLAINED SIGNALS (no bug explains them; investigate or draft; the user can ignore noise):"
         ] + [f"- {x['sig_key']} (seen in {x['seen_runs']} runs since build {x['first_build']})" for x in noisy]
     due = [
-        x["state_key"] + (f" ({core.short(x['trigger'], 80)})" if x["trigger"] else "") for x in _due_states(con, r, b)
+        x["state_key"] + (f" ({core.short(x['trigger'], 80)})" if x["trigger"] else "") for x in due_states(con, r, b)
     ]
     if due:
         out.append(
@@ -261,7 +261,7 @@ def card(con, q, focus=None, ids=False):
             + "; ".join(due[:8])
             + (f" (+{len(due) - 8})" if len(due) > 8 else "")
         )
-    apis = [] if code_only else _unexercised_apis(con, r, b)
+    apis = [] if code_only else unexercised_apis(con, r, b)
     if apis:
         out.append(
             f"UNEXERCISED ENDPOINTS (mapped in the code, not yet observed on build {b}: exercise them or say why not in "
@@ -287,10 +287,10 @@ def card(con, q, focus=None, ids=False):
             )
             + ")"
         )
-    recurring = _patterns(con)[:3]
+    recurring = bug_patterns(con)[:3]
     if recurring:
         out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [
-            _pattern_line(g) for g in recurring
+            pattern_line(g) for g in recurring
         ]
     return "\n".join(x for x in out if x)
 
@@ -326,9 +326,9 @@ def _changed_here(con, route, pg):
     ts = _visited(con, pg)
     if not ts or not con.execute("SELECT 1 FROM codemap WHERE page=? AND src != '' LIMIT 1", (route,)).fetchone():
         return [], set()
-    files = _source_changes(con, {route: ts})[0].get(route, [])
+    files = source_changes(con, {route: ts})[0].get(route, [])
     labels = {
-        x["label"] for x in codemap._codemap_rows(con, route) if x["src"] in files and x["kind"] in ("rule", "api")
+        x["label"] for x in codemap.codemap_rows(con, route) if x["src"] in files and x["kind"] in ("rule", "api")
     }
     return files, labels
 
@@ -338,32 +338,32 @@ def _field_words(label):
     return set(core.norm(re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", re.sub(r"\s\(\d+\)$", "", label))).split())
 
 
-def _unexercised_apis(con, route, build, bound=None):
+def unexercised_apis(con, route, build, bound=None):
     """['METHOD /path'] the page's code maps (a frontend `api` row, its module and shell routes included) that no run
     observed on `build` (writes first). Empty for a page with no observed call on this build at all: without a request
     log nothing is known, which isn't a gap."""
     group = codemap.page_group(con, route, bound)
-    mapped = codemap._group_calls(con, group)
+    mapped = codemap.group_calls(con, group)
     if not mapped or not build:
         return []
     seen = {
-        codemap._api_ref(f"{m} {p}")
+        codemap.api_ref(f"{m} {p}")
         for m, p in con.execute(
             f"SELECT DISTINCT method, path FROM observed_endpoints WHERE route IN ({','.join('?' * len(group))}) AND {ON_BUILD}",
-            (*sorted(group), build, _week_ago()),
+            (*sorted(group), build, week_ago()),
         )
     }
     todo = sorted(
-        (c for c in mapped if seen and not any(codemap._same_call(c, o) for o in seen)),
+        (c for c in mapped if seen and not any(codemap.same_call(c, o) for o in seen)),
         key=lambda c: (c[0] not in codemap.WRITE_METHODS, c[1], c[0]),
     )
     return [f"{m} /{p}" if m else f"/{p}" for m, p in todo]
 
 
-def _due_states(con, route, build):
+def due_states(con, route, build):
     """The page's in-page states not opened on `build` (newest first): what the card's UNVISITED STATES and `gaps` count.
     A state that deletes, removes or signs out is never listed: opening it is no check."""
-    week = _week_ago()
+    week = week_ago()
     return [
         x
         for x in con.execute(
@@ -453,7 +453,7 @@ def _client_server_differ(con, route):
     pair: a limit with other numbers (negative ones too), different `one of` options, a trait or bound one side lacks
     (required, integer, trim, a pattern). Then a page rule no server rule matches (only when the backend maps the page's
     write endpoint) and a server rule the page has no rule for (only when the page states rules). Hints, not oracles."""
-    rows = codemap._codemap_rows(con, route)
+    rows = codemap.codemap_rows(con, route)
     client = [x for x in rows if x["kind"] == "rule" and x["page"] != "*"]
     server = [x for x in rows if x["kind"] == "rule" and x["page"] == "*"]
     writes = [
@@ -484,11 +484,11 @@ def _client_server_differ(con, route):
     return list(dict.fromkeys(out))
 
 
-def _cross_page_rules_differ(con, route):
+def cross_page_rules_differ(con, route):
     """Hints where a page rule and the rule of the same field (same words, camelCase or not) on a sibling page that
     writes the same resource (create and edit) don't agree: another limit or `one of` options, a trait or bound only
     one page states. Only the pages' own rules, not the backend's. Hints to verify on both pages, not oracles."""
-    own = lambda r: [x for x in codemap._codemap_rows(con, r) if x["kind"] == "rule" and x["page"] != "*"]
+    own = lambda r: [x for x in codemap.codemap_rows(con, r) if x["kind"] == "rule" and x["page"] != "*"]
     mine = own(route)
     out = []
     for sib in codemap.resource_neighbors(con, route)["siblings"][:5] if mine else []:
@@ -504,7 +504,7 @@ def _cross_page_rules_differ(con, route):
 ROLE_TEXT = {"siblings": "also writes", "consumers": "reads", "producers": "writes"}
 
 
-def _related(con, route):
+def related_pages(con, route):
     """[(route, why)] for the pages a change on `route` may reach, the nearest first: the pages writing the same
     resource, the pages reading what it writes, the pages writing what it reads, the pages sharing a component file."""
     links = codemap.resource_neighbors(con, route)
@@ -521,23 +521,23 @@ def _related(con, route):
 ON_BUILD = "((build=? AND build!='unknown') OR (build='unknown' AND ts >= ?))"
 
 
-def _week_ago():
+def week_ago():
     return datetime.fromtimestamp(time.time() - 7 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _rechecked(con, route, build):
+def rechecked(con, route, build):
     """Hashes of the page's bugs some run re-checked on `build` (coverage `regression` with the hash as target)."""
     return {
         r[0]
         for r in con.execute(
             f"SELECT lower(trim(target)) FROM coverage WHERE page=? AND heuristic='other:regression' "
             f"AND result!='blocked' AND {ON_BUILD}",
-            (route, build, _week_ago()),
+            (route, build, week_ago()),
         )
     }
 
 
-def _near_pages(con, route):
+def near_pages(con, route):
     """The pages a bug without an endpoint may also show on: those sharing a call, and those sharing a component file."""
     return sorted(
         set(codemap.sharing_pages(con, route)) | {x["route"] for x in codemap.component_neighbors(con, route)}
@@ -547,7 +547,7 @@ def _near_pages(con, route):
 def _shared_bugs(con, route, limit=3):
     """Bugs on other pages that this page may show too: bugs recorded with an endpoint this page calls (any number of
     callers: only bugs of that endpoint match), and for bugs without one the pages sharing a call or a component file."""
-    mine = codemap._group_calls(con, codemap.page_group(con, route)) if route != "*" else set()
+    mine = codemap.group_calls(con, codemap.page_group(con, route)) if route != "*" else set()
     found = {}
     cols = f"{BUG_COLS},endpoint,last_seen"
     if mine:
@@ -555,9 +555,9 @@ def _shared_bugs(con, route, limit=3):
             f"SELECT {cols} FROM bugs WHERE endpoint IS NOT NULL AND page!=? AND status IN (?,?,?,'FIXED')",
             (route, *core.VISIBLE),
         ):
-            if any(codemap._same_call(_endpoint_ref(x["endpoint"]), c) for c in mine):
+            if any(codemap.same_call(endpoint_ref(x["endpoint"]), c) for c in mine):
                 found[x["hash"]] = x
-    sharing = _near_pages(con, route)
+    sharing = near_pages(con, route)
     if sharing:
         for x in con.execute(
             f"SELECT {cols} FROM bugs WHERE endpoint IS NULL AND status IN (?,?,?,'FIXED') AND page IN "
@@ -568,7 +568,7 @@ def _shared_bugs(con, route, limit=3):
     return sorted(found.values(), key=lambda x: x["last_seen"] or "", reverse=True)[:limit]
 
 
-def _patterns(con, min_pages=2):
+def bug_patterns(con, min_pages=2):
     """Bugs of one kind (their pattern tag, else the heuristic that found them) on min_pages+ pages, most pages first.
     INVALID bugs are never a pattern; a page counts when the bug was found or sighted there."""
     seen = {}
@@ -605,7 +605,7 @@ def _patterns(con, min_pages=2):
     return sorted(out, key=lambda g: (-g["pages"], -g["bugs"], g["pattern"]))
 
 
-def _pattern_line(g):
+def pattern_line(g):
     return (
         f"- {g['pattern']}"
         + (f" ({g['heuristic']})" if g["heuristic"] else "")
@@ -615,14 +615,14 @@ def _pattern_line(g):
     )
 
 
-def _coverage(con, route, build):
+def coverage(con, route, build):
     """({heuristic: ['target:result', ...]}, heuristics tried, normalised targets checked) on `build`. Coverage from
     runs that couldn't read the build counts for a week, then it is retried."""
     cov, targets = {}, set()
     for c in con.execute(
         f"SELECT heuristic, target, result FROM coverage WHERE page=? AND {ON_BUILD} "
         "ORDER BY heuristic, result='pass', ts DESC",
-        (route, build, _week_ago()),
+        (route, build, week_ago()),
     ):  # failures first
         cov.setdefault(c["heuristic"], []).append(f"{core.short(c['target'], 40)}:{core.short(c['result'], 12)}")
         if c["result"] != "blocked" and c["heuristic"] in ADVERSARIAL:
@@ -632,12 +632,12 @@ def _coverage(con, route, build):
     return cov, tried, targets
 
 
-def _untested_rules(con, route, targets):
+def untested_rules(con, route, targets):
     """Labels of the page's code-map rules, then the linked server rules ('[server] <label>'), that no adversarial check
     named: target 'Speed limit field' covers rule 'speed', target 'date' doesn't cover 'start date'. A check of a server
     rule ('[server] POST /api/zones speed') doesn't cover the page's own field of that name."""
     out, seen = [], set()
-    rows = [(x["label"], x["page"] == "*") for x in codemap._codemap_rows(con, route) if x["kind"] == "rule"]
+    rows = [(x["label"], x["page"] == "*") for x in codemap.codemap_rows(con, route) if x["kind"] == "rule"]
     labels = [
         (re.sub(r"\s\(\d+\)$", "", label), server) for label, server in rows
     ]  # apply_codemap's 'speed (2)': one field
@@ -663,7 +663,7 @@ def _untested_rules(con, route, targets):
 BUG_COLS = "hash,page,severity,status,title,symptom,seen_count,jira_key"
 
 
-def _bug_line(x, with_page, n=100):
+def bug_line(x, with_page, n=100):
     jk = f" {x['jira_key']}" if x["jira_key"] else ""
     return (
         f"- {x['hash']} {x['status']}{jk} [{x['severity'] or '?'}] "
@@ -686,11 +686,11 @@ def bug_lines(con, route, build=None):
         + (" AND page=? ORDER BY last_seen DESC" if route is not None else " ORDER BY last_seen DESC LIMIT 5"),
         [route] if route is not None else [],
     ).fetchall()
-    line = lambda x: _bug_line(x, route is None)  # app-wide list: say which page
+    line = lambda x: bug_line(x, route is None)  # app-wide list: say which page
     out = []
     if rows:
         out += ["KNOWN BUGS (don't re-draft; to report a sighting put its hash in run.json):"] + [line(x) for x in rows]
-    done = _rechecked(con, route, build) if route is not None else set()
+    done = rechecked(con, route, build) if route is not None else set()
     # the ones still to re-check first: a bug fixed today keeps its old last_seen, and gaps counts it
     fixed = sorted(fixed, key=lambda x: x["hash"] in done)
     more, fixed = len(fixed) - 5, fixed[:5]
@@ -712,13 +712,13 @@ def bug_lines(con, route, build=None):
     return "\n".join(out)
 
 
-def _fts_query(groups, nots):
+def fts_query(groups, nots):
     """An FTS5 query: any group of words, every word of a group (each a quoted string, so typed operators are words)."""
     body = " OR ".join("(" + " ".join(f'"{w}"' for w in g) + ")" for g in groups)
     return (f"({body})" if len(groups) > 1 else body) + "".join(f' NOT "{p}"' for p in nots)
 
 
-def _source_changes(con, verified):
+def source_changes(con, verified):
     """({page: [src, ...]}, [repos git couldn't read]): the files of each visited page (its code-map rows and the
     backend rows of the endpoints it calls) that a commit touched after the page was last verified. Source HEAD may be
     ahead of the deployed build: a hint, not proof. A submodule's files are mapped under the parent repo, whose log
@@ -729,7 +729,7 @@ def _source_changes(con, verified):
             when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
             continue
-        files[page] = (when, {(x["repo"], x["src"]) for x in codemap._codemap_rows(con, page) if x["src"]})
+        files[page] = (when, {(x["repo"], x["src"]) for x in codemap.codemap_rows(con, page) if x["src"]})
         for repo, _ in files[page][1]:
             by_repo.setdefault(repo, []).append(ts)
     newest, failed = {}, []
@@ -738,7 +738,7 @@ def _source_changes(con, verified):
         log = (
             None
             if core.GIT_SLOW
-            else core._git(
+            else core.git(
                 repo,
                 "log",
                 "--first-parent",

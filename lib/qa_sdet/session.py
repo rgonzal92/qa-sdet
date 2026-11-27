@@ -128,7 +128,7 @@ def _norm_host(raw):
     return netloc, hostname
 
 
-def _unwrap_raw(text):
+def unwrap_raw(text):
     t = (text or "").strip()
     try:
         v = json.loads(t)
@@ -137,12 +137,12 @@ def _unwrap_raw(text):
         return t
 
 
-def _pw_env():
+def pw_env():
     """The environment playwright-cli runs with: no PLAYWRIGHT_MCP_* / PWTEST_* (they would override the profile)."""
     return {k: v for k, v in os.environ.items() if not k.startswith(("PLAYWRIGHT_MCP_", "PWTEST_"))}
 
 
-def _close_qa(env):
+def close_qa(env):
     try:
         subprocess.run(["playwright-cli", "-s=qa", "close"], env=env, capture_output=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
@@ -155,7 +155,7 @@ PAGE_STATE_JS = (
 )
 
 
-def _signed_in(cfg, parsed):
+def page_signed_in(cfg, parsed):
     """(signed_in, status) of a PAGE_STATE_JS result: signed_in is False on ssoHost or a page with a password field."""
     sso_netloc, sso_host = _norm_host(cfg.get("ssoHost"))
     cur_netloc, cur_host = _norm_host(parsed.get("host"))
@@ -185,16 +185,16 @@ def _sign_in_state(cfg, env):
     if r.returncode != 0:
         detail = core.short((r.stderr or r.stdout or f"exited {r.returncode}").strip(), 200)
         return None, f"browser tool failed: session-check eval failed ({detail})", 0
-    parsed = _unwrap_raw(r.stdout)
+    parsed = unwrap_raw(r.stdout)
     if isinstance(parsed, str):
-        parsed = _unwrap_raw(parsed)
+        parsed = unwrap_raw(parsed)
     if not isinstance(parsed, dict) or "host" not in parsed:
         return None, f"browser tool failed: unexpected session-check output ({core.short(r.stdout.strip(), 120)})", 0
-    signed_in, status = _signed_in(cfg, parsed)
+    signed_in, status = page_signed_in(cfg, parsed)
     return signed_in, None, status
 
 
-def _stored_build():
+def stored_build():
     """The build the user last recorded with `qa-mem stale`, or None. Read-only: never creates the DB."""
     p = core.db_path()
     if not p.is_file():
@@ -253,7 +253,7 @@ def _read_build(cfg, hosts, env):
     listed = cfg.get("buildSource")
     scripts = [_build_js(bs, hosts) for bs in (listed if isinstance(listed, list) else [listed])]
     if not scripts or not all(scripts):
-        return _stored_build() or core.UNKNOWN
+        return stored_build() or core.UNKNOWN
     parts = []
     for bs, bjs in zip(listed if isinstance(listed, list) else [listed], scripts):
         try:
@@ -271,7 +271,7 @@ def _read_build(cfg, hosts, env):
         if br.returncode != 0:
             _build_notice(bs, br.stderr or br.stdout or f"the eval exited {br.returncode}")
             return None
-        raw_b = _unwrap_raw(br.stdout)
+        raw_b = unwrap_raw(br.stdout)
         parts.append(core.norm_build(raw_b if isinstance(raw_b, str) else br.stdout))
         if parts[-1] == core.UNKNOWN:
             _build_notice(bs, "the source read as empty (no such element, or no text)")
@@ -281,7 +281,7 @@ def _read_build(cfg, hosts, env):
     return "+".join(p if len(p) <= BUILD_PART else digest(p) for p in parts)
 
 
-def _qa_config(what):
+def qa_config(what):
     try:
         cfg = core.config(strict=True)
     except (OSError, ValueError) as e:
@@ -292,7 +292,7 @@ def _qa_config(what):
 def session_check(record=False, read_build=False):
     """Headless check that the `main` browser profile is signed in at qaBaseUrl (not redirected to ssoHost or a login
     form). Exit 0 = signed in, 1 = session expired, 2 = config/browser/tool error."""
-    cfg, hosts = _qa_config("session-check")
+    cfg, hosts = qa_config("session-check")
     base_url = str(cfg.get("qaBaseUrl") or "").strip()
     if not core.url_allowed(base_url, hosts):
         raise core.BadInput(
@@ -302,7 +302,7 @@ def session_check(record=False, read_build=False):
         rc = browser_open([base_url])
     if rc:
         return 2
-    env = _pw_env()
+    env = pw_env()
     try:
         signed_in, problem, _ = _sign_in_state(cfg, env)
         if problem:
@@ -314,11 +314,11 @@ def session_check(record=False, read_build=False):
         build = _read_build(cfg, hosts, env) if read_build else None
         if record:
             ensure_profile_dir()
-            core._write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
+            core.write(signed_in_stamp(), datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
         print(f"ok  build={build}" if read_build else "ok")
         return 0
     finally:
-        _close_qa(env)
+        close_qa(env)
 
 
 def page_start(url):
@@ -326,15 +326,15 @@ def page_start(url):
     the build. Prints one JSON line: {status: ok, build, url} with the browser left open (exit 0), or {status: blocked,
     block_scope: browser|session|page, reason} (exit 1; a sign-in page closes the browser, an HTTP error page leaves it open
     for the explorer's finish)."""
-    cfg, hosts = _qa_config("page-start")
+    cfg, hosts = qa_config("page-start")
     if not core.url_allowed(url, hosts):
         raise core.BadInput(f"page-start: {url!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
-    started = _start_page(cfg, hosts, url)
+    started = start_at(cfg, hosts, url)
     print(json.dumps(started))
     return 0 if started["status"] == "ok" else 1
 
 
-def _start_page(cfg, hosts, url):
+def start_at(cfg, hosts, url):
     """page-start's result for an allowed url: {status: ok, build, url} or {status: blocked, block_scope, reason}, plus
     the browser it opens (a run file records it)."""
     out = lambda d: d | {"browser": cfg.get("browser")}
@@ -344,10 +344,10 @@ def _start_page(cfg, hosts, url):
     if rc:
         first = next((x.strip() for x in err.getvalue().splitlines() if x.strip()), f"browser-open exited {rc}")
         return out({"status": "blocked", "block_scope": "browser", "reason": core.short(first, 300)})
-    env = _pw_env()
+    env = pw_env()
     signed_in, problem, status = _sign_in_state(cfg, env)
     if problem or not signed_in:
-        _close_qa(env)
+        close_qa(env)
         return out(
             {
                 "status": "blocked",

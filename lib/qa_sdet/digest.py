@@ -110,7 +110,7 @@ class Anonymizer:
             for p in {str(project), str(Path(project).resolve())}:
                 if p and p != "/":
                     raw_paths.append((p.rstrip("/"), "<project>"))
-        raw_paths.append((str(plugin_log._PLUGIN_ROOT).rstrip("/"), "<plugin>"))
+        raw_paths.append((str(plugin_log.PLUGIN_ROOT).rstrip("/"), "<plugin>"))
         for idx, sp in enumerate(cfg.get("sourcePaths") if isinstance(cfg.get("sourcePaths"), list) else (), 1):
             s = str(sp or "").strip().rstrip("/")
             if s:
@@ -168,10 +168,10 @@ class Anonymizer:
         frag_part = ""
         if "#" in path_part:
             path_part, _, frag_part = path_part.partition("#")
-        norm_p = core._ids(path_part) or "/"
+        norm_p = core.mask_ids(path_part) or "/"
         if frag_part.startswith(("/", "!/")):
             bang = "!" if frag_part.startswith("!/") else ""
-            norm_p += f"#{bang}{core._ids(frag_part[len(bang) :].split('?')[0])}"
+            norm_p += f"#{bang}{core.mask_ids(frag_part[len(bang) :].split('?')[0])}"
         return f"{scheme}{net}{norm_p}" + ("?<query>" if q_sep else "")
 
     def route(self, r):
@@ -198,7 +198,7 @@ class Anonymizer:
             out = re.sub(rf"(?i)\b{re.escape(self._app)}\b", "<app>", out)
         # Normalize numeric/UUID segments in route-like paths that weren't full URLs
         out = _ROUTE_SEG_RE.sub(
-            lambda m: core._ids(m.group(1)) if not m.group(1).startswith("/usr/") else m.group(1), out
+            lambda m: core.mask_ids(m.group(1)) if not m.group(1).startswith("/usr/") else m.group(1), out
         )
         return out
 
@@ -237,7 +237,7 @@ def _filter_window(items, qa_out, all_events=False, since=None):
     if since:
         cutoff = _parse_since(since)
         return [(h, d) for h, d in items if str(d.get("ts") or "") >= cutoff]
-    cur = plugin_log._read_cursor(qa_out)
+    cur = plugin_log.read_cursor(qa_out)
     if not cur:
         return items
     ch, cts = cur.get("line_hash"), str(cur.get("ts") or "")
@@ -483,10 +483,10 @@ def export_digest(
     """Export anonymized Markdown digest. Returns {events, path, markdown, summary}."""
     proj = Path(project).resolve()
     qa_out = proj / "qa-out"
-    items, bad = plugin_log._read_events(qa_out)
+    items, bad = plugin_log.read_events(qa_out)
     selected = _filter_window(items, qa_out, all_events=all_events, since=since)
     if not selected:
-        cur = plugin_log._read_cursor(qa_out)
+        cur = plugin_log.read_cursor(qa_out)
         why = (
             f"since {since}"
             if since
@@ -505,10 +505,10 @@ def export_digest(
     if not preview and not stdout:
         qa_out.mkdir(exist_ok=True)
         path = _next_digest_path(qa_out, day or datetime.now().strftime("%Y-%m-%d"))  # noqa: DTZ005 - the user's local date (stored times use core.now(), UTC)
-        core._write(path, md)
+        core.write(path, md)
     if not preview:
         last_hash, last_ev = selected[-1]
-        plugin_log._write_cursor(qa_out, last_hash, str(last_ev.get("ts") or core.now()))
+        plugin_log.write_cursor(qa_out, last_hash, str(last_ev.get("ts") or core.now()))
     counts = Counter(str(e.get("type")) for e in events)
     breakdown = ", ".join(f"{k}={v}" for k, v in counts.most_common())
     summary = f"exported {len(events)} event(s) ({breakdown})" + (f" -> {path}" if path else "")

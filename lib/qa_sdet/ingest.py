@@ -333,8 +333,8 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
                     rid,
                     symptom,
                     core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
-                    cards._endpoint(b.get("endpoint")),
-                    memory._pattern(b.get("pattern")),
+                    cards.endpoint(b.get("endpoint")),
+                    memory.pattern_tag(b.get("pattern")),
                     core.cap(b.get("ticket"))[:30] or None,
                     build if known else None,
                     build if known else None,
@@ -402,7 +402,7 @@ def _store_blind_spots(con, run, page, rid, build, ts):
     reopens it. An unfinished run says nothing about what a finished one left out."""
     from . import results
 
-    for cat, text in results._not_tested(run):
+    for cat, text in results.not_tested(run):
         con.execute(
             "INSERT INTO blind_spots(page,category,text,build,first_seen,last_seen,last_run) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(page,category,text) DO UPDATE SET seen_runs=seen_runs + (last_run IS NOT excluded.last_run), "
@@ -561,7 +561,7 @@ def _store_observed(con, run, f, ts):
         return
     page, build = core.norm_route(target), core.norm_build(core.txt(run.get("build"), "build"))
     hosts, rows = core.allowed_hosts(core.config()), set()
-    for line in scrub.redact(results._text(log)).splitlines():
+    for line in scrub.redact(results.read_text(log)).splitlines():
         m = signals.REQUEST_LINE.fullmatch(line)
         if not m:
             continue
@@ -570,7 +570,7 @@ def _store_observed(con, run, f, ts):
             path = urlsplit(url).path or url
         except ValueError:
             continue
-        shape = core._ids(path)
+        shape = core.mask_ids(path)
         klass = "failed" if code == "FAILED" else f"{code[0]}xx"
         if (
             not shape
@@ -830,13 +830,13 @@ def _ingest_files(con, pending):
                     raise
                 except (OSError, ValueError, sqlite3.DatabaseError) as e:
                     print(f"qa-mem: requests of {f.name} not kept: {e}", file=sys.stderr)
-            core._write(done, f"{digest}\n{core.now()}\n{note}")
+            core.write(done, f"{digest}\n{core.now()}\n{note}")
             err.unlink(missing_ok=True)
             n += 1
         except sqlite3.OperationalError as e:  # transient (e.g. DB locked): retry on the next hook run
             print(f"qa-mem: will retry {f}: {e}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 - bad file: park it until it is rewritten
-            core._write(err, f"{digest}\n{core.now()} {type(e).__name__}: {e}\n")
+            core.write(err, f"{digest}\n{core.now()} {type(e).__name__}: {e}\n")
             print(f"qa-mem: skipped {f}: {e}", file=sys.stderr)
             PARKED.append(f"{f}: {type(e).__name__}: {e}")
     return n

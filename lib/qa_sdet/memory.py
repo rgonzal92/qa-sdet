@@ -11,7 +11,7 @@ import sqlite3
 from . import cards, codemap, core, scrub
 
 
-def _pattern(raw):
+def pattern_tag(raw):
     """A defect class as a short kebab-case tag ('Silent error as EMPTY!' -> silent-error-as-empty), or None."""
     tag = re.sub(r"[^a-z0-9]+", "-", str(raw or "").lower()).strip("-")[:60].strip("-")
     return tag or None
@@ -24,7 +24,7 @@ def signal_key(key):
         return "console", "console: " + re.sub(r"\d+", "N", key[len("console: ") :])[:200]
     m = re.fullmatch(r"([A-Z]+) (\S+) → (\S+).*", key)
     return (
-        ("request", f"{m.group(1)} {core._ids(m.group(2)) or m.group(2)} {m.group(3)}")
+        ("request", f"{m.group(1)} {core.mask_ids(m.group(2)) or m.group(2)} {m.group(3)}")
         if m and "×" not in key
         else None
     )
@@ -60,13 +60,13 @@ def set_signal(con, sid, status):
 
 
 def patterns(con, min_pages=2, as_json=False):
-    rows = cards._patterns(con, min_pages)
+    rows = cards.bug_patterns(con, min_pages)
     if as_json:
         return json.dumps(rows, indent=1)
     return (
         "\n".join(
             [f"RECURRING PATTERNS (one kind of bug on {min_pages}+ pages; most pages first):"]
-            + [cards._pattern_line(g) for g in rows]
+            + [cards.pattern_line(g) for g in rows]
         )
         if rows
         else f"no bug pattern on {min_pages}+ pages yet"
@@ -83,8 +83,8 @@ def search(con, q):
     words = list(dict.fromkeys(w for t in pos for w in re.findall(r"\w+", t)))[:8]
     nots = [" ".join(ws) for t in neg if (ws := re.findall(r"\w+", t))]
     found = lambda groups: (
-        _search(con, cards._fts_query(groups, nots)),
-        _search_bugs(con, cards._fts_query(groups, nots)),
+        _search(con, cards.fts_query(groups, nots)),
+        _search_bugs(con, cards.fts_query(groups, nots)),
     )
     rows, bug_rows = found([words]) if words else ([], [])
     relaxed = not rows and not bug_rows and len(words) >= 3
@@ -137,7 +137,7 @@ def ticket_context(con, text, n=8):
     terms = sorted(counts, key=lambda w: -counts[w])[:12]
     names = {x["route"]: x["name"] or "" for x in con.execute("SELECT route, name FROM pages WHERE route != '*'")}
     named = {core.norm_route(m) for m in re.findall(r"(?<![\w.])/[\w#!/.-]+", str(text))} & set(names)
-    pairs = cards._fts_query(list(itertools.combinations(terms, 2)), []) if len(terms) > 1 else None
+    pairs = cards.fts_query(list(itertools.combinations(terms, 2)), []) if len(terms) > 1 else None
     facts, bug_rows = (_search(con, pairs), _search_bugs(con, pairs)) if pairs else ([], [])  # 2+ of the ticket's words
     score, why = {}, {}
     shell_of = {m: s for s, (_, m) in codemap.module_bindings(con).items()}  # a module page counts for its shell route
@@ -163,11 +163,11 @@ def ticket_context(con, text, n=8):
     ranked = sorted(score, key=lambda r: (-score[r], r))[:n]
     impacted = {}  # what the top candidates reach: sibling writers, readers, shared components (one hop)
     for r in ranked[:3]:
-        for p, reason in cards._related(con, r):
+        for p, reason in cards.related_pages(con, r):
             if p not in ranked and p in names:
                 impacted.setdefault(p, f"{reason} (via {r})")
     if terms and ranked:  # on the routes the ticket points at, one of its words is enough
-        one = cards._fts_query([[w] for w in terms], [])
+        one = cards.fts_query([[w] for w in terms], [])
         top = ranked[:3]
         facts += [x for x in _search(con, one) if x["page"] in top and x["id"] not in {f["id"] for f in facts}]
         bug_rows += [
@@ -184,7 +184,7 @@ def ticket_context(con, text, n=8):
     ][:10]
     return {
         "terms": terms,
-        "patterns": [cards._pattern_line(g) for g in cards._patterns(con)[:3]],
+        "patterns": [cards.pattern_line(g) for g in cards.bug_patterns(con)[:3]],
         "decisions": [
             f"{x['text']} → {x['answer'] or '(answered)'}" + (f" ({x['ticket']})" if x["ticket"] else "")
             for x in decisions
@@ -192,7 +192,7 @@ def ticket_context(con, text, n=8):
         "candidate_routes": [{"route": r, "name": names[r], "why": ", ".join(why[r])} for r in ranked],
         "impacted_routes": [{"route": p, "name": names[p], "why": reason} for p, reason in list(impacted.items())[:6]],
         "relevant_facts": [f"{x['page']} [{x['kind']}] {x['text']}" + (" *" if x["stale"] else "") for x in facts[:15]],
-        "relevant_bugs": [cards._bug_line(x, True) for x in bug_rows[:15]],
+        "relevant_bugs": [cards.bug_line(x, True) for x in bug_rows[:15]],
     }
 
 
@@ -211,7 +211,7 @@ def impact(con, target, as_json=False):
     its resource. Hints from source, never proof."""
     target = " ".join(str(target).split())
     if re.match(rf"(?i)({codemap.HTTP_METHODS})\s", target):
-        ref = codemap._api_ref(target)
+        ref = codemap.api_ref(target)
         if not ref[1]:
             raise core.BadInput(f"impact: no path in {target!r}: use METHOD /path (POST /api/zones)")
         calling = codemap.callers(con, ref)
@@ -237,7 +237,7 @@ def impact(con, target, as_json=False):
             "resource_consumers": links["consumers"],
             "resource_producers": links["producers"],
             "shared_components": codemap.component_neighbors(con, route),
-            "cross_page_rules": cards._cross_page_rules_differ(con, route),
+            "cross_page_rules": cards.cross_page_rules_differ(con, route),
         }
         head = f"IMPACT of {route} (hints from the code map, not proof):"
     if as_json:
@@ -280,14 +280,14 @@ def bug_matches(con, route, symptom, endpoint=None):
     """[(score, bug row)] best first: bugs on this page, on pages sharing its calls, sighted here, or recorded on the same
     endpoint, whose title and symptom share words with this symptom (any status). Reads only."""
     page, words = core.norm_route(route), _stems(symptom)
-    ep = codemap._api_ref(endpoint) if endpoint else ("", "")
-    near = {page} | set(cards._near_pages(con, page))
+    ep = codemap.api_ref(endpoint) if endpoint else ("", "")
+    near = {page} | set(cards.near_pages(con, page))
     sighted = {h for (h,) in con.execute("SELECT hash FROM sightings WHERE page=?", (page,))}
     scored = []
     for x in con.execute(f"SELECT {cards.BUG_COLS},endpoint FROM bugs"):
         theirs = _stems(f"{x['title']} {x['symptom'] or ''}")
         shared = len(words & theirs)
-        same_ep = bool(ep[1] and x["endpoint"] and codemap._same_call(cards._endpoint_ref(x["endpoint"]), ep))
+        same_ep = bool(ep[1] and x["endpoint"] and codemap.same_call(cards.endpoint_ref(x["endpoint"]), ep))
         if not shared or not (same_ep or x["page"] in near or x["hash"] in sighted):
             continue  # same words on a page that shares nothing with this one: another bug
         score = shared / len(words | theirs) + 0.5 * same_ep + 0.1 * (x["page"] == page)

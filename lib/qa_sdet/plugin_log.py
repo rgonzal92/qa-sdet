@@ -45,7 +45,7 @@ EVENT_TYPES = (
     "run_summary",
     "user_note",
 )
-_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 
 # The secret forms hooks/guard.py mask() covers and scrub.py doesn't, so tool_fail and cli_error calls stay as clean as
 # denials; credential-shaped values only, so notes stay readable (tests/test_guard.py LibMirrorsGuard pins the two).
@@ -64,7 +64,7 @@ _CLI_MASKS = (
 def plugin_version() -> str:
     """Version from .claude-plugin/plugin.json, cached per process."""
     try:
-        v = json.loads((_PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")).get("version")
+        v = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")).get("version")
         return str(v).strip() if v else core.UNKNOWN
     except (OSError, ValueError, AttributeError):
         return core.UNKNOWN
@@ -282,7 +282,7 @@ def add_note(project: Path, text: str, kind: str = "nuisance", severity: str | N
 
 
 # ---------- Reading, cursor, show & clear ----------
-def _read_events(qa_out):
+def read_events(qa_out):
     """Return ([(line_hash, dict), ...], bad_lines) from <qa_out>/plugin-log.jsonl."""
     log = Path(qa_out) / LOG_NAME
     try:
@@ -309,7 +309,7 @@ def _read_events(qa_out):
     return items, bad
 
 
-def _read_cursor(qa_out):
+def read_cursor(qa_out):
     try:
         doc = json.loads((Path(qa_out) / CURSOR_NAME).read_text(encoding="utf-8"))
         return doc if isinstance(doc, dict) else {}
@@ -317,14 +317,14 @@ def _read_cursor(qa_out):
         return {}
 
 
-def _write_cursor(qa_out, line_hash, ts):
-    core._write(Path(qa_out) / CURSOR_NAME, json.dumps({"ts": ts, "line_hash": line_hash}) + "\n")
+def write_cursor(qa_out, line_hash, ts):
+    core.write(Path(qa_out) / CURSOR_NAME, json.dumps({"ts": ts, "line_hash": line_hash}) + "\n")
 
 
 def show_log(project: Path, *, limit: int = 30, event_type: str | None = None) -> str:
     """Compact local terminal view of recent events (raw local, secrets already scrubbed on write)."""
     qa_out = Path(project).resolve() / "qa-out"
-    items, _ = _read_events(qa_out)
+    items, _ = read_events(qa_out)
     events = [d for _, d in items]
     if event_type:
         if event_type not in EVENT_TYPES:

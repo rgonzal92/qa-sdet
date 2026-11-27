@@ -53,24 +53,24 @@ class BrowserBase(Base):
         os.chdir(self.proj)  # playwright-cli writes .playwright-cli/ into the folder it runs in
 
     def tearDown(self):
-        session._close_qa(session._pw_env())  # before the sandbox goes: the browser's profile lives in it
+        session.close_qa(session.pw_env())  # before the sandbox goes: the browser's profile lives in it
         os.chdir(self.cwd)
         super().tearDown()
 
     def open(self, path):
-        cfg, hosts = session._qa_config("test")
-        started = session._start_page(cfg, hosts, self.base + path)
+        cfg, hosts = session.qa_config("test")
+        started = session.start_at(cfg, hosts, self.base + path)
         self.assertEqual(started["status"], "ok", started)
         return started
 
     def pw(self, *args):
         """The output of one playwright-cli command on the `qa` session; a failed command fails the test."""
-        ok, out = crawl._pw(list(args), 60)
+        ok, out = crawl.pw(list(args), 60)
         self.assertTrue(ok, out)
         return out
 
     def js(self, script, target=None):
-        return session._unwrap_raw(self.pw("--raw", "eval", script, *([target] if target else [])))
+        return session.unwrap_raw(self.pw("--raw", "eval", script, *([target] if target else [])))
 
 
 class PlaywrightCli(BrowserBase):
@@ -93,7 +93,7 @@ class PlaywrightCli(BrowserBase):
         self.assertIn({"errors": [{"message": "Not allowed to read zones"}], "data": None}, bodies)
         sent = json.loads(self.pw("--raw", "request-body", calls[0].split(".")[0].strip()))
         self.assertIn("operationName", sent)
-        ok, out = crawl._pw(["--raw", "response-body", "9999"], 60)  # a request the browser doesn't hold
+        ok, out = crawl.pw(["--raw", "response-body", "9999"], 60)  # a request the browser doesn't hold
         self.assertEqual((ok, "not found" in out), (False, True), out)
 
     def test_a_binary_response_body_is_saved_to_a_file(self):
@@ -107,7 +107,7 @@ class PlaywrightCli(BrowserBase):
         self.open("/console/schedules")  # four iframes: two hidden modules, the shown one, a 0x0 session frame
         self.assertEqual(self.js("document.querySelectorAll('iframe').length"), "4")
         self.assertEqual(self.js("el => el.ownerDocument.title", FRAME.format(0)), "Schedules")
-        ok, out = crawl._pw(["--raw", "eval", "el => 1", FRAME.format(1)], 60)
+        ok, out = crawl.pw(["--raw", "eval", "el => 1", FRAME.format(1)], 60)
         self.assertEqual((ok, "does not match any elements" in out), (False, True), out)
 
     def test_an_eval_on_a_frame_reads_the_frames_document(self):  # the tips file's `el => (<script>)` wrap
@@ -144,7 +144,7 @@ class PlaywrightCli(BrowserBase):
         self.assertEqual(self.js(tag, "getByRole('searchbox', { name: 'Find a device' })"), "INPUT")
         self.assertEqual(self.js(tag, '[data-qa-item="close-btn"]'), "BUTTON")
         for missing in ("getByRole('textbox')", "getByRole('button', { name: 'Ghost' })", "getByTestId('close-btn')"):
-            ok, out = crawl._pw(["--raw", "eval", tag, missing], 60)
+            ok, out = crawl.pw(["--raw", "eval", tag, missing], 60)
             self.assertEqual((ok, "does not match any elements" in out), (False, True), missing)
 
 
@@ -437,12 +437,12 @@ class Recipes(BrowserBase):
         shown = self.recipe(
             "Type key by key", **{"locator of the first part": "getByLabel('Hours')", "css of the parts": "#time input"}
         )
-        self.assertEqual(session._unwrap_raw(shown), ":30")  # the hour typed first is gone
+        self.assertEqual(session.unwrap_raw(shown), ":30")  # the hour typed first is gone
 
     def test_a_count_is_read_once_it_stops_changing(self):
         self.open("/grid.html")
         self.assertEqual(
-            session._unwrap_raw(self.recipe("Settled, not just loaded", **{"css of the count": "#range"})),
+            session.unwrap_raw(self.recipe("Settled, not just loaded", **{"css of the count": "#range"})),
             "Showing 1-20 of 65",
         )
 
@@ -450,14 +450,14 @@ class Recipes(BrowserBase):
         self.open("/form.html")
         self.pw("fill", "getByLabel('Zone name')", "qa-sdet-zone")
         fill = {"locator": "getByRole('button', { name: 'Save' })", "css of what appears": "#msg"}
-        shown = session._unwrap_raw(self.recipe("Settled, not just loaded", 1, **fill))
+        shown = session.unwrap_raw(self.recipe("Settled, not just loaded", 1, **fill))
         self.assertEqual(shown, 'Saved zone "qa-sdet-zone" at 0 km/h')
 
     def test_a_popup_tab_is_read_and_closed(self):
         self.open("/export.html")
         self.pw("click", "getByRole('button', { name: 'Open daily report' })")
         self.assertIn(
-            "Daily report | about:blank | Daily report", session._unwrap_raw(self.recipe("Second tab or popup"))
+            "Daily report | about:blank | Daily report", session.unwrap_raw(self.recipe("Second tab or popup"))
         )
         self.assertIn("- 0: (current) [Reports]", self.recipe("Second tab or popup", 1))
         self.assertNotIn("- 1:", self.pw("tab-list"))

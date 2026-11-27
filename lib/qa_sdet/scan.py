@@ -194,7 +194,7 @@ SCAN_MAX_BYTES = 400_000  # bigger files are generated or data, not hand-written
 def _rel_files(root):
     """Relative paths of regular files under root. In a git repo: tracked and untracked-but-not-ignored files, the
     same set incremental scans see (so ignored generated code is never mapped); otherwise a walk of the tree."""
-    listed = core._git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".")
+    listed = core.git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".")
     rels = [rel.rstrip("/") for rel in (listed or "").split("\0") if rel and os.path.normpath(rel) != "."]
     if rels:  # (nothing listed: not a repo, or a folder a parent repo ignores: walk it)
         for rel in rels:
@@ -459,7 +459,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             continue
         if any(r[0] == repo for r in repos):
             continue  # the same folder given twice (. and ./): listed once
-        head = (core._git(repo, "rev-parse", "HEAD") or "").strip()
+        head = (core.git(repo, "rev-parse", "HEAD") or "").strip()
         head = head if core.COMMIT_RE.fullmatch(head) else ""
         scanned = {}  # rel -> [area, bytes, text]
         for rel in _rel_files(repo):
@@ -509,8 +509,8 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
         candidates,
         routers,
     ) in repos:  # did a router change, or a route file go, since frontend last mapped?
-        stored = codemap._hashes(con, "frontend", repo)
-        by_file = codemap._route_pages_by_file(con, repo)
+        stored = codemap.file_hashes(con, "frontend", repo)
+        by_file = codemap.route_pages_by_file(con, repo)
         for src, pages in by_file.items():
             cur = candidates.get(src)
             if cur is None or cur[0] not in ("frontend", "shell") or (len(pages) > 1 and stored.get(src) != cur[2]):
@@ -529,7 +529,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             keep = set(mine) | (
                 {rel for rel, (ar, _, _) in candidates.items() if ar == "shell"} if a == "frontend" else set()
             )
-            stored = codemap._hashes(con, a, repo)
+            stored = codemap.file_hashes(con, a, repo)
             had = {
                 r[0] for r in con.execute("SELECT DISTINCT src FROM codemap WHERE repo=? AND area=?", (repo, a))
             } | set(stored)
@@ -557,7 +557,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             entry["bytes"] = sum(entry["sizes"].values())
             if entry["files"]:  # listed, not yet mapped: no stored hash, so a map that never lands lists them again
                 with con:
-                    codemap._set_hashes(con, a, repo, {k: v for k, v in stored.items() if k not in entry["files"]})
+                    codemap.set_file_hashes(con, a, repo, {k: v for k, v in stored.items() if k not in entry["files"]})
             else:  # nothing for a mapper: settle it now so cards don't say "behind" forever
                 with con:
                     if entry["full"]:
@@ -566,7 +566,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                         con.execute("DELETE FROM codemap WHERE repo=? AND area=? AND src=?", (repo, a, rel))
                     if head:
                         core.set_meta(con, f"codemap_commit:{a}:{repo}", head)
-                    codemap._set_hashes(
+                    codemap.set_file_hashes(
                         con,
                         a,
                         repo,
@@ -576,7 +576,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
             areas[a].append(entry)
     _apply_shell_menu(con, repos)
     with con:
-        codemap._drop_code_only_pages(con)
+        codemap.drop_code_only_pages(con)
     for a, entries in areas.items():
         chunks = _chunk(entries, chunk_files, chunk_tokens)
         info = []
@@ -588,7 +588,7 @@ def codemap_scan(con, paths, out_dir, full=False, stamp=None, chunk_files=CHUNK_
                 "repos": [{k: v for k, v in r.items() if k != "sizes"} for r in chunk],
             }
             scan_file = out_dir / f"scan-{a}{suffix}.json"
-            core._write(scan_file, json.dumps(data, indent=1))
+            core.write(scan_file, json.dumps(data, indent=1))
             files = sum(len(r["files"]) for r in chunk)
             if files:
                 info.append(

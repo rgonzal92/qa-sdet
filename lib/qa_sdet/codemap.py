@@ -13,7 +13,7 @@ CODEMAP_KINDS = ("route", "locator", "rule", "api")
 CODEMAP_PAGE_CAP = 200  # rows per page, route rows not counted; page '*' (the whole backend) is exempt
 
 
-def _route_pages_by_file(con, repo):
+def route_pages_by_file(con, repo):
     """{src: {pages}} for the files that define routes (frontend route rows)."""
     out = {}
     for src, page in con.execute(
@@ -23,7 +23,7 @@ def _route_pages_by_file(con, repo):
     return out
 
 
-def _hashes(con, area, repo):
+def file_hashes(con, area, repo):
     """{file: sha1 of its content when last mapped} for one area of one repo."""
     try:
         h = json.loads(core.meta(con, f"codemap_hashes:{area}:{repo}") or "{}")
@@ -32,11 +32,11 @@ def _hashes(con, area, repo):
         return {}
 
 
-def _set_hashes(con, area, repo, hashes):
+def set_file_hashes(con, area, repo, hashes):
     core.set_meta(con, f"codemap_hashes:{area}:{repo}", json.dumps(dict(sorted(hashes.items()))))
 
 
-def _drop_code_only_pages(con):
+def drop_code_only_pages(con):
     """Pages that exist only because of the code map, once their rows are gone (a route removed from the code)."""
     con.execute(
         "DELETE FROM pages WHERE build IS NULL AND route NOT IN (SELECT page FROM codemap) "
@@ -90,7 +90,7 @@ def apply_codemap(con, cm, scan, ts=None):
     for r in scan.get("repos") or []:
         path = r.get("path") if isinstance(r, dict) else None
         if isinstance(path, str) and os.path.isabs(path) and os.path.isdir(path):
-            repos[os.path.realpath(path)] = {**r, "files": core._strs(r, "files"), "deleted": core._strs(r, "deleted")}
+            repos[os.path.realpath(path)] = {**r, "files": core.strs(r, "files"), "deleted": core.strs(r, "deleted")}
     rows = core.dicts(cm, "rows")
     for x in rows:
         for fld in ("page", "kind", "label", "value", "file", "repo"):
@@ -186,13 +186,13 @@ def apply_codemap(con, cm, scan, ts=None):
             )
         for path, r in repos.items():
             files, gone = set(r.get("files") or []), set(r.get("deleted") or [])
-            hashes = {} if r.get("full") else {k: v for k, v in _hashes(con, area, path).items() if k not in gone}
+            hashes = {} if r.get("full") else {k: v for k, v in file_hashes(con, area, path).items() if k not in gone}
             given = g if isinstance(g := r.get("hashes"), dict) else {}
             hashes.update({rel: str(given.get(rel) or "") for rel in files})
-            _set_hashes(con, area, path, hashes)
+            set_file_hashes(con, area, path, hashes)
             if core.COMMIT_RE.fullmatch(str(r.get("commit") or "")):
                 core.set_meta(con, f"codemap_commit:{area}:{path}", r["commit"])
-        _drop_code_only_pages(con)
+        drop_code_only_pages(con)
     return dropped
 
 
@@ -210,7 +210,7 @@ def _codemap_behind(con, rows):
                 ""
                 if core.GIT_SLOW
                 else (
-                    core._git(repo, "rev-list", "--count", "--end-of-options", f"{commit}..HEAD", "--", ".", timeout=2)
+                    core.git(repo, "rev-list", "--count", "--end-of-options", f"{commit}..HEAD", "--", ".", timeout=2)
                     or ""
                 ).strip()
             )
@@ -228,7 +228,7 @@ HTTP_METHODS = r"GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS"
 FETCH_CALL_RE = re.compile(r"\bfetch\(\s*(['\"`])[^'\"`]*\1\s*(,\s*\{(?:[^{}]|\{[^{}]*\})*\})?\s*\)")
 
 
-def _api_ref(text):
+def api_ref(text):
     """(METHOD or '', 'api/zones/:id') from 'POST /api/zones/{id:int}', "fetch(`${BASE}/zones/${encodeURIComponent(id)}`)",
     "'/api/zones/' + id", 'https://h/api/x', "api.get('zones')": the lowercase shape a frontend call and a backend route
     share. ('', '') when there is no path. The method is '' (any) when the text doesn't show it."""
@@ -289,14 +289,14 @@ def _called(rows):
     called = set()
     for x in rows:
         if x["kind"] == "api":
-            ref = _api_ref(x["value"])
-            ref = ref if ref[1] else _api_ref(x["label"])
+            ref = api_ref(x["value"])
+            ref = ref if ref[1] else api_ref(x["label"])
             if ref[1]:
                 called.add(ref)
     return called
 
 
-def _same_call(a, b):
+def same_call(a, b):
     """Two (method, path) refs name one call: same endpoint, and same method when both name one (a call written
     without a method matches any)."""
     return _same_endpoint(a[1], b[1]) and (not a[0] or not b[0] or a[0] == b[0])
@@ -329,7 +329,7 @@ def shell_alias(con, module_route):
     return sorted(s for s, (_, m) in module_bindings(con).items() if m == module_route)
 
 
-def _codemap_rows(con, route):
+def codemap_rows(con, route):
     """This page's rows (a shell route's include its module page's) plus the backend rows ('*') for the endpoints its
     frontend calls (same path; same method when both sides name one)."""
     module = module_target(con, route) if route != "*" else None
@@ -343,9 +343,9 @@ def _codemap_rows(con, route):
             "SELECT page,kind,label,value,file,repo,area,src FROM codemap WHERE page='*' AND kind IN ('api','rule') "
             "ORDER BY kind, label"
         ):
-            ref = _api_ref(x["label"])
-            ref = ref if ref[1] else _api_ref(x["value"])
-            if ref[1] and any(_same_call(ref, c) for c in called):
+            ref = api_ref(x["label"])
+            ref = ref if ref[1] else api_ref(x["value"])
+            if ref[1] and any(same_call(ref, c) for c in called):
                 rows.append(x)
     return rows
 
@@ -373,7 +373,7 @@ def _calls_by_page(con):
     return {page: _called(r) for page, r in rows.items()}
 
 
-def _group_calls(con, group):
+def group_calls(con, group):
     return _called(
         con.execute(
             f"SELECT kind,label,value FROM codemap WHERE kind='api' AND page IN ({','.join('?' * len(group))})",
@@ -386,13 +386,13 @@ def sharing_pages(con, route):
     """Other pages whose frontend calls an endpoint this page calls: a bug in that endpoint may show on both."""
     bound = module_bindings(con)
     group = page_group(con, route, bound)
-    mine = _group_calls(con, group) if route != "*" else set()
+    mine = group_calls(con, group) if route != "*" else set()
     if not mine:
         return []
     theirs = {page: refs for page, refs in _calls_by_page(con).items() if page not in group}
     out = set()
     for ref in mine:
-        pages = {page for page, refs in theirs.items() if any(_same_call(ref, c) for c in refs)}
+        pages = {page for page, refs in theirs.items() if any(same_call(ref, c) for c in refs)}
         # shortcut: an endpoint more than APP_WIDE_CALLERS other pages call (session, config) links nothing, or every
         # card would list every bug; upgrade to per-endpoint bug links if real shared bugs get missed
         if len(pages) <= APP_WIDE_CALLERS:
@@ -403,7 +403,7 @@ def sharing_pages(con, route):
 def callers(con, ref):
     """Every page whose frontend calls this exact endpoint ((METHOD or '', path)), however many do: the pages a bug of
     that endpoint may show on."""
-    return {page for page, refs in _calls_by_page(con).items() if any(_same_call(ref, c) for c in refs)}
+    return {page for page, refs in _calls_by_page(con).items() if any(same_call(ref, c) for c in refs)}
 
 
 def shown(con, pages):
@@ -484,7 +484,7 @@ def resource_links(con, calls, group=()):
 def resource_neighbors(con, route):
     """resource_links of what this page (a shell route with its module page) calls."""
     group = page_group(con, route)
-    return resource_links(con, _group_calls(con, group) if route != "*" else set(), group)
+    return resource_links(con, group_calls(con, group) if route != "*" else set(), group)
 
 
 def component_neighbors(con, route):
@@ -518,7 +518,7 @@ def codemap_block(con, route, shown, first=()):
     """Card lines for the code map: compact (about 12 lines); `qa-mem code <route>` has everything. `shown`: the verified
     locators the card already printed (any it had no room for still show here as hints). Rules whose label is in `first`
     (untested, or in a file changed since the last visit) come before the others within the cap."""
-    all_rows = _codemap_rows(con, route)
+    all_rows = codemap_rows(con, route)
     rows = [x for x in all_rows if x["kind"] != "route"]
     if not rows:
         return []
@@ -573,7 +573,7 @@ def codemap_forget(con, repo):
                 con.execute(
                     "DELETE FROM meta WHERE key IN (?,?)", (f"codemap_commit:{a}:{key}", f"codemap_hashes:{a}:{key}")
                 )
-        _drop_code_only_pages(con)
+        drop_code_only_pages(con)
     return n
 
 
@@ -607,7 +607,7 @@ def code(con, q=""):
     else:
         pg = find_page(con, q)
         route = pg["route"] if pg else core.norm_route(q)
-    rows = _codemap_rows(con, route)
+    rows = codemap_rows(con, route)
     if not rows:
         return f"no code-map rows for '{q}'"
     return f"CODE MAP {route} ({_codemap_behind(con, rows)}; hints from source, not requirements):\n" + "\n".join(

@@ -18,13 +18,13 @@ def _clip(s, n):
     return (cut[: cut.rfind(" ")] if " " in cut[n // 2 :] else cut).rstrip(" ,;:") + "…"
 
 
-def _plan_folders(qa_out):
+def plan_folders(qa_out):
     """Run folders with a plan.json, the most recently changed first (plan or a run file; not the folder, which a
     re-rendered REPORT.md or an editor's swap file touches): plan-find's latest run and the inbox's Last QA come from
     the same order."""
     dirs = [p for p in qa_out.iterdir() if p.is_dir() and not p.is_symlink() and (p / ".data" / "plan.json").is_file()]
     when = lambda p: max(
-        (results._mtime(x) for x in [p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()),
+        (results.mtime(x) for x in [p / ".data" / "plan.json", *(p / ".data").glob("run-*.json")] if x.exists()),
         default=0.0,
     )
     return sorted(dirs, key=lambda p: (when(p), p.name), reverse=True)
@@ -40,7 +40,7 @@ def _run_state(run_dir):
     plan, runs = d["plan"], d["runs"]
     if not plan:
         return None
-    tickets = [t["key"] for t in results._plan_tickets(plan)]
+    tickets = [t["key"] for t in results.plan_tickets(plan)]
     cases = results.merged_cases(plan, runs)
     counts = {s: sum(c["status"] == s for c in cases) for s in core.CASE_STATUSES}
     builds = sorted(
@@ -49,7 +49,7 @@ def _run_state(run_dir):
     case_build = {}
     for _, r in runs:
         b = core.norm_build(r.get("build"))
-        for x in results._list(r, "cases"):
+        for x in results.entries(r, "cases"):
             if x.get("id") not in (None, "") and not isinstance(x.get("id"), bool):  # a kept result: its own build
                 case_build[str(x["id"])] = core.norm_build(x["build"]) if isinstance(x.get("build"), str) else b
     # routes as dispatch keys them (path and query: /list?a=1 and /list?a=2 are two briefs and run files), spelled so a
@@ -63,14 +63,14 @@ def _run_state(run_dir):
     for _, r in runs:
         k = core.route_key(r.get("target"))
         if k[0]:
-            run_status_by_route[k], run_build_by_route[k] = results._first_word(r.get("status")), r.get("build")
-    now, of = results._now_build(runs), lambda by, k: by.get(k, by.get((k[0], "")))
+            run_status_by_route[k], run_build_by_route[k] = results.first_word(r.get("status")), r.get("build")
+    now, of = results.now_build(runs), lambda by, k: by.get(k, by.get((k[0], "")))
     incomplete = []
     for k in routes_order:
         rcases = [c for c in cases if core.route_key(c.get("route")) == k]
         if (
             of(run_status_by_route, k) in ("blocked", "incomplete")
-            or results._older_build(of(run_build_by_route, k), now)  # a new build's re-run stopped before this page
+            or results.older_build(of(run_build_by_route, k), now)  # a new build's re-run stopped before this page
             or any(c["status"] in ("BLOCKED", "NOT_RUN") for c in rcases)
         ):
             incomplete.append(k)
@@ -81,13 +81,13 @@ def _run_state(run_dir):
     # naming) a CONFIRMED CRITICAL/HIGH bug of its ticket that no retested case names, is retested: a partial retest must
     # not make it a prior pass and drop the reason the ticket didn't pass
     bugs = results.run_bugs(runs)
-    rechecked = set().union(*(results._case_bugs(c) for c in cases if c["status"] != "PASS"))
+    rechecked = set().union(*(results.case_bugs(c) for c in cases if c["status"] != "PASS"))
     tkey = lambda c: c.get("ticket") if isinstance(c.get("ticket"), str) else None  # a list ticket is no plan ticket's
     serious = {
         t: [
             b
             for b in results.ticket_bugs(t, cases, bugs, tickets)
-            if results._serious(b) and not results._bug_refs(b) & rechecked
+            if results.is_serious(b) and not results.bug_refs(b) & rechecked
         ]
         for t in {tkey(c) for c in cases}
     }
@@ -97,9 +97,9 @@ def _run_state(run_dir):
         return (
             c["status"] == "PASS"
             and not d["unread"]
-            and not results._blocked_runs([c], runs)
+            and not results.blocked_runs([c], runs)
             and not any(
-                (rt and rt in (b.get("route"), b.get("target"))) or results._bug_refs(b) & results._case_bugs(c)
+                (rt and rt in (b.get("route"), b.get("target"))) or results.bug_refs(b) & results.case_bugs(c)
                 for b in serious[tkey(c)]
             )
         )
@@ -136,10 +136,10 @@ def _run_state(run_dir):
             "ticket": c.get("ticket") or "",
             "ac": c.get("ac") or "",
             "route": core.norm_route(c.get("route")) or "",
-            "title": core._s(c.get("title")),
-            "build": core._s(c.get("build")) or core.UNKNOWN,
+            "title": core.as_text(c.get("title")),
+            "build": core.as_text(c.get("build")) or core.UNKNOWN,
         }
-        for c in results._prior_passed(plan, tickets)
+        for c in results.prior_passed(plan, tickets)
         if isinstance(c.get("id"), (str, int))
         and not isinstance(c["id"], bool)
         and str(c["id"])
@@ -148,7 +148,7 @@ def _run_state(run_dir):
     zero_exec = (
         bool(runs)
         and all(c["status"] in ("BLOCKED", "NOT_RUN") for c in cases)
-        and all(results._first_word(r.get("status")) == "blocked" for _, r in runs)
+        and all(results.first_word(r.get("status")) == "blocked" for _, r in runs)
     )
     kind = str(plan.get("kind") or "")
     return {
@@ -173,7 +173,7 @@ def _run_state(run_dir):
 
 def plan_find(project, keys=None, run_dir=None):
     """Find the newest reusable plan and/or latest ticket run for `keys`, or inspect a specific `--run` folder."""
-    proj = ops._project(project)
+    proj = ops.project_dir(project)
     if run_dir is not None:
         target = Path(run_dir)
         target = target if target.is_absolute() else (proj / "qa-out" / target if not target.exists() else target)
@@ -199,7 +199,7 @@ def plan_find(project, keys=None, run_dir=None):
     )
     if st:  # the ticket's folder is its run, re-run in place; its plan is reusable as long as nothing ran
         return {"reusable_plan": st if reusable_kind(st) else None, "latest_run": st}
-    dirs = _plan_folders(qa_out)  # no folder of its own (yet): an older dated or combined run, as before
+    dirs = plan_folders(qa_out)  # no folder of its own (yet): an older dated or combined run, as before
     reusable, latest = None, None
     for p in dirs:
         st = _run_state(p)
@@ -241,21 +241,21 @@ def next_action(run_dir, slug):
     a --resume of the same folder isn't stopped by the run files of the session that stopped."""
     data = Path(run_dir) / ".data"
     f, state_file = data / f"run-{slug}.json", data / "next-action.json"
-    prev = results._load_json(state_file, [])
+    prev = results.load_json(state_file, [])
     prev = prev if isinstance(prev, dict) else {}
-    mtime = results._mtime(f)
+    mtime = results.mtime(f)
     again = (prev.get("slug"), prev.get("mtime")) == (slug, mtime)  # asked again about the same result
     streak = prev.get("before" if again else "streak")
     streak = streak if isinstance(streak, int) and not isinstance(streak, bool) else 0
     at = prev.get("at") if isinstance(prev.get("at"), (int, float)) else None
     others = at is not None and any(
-        results._mtime(b) > at for b in data.glob("brief-*.md") if b.name != f"brief-{slug}.md"
+        results.mtime(b) > at for b in data.glob("brief-*.md") if b.name != f"brief-{slug}.md"
     )
     if not again and (others or (prev.get("slug") == slug and prev.get("action") != "recover_sso")):
         streak = 0  # another route was dispatched and never answered, or this one runs again: a session stopped
 
     def answer(out, new_streak):
-        core._write(
+        core.write(
             state_file,
             json.dumps(
                 {
@@ -271,10 +271,10 @@ def next_action(run_dir, slug):
         )
         return out
 
-    run = results._load_json(f, [])
+    run = results.load_json(f, [])
     if not isinstance(run, dict):
         return answer({"action": "abort", "block_scope": "browser", "reason": "explorer ended without a run file"}, 0)
-    if results._first_word(run.get("status")) != "blocked":
+    if results.first_word(run.get("status")) != "blocked":
         return answer(
             {"action": "continue", "block_scope": None, "reason": f"run-{slug}.json is {run.get('status') or '?'}"}, 0
         )
@@ -357,7 +357,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
             (lead.get("target"), lead.get("reason")),
         )
     for _, r in runs:
-        for b in results._list(r, "bugs"):
+        for b in results.entries(r, "bugs"):
             if core.norm(b.get("classification")) != "confirmed" or not b.get("route") or con is None:
                 continue
             route, weight = (
@@ -366,9 +366,9 @@ def _frontier(con, runs, explored, done, incomplete, leads):
             )
             title, ref = (
                 _clip(b.get("title"), 100),
-                codemap._api_ref(b.get("endpoint")) if b.get("endpoint") else ("", ""),
+                codemap.api_ref(b.get("endpoint")) if b.get("endpoint") else ("", ""),
             )
-            pattern = memory._pattern(b.get("pattern"))
+            pattern = memory.pattern_tag(b.get("pattern"))
             terms = (b.get("title"), b.get("symptom"))
             if ref[1]:
                 endpoint, group = f"{ref[0]} {ref[1]}".strip(), codemap.page_group(con, route)
@@ -395,7 +395,7 @@ def _frontier(con, runs, explored, done, incomplete, leads):
                             pattern,
                         )
             else:
-                for page in cards._near_pages(con, route):
+                for page in cards.near_pages(con, route):
                     add(
                         page,
                         "shared",
@@ -421,8 +421,8 @@ def _run_patterns(runs):
 
     out = {}
     for _, r in runs:
-        for b in results._list(r, "bugs"):
-            tag = memory._pattern(b.get("pattern") or b.get("heuristic"))
+        for b in results.entries(r, "bugs"):
+            tag = memory.pattern_tag(b.get("pattern") or b.get("heuristic"))
             if tag and core.norm(b.get("classification")) == "confirmed" and tag not in out:
                 route, title = core.norm_route(b.get("route") or r.get("target")), _clip(b.get("title"), 100)
                 out[tag] = {
@@ -448,11 +448,11 @@ def _expand_gate(runs, run_dir, frontier, leads):
     spread = [x["route"] for x in frontier if x["source"] in ("endpoint", "downstream", "shared")]
     if spread:
         why.append(f"a CONFIRMED bug may reach {', '.join(spread[:3])}")
-    baseline = signals._signal_baseline()
+    baseline = signals.signal_baseline()
     new5xx = [
         key[len("[NEW] ") :]
         for name, r in runs
-        for key, _ in signals._signals(run_dir, name, r, baseline=baseline)[0]
+        for key, _ in signals.run_signals(run_dir, name, r, baseline=baseline)[0]
         if key.startswith("[NEW] ") and re.search(r"→ 5\d\d\b", key)
     ]
     if new5xx:
@@ -473,15 +473,15 @@ def explore_next(project, run_dir=None):
     or component). `frontier` ranks them all with why (a `hypothesis` to hand the explorer) and the chain of pages that
     opens a detail route; `run_patterns` are the bug patterns this run has found, to try first on the pages still to do.
     `expand_recommended` (with `expand_reason`) says whether pages beyond the unfinished routes are worth running."""
-    proj = ops._project(project)
+    proj = ops.project_dir(project)
     qa_out = proj / "qa-out"
     if run_dir is not None:
         folders = [Path(run_dir).resolve()]
     else:
         folders = [
             p
-            for p in (_plan_folders(qa_out) if qa_out.is_dir() else [])
-            if (results._load_json(p / ".data" / "plan.json", []) or {}).get("kind") == "explore"
+            for p in (plan_folders(qa_out) if qa_out.is_dir() else [])
+            if (results.load_json(p / ".data" / "plan.json", []) or {}).get("kind") == "explore"
         ][:1]
     if not folders or not (folders[0] / ".data" / "plan.json").is_file():
         raise core.BadInput("explore-next: no explore run folder (qa-out/<run>/ with an explore plan.json)")
@@ -490,14 +490,14 @@ def explore_next(project, run_dir=None):
     planned = [core.norm_route(x) for x in title.split(", ") if x.strip().startswith(("/", "http", "#"))]
     done = {core.norm_route(r.get("target")): r for _, r in d["runs"] if core.norm_route(r.get("target"))}
     unfinished = lambda r: (
-        results._first_word(r.get("status")) == "incomplete"
-        or (results._first_word(r.get("status")) == "blocked" and block_scope(r) != "page")
+        results.first_word(r.get("status")) == "incomplete"
+        or (results.first_word(r.get("status")) == "blocked" and block_scope(r) != "page")
     )
     incomplete = [x for x in dict.fromkeys(planned) if x and x not in done] + [
         x for x, r in done.items() if unfinished(r)
     ]
     explored = set(planned) | set(done)
-    leads = results._leads(d["runs"], skip=explored)
+    leads = results.leads(d["runs"], skip=explored)
     con = None
     if core.db_path().is_file():
         import sqlite3

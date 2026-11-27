@@ -519,7 +519,7 @@ class Signals(Rendering):
         )
         self.assertNotIn("signal", check)
         ignored = {("/form", "request", "POST /form 500"): ("IGNORED", 2, "r0")}
-        with mock.patch.object(signals, "_signal_baseline", return_value=ignored):
+        with mock.patch.object(signals, "signal_baseline", return_value=ignored):
             _, check, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n")
         self.assertNotIn("signal", check)
 
