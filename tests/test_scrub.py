@@ -400,8 +400,8 @@ class ScrubFiles(MemBase):
 
 
 class ScrubGaps(MemBase):
-    """What mutation testing found unchecked in scrub_file and scrub_tree (`make mutation`): each test fails when the
-    line it names is changed."""
+    """What mutation testing found unchecked in scrub_file and scrub_tree (`make mutation`): each test fails for a
+    change to one of the two that the suite let through before."""
 
     def tree(self, *names, text=BEARER):
         """qa-out with these files in its folder `a`, each holding `text`: (qa-out, the files)."""
