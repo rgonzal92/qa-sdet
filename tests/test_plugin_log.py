@@ -1,4 +1,5 @@
-"""Tests for lib/qa_sdet/plugin_log.py: JSONL capture, scrubbing, anonymization, digest export, cursor, show and clear."""
+"""The plugin log (qa_sdet.plugin_log, digest): JSONL capture, scrubbing, anonymization, digest export, cursor, show and
+clear."""
 
 import json
 import os
@@ -6,6 +7,8 @@ import sys
 import unittest
 
 from support import ROOT, Base, core
+
+from qa_sdet import digest
 
 
 class PluginLogCore(Base):
@@ -138,7 +141,6 @@ class PluginLogAnonymizerAndExport(Base):
         return plugin_log
 
     def test_anonymizer_strips_work_identifiers_but_keeps_structure_and_tech_tokens(self):
-        pl = self._mod()
         self.config(
             app="TrafficControl",
             qaBaseUrl="https://qa.acme-corp.internal",
@@ -148,7 +150,7 @@ class PluginLogAnonymizerAndExport(Base):
             jiraKeyPrefix="TRAF",
             sourcePaths=["/home/alice/work/traffic-ui", "/home/alice/work/traffic-api"],
         )
-        anon = pl.Anonymizer(self.proj, core.config())
+        anon = digest.Anonymizer(self.proj, core.config())
         txt = anon.text(
             "TrafficControl failed on https://qa.acme-corp.internal/incidents/4521?owner=alice&tab=2 "
             "and https://api.acme-corp.internal/v1/items/550e8400-e29b-41d4-a716-446655440000 "
@@ -297,7 +299,7 @@ class PluginLogAnonymizerAndExport(Base):
         )
 
         # Preview does not write a file or advance the cursor
-        prev = pl.export_digest(self.proj, preview=True, day="2026-11-25")
+        prev = digest.export_digest(self.proj, preview=True, day="2026-11-25")
         self.assertIsNone(prev["path"])
         self.assertEqual(prev["events"], 9)
         self.assertFalse((qa_out / pl.CURSOR_NAME).exists())
@@ -311,29 +313,29 @@ class PluginLogAnonymizerAndExport(Base):
         self.assertIn("unknown", md)
 
         # Real export writes dated file and advances cursor
-        first = pl.export_digest(self.proj, day="2026-11-25")
+        first = digest.export_digest(self.proj, day="2026-11-25")
         self.assertEqual(first["path"], qa_out / "plugin-digest-2026-11-25.md")
         self.assertTrue(first["path"].is_file())
         self.assertTrue((qa_out / pl.CURSOR_NAME).is_file())
 
         # Immediate re-export finds 0 new events and writes no file
-        empty = pl.export_digest(self.proj, day="2026-11-25")
+        empty = digest.export_digest(self.proj, day="2026-11-25")
         self.assertEqual(empty["events"], 0)
         self.assertIsNone(empty["path"])
 
         # Same-second event appended AFTER cursor must still be picked up; dated file becomes -2.md
         pl.append_event(qa_out, "user_note", {"kind": "idea", "text": "add export shortcut"}, ts=t2)
         pl.append_event(qa_out, "nudge", {"agent": "qa-explorer", "kind": "spin", "detail": "8 calls"}, ts=t3)
-        second = pl.export_digest(self.proj, day="2026-11-25")
+        second = digest.export_digest(self.proj, day="2026-11-25")
         self.assertEqual(second["events"], 2)
         self.assertEqual(second["path"], qa_out / "plugin-digest-2026-11-25-2.md")
         self.assertTrue(first["path"].is_file())  # not clobbered
         self.assertIn("add export shortcut", second["markdown"])
 
         # --all includes everything again; --since filters by timestamp
-        all_res = pl.export_digest(self.proj, all_events=True, preview=True)
+        all_res = digest.export_digest(self.proj, all_events=True, preview=True)
         self.assertEqual(all_res["events"], 11)
-        since_res = pl.export_digest(self.proj, since=t3, preview=True)
+        since_res = digest.export_digest(self.proj, since=t3, preview=True)
         self.assertEqual(since_res["events"], 1)
 
     def test_build_detection_counts_only_runs_that_read_a_build(self):  # a code map reads source, never a build
@@ -342,11 +344,11 @@ class PluginLogAnonymizerAndExport(Base):
         qa_out.mkdir()
         for i in range(3):
             pl.append_event(qa_out, "run_summary", {"run": "init", "slug": f"code-map-{i}", "mode": "map"})
-        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        md = digest.export_digest(self.proj, preview=True)["markdown"]
         self.assertIn("**Build detection:** n/a (code-map runs only)", md)
         for slug in ("a", "b"):
             pl.append_event(qa_out, "run_summary", {"run": "r", "slug": slug, "mode": "explore", "build_known": False})
-        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        md = digest.export_digest(self.proj, preview=True)["markdown"]
         self.assertIn("**Build detection:** 0/2 known (2 `unknown`)", md)
 
     def test_the_digest_shows_where_run_time_went_and_the_notices(self):
@@ -376,7 +378,7 @@ class PluginLogAnonymizerAndExport(Base):
         pl.append_event(qa_out, "notice", {"kind": "bug_dropped", "hash": "abc123def456", "route": "/form/7"})
         rec = json.loads((qa_out / pl.LOG_NAME).read_text().splitlines()[0])
         self.assertEqual((rec["blockers"], rec["model_s"]), ({"jq": 5, "a loop": 3}, 300.25))  # through the scrubber
-        md = pl.export_digest(self.proj, preview=True)["markdown"]
+        md = digest.export_digest(self.proj, preview=True)["markdown"]
         self.assertIn("### Notices (3)", md)
         self.assertIn("`build_unreadable` (×2)", md)
         self.assertIn("`bug_dropped` (×1)", md)
@@ -398,14 +400,14 @@ class PluginLogAnonymizerAndExport(Base):
         pl.append_event(
             qa_out, "nudge", {"agent": "qa-explorer", "kind": "spin", "detail": "8 calls"}, ts="2026-11-25T10:01:00Z"
         )
-        digest = pl.export_digest(self.proj, day="2026-11-25")["path"]
+        written = digest.export_digest(self.proj, day="2026-11-25")["path"]
         out = pl.show_log(self.proj, limit=10, event_type="user_note")
         self.assertIn("too verbose", out)
         self.assertNotIn("spin", out)
         pl.clear_log(self.proj)
         self.assertFalse((qa_out / pl.LOG_NAME).exists())
         self.assertFalse((qa_out / pl.CURSOR_NAME).exists())
-        self.assertTrue(digest.is_file())  # exported digest preserved
+        self.assertTrue(written.is_file())  # exported digest preserved
 
 
 class PluginLogCli(Base):

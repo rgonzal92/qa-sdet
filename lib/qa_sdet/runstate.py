@@ -298,11 +298,10 @@ def next_action(run_dir, slug):
 FRONTIER_SCORE = {"incomplete": 60, "endpoint": 50, "downstream": 40, "shared": 30}  # + 1-4 for the bug's severity
 LEAD_SCORE = {"HIGH": 55, "MEDIUM": 35, "LOW": 20}
 FRONTIER_CAP = 8
-HYPOTHESIS_CAP = 400
 SAFE_ROUTE_RE = re.compile(r"[/#][\w#!/.:~%@+,=-]*")  # a path the coordinator can single-quote into a command
 
 
-def _safe_text(v, cap=HYPOTHESIS_CAP):
+def _safe_text(v, cap=ops.HYPOTHESIS_CAP):
     """One line of page-derived text (a lead's reason, a bug's title) the coordinator can put in single quotes: no
     control characters, no `'`, at most `cap` characters."""
     return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", str(v or "")).split()).replace("'", "\u2019")[:cap]

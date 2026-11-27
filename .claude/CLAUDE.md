@@ -15,7 +15,8 @@ Shared
 - `scrub`: redaction of secrets from text, JSON and files
 - `md`: text made safe for Markdown
 - `contracts`: the typed JSON shapes (type checker only)
-- `plugin_log`: `plugin-log`, the per-project event log and its digest
+- `plugin_log`: the per-project event log: its writer, `plugin-log` note, show and clear
+- `digest`: `plugin-log export`, the anonymizer
 
 Memory DB
 - `codemap`: the stored code map, `code`, `codemap-forget`

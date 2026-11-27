@@ -395,7 +395,7 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             else "all rules already present; nothing changed"
         )
     elif cmd == "plugin-log":
-        from . import plugin_log
+        from . import digest, plugin_log
 
         if not args or args[0] not in ("note", "export", "show", "clear"):
             raise core.BadInput(f"usage: qa-mem plugin-log {COMMANDS['plugin-log']}")
@@ -416,7 +416,7 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             if o.get("--all") and "--since" in o:
                 raise core.BadOption("give either --all or --since, not both")
             proj = plugin_log.resolve_project(o.get("--project"))
-            res = plugin_log.export_digest(
+            res = digest.export_digest(
                 proj,
                 all_events=o.get("--all", False),
                 since=o.get("--since"),
