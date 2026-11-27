@@ -9,13 +9,14 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from urllib.parse import quote
 
 from . import audit, core, md, report_blocks, report_jira, results, scrub, signals
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:  # NOSONAR
+    from typing import Any
+
     from .contracts import JsonObj
 
 
@@ -96,16 +97,35 @@ def _questions(plan, runs):
     return open_qs, resolved_fold
 
 
-def _todo(rep, open_qs):
+@core.record
+class Report:
+    """The report being rendered: the folder, each ticket's results, and what its sections branch on."""
+
+    folder: report_blocks.Folder  # its plan, cases and bugs, and what is known about the bugs
+    runs: list[tuple[str, JsonObj]]  # [(file name, run)] of its run files
+    kind: str  # the plan's kind ("plan", "ticket", "explore"), else the first run's mode
+    with_status: bool  # False for a plan: nothing ran, so its cases have no result to show
+    tickets: list[JsonObj]  # the plan's tickets that can get a verdict
+    single: bool  # one ticket: the report is that ticket's
+    multi: bool  # several tickets: a section each
+    info: dict[str, report_blocks.TicketResult]  # by ticket key
+    drafts: dict[str, str]  # {Jira comment file name: text}
+    owners: list[list[str]]  # per bug of the folder, in order: the tickets it counts for
+    triaged: list[tuple[Any, Any]]  # per run file: (its target, what signals.run_signals found)
+    retest_of: str  # what the plan says it retests; "" when it retests nothing
+    run_abs: Path  # the folder's absolute path, for the commands the report prints
+
+
+def _todo(rep: Report, open_qs):
     """What to do, in order: each bug, each open question, test data left in the app, severe signals, then the Jira comments to post."""
     todo = [
-        report_blocks.bug_todo(b, rep.run_dir, rep.folder.states)
-        for b in sorted(rep.bugs, key=lambda b: results.first_word(b.get("classification")) != "confirmed")
+        report_blocks.bug_todo(b, rep.folder.run_dir, rep.folder.states)
+        for b in sorted(rep.folder.bugs, key=lambda b: results.first_word(b.get("classification")) != "confirmed")
     ]
     todo += [f"Answer: {report_blocks.question_text(q)}" for q in open_qs]
     todo += [
         f"Answer the question {md.one_line(c['id'])} raised: see Results."
-        for c in rep.cases
+        for c in rep.folder.cases
         if c["status"] == "QUESTION" and not results.asked(c, open_qs)
     ]
     todo += [
@@ -125,7 +145,7 @@ def _todo(rep, open_qs):
             t["key"],
             rep.info[t["key"]].name,
             rep.run_abs,
-            report_blocks.post_checks(t, rep.info[t["key"]], rep.run_dir, rep.retest_of),
+            report_blocks.post_checks(t, rep.info[t["key"]], rep.folder.run_dir, rep.retest_of),
             rep.multi,
         )
         for t in rep.tickets
@@ -139,33 +159,35 @@ def _heading(t):
     return md.one_line(t["key"]) + (f": {md.one_line(t['summary'])}" if t.get("summary") else "")
 
 
-def _status_line(rep, t, folder):
-    """One ticket's status line. folder: it is the report's own (one ticket), so it also says what holds for the whole
-    folder."""
+def _status_line(rep: Report, t, whole):
+    """One ticket's status line. whole: the ticket is the report's only one, so the line also says what holds for the
+    whole folder."""
     i = rep.info[t["key"]]
     passed = sum(c["status"] == "PASS" for c in i.mine) + len(i.prior)
     total = len(i.mine) + len(i.prior)
-    n = len(results.ticket_bugs(t["key"], rep.cases, rep.bugs, rep.keys))
+    n = len(results.ticket_bugs(t["key"], rep.folder.cases, rep.folder.bugs, rep.folder.keys))
     return report_blocks.dot_line(
         [
             results.VERDICT_ICON[i.v],
             "build " + (", ".join(i.builds) if rep.runs else "not run yet"),
-            rep.date if folder else "",
+            rep.folder.date if whole else "",
             f"{passed} of {report_blocks.plural(total, 'case')} passed"
             + (f" ({len(i.prior)} on an earlier build)" if i.prior else ""),
             report_blocks.plural(n, "bug") if n else "no bugs",
-            f"retest of {rep.retest_of}" if rep.retest_of and folder else "",
-            report_blocks.ran_as(rep.runs) if folder else "",
+            f"retest of {rep.retest_of}" if rep.retest_of and whole else "",
+            report_blocks.ran_as(rep.runs) if whole else "",
         ]
     )
 
 
-def _head_blocks(rep, open_qs, resolved_fold):
+def _head_blocks(rep: Report, open_qs, resolved_fold):
     """The status line(s) under the title, then a plan's questions or a run's What to do."""
     blocks = []
     if rep.kind == "plan":
         blocks.append(
-            report_blocks.dot_line(["plan", rep.date, "not run yet", report_blocks.plural(len(rep.cases), "case")])
+            report_blocks.dot_line(
+                ["plan", rep.folder.date, "not run yet", report_blocks.plural(len(rep.folder.cases), "case")]
+            )
         )
         if rep.multi:
             blocks.append(
@@ -184,13 +206,16 @@ def _head_blocks(rep, open_qs, resolved_fold):
         blocks += resolved_fold
     else:
         if rep.single:
-            blocks += [_status_line(rep, rep.tickets[0], True), report_blocks.dot_line([rep.info[rep.keys[0]].why])]
+            blocks += [
+                _status_line(rep, rep.tickets[0], True),
+                report_blocks.dot_line([rep.info[rep.folder.keys[0]].why]),
+            ]
         elif rep.multi:
             blocks.append(
                 report_blocks.dot_line(
                     [
                         rep.kind,
-                        rep.date,
+                        rep.folder.date,
                         "build " + (", ".join(_run_builds(rep.runs)) or "not run yet"),
                         f"retest of {rep.retest_of}" if rep.retest_of else "",
                         report_blocks.ran_as(rep.runs),
@@ -201,17 +226,17 @@ def _head_blocks(rep, open_qs, resolved_fold):
                 report_blocks.bullets(
                     [
                         f"- {md.one_line(k)}: {results.VERDICT_ICON[rep.info[k].v]} — {md.one_line(rep.info[k].why)}"
-                        for k in rep.keys
+                        for k in rep.folder.keys
                     ]
                 )
             )
-        elif rep.plan or rep.runs:
-            n = len(rep.bugs)
+        elif rep.folder.plan or rep.runs:
+            n = len(rep.folder.bugs)
             blocks.append(
                 report_blocks.dot_line(
                     [
                         rep.kind,
-                        rep.date,
+                        rep.folder.date,
                         "build " + (", ".join(_run_builds(rep.runs)) or "not run yet"),
                         "; ".join(f"{r.get('target') or name} {r.get('status') or '?'}" for name, r in rep.runs),
                         report_blocks.plural(n, "bug") if n else "no bugs",
@@ -219,7 +244,7 @@ def _head_blocks(rep, open_qs, resolved_fold):
                     ]
                 )
             )
-        if rep.plan or rep.runs:
+        if rep.folder.plan or rep.runs:
             todo = _todo(rep, open_qs)
             blocks += [
                 "## What to do",
@@ -229,7 +254,7 @@ def _head_blocks(rep, open_qs, resolved_fold):
     return blocks
 
 
-def _ticket_blocks(rep):
+def _ticket_blocks(rep: Report):
     """Each ticket's results and bugs, then the cases and bugs no ticket owns."""
     blocks = []
     level = 3 if rep.multi else 2
@@ -238,13 +263,13 @@ def _ticket_blocks(rep):
         if rep.multi:
             blocks.append(f"## {_heading(t)}")
             blocks += [_status_line(rep, t, False)] if rep.with_status else []
-        res = report_blocks.ac_results(t, i.mine + i.prior, rep.run_dir, rep.with_status, level + 1)
+        res = report_blocks.ac_results(t, i.mine + i.prior, rep.folder.run_dir, rep.with_status, level + 1)
         if res:
             blocks += [f"{'#' * level} {'Results' if rep.with_status else 'Cases'}", *res]
-        mine_bugs = [(b, o) for b, o in zip(rep.bugs, rep.owners) if rep.single or (o and o[0] == t["key"])]
+        mine_bugs = [(b, o) for b, o in zip(rep.folder.bugs, rep.owners) if rep.single or (o and o[0] == t["key"])]
         elsewhere = [  # a bug of several tickets is listed once, under the first
-            f"- {report_blocks.bug_name(b, rep.run_dir)}: listed under {md.one_line(o[0])}."
-            for b, o in zip(rep.bugs, rep.owners)
+            f"- {report_blocks.bug_name(b, rep.folder.run_dir)}: listed under {md.one_line(o[0])}."
+            for b, o in zip(rep.folder.bugs, rep.owners)
             if rep.multi and t["key"] in o[1:]
         ]
         if mine_bugs or elsewhere:
@@ -252,20 +277,20 @@ def _ticket_blocks(rep):
             for b, o in mine_bugs:
                 blocks += report_blocks.bug_entry(b, o, [t["key"]], level + 1, rep.folder)
             blocks += [report_blocks.bullets(elsewhere)] if elsewhere else []
-        if rep.multi and (table := report_blocks.history_table(rep.run_dir, t["key"])):
+        if rep.multi and (table := report_blocks.history_table(rep.folder.run_dir, t["key"])):
             blocks += ["### History", table]
-    other = [c for c in rep.cases if c.get("ticket") not in rep.keys]
+    other = [c for c in rep.folder.cases if c.get("ticket") not in rep.folder.keys]
     if other:
         blocks += [
             "## Other test cases" if rep.tickets else "## Cases",
-            report_blocks.bullets([report_blocks.case_item(c, rep.run_dir, rep.with_status) for c in other]),
+            report_blocks.bullets([report_blocks.case_item(c, rep.folder.run_dir, rep.with_status) for c in other]),
         ]
     if not rep.single:
-        rest = [(b, o) for b, o in zip(rep.bugs, rep.owners) if not (o and o[0] in rep.keys)]
+        rest = [(b, o) for b, o in zip(rep.folder.bugs, rep.owners) if not (o and o[0] in rep.folder.keys)]
         if rest:
             blocks.append("## Other bugs" if rep.tickets else "## Bugs")
             for b, o in rest:
-                blocks += report_blocks.bug_entry(b, o, rep.keys, 3, rep.folder)
+                blocks += report_blocks.bug_entry(b, o, rep.folder.keys, 3, rep.folder)
     return blocks
 
 
@@ -304,18 +329,20 @@ def _untested_and_signals(runs, triaged):
     return blocks
 
 
-def _history_blocks(rep):
+def _history_blocks(rep: Report):
     """History: a single ticket's earlier runs, and drafts of earlier runs this run did not see."""
     blocks = []
-    history = [report_blocks.history_table(rep.run_dir, rep.keys[0])] if rep.single else []
-    listed = {b["id"] for b in rep.bugs}.union(*map(results.case_bugs, rep.cases))
+    history = [report_blocks.history_table(rep.folder.run_dir, rep.folder.keys[0])] if rep.single else []
+    listed = {b["id"] for b in rep.folder.bugs}.union(*map(results.case_bugs, rep.folder.cases))
     # shortcut: a known bug (named by its memory hash) is matched to its earlier draft by title, as the card gives
     # it; read the draft path from memory if explorers start rewording titles
-    seen_again = {" ".join(core.as_text(b.get("title")).split()) for b in rep.bugs if b.get("hash") and not b.get("id")}
+    seen_again = {
+        " ".join(core.as_text(b.get("title")).split()) for b in rep.folder.bugs if b.get("hash") and not b.get("id")
+    }
     orphans = sorted(
         (
             p
-            for p in (rep.run_dir / "bugs").glob("BUG-*.md")
+            for p in (rep.folder.run_dir / "bugs").glob("BUG-*.md")
             if re.fullmatch(r"BUG-\d+", p.stem)
             and p.stem not in listed
             and p.is_file()
@@ -327,7 +354,7 @@ def _history_blocks(rep):
         history += [
             "Earlier bugs this run did not see (no verdict counts them; file one if it still applies):",
             "\n".join(
-                f"- {report_blocks.bug_link(p.stem, rep.run_dir)} {md.one_line(report_blocks.draft_title(p, ''))}"
+                f"- {report_blocks.bug_link(p.stem, rep.folder.run_dir)} {md.one_line(report_blocks.draft_title(p, ''))}"
                 for p in orphans
             ),
         ]
@@ -380,7 +407,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     triaged = [(r.get("target") or name, signals.run_signals(run_dir, name, r, hosts, baseline)) for name, r in runs]
     folder = _folder(run_dir, cfg, keys, cases, bugs, d)
     owners = results.bug_owners(bugs, cases, keys)
-    single, multi, date = len(tickets) == 1, len(tickets) > 1, folder.date
+    single, multi = len(tickets) == 1, len(tickets) > 1
     drafts: dict[str, str] = {}
     info: dict[str, report_blocks.TicketResult] = {}
     for t in tickets:
@@ -405,27 +432,20 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
         if v != "NOT STARTED" and _safe_key(key):
             drafts[name] = report_jira.comment(t, i, folder)
 
-    rep = SimpleNamespace(
-        bugs=bugs,
-        cases=cases,
+    rep = Report(
         folder=folder,
-        date=date,
-        drafts=drafts,
-        info=info,
-        keys=keys,
+        runs=runs,
         kind=kind,
+        with_status=with_status,
+        tickets=tickets,
+        single=single,
         multi=multi,
-        plan=plan,
+        info=info,
+        drafts=drafts,
+        owners=owners,
+        triaged=triaged,
         retest_of=retest_of,
         run_abs=run_abs,
-        run_dir=run_dir,
-        runs=runs,
-        single=single,
-        tickets=tickets,
-        triaged=triaged,
-        cfg=cfg,
-        owners=owners,
-        with_status=with_status,
     )
     blocks = [
         f"# {_heading(tickets[0])}" if single else f"# QA report: {md.one_line(plan.get('title') or run_dir.name)}"
