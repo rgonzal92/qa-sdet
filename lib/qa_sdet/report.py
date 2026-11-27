@@ -10,6 +10,7 @@ import re
 import shlex
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from . import audit, core, md, ops, results, scrub, signals
@@ -664,6 +665,232 @@ def _jira_comment(t, v, mine, prior, builds, date, cases, bugs, keys, plan, cfg,
     return "\n\n".join(groups) + "\n"
 
 
+def _warn_unknown_acs(tickets, cases, d):
+    """A case naming an AC its ticket doesn't list covers nothing: a warning says so."""
+    for t in tickets:  # a case naming an AC its ticket doesn't list covers nothing: say so
+        have = {results.ac_key(results.ac_id(a)) for a in results.entries(t, "acs") if results.ac_id(a)}
+        for c in (c for c in cases if have and c.get("ticket") == t["key"]):
+            d["warnings"] += [
+                f"{c['id']} names {a}, which {t['key']} doesn't have: fix the case's `ac` in plan.json"
+                for a in sorted(results.case_acs(c) - have)
+            ]
+
+
+def _questions(plan, runs):
+    """(open questions, the fold of the resolved ones) from the plan and the runs."""
+    q_items = results.question_items(plan, "test plan") + [
+        q for name, r in runs for q in results.question_items(r, str(r.get("target") or name))
+    ]
+    merged = results.merge_questions(q_items)
+    open_qs = sorted([q for q in merged if not q["resolved"]], key=results.question_rank)
+    answered = [q for q in merged if q["resolved"]]
+    answers = "\n".join(
+        f"- {md.cell(q['text'])}" + (f" — answer: {md.cell(q['answer'])}" if q["answer"] else "") for q in answered
+    )
+    resolved_fold = [_fold(f"Resolved questions ({len(answered)})", [answers])] if answered else []
+    return open_qs, resolved_fold
+
+
+def _todo(rep, open_qs):
+    """What to do, in order: each bug, each open question, test data left in the app, severe signals, then the Jira comments to post."""
+    todo = [
+        _bug_todo(b, rep.run_dir, rep.ctx["states"])
+        for b in sorted(rep.bugs, key=lambda b: results.first_word(b.get("classification")) != "confirmed")
+    ]
+    todo += [f"Answer: {_q_text(q)}" for q in open_qs]
+    todo += [
+        f"Answer the question {md.one_line(c['id'])} raised: see Results."
+        for c in rep.cases
+        if c["status"] == "QUESTION" and not results.asked(c, open_qs)
+    ]
+    todo += [
+        f"Delete the test data left in the app on {md.one_line(r.get('target') or name)}: {md.cell(m.group(1).strip())}"
+        for name, r in rep.runs
+        for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core.as_text(r.get("notes")))
+        if not re.fullmatch(r"(none|nothing|n/a)\s*([.;,(].*)?|-", m.group(1).strip(), re.I)
+    ]  # step 9 couldn't delete them: they stay in the shared QA app
+    severe = [k for _, (sig, _) in rep.triaged for k, _ in sig if signals.signal_severity(k) == "severe"]
+    if severe:
+        todo.append(
+            f"Look into the {_plural(len(severe), 'severe browser signal')} no bug explains (a 5xx, a failed "
+            "request, an error body or a leak): see Signals no bug explains."
+        )
+    todo += [
+        _post_item(
+            t["key"],
+            rep.info[t["key"]]["name"],
+            rep.run_abs,
+            _post_checks(t, rep.info[t["key"]], rep.run_dir, rep.retest_of),
+            rep.multi,
+        )
+        for t in rep.tickets
+        if rep.info[t["key"]]["name"] in rep.drafts
+    ]
+    return todo
+
+
+def _head_blocks(rep, open_qs, resolved_fold):
+    """The status line(s) under the title, then a plan's questions or a run's What to do."""
+    blocks = []
+    if rep.kind == "plan":
+        blocks.append(_line(["plan", rep.date, "not run yet", _plural(len(rep.cases), "case")]))
+        if rep.multi:
+            blocks.append(
+                _items(
+                    [
+                        f"- {rep.heading(t)} — {len(results.entries(t, 'acs'))} AC, {_plural(len(rep.info[t['key']]['mine']), 'case')}"
+                        for t in rep.tickets
+                    ]
+                )
+            )
+        if open_qs:
+            blocks += ["## Questions", _items([f"- {_q_text(q, show_from=False)}" for q in open_qs])]
+        blocks += resolved_fold
+    else:
+        if rep.single:
+            blocks += [rep.status(rep.tickets[0], True), _line([rep.info[rep.keys[0]]["why"]])]
+        elif rep.multi:
+            blocks.append(
+                _line(
+                    [
+                        rep.kind,
+                        rep.date,
+                        "build " + (", ".join(_run_builds(rep.runs)) or "not run yet"),
+                        f"retest of {rep.retest_of}" if rep.retest_of else "",
+                        _ran_as(rep.runs),
+                    ]
+                )
+            )
+            blocks.append(
+                _items(
+                    [
+                        f"- {md.one_line(k)}: {results.VERDICT_ICON[rep.info[k]['v']]} — {md.one_line(rep.info[k]['why'])}"
+                        for k in rep.keys
+                    ]
+                )
+            )
+        elif rep.plan or rep.runs:
+            n = len(rep.bugs)
+            blocks.append(
+                _line(
+                    [
+                        rep.kind,
+                        rep.date,
+                        "build " + (", ".join(_run_builds(rep.runs)) or "not run yet"),
+                        "; ".join(f"{r.get('target') or name} {r.get('status') or '?'}" for name, r in rep.runs),
+                        _plural(n, "bug") if n else "no bugs",
+                        _ran_as(rep.runs),
+                    ]
+                )
+            )
+        if rep.plan or rep.runs:
+            todo = _todo(rep, open_qs)
+            blocks += ["## What to do", _numbered(todo) if todo else "Nothing needs your action.", *resolved_fold]
+    return blocks
+
+
+def _ticket_blocks(rep):
+    """Each ticket's results and bugs, then the cases and bugs no ticket owns."""
+    blocks = []
+    level = 3 if rep.multi else 2
+    for t in rep.tickets:
+        i = rep.info[t["key"]]
+        if rep.multi:
+            blocks.append(f"## {rep.heading(t)}")
+            blocks += [rep.status(t, False)] if rep.with_status else []
+        res = _results(t, i["mine"] + i["prior"], rep.run_dir, rep.with_status, level + 1)
+        if res:
+            blocks += [f"{'#' * level} {'Results' if rep.with_status else 'Cases'}", *res]
+        mine_bugs = [(b, o) for b, o in zip(rep.bugs, rep.owners) if rep.single or (o and o[0] == t["key"])]
+        elsewhere = [  # a bug of several tickets is listed once, under the first
+            f"- {_bug_name(b, rep.run_dir)}: listed under {md.one_line(o[0])}."
+            for b, o in zip(rep.bugs, rep.owners)
+            if rep.multi and t["key"] in o[1:]
+        ]
+        if mine_bugs or elsewhere:
+            blocks.append(f"{'#' * level} Bugs")
+            for b, o in mine_bugs:
+                blocks += _bug_entry(b, o, [t["key"]], rep.cases, rep.run_dir, rep.cfg, rep.ctx, level + 1)
+            blocks += [_items(elsewhere)] if elsewhere else []
+        if rep.multi and (table := _history_table(rep.run_dir, t["key"])):
+            blocks += ["### History", table]
+    other = [c for c in rep.cases if c.get("ticket") not in rep.keys]
+    if other:
+        blocks += [
+            "## Other test cases" if rep.tickets else "## Cases",
+            _items([_case_item(c, rep.run_dir, rep.with_status) for c in other]),
+        ]
+    if not rep.single:
+        rest = [(b, o) for b, o in zip(rep.bugs, rep.owners) if not (o and o[0] in rep.keys)]
+        if rest:
+            blocks.append("## Other bugs" if rep.tickets else "## Bugs")
+            for b, o in rest:
+                blocks += _bug_entry(b, o, rep.keys, rep.cases, rep.run_dir, rep.cfg, rep.ctx, 3)
+    return blocks
+
+
+def _untested_and_signals(runs, triaged):
+    """Not tested, by category, and the browser signals no bug explains."""
+    blocks = []
+    not_tested = [item for _, r in runs for item in results.not_tested(r)]
+    if not_tested:
+        blocks.append("## Not tested")
+        for key, label in results.NOT_TESTED_CATEGORIES:
+            group = [x for k, x in not_tested if k == key]
+            if group:
+                blocks.append(_fold(f"{label} ({len(group)})", ["\n".join(f"- {md.cell(x)}" for x in group)]))
+    unexplained = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
+    third = sum(n for _, (_, n) in triaged)
+    if unexplained or third:
+        blocks.append("## Signals no bug explains" + (f" ({len(unexplained)})" if unexplained else ""))
+        lines = [
+            f"- {md.one_line(route)}: {md.one_line(key)}" + (f" (×{n})" if n > 1 else "")
+            for route, key, n in unexplained[: signals.SIGNALS_SHOWN]
+        ]
+        if len(unexplained) > signals.SIGNALS_SHOWN:
+            lines.append(
+                f"- +{len(unexplained) - signals.SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`"
+            )
+        blocks += ["\n".join(lines)] if lines else []
+        if third:  # a CDN or map-tile failure can still break the page: counted, folded, never mixed with the app's
+            blocks.append(
+                _fold(
+                    f"{third} third-party signal(s) (hosts outside allowedHosts)",
+                    ["Failed requests to hosts outside `allowedHosts`: see `requests-*.log` in `.data/`."],
+                )
+            )
+    return blocks
+
+
+def _history_blocks(rep):
+    """History: a single ticket's earlier runs, and drafts of earlier runs this run did not see."""
+    blocks = []
+    history = [_history_table(rep.run_dir, rep.keys[0])] if rep.single else []
+    listed = {b["id"] for b in rep.bugs}.union(*map(results.case_bugs, rep.cases))
+    # shortcut: a known bug (named by its memory hash) is matched to its earlier draft by title, as the card gives
+    # it; read the draft path from memory if explorers start rewording titles
+    seen_again = {" ".join(core.as_text(b.get("title")).split()) for b in rep.bugs if b.get("hash") and not b.get("id")}
+    orphans = sorted(
+        (
+            p
+            for p in (rep.run_dir / "bugs").glob("BUG-*.md")
+            if re.fullmatch(r"BUG-\d+", p.stem)
+            and p.stem not in listed
+            and p.is_file()
+            and " ".join(_draft_title(p, "").split()) not in seen_again
+        ),
+        key=lambda p: int(p.stem[4:]),
+    )
+    if rep.runs and orphans:  # a draft whose run file a later one replaced: still shown, but no verdict counts it
+        history += [
+            "Earlier bugs this run did not see (no verdict counts them; file one if it still applies):",
+            "\n".join(f"- {_bug_link(p.stem, rep.run_dir)} {md.one_line(_draft_title(p, ''))}" for p in orphans),
+        ]
+    if any(history):
+        blocks += ["## History", *(x for x in history if x)]
+    return blocks
+
+
 def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tuple[str, dict[str, str]]:
     """(REPORT.md text, {Jira comment file name: text}). One renderer for every kind: a ticket's report (status, what
     to do, results by AC, bugs, not tested, signals, exploration notes, history), an exploration's (the same without
@@ -678,13 +905,7 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
     keys = [t["key"] for t in tickets]
     cases, bugs = results.merged_cases(plan, runs, d["warnings"]), results.run_bugs(runs, d["warnings"])
     prior_all = results.prior_passed(plan, keys, cases)
-    for t in tickets:  # a case naming an AC its ticket doesn't list covers nothing: say so
-        have = {results.ac_key(results.ac_id(a)) for a in results.entries(t, "acs") if results.ac_id(a)}
-        for c in (c for c in cases if have and c.get("ticket") == t["key"]):
-            d["warnings"] += [
-                f"{c['id']} names {a}, which {t['key']} doesn't have: fix the case's `ac` in plan.json"
-                for a in sorted(results.case_acs(c) - have)
-            ]
+    _warn_unknown_acs(tickets, cases, d)
     retest_of = " ".join(plan["retest_of"].split()) if isinstance(plan.get("retest_of"), str) else ""
     with_status = kind != "plan"
     cfg = core.config() if cfg is None else cfg
@@ -751,195 +972,44 @@ def render_report_parts(run_dir: str | Path, cfg: JsonObj | None = None) -> tupl
         )
 
     heading = lambda t: md.one_line(t["key"]) + (f": {md.one_line(t['summary'])}" if t.get("summary") else "")
+    rep = SimpleNamespace(
+        bugs=bugs,
+        cases=cases,
+        ctx=ctx,
+        date=date,
+        drafts=drafts,
+        heading=heading,
+        info=info,
+        keys=keys,
+        kind=kind,
+        multi=multi,
+        plan=plan,
+        retest_of=retest_of,
+        run_abs=run_abs,
+        run_dir=run_dir,
+        runs=runs,
+        single=single,
+        status=status,
+        tickets=tickets,
+        triaged=triaged,
+        cfg=cfg,
+        owners=owners,
+        with_status=with_status,
+    )
     blocks = [
         f"# {heading(tickets[0])}" if single else f"# QA report: {md.one_line(plan.get('title') or run_dir.name)}"
     ]
     if not plan and not runs:
         blocks.append("_Nothing recorded yet: no plan and no test run in this folder._")
-    q_items = results.question_items(plan, "test plan") + [
-        q for name, r in runs for q in results.question_items(r, str(r.get("target") or name))
-    ]
-    merged = results.merge_questions(q_items)
-    open_qs = sorted([q for q in merged if not q["resolved"]], key=results.question_rank)
-    answered = [q for q in merged if q["resolved"]]
-    answers = "\n".join(
-        f"- {md.cell(q['text'])}" + (f" — answer: {md.cell(q['answer'])}" if q["answer"] else "") for q in answered
-    )
-    resolved_fold = [_fold(f"Resolved questions ({len(answered)})", [answers])] if answered else []
-    if kind == "plan":
-        blocks.append(_line(["plan", date, "not run yet", _plural(len(cases), "case")]))
-        if multi:
-            blocks.append(
-                _items(
-                    [
-                        f"- {heading(t)} — {len(results.entries(t, 'acs'))} AC, {_plural(len(info[t['key']]['mine']), 'case')}"
-                        for t in tickets
-                    ]
-                )
-            )
-        if open_qs:
-            blocks += ["## Questions", _items([f"- {_q_text(q, show_from=False)}" for q in open_qs])]
-        blocks += resolved_fold
-    else:
-        if single:
-            blocks += [status(tickets[0], True), _line([info[keys[0]]["why"]])]
-        elif multi:
-            blocks.append(
-                _line(
-                    [
-                        kind,
-                        date,
-                        "build " + (", ".join(_run_builds(runs)) or "not run yet"),
-                        f"retest of {retest_of}" if retest_of else "",
-                        _ran_as(runs),
-                    ]
-                )
-            )
-            blocks.append(
-                _items(
-                    [
-                        f"- {md.one_line(k)}: {results.VERDICT_ICON[info[k]['v']]} — {md.one_line(info[k]['why'])}"
-                        for k in keys
-                    ]
-                )
-            )
-        elif plan or runs:
-            n = len(bugs)
-            blocks.append(
-                _line(
-                    [
-                        kind,
-                        date,
-                        "build " + (", ".join(_run_builds(runs)) or "not run yet"),
-                        "; ".join(f"{r.get('target') or name} {r.get('status') or '?'}" for name, r in runs),
-                        _plural(n, "bug") if n else "no bugs",
-                        _ran_as(runs),
-                    ]
-                )
-            )
-        if plan or runs:
-            todo = [
-                _bug_todo(b, run_dir, ctx["states"])
-                for b in sorted(bugs, key=lambda b: results.first_word(b.get("classification")) != "confirmed")
-            ]
-            todo += [f"Answer: {_q_text(q)}" for q in open_qs]
-            todo += [
-                f"Answer the question {md.one_line(c['id'])} raised: see Results."
-                for c in cases
-                if c["status"] == "QUESTION" and not results.asked(c, open_qs)
-            ]
-            todo += [
-                f"Delete the test data left in the app on {md.one_line(r.get('target') or name)}: {md.cell(m.group(1).strip())}"
-                for name, r in runs
-                for m in re.finditer(r"Left in the app:[ \t]*([^\n]+)", core.as_text(r.get("notes")))
-                if not re.fullmatch(r"(none|nothing|n/a)\s*([.;,(].*)?|-", m.group(1).strip(), re.I)
-            ]  # step 9 couldn't delete them: they stay in the shared QA app
-            severe = [k for _, (sig, _) in triaged for k, _ in sig if signals.signal_severity(k) == "severe"]
-            if severe:
-                todo.append(
-                    f"Look into the {_plural(len(severe), 'severe browser signal')} no bug explains (a 5xx, a failed "
-                    "request, an error body or a leak): see Signals no bug explains."
-                )
-            todo += [
-                _post_item(
-                    t["key"],
-                    info[t["key"]]["name"],
-                    run_abs,
-                    _post_checks(t, info[t["key"]], run_dir, retest_of),
-                    multi,
-                )
-                for t in tickets
-                if info[t["key"]]["name"] in drafts
-            ]
-            blocks += ["## What to do", _numbered(todo) if todo else "Nothing needs your action.", *resolved_fold]
+    open_qs, resolved_fold = _questions(plan, runs)
+    blocks += _head_blocks(rep, open_qs, resolved_fold)
 
-    level = 3 if multi else 2
-    for t in tickets:
-        i = info[t["key"]]
-        if multi:
-            blocks.append(f"## {heading(t)}")
-            blocks += [status(t, False)] if with_status else []
-        res = _results(t, i["mine"] + i["prior"], run_dir, with_status, level + 1)
-        if res:
-            blocks += [f"{'#' * level} {'Results' if with_status else 'Cases'}", *res]
-        mine_bugs = [(b, o) for b, o in zip(bugs, owners) if single or (o and o[0] == t["key"])]
-        elsewhere = [  # a bug of several tickets is listed once, under the first
-            f"- {_bug_name(b, run_dir)}: listed under {md.one_line(o[0])}."
-            for b, o in zip(bugs, owners)
-            if multi and t["key"] in o[1:]
-        ]
-        if mine_bugs or elsewhere:
-            blocks.append(f"{'#' * level} Bugs")
-            for b, o in mine_bugs:
-                blocks += _bug_entry(b, o, [t["key"]], cases, run_dir, cfg, ctx, level + 1)
-            blocks += [_items(elsewhere)] if elsewhere else []
-        if multi and (table := _history_table(run_dir, t["key"])):
-            blocks += ["### History", table]
-    other = [c for c in cases if c.get("ticket") not in keys]
-    if other:
-        blocks += [
-            "## Other test cases" if tickets else "## Cases",
-            _items([_case_item(c, run_dir, with_status) for c in other]),
-        ]
-    if not single:
-        rest = [(b, o) for b, o in zip(bugs, owners) if not (o and o[0] in keys)]
-        if rest:
-            blocks.append("## Other bugs" if tickets else "## Bugs")
-            for b, o in rest:
-                blocks += _bug_entry(b, o, keys, cases, run_dir, cfg, ctx, 3)
+    blocks += _ticket_blocks(rep)
 
-    not_tested = [item for _, r in runs for item in results.not_tested(r)]
-    if not_tested:
-        blocks.append("## Not tested")
-        for key, label in results.NOT_TESTED_CATEGORIES:
-            group = [x for k, x in not_tested if k == key]
-            if group:
-                blocks.append(_fold(f"{label} ({len(group)})", ["\n".join(f"- {md.cell(x)}" for x in group)]))
-    unexplained = [(route, key, n) for route, (sig, _) in triaged for key, n in sig]
-    third = sum(n for _, (_, n) in triaged)
-    if unexplained or third:
-        blocks.append("## Signals no bug explains" + (f" ({len(unexplained)})" if unexplained else ""))
-        lines = [
-            f"- {md.one_line(route)}: {md.one_line(key)}" + (f" (×{n})" if n > 1 else "")
-            for route, key, n in unexplained[: signals.SIGNALS_SHOWN]
-        ]
-        if len(unexplained) > signals.SIGNALS_SHOWN:
-            lines.append(
-                f"- +{len(unexplained) - signals.SIGNALS_SHOWN} more: see `requests-*.log` and `console-*.log` in `.data/`"
-            )
-        blocks += ["\n".join(lines)] if lines else []
-        if third:  # a CDN or map-tile failure can still break the page: counted, folded, never mixed with the app's
-            blocks.append(
-                _fold(
-                    f"{third} third-party signal(s) (hosts outside allowedHosts)",
-                    ["Failed requests to hosts outside `allowedHosts`: see `requests-*.log` in `.data/`."],
-                )
-            )
+    blocks += _untested_and_signals(runs, triaged)
     if runs:
         blocks += _notes_blocks(plan, runs)
-    history = [_history_table(run_dir, keys[0])] if single else []
-    listed = {b["id"] for b in bugs}.union(*map(results.case_bugs, cases))
-    # shortcut: a known bug (named by its memory hash) is matched to its earlier draft by title, as the card gives
-    # it; read the draft path from memory if explorers start rewording titles
-    seen_again = {" ".join(core.as_text(b.get("title")).split()) for b in bugs if b.get("hash") and not b.get("id")}
-    orphans = sorted(
-        (
-            p
-            for p in (run_dir / "bugs").glob("BUG-*.md")
-            if re.fullmatch(r"BUG-\d+", p.stem)
-            and p.stem not in listed
-            and p.is_file()
-            and " ".join(_draft_title(p, "").split()) not in seen_again
-        ),
-        key=lambda p: int(p.stem[4:]),
-    )
-    if runs and orphans:  # a draft whose run file a later one replaced: still shown, but no verdict counts it
-        history += [
-            "Earlier bugs this run did not see (no verdict counts them; file one if it still applies):",
-            "\n".join(f"- {_bug_link(p.stem, run_dir)} {md.one_line(_draft_title(p, ''))}" for p in orphans),
-        ]
-    if any(history):
-        blocks += ["## History", *(x for x in history if x)]
+    blocks += _history_blocks(rep)
     if d["warnings"]:
         blocks += ["## Problems reading this folder", "\n".join(f"- {md.one_line(w)}" for w in d["warnings"])]
     return "\n\n".join(blocks) + "\n", drafts

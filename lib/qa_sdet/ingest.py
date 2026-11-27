@@ -125,12 +125,234 @@ def check_run(run: object) -> tuple[str, str, bool, list[JsonObj], list[JsonObj]
     return rid, build, known, pages, bug_list
 
 
-# In _store's bug upsert: this sighting makes a FIXED bug REGRESSED. ? is 1 for a run that hadn't listed the bug yet; a
+# In _store_bugs' upsert: this sighting makes a FIXED bug REGRESSED. ? is 1 for a run that hadn't listed the bug yet; a
 # run older than the last sighting or than the fix (ingested late) predates them: no regression.
 REGRESSES = (
     "status='FIXED' AND ? AND excluded.last_seen >= coalesce(last_seen, '') "
     "AND excluded.last_seen >= coalesce(fixed_ts, '')"
 )
+
+
+def _store_page(con, pg, ts, known, build, explored, rid):
+    """One page of a run: the page row, its facts, locators, states and coverage. A run older than what memory holds
+    (ingested late) adds what is new and never rolls the page back."""
+    route = pg["route"]
+    old = con.execute("SELECT build, last_verified FROM pages WHERE route=?", (route,)).fetchone()
+    # A run older than what we already know (ingested late) must not roll the page back.
+    late = bool(old and old["last_verified"] and ts < old["last_verified"])
+    # A late file of the page's current build still saw the current page: its new facts and locators count.
+    same_build = bool(known and old and old["build"] == build)
+    current = known and (not late or same_build)
+    if known and not late and old and old["build"] not in (build, core.UNKNOWN, None):  # new build: re-verify
+        con.execute("UPDATE facts SET stale=1 WHERE page=? AND pinned=0", (route,))  # the user's own stay
+        con.execute("UPDATE locators SET stale=1 WHERE page=?", (route,))
+    if late:
+        con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
+    elif known:
+        con.execute(
+            "INSERT INTO pages(route, name, build, last_verified) VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
+            "name=coalesce(excluded.name, name), build=excluded.build, "
+            "last_verified=excluded.last_verified",
+            (route, core.cap(pg.get("name")) or None, build, ts),
+        )
+    else:  # e.g. a plan from a ticket: knows the page, verified nothing
+        con.execute(
+            "INSERT INTO pages(route, name, build) VALUES(?,?,?) ON CONFLICT(route) DO UPDATE "
+            "SET name=coalesce(name, excluded.name), build=coalesce(build, excluded.build)",
+            (route, core.cap(pg.get("name")) or None, core.UNKNOWN),
+        )
+    if explored:
+        con.execute("UPDATE pages SET explored=max(coalesce(explored, ''), ?) WHERE route=?", (ts, route))
+    for f in pg.get("facts") or []:
+        text = core.cap(f.get("text"))
+        if text:
+            # Only a verifying run (known build, not late) refreshes an existing fact.
+            con.execute(
+                "INSERT INTO facts(page,kind,text,source,build,ts,stale) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(page,kind,text) DO UPDATE SET "
+                "source=CASE WHEN ? AND lower(coalesce(excluded.source, '')) = 'observed' "
+                "THEN 'observed' ELSE source END, "  # a ticket rule the explorer has now seen
+                "stale=CASE WHEN ? THEN 0 ELSE stale END, "
+                "build=CASE WHEN ? THEN excluded.build ELSE build END, "
+                "ts=CASE WHEN ? THEN excluded.ts ELSE ts END",
+                (
+                    route,
+                    core.cap(f.get("kind"))[:30] or "note",
+                    text,
+                    core.cap(f.get("source")),
+                    build,
+                    ts,
+                    int(late and not same_build),
+                    int(current),
+                    int(current),
+                    *(int(known and not late),) * 2,
+                ),
+            )
+    framed = set()  # what this run found in a frame, as the same element reads without the frame
+    for loc in pg.get("locators") or []:
+        # A truncated locator would be broken, so skip oversized ones instead of capping.
+        loc_name, loc_val = (
+            core.cap(loc.get("name")),
+            (core.txt(loc.get("locator"), "locators.locator") or "").strip(),
+        )
+        if (not late or same_build) and loc_name and loc_val and len(loc_val) <= core.MAX_TEXT:
+            # late + same build, or unknown-build plan on a verified page: add, never overwrite/un-stale verified
+            keep_old = late or (not known and bool(old and old["build"] not in (core.UNKNOWN, None)))
+            con.execute(
+                f"INSERT OR {'IGNORE' if keep_old else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
+                (route, loc_name, loc_val, build, ts),
+            )
+            if not keep_old and core.FRAME_MARK in loc_val:
+                framed.add(core.frame_tail(loc_val))
+    # the same element saved earlier without its frame, under another name (a page object's `this.page.` in
+    # front or not): it matches nothing as written, and it takes a card's room
+    for x in (
+        con.execute(
+            "SELECT name, locator FROM locators WHERE page=? AND instr(locator, ?)=0", (route, core.FRAME_MARK)
+        ).fetchall()
+        if framed
+        else ()
+    ):
+        if re.sub(r"^(?:[A-Za-z_$][\w$]*\.)+(?=getBy)", "", x["locator"]) in framed:
+            con.execute("DELETE FROM locators WHERE page=? AND name=?", (route, x["name"]))
+    _store_states(con, route, pg, build, ts)
+    for c in pg.get("coverage") or []:
+        if core.norm(c.get("heuristic")):
+            # the newest run's result stands: a run.json ingested late must not put its older one back
+            con.execute(
+                "INSERT INTO coverage VALUES(?,?,?,?,?,?,?) ON CONFLICT(page,target,heuristic,build) "
+                "DO UPDATE SET result=excluded.result, run_id=excluded.run_id, ts=excluded.ts "
+                "WHERE excluded.ts >= coalesce(coverage.ts, '')",
+                (
+                    route,
+                    core.cap(c.get("target")) or "*",
+                    core.heuristic_id(c["heuristic"]),
+                    core.coverage_result(c.get("result")),
+                    build,
+                    rid,
+                    ts,
+                ),
+            )
+
+
+def _cap_pages(con, pages):
+    """Size caps: each page keeps its freshest facts, coverage and locators."""
+    for pg in pages:  # size caps: keep the freshest knowledge per page
+        con.execute(
+            "DELETE FROM facts WHERE page=? AND id NOT IN (SELECT id FROM facts WHERE page=? "
+            "ORDER BY pinned DESC, stale, ts DESC LIMIT ?)",
+            (pg["route"], pg["route"], core.MAX_FACTS),
+        )
+        con.execute(
+            "DELETE FROM coverage WHERE page=? AND rowid NOT IN (SELECT rowid FROM coverage WHERE page=? "
+            "ORDER BY ts DESC LIMIT ?)",
+            (pg["route"], pg["route"], core.MAX_COVERAGE),
+        )
+        con.execute(
+            "DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
+            "ORDER BY stale, last_verified DESC LIMIT ?)",
+            (pg["route"], pg["route"], core.MAX_LOCATORS),
+        )
+
+
+def _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known):
+    """The run file's bugs: each is upserted and sighted; one that an earlier version of the file listed and this one
+    doesn't is un-sighted, and dropped when only this file ever saw it."""
+    # sightings = which bugs this run file reported. A rewritten run.json (or a sibling's hook ingesting it
+    # mid-run) replaces its earlier version: a bug it no longer lists is un-sighted (dropped when only it ever
+    # saw it), and seen_count counts distinct run ids even when runs are re-ingested interleaved.
+    src = str(src or "")
+    before = {r[0] for r in con.execute("SELECT hash FROM sightings WHERE run_id=? AND src=?", (rid, src))}
+    ran = lambda h: con.execute("SELECT 1 FROM sightings WHERE run_id=? AND hash=?", (rid, h)).fetchone()
+    now_seen = set()
+    for b in bug_list:
+        symptom = core.cap(b.get("symptom")) or core.cap(b["title"])
+        raw = str(b.get("hash") or "").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw) and not re.fullmatch(r"(?i)BUG-\d+", raw):
+            continue  # a Jira key: a bug tracked in Jira, not a local one to create (BUG-n is a draft's id: created)
+        given = core.given_hash(raw)  # 'n/a', 'TBD', 'new': no hash, so the bug is created
+        h = None
+        if given:  # re-sighting of a known bug (prefix ok if unique)
+            hits = con.execute("SELECT hash FROM bugs WHERE substr(hash,1,?)=?", (len(given), given)).fetchall()
+            h = hits[0][0] if len(hits) == 1 else None
+        h = h or core.bug_hash(b["route"], symptom)
+        # a new sighting counts once; a bug from before sightings existed counts this run via last_run
+        fresh = int(
+            not ran(h) and not con.execute("SELECT 1 FROM bugs WHERE hash=? AND last_run=?", (h, rid)).fetchone()
+        )
+        now_seen.add(h)
+        con.execute(
+            "INSERT OR IGNORE INTO sightings(run_id,src,hash,page,build) VALUES(?,?,?,?,?)",
+            (rid, src, h, b["route"], build),
+        )  # where it showed: a shared-endpoint bug on another page too
+        # a FIXED bug seen again by another run becomes REGRESSED.
+        con.execute(
+            "INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
+            "last_seen,last_run,symptom,heuristic,endpoint,pattern,ticket,first_build,last_build) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
+            "first_build=coalesce(first_build, excluded.first_build), "
+            "last_build=CASE WHEN excluded.last_build IS NOT NULL AND excluded.last_seen >= coalesce(last_seen, '') "
+            "THEN excluded.last_build ELSE last_build END, "
+            f"regressed_count=coalesce(regressed_count, 0) + CASE WHEN {REGRESSES} THEN 1 ELSE 0 END, "
+            "heuristic=coalesce(excluded.heuristic, heuristic), endpoint=coalesce(excluded.endpoint, endpoint), "
+            "pattern=coalesce(excluded.pattern, pattern), ticket=coalesce(excluded.ticket, ticket), "
+            "seen_count=seen_count + ?, "
+            f"status=CASE WHEN {REGRESSES} THEN 'REGRESSED' ELSE status END, "
+            f"regressed_by=CASE WHEN {REGRESSES} THEN excluded.last_run ELSE regressed_by END, "
+            "last_run=CASE WHEN excluded.last_seen >= coalesce(last_seen, '') THEN excluded.last_run ELSE last_run END, "
+            "last_seen=max(coalesce(last_seen, ''), excluded.last_seen), "
+            "first_seen=min(coalesce(first_seen, excluded.first_seen), excluded.first_seen), "
+            "severity=coalesce(excluded.severity, severity), "
+            "classification=coalesce(excluded.classification, classification), "
+            "draft_path=coalesce(excluded.draft_path, draft_path), "
+            "symptom=coalesce(symptom, excluded.symptom)",
+            (
+                h,
+                b.get("route"),
+                core.cap(b["title"]),
+                core.cap(b.get("severity"))[:20] or None,
+                core.cap(b.get("classification"))[:20] or None,
+                resolve_draft(b.get("draft_path"), run_dir),
+                ts,
+                ts,
+                rid,
+                symptom,
+                core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
+                cards.endpoint(b.get("endpoint")),
+                memory.pattern_tag(b.get("pattern")),
+                core.cap(b.get("ticket"))[:30] or None,
+                build if known else None,
+                build if known else None,
+                fresh,
+                fresh,
+                fresh,
+                fresh,
+            ),
+        )
+    for h in before - now_seen:  # listed by an earlier version of this run.json only
+        con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
+        if ran(h):
+            continue  # another file of the same run id still lists it
+        con.execute(
+            "UPDATE bugs SET seen_count=max(seen_count - 1, 0), "
+            "last_run=CASE WHEN last_run=? THEN NULL ELSE last_run END WHERE hash=?",
+            (rid, h),
+        )
+        # the sighting that made a FIXED bug REGRESSED is gone (a checkpoint listed it, the final file didn't)
+        con.execute(
+            "UPDATE bugs SET status='FIXED', regressed_count=max(coalesce(regressed_count, 0) - 1, 0), "
+            "regressed_by=NULL WHERE hash=? AND status='REGRESSED' AND regressed_by=?",
+            (h, rid),
+        )
+        # only this run ever saw it and the user hasn't triaged it: it was never a bug
+        page = con.execute("SELECT page FROM bugs WHERE hash=?", (h,)).fetchone()
+        gone = con.execute(
+            "DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
+            "(SELECT 1 FROM sightings WHERE hash=?)",
+            (h, h),
+        ).rowcount
+        if gone:
+            _bug_dropped(src, h, page[0] if page else None, rid)
 
 
 def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
@@ -160,214 +382,9 @@ def _store(con, run, rid, build, known, pages, bug_list, ts, run_dir, src):
         # the read-only map (qa-mem crawl and discover) and a blocked start test nothing
         explored = core.norm(run.get("mode")) != "map" and core.norm(run.get("status")) != "blocked"
         for pg in pages:
-            route = pg["route"]
-            old = con.execute("SELECT build, last_verified FROM pages WHERE route=?", (route,)).fetchone()
-            # A run older than what we already know (ingested late) must not roll the page back.
-            late = bool(old and old["last_verified"] and ts < old["last_verified"])
-            # A late file of the page's current build still saw the current page: its new facts and locators count.
-            same_build = bool(known and old and old["build"] == build)
-            current = known and (not late or same_build)
-            if known and not late and old and old["build"] not in (build, core.UNKNOWN, None):  # new build: re-verify
-                con.execute("UPDATE facts SET stale=1 WHERE page=? AND pinned=0", (route,))  # the user's own stay
-                con.execute("UPDATE locators SET stale=1 WHERE page=?", (route,))
-            if late:
-                con.execute("INSERT OR IGNORE INTO pages(route, name, build) VALUES(?,?,?)", (route, None, build))
-            elif known:
-                con.execute(
-                    "INSERT INTO pages(route, name, build, last_verified) VALUES(?,?,?,?) ON CONFLICT(route) DO UPDATE SET "
-                    "name=coalesce(excluded.name, name), build=excluded.build, "
-                    "last_verified=excluded.last_verified",
-                    (route, core.cap(pg.get("name")) or None, build, ts),
-                )
-            else:  # e.g. a plan from a ticket: knows the page, verified nothing
-                con.execute(
-                    "INSERT INTO pages(route, name, build) VALUES(?,?,?) ON CONFLICT(route) DO UPDATE "
-                    "SET name=coalesce(name, excluded.name), build=coalesce(build, excluded.build)",
-                    (route, core.cap(pg.get("name")) or None, core.UNKNOWN),
-                )
-            if explored:
-                con.execute("UPDATE pages SET explored=max(coalesce(explored, ''), ?) WHERE route=?", (ts, route))
-            for f in pg.get("facts") or []:
-                text = core.cap(f.get("text"))
-                if text:
-                    # Only a verifying run (known build, not late) refreshes an existing fact.
-                    con.execute(
-                        "INSERT INTO facts(page,kind,text,source,build,ts,stale) VALUES(?,?,?,?,?,?,?) "
-                        "ON CONFLICT(page,kind,text) DO UPDATE SET "
-                        "source=CASE WHEN ? AND lower(coalesce(excluded.source, '')) = 'observed' "
-                        "THEN 'observed' ELSE source END, "  # a ticket rule the explorer has now seen
-                        "stale=CASE WHEN ? THEN 0 ELSE stale END, "
-                        "build=CASE WHEN ? THEN excluded.build ELSE build END, "
-                        "ts=CASE WHEN ? THEN excluded.ts ELSE ts END",
-                        (
-                            route,
-                            core.cap(f.get("kind"))[:30] or "note",
-                            text,
-                            core.cap(f.get("source")),
-                            build,
-                            ts,
-                            int(late and not same_build),
-                            int(current),
-                            int(current),
-                            *(int(known and not late),) * 2,
-                        ),
-                    )
-            framed = set()  # what this run found in a frame, as the same element reads without the frame
-            for loc in pg.get("locators") or []:
-                # A truncated locator would be broken, so skip oversized ones instead of capping.
-                loc_name, loc_val = (
-                    core.cap(loc.get("name")),
-                    (core.txt(loc.get("locator"), "locators.locator") or "").strip(),
-                )
-                if (not late or same_build) and loc_name and loc_val and len(loc_val) <= core.MAX_TEXT:
-                    # late + same build, or unknown-build plan on a verified page: add, never overwrite/un-stale verified
-                    keep_old = late or (not known and bool(old and old["build"] not in (core.UNKNOWN, None)))
-                    con.execute(
-                        f"INSERT OR {'IGNORE' if keep_old else 'REPLACE'} INTO locators VALUES(?,?,?,?,?,0)",
-                        (route, loc_name, loc_val, build, ts),
-                    )
-                    if not keep_old and core.FRAME_MARK in loc_val:
-                        framed.add(core.frame_tail(loc_val))
-            # the same element saved earlier without its frame, under another name (a page object's `this.page.` in
-            # front or not): it matches nothing as written, and it takes a card's room
-            for x in (
-                con.execute(
-                    "SELECT name, locator FROM locators WHERE page=? AND instr(locator, ?)=0", (route, core.FRAME_MARK)
-                ).fetchall()
-                if framed
-                else ()
-            ):
-                if re.sub(r"^(?:[A-Za-z_$][\w$]*\.)+(?=getBy)", "", x["locator"]) in framed:
-                    con.execute("DELETE FROM locators WHERE page=? AND name=?", (route, x["name"]))
-            _store_states(con, route, pg, build, ts)
-            for c in pg.get("coverage") or []:
-                if core.norm(c.get("heuristic")):
-                    # the newest run's result stands: a run.json ingested late must not put its older one back
-                    con.execute(
-                        "INSERT INTO coverage VALUES(?,?,?,?,?,?,?) ON CONFLICT(page,target,heuristic,build) "
-                        "DO UPDATE SET result=excluded.result, run_id=excluded.run_id, ts=excluded.ts "
-                        "WHERE excluded.ts >= coalesce(coverage.ts, '')",
-                        (
-                            route,
-                            core.cap(c.get("target")) or "*",
-                            core.heuristic_id(c["heuristic"]),
-                            core.coverage_result(c.get("result")),
-                            build,
-                            rid,
-                            ts,
-                        ),
-                    )
-        for pg in pages:  # size caps: keep the freshest knowledge per page
-            con.execute(
-                "DELETE FROM facts WHERE page=? AND id NOT IN (SELECT id FROM facts WHERE page=? "
-                "ORDER BY pinned DESC, stale, ts DESC LIMIT ?)",
-                (pg["route"], pg["route"], core.MAX_FACTS),
-            )
-            con.execute(
-                "DELETE FROM coverage WHERE page=? AND rowid NOT IN (SELECT rowid FROM coverage WHERE page=? "
-                "ORDER BY ts DESC LIMIT ?)",
-                (pg["route"], pg["route"], core.MAX_COVERAGE),
-            )
-            con.execute(
-                "DELETE FROM locators WHERE page=? AND name NOT IN (SELECT name FROM locators WHERE page=? "
-                "ORDER BY stale, last_verified DESC LIMIT ?)",
-                (pg["route"], pg["route"], core.MAX_LOCATORS),
-            )
-        # sightings = which bugs this run file reported. A rewritten run.json (or a sibling's hook ingesting it
-        # mid-run) replaces its earlier version: a bug it no longer lists is un-sighted (dropped when only it ever
-        # saw it), and seen_count counts distinct run ids even when runs are re-ingested interleaved.
-        src = str(src or "")
-        before = {r[0] for r in con.execute("SELECT hash FROM sightings WHERE run_id=? AND src=?", (rid, src))}
-        ran = lambda h: con.execute("SELECT 1 FROM sightings WHERE run_id=? AND hash=?", (rid, h)).fetchone()
-        now_seen = set()
-        for b in bug_list:
-            symptom = core.cap(b.get("symptom")) or core.cap(b["title"])
-            raw = str(b.get("hash") or "").strip()
-            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-\d+", raw) and not re.fullmatch(r"(?i)BUG-\d+", raw):
-                continue  # a Jira key: a bug tracked in Jira, not a local one to create (BUG-n is a draft's id: created)
-            given = core.given_hash(raw)  # 'n/a', 'TBD', 'new': no hash, so the bug is created
-            h = None
-            if given:  # re-sighting of a known bug (prefix ok if unique)
-                hits = con.execute("SELECT hash FROM bugs WHERE substr(hash,1,?)=?", (len(given), given)).fetchall()
-                h = hits[0][0] if len(hits) == 1 else None
-            h = h or core.bug_hash(b["route"], symptom)
-            # a new sighting counts once; a bug from before sightings existed counts this run via last_run
-            fresh = int(
-                not ran(h) and not con.execute("SELECT 1 FROM bugs WHERE hash=? AND last_run=?", (h, rid)).fetchone()
-            )
-            now_seen.add(h)
-            con.execute(
-                "INSERT OR IGNORE INTO sightings(run_id,src,hash,page,build) VALUES(?,?,?,?,?)",
-                (rid, src, h, b["route"], build),
-            )  # where it showed: a shared-endpoint bug on another page too
-            # a FIXED bug seen again by another run becomes REGRESSED.
-            con.execute(
-                "INSERT INTO bugs(hash,page,title,severity,classification,draft_path,first_seen,"
-                "last_seen,last_run,symptom,heuristic,endpoint,pattern,ticket,first_build,last_build) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
-                "first_build=coalesce(first_build, excluded.first_build), "
-                "last_build=CASE WHEN excluded.last_build IS NOT NULL AND excluded.last_seen >= coalesce(last_seen, '') "
-                "THEN excluded.last_build ELSE last_build END, "
-                f"regressed_count=coalesce(regressed_count, 0) + CASE WHEN {REGRESSES} THEN 1 ELSE 0 END, "
-                "heuristic=coalesce(excluded.heuristic, heuristic), endpoint=coalesce(excluded.endpoint, endpoint), "
-                "pattern=coalesce(excluded.pattern, pattern), ticket=coalesce(excluded.ticket, ticket), "
-                "seen_count=seen_count + ?, "
-                f"status=CASE WHEN {REGRESSES} THEN 'REGRESSED' ELSE status END, "
-                f"regressed_by=CASE WHEN {REGRESSES} THEN excluded.last_run ELSE regressed_by END, "
-                "last_run=CASE WHEN excluded.last_seen >= coalesce(last_seen, '') THEN excluded.last_run ELSE last_run END, "
-                "last_seen=max(coalesce(last_seen, ''), excluded.last_seen), "
-                "first_seen=min(coalesce(first_seen, excluded.first_seen), excluded.first_seen), "
-                "severity=coalesce(excluded.severity, severity), "
-                "classification=coalesce(excluded.classification, classification), "
-                "draft_path=coalesce(excluded.draft_path, draft_path), "
-                "symptom=coalesce(symptom, excluded.symptom)",
-                (
-                    h,
-                    b.get("route"),
-                    core.cap(b["title"]),
-                    core.cap(b.get("severity"))[:20] or None,
-                    core.cap(b.get("classification"))[:20] or None,
-                    resolve_draft(b.get("draft_path"), run_dir),
-                    ts,
-                    ts,
-                    rid,
-                    symptom,
-                    core.heuristic_id(b["heuristic"]) if core.norm(b.get("heuristic")) else None,
-                    cards.endpoint(b.get("endpoint")),
-                    memory.pattern_tag(b.get("pattern")),
-                    core.cap(b.get("ticket"))[:30] or None,
-                    build if known else None,
-                    build if known else None,
-                    fresh,
-                    fresh,
-                    fresh,
-                    fresh,
-                ),
-            )
-        for h in before - now_seen:  # listed by an earlier version of this run.json only
-            con.execute("DELETE FROM sightings WHERE run_id=? AND src=? AND hash=?", (rid, src, h))
-            if ran(h):
-                continue  # another file of the same run id still lists it
-            con.execute(
-                "UPDATE bugs SET seen_count=max(seen_count - 1, 0), "
-                "last_run=CASE WHEN last_run=? THEN NULL ELSE last_run END WHERE hash=?",
-                (rid, h),
-            )
-            # the sighting that made a FIXED bug REGRESSED is gone (a checkpoint listed it, the final file didn't)
-            con.execute(
-                "UPDATE bugs SET status='FIXED', regressed_count=max(coalesce(regressed_count, 0) - 1, 0), "
-                "regressed_by=NULL WHERE hash=? AND status='REGRESSED' AND regressed_by=?",
-                (h, rid),
-            )
-            # only this run ever saw it and the user hasn't triaged it: it was never a bug
-            page = con.execute("SELECT page FROM bugs WHERE hash=?", (h,)).fetchone()
-            gone = con.execute(
-                "DELETE FROM bugs WHERE hash=? AND seen_count=0 AND status='OPEN' AND NOT EXISTS "
-                "(SELECT 1 FROM sightings WHERE hash=?)",
-                (h, h),
-            ).rowcount
-            if gone:
-                _bug_dropped(src, h, page[0] if page else None, rid)
+            _store_page(con, pg, ts, known, build, explored, rid)
+        _cap_pages(con, pages)
+        _store_bugs(con, src, rid, bug_list, build, run_dir, ts, known)
         target = (
             core.norm_route(core.cap(run.get("target")))
             if str(run.get("target") or "").startswith(("/", "http", "#"))

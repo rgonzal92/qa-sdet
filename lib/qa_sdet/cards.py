@@ -55,41 +55,10 @@ def _frame_line(con, route, own=()):
     return [f"FRAME: no locator of this page names a frame yet; {loads} in one: try `{frame}` {tip}"]
 
 
-def card(con, q, focus=None, ids=False):
-    pg = codemap.find_page(con, q)
-    if not pg:
-        tip = (
-            ""
-            if con.execute("SELECT 1 FROM codemap LIMIT 1").fetchone()
-            else "tip: /qa-sdet:qa-init maps routes and locators from your source, so pages resolve by name\n"
-        )
-        return (
-            f"NO CARD for '{q}': first visit. Untried heuristics: {', '.join(core.HEURISTICS)}\n"
-            + "".join(f"{x}\n" for x in _frame_line(con, ""))
-            + tip
-            + bug_lines(con, None)
-        )
-    r = pg["route"]
-    b = core.meta(con, "build") or pg["build"]  # coverage only counts on the build deployed now
-    unknown_page = pg["build"] == core.UNKNOWN  # no run read its build (a map page without the footer, a planned page)
-    code_only = pg["build"] is None  # known from the code map only: nothing observed yet, nothing to re-verify
-    current = pg["build"] == b or unknown_page or code_only
-    out = [
-        f'PAGE {r} "{pg["name"] or ""}" build={pg["build"]} verified={pg["last_verified"] or "never"}'
-        + ("" if core.norm_route(q) == r else f"  (matched from '{q}')")
-    ]
-    if code_only:
-        out.append("NOTE: known from source code (or a link) only; no run has visited it yet.")
-    elif not current:
-        out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
-    elif unknown_page and b != core.UNKNOWN:
-        # a plan lists a page with no build too: "never readable" was wrong for a page no run had opened
-        out.append(f"NOTE: no run verified this page on a build it could read; its knowledge may predate build {b}.")
-    module = codemap.module_bindings(con).get(r)
-    if module:  # an app-shell route: its module page's rows (code, rules, endpoints, changes) are read as this page's
-        out.append(f"MODULE: {module[0] or '?'} at {module[1]} (its code-map rows below are this page's)")
+def _card_facts(con, r, focus_words, ids, current):
+    """FACTS: the charter's first, then rules before plain notes; near-duplicates collapse to the freshest."""
+    out = []
     facts, seen = [], []
-    focus_words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w+", str(focus or ""))))[:8]
     # the charter's facts first (stemmed match on any of its words), then rules, flows, validations, API facts and
     # ticket-stated ones before plain notes: 15 recent notes must not push the page's rules off the card
     on_focus = (
@@ -137,6 +106,12 @@ def card(con, q, focus=None, ids=False):
             + (" *" if f["id"] not in pinned_ids and (f["stale"] or not current) else "")
             for f in facts
         ]
+    return out
+
+
+def _card_questions(con, r):
+    """DECISIONS and OPEN QUESTIONS."""
+    out = []
     decided = con.execute(
         "SELECT text, answer, ticket FROM questions WHERE status='resolved' AND page IN (?, '*') "
         "ORDER BY page='*', last_seen DESC LIMIT 5",
@@ -152,6 +127,12 @@ def card(con, q, focus=None, ids=False):
     ).fetchall()
     if asked:
         out += ["OPEN QUESTIONS (asked before, no answer yet):"] + [f"- #{x['id']} {x['text']}" for x in asked]
+    return out
+
+
+def _card_locators(con, current, r):
+    """LOCATORS, and with it the locators shown (FROM CODE leaves them out) and the frames they name."""
+    out = []
     shown, own = set(), []
     if current:
         locs, size = [], 0
@@ -184,7 +165,12 @@ def card(con, q, focus=None, ids=False):
             out.append("LOCATORS (fresh): " + "; ".join(locs) + more)
             # as `generate-locator` prints it: locator('iframe[name="module"]').contentFrame().getByTestId('save')
             own = list(dict.fromkeys(_frame(x["locator"]) for x in rows if core.FRAME_MARK in x["locator"]))
-    out += _frame_line(con, r, own)
+    return out, shown, own
+
+
+def _card_code(con, r, b, pg, shown, focus_words):
+    """FROM CODE, CHANGED SINCE LAST VISIT, COVERED, UNTRIED and UNTESTED TARGETS."""
+    out = []
     cov, tried, targets = coverage(con, r, b)
     untested = untested_rules(con, r, targets)
     changed, in_changed = _changed_here(con, r, pg)
@@ -217,6 +203,12 @@ def card(con, q, focus=None, ids=False):
             f"UNTESTED TARGETS (code rules no adversarial check covered on {on}; write the label as the "
             "coverage target): " + "; ".join(untested[:shown_n]) + more
         )
+    return out
+
+
+def _card_hints(con, r):
+    """Rules that differ between client and server or across pages, and RELATED PAGES."""
+    out = []
     differ = _client_server_differ(con, r)
     if differ:
         out.append(
@@ -235,6 +227,12 @@ def card(con, q, focus=None, ids=False):
             + "; ".join(f"{p} ({core.short(why, 70)})" for p, why in related[:4])
             + (f"; +{len(related) - 4} more (qa-mem impact '{r}')" if len(related) > 4 else "")
         )
+    return out
+
+
+def _card_bugs(con, r, b):
+    """The page's bugs, bugs on pages sharing an endpoint or component, and recurring signals."""
+    out = []
     out.append(bug_lines(con, r, b))
     shared = _shared_bugs(con, r)
     if shared:
@@ -251,6 +249,12 @@ def card(con, q, focus=None, ids=False):
         out += [
             "RECURRING UNEXPLAINED SIGNALS (no bug explains them; investigate or draft; the user can ignore noise):"
         ] + [f"- {x['sig_key']} (seen in {x['seen_runs']} runs since build {x['first_build']})" for x in noisy]
+    return out
+
+
+def _card_unvisited(con, r, b, code_only):
+    """UNVISITED STATES and UNEXERCISED ENDPOINTS."""
+    out = []
     due = [
         x["state_key"] + (f" ({core.short(x['trigger'], 80)})" if x["trigger"] else "") for x in due_states(con, r, b)
     ]
@@ -269,6 +273,12 @@ def card(con, q, focus=None, ids=False):
             + "; ".join(apis[:4])
             + (f" (+{len(apis) - 4} more)" if len(apis) > 4 else "")
         )
+    return out
+
+
+def _card_routes(con, r):
+    """LEADS TO and ENTRY: the transitions out of the page and into it."""
+    out = []
     leads = con.execute(
         "SELECT to_route, trigger FROM transitions WHERE from_route=? ORDER BY ts DESC LIMIT 5", (r,)
     ).fetchall()
@@ -287,6 +297,53 @@ def card(con, q, focus=None, ids=False):
             )
             + ")"
         )
+    return out
+
+
+def card(con, q, focus=None, ids=False):
+    pg = codemap.find_page(con, q)
+    if not pg:
+        tip = (
+            ""
+            if con.execute("SELECT 1 FROM codemap LIMIT 1").fetchone()
+            else "tip: /qa-sdet:qa-init maps routes and locators from your source, so pages resolve by name\n"
+        )
+        return (
+            f"NO CARD for '{q}': first visit. Untried heuristics: {', '.join(core.HEURISTICS)}\n"
+            + "".join(f"{x}\n" for x in _frame_line(con, ""))
+            + tip
+            + bug_lines(con, None)
+        )
+    r = pg["route"]
+    b = core.meta(con, "build") or pg["build"]  # coverage only counts on the build deployed now
+    unknown_page = pg["build"] == core.UNKNOWN  # no run read its build (a map page without the footer, a planned page)
+    code_only = pg["build"] is None  # known from the code map only: nothing observed yet, nothing to re-verify
+    current = pg["build"] == b or unknown_page or code_only
+    out = [
+        f'PAGE {r} "{pg["name"] or ""}" build={pg["build"]} verified={pg["last_verified"] or "never"}'
+        + ("" if core.norm_route(q) == r else f"  (matched from '{q}')")
+    ]
+    if code_only:
+        out.append("NOTE: known from source code (or a link) only; no run has visited it yet.")
+    elif not current:
+        out.append(f"NOTE: current build is {b}; everything below is from build {pg['build']}: re-verify.")
+    elif unknown_page and b != core.UNKNOWN:
+        # a plan lists a page with no build too: "never readable" was wrong for a page no run had opened
+        out.append(f"NOTE: no run verified this page on a build it could read; its knowledge may predate build {b}.")
+    module = codemap.module_bindings(con).get(r)
+    if module:  # an app-shell route: its module page's rows (code, rules, endpoints, changes) are read as this page's
+        out.append(f"MODULE: {module[0] or '?'} at {module[1]} (its code-map rows below are this page's)")
+    focus_words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w+", str(focus or ""))))[:8]
+    out += _card_facts(con, r, focus_words, ids, current)
+    out += _card_questions(con, r)
+    lines, shown, own = _card_locators(con, current, r)
+    out += lines
+    out += _frame_line(con, r, own)
+    out += _card_code(con, r, b, pg, shown, focus_words)
+    out += _card_hints(con, r)
+    out += _card_bugs(con, r, b)
+    out += _card_unvisited(con, r, b, code_only)
+    out += _card_routes(con, r)
     recurring = bug_patterns(con)[:3]
     if recurring:
         out += ["RECURRING APP PATTERNS (this app broke this way on 2+ pages: try it here too):"] + [

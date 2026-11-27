@@ -65,24 +65,8 @@ def pillow_fix():
     return "sudo apt-get install python3-pil (this python3 is OS-managed, so pip refuses)"
 
 
-def doctor():
-    """Setup check for a new machine. Prints one line per item; returns the number of problems.
-    Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 s) so a skill's Bash call never cuts it off."""
-    problems = 0
-
-    def line(ok, what, fix=""):
-        nonlocal problems
-        problems += not ok
-        print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
-
-    line(
-        sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)"
-    )
-    cfg, cfg_err = {}, None
-    try:
-        cfg = core.config(strict=True)
-    except (OSError, ValueError) as e:
-        cfg_err = e
+def _check_browser_tool(line, cfg):
+    """playwright-cli runs, and the browser the config names is installed."""
     chosen = cfg.get("browser")
     pw = shutil.which("playwright-cli")
     on_path = bool(pw)
@@ -115,6 +99,10 @@ def doctor():
                 print(f"info browser {chosen}: {how}")
             else:
                 line(ok_b, f"browser {chosen} installed" + (f" ({how})" if ok_b else ""), how)
+
+
+def _check_acli(line):
+    """acli is signed in to Jira (optional: without it tickets are pasted)."""
     acli = shutil.which("acli")
     if acli:
         try:
@@ -133,127 +121,128 @@ def doctor():
         line(ok, "acli signed in to Jira", "acli jira auth login")
     else:
         print("info no acli: tickets are pasted (optional: install acli)")
-    if cfg_err:
+
+
+def _check_config_required(line, cfg):
+    """The config keys every run needs: the app, its URL and hosts, the sign-in host and where the build is read."""
+    line(True, f"config {core.CONFIG}")
+    missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost") if not cfg.get(k)]
+    line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost", f"add {missing}")
+    bs = cfg.get("buildSource")
+    if bs is None or bs == "":  # no build the browser can read: session._read_build takes the stored one
+        stored = session.stored_build()
         line(
-            False,
-            f"config {core.CONFIG} ({cfg_err.__class__.__name__})",
-            f"fix the JSON ({cfg_err})"
-            if isinstance(cfg_err, ValueError)
-            else f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}"
-            if isinstance(cfg_err, PermissionError)
-            else "run any qa-sdet skill once; it asks for the values",
+            bool(stored),
+            f"buildSource unset: using the stored build {stored} (qa-mem stale)"
+            if stored
+            else "buildSource unset and no build stored",
+            "add buildSource, or record the build: qa-mem stale <build>",
         )
     else:
-        line(True, f"config {core.CONFIG}")
-        missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost") if not cfg.get(k)]
-        line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost", f"add {missing}")
-        bs = cfg.get("buildSource")
-        if bs is None or bs == "":  # no build the browser can read: session._read_build takes the stored one
-            stored = session.stored_build()
-            line(
-                bool(stored),
-                f"buildSource unset: using the stored build {stored} (qa-mem stale)"
-                if stored
-                else "buildSource unset and no build stored",
-                "add buildSource, or record the build: qa-mem stale <build>",
-            )
-        else:
-            line(
-                bool(bs)
-                and all(
-                    isinstance(x, dict)
-                    and x.get("type") in ("selector", "url", "header")
-                    and isinstance(x.get("value"), str)
-                    and bool(x["value"].strip())
-                    for x in (bs if isinstance(bs, list) else [bs])
-                ),
-                "buildSource is {type: selector|url|header, value}, or a list of them",
-                'e.g. {"type": "selector", "value": "footer .version"}',
-            )
-        hosts = cfg.get("allowedHosts")
         line(
-            isinstance(hosts, list) and all(isinstance(h, str) for h in hosts),
-            "allowedHosts is a list of hosts",
-            'e.g. "allowedHosts": ["qa.example.com"]',
+            bool(bs)
+            and all(
+                isinstance(x, dict)
+                and x.get("type") in ("selector", "url", "header")
+                and isinstance(x.get("value"), str)
+                and bool(x["value"].strip())
+                for x in (bs if isinstance(bs, list) else [bs])
+            ),
+            "buildSource is {type: selector|url|header, value}, or a list of them",
+            'e.g. {"type": "selector", "value": "footer .version"}',
         )
-        odd = sorted(
-            h for h in core.allowed_hosts(cfg) if not re.fullmatch(r"[a-z0-9._-]+|::1", h)
-        )  # the guard matches host names only
-        if odd:
-            line(
-                False,
-                f"allowedHosts entries are host names ({', '.join(core.short(h, 40) for h in odd[:3])} can never match)",
-                'just the host, no https://, port or path: "https://qa.example.com:8443/app" -> "qa.example.com"',
-            )
-        try:
-            base_url = urlsplit(str(cfg.get("qaBaseUrl") or ""))
-            base, base_host = (base_url.hostname or "").rstrip("."), base_url.netloc.rpartition("@")[2].lower()
-        except ValueError:
-            base = base_host = ""
-        if cfg.get("qaBaseUrl") and not (base and str(cfg["qaBaseUrl"]).lower().startswith(("http://", "https://"))):
-            line(False, "qaBaseUrl is a full URL", 'e.g. "qaBaseUrl": "https://qa.example.com"')
-        elif base:
-            line(
-                core.url_allowed(cfg["qaBaseUrl"], core.allowed_hosts(cfg)),  # the guard's rules: what it will let open
-                "qaBaseUrl host is in allowedHosts",
-                "add the qaBaseUrl host to allowedHosts",
-            )
-        sso = cfg.get("ssoHost")
-        if sso and not (isinstance(sso, str) and re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?\.?", sso.strip())):
-            line(
-                False,
-                "ssoHost is a host name",
-                'just the host, no https:// or path: e.g. "ssoHost": "login.microsoftonline.com"',
-            )
-        elif sso:  # runs compare it with location.host
-            line(
-                sso.lower().strip().rstrip(".") not in (base.lower(), base_host),
-                "ssoHost differs from the qaBaseUrl host",
-                "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED",
-            )
-        prefix = cfg.get("jiraKeyPrefix")
-        if prefix not in (None, ""):  # optional: lets the user type ticket numbers without the project key
-            line(
-                isinstance(prefix, str)
-                and prefix.isascii()
-                and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"), re.ASCII)),
-                "jiraKeyPrefix is a Jira project key",
-                'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"',
-            )
-        temps = cfg.get("releaseTemplates")
-        if temps not in (None, []):  # optional: the Jira comment's Release line fills {version} into these
-            ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
-            line(
-                ok_t,
-                "releaseTemplates lists release names with {version}",
-                'a list such as ["Release-A-{version}"]: the Release line of the Jira comment fills in the fix version',
-            )
-        ac_field = cfg.get("jiraAcField")
-        if ac_field not in (None, ""):
-            line(
-                isinstance(ac_field, str) and bool(re.fullmatch(r"customfield_\d+", ac_field.strip())),
-                "jiraAcField is a Jira custom field id",
-                'e.g. "jiraAcField": "customfield_10042"',
-            )
-        jql = cfg.get("inboxJql")
-        if jql not in (None, ""):
-            line(
-                isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
-                "inboxJql is a single-line JQL query",
-                'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"',
-            )
-        link = cfg.get("jiraBugLinkType")
-        if link in (None, ""):  # optional, and team-specific: never guessed
-            print(
-                "note jiraBugLinkType not set: filing commands print no command linking a new bug to its story "
-                '(set your Jira\'s link type, e.g. "jiraBugLinkType": "Blocks"; `acli jira workitem link type` lists them)'
-            )
-        else:
-            line(
-                isinstance(link, str) and bool(link.strip()) and "\n" not in link and "'" not in link,
-                "jiraBugLinkType names a Jira link type",
-                'e.g. "jiraBugLinkType": "Blocks" (acli jira workitem link type)',
-            )
+    hosts = cfg.get("allowedHosts")
+    line(
+        isinstance(hosts, list) and all(isinstance(h, str) for h in hosts),
+        "allowedHosts is a list of hosts",
+        'e.g. "allowedHosts": ["qa.example.com"]',
+    )
+    odd = sorted(
+        h for h in core.allowed_hosts(cfg) if not re.fullmatch(r"[a-z0-9._-]+|::1", h)
+    )  # the guard matches host names only
+    if odd:
+        line(
+            False,
+            f"allowedHosts entries are host names ({', '.join(core.short(h, 40) for h in odd[:3])} can never match)",
+            'just the host, no https://, port or path: "https://qa.example.com:8443/app" -> "qa.example.com"',
+        )
+    try:
+        base_url = urlsplit(str(cfg.get("qaBaseUrl") or ""))
+        base, base_host = (base_url.hostname or "").rstrip("."), base_url.netloc.rpartition("@")[2].lower()
+    except ValueError:
+        base = base_host = ""
+    if cfg.get("qaBaseUrl") and not (base and str(cfg["qaBaseUrl"]).lower().startswith(("http://", "https://"))):
+        line(False, "qaBaseUrl is a full URL", 'e.g. "qaBaseUrl": "https://qa.example.com"')
+    elif base:
+        line(
+            core.url_allowed(cfg["qaBaseUrl"], core.allowed_hosts(cfg)),  # the guard's rules: what it will let open
+            "qaBaseUrl host is in allowedHosts",
+            "add the qaBaseUrl host to allowedHosts",
+        )
+    sso = cfg.get("ssoHost")
+    if sso and not (isinstance(sso, str) and re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?\.?", sso.strip())):
+        line(
+            False,
+            "ssoHost is a host name",
+            'just the host, no https:// or path: e.g. "ssoHost": "login.microsoftonline.com"',
+        )
+    elif sso:  # runs compare it with location.host
+        line(
+            sso.lower().strip().rstrip(".") not in (base.lower(), base_host),
+            "ssoHost differs from the qaBaseUrl host",
+            "ssoHost is the login provider's host (e.g. login.microsoftonline.com); every run would end BLOCKED",
+        )
+
+
+def _check_config_optional(line, cfg):
+    """The optional Jira keys: wrong shapes are named, missing ones are fine."""
+    prefix = cfg.get("jiraKeyPrefix")
+    if prefix not in (None, ""):  # optional: lets the user type ticket numbers without the project key
+        line(
+            isinstance(prefix, str)
+            and prefix.isascii()
+            and bool(re.fullmatch(r"[A-Z][A-Z0-9]+", prefix.strip().upper().rstrip("-"), re.ASCII)),
+            "jiraKeyPrefix is a Jira project key",
+            'the letters before the ticket number: e.g. "jiraKeyPrefix": "PROJ"',
+        )
+    temps = cfg.get("releaseTemplates")
+    if temps not in (None, []):  # optional: the Jira comment's Release line fills {version} into these
+        ok_t = isinstance(temps, list) and all(isinstance(t, str) and "{version}" in t for t in temps)
+        line(
+            ok_t,
+            "releaseTemplates lists release names with {version}",
+            'a list such as ["Release-A-{version}"]: the Release line of the Jira comment fills in the fix version',
+        )
+    ac_field = cfg.get("jiraAcField")
+    if ac_field not in (None, ""):
+        line(
+            isinstance(ac_field, str) and bool(re.fullmatch(r"customfield_\d+", ac_field.strip())),
+            "jiraAcField is a Jira custom field id",
+            'e.g. "jiraAcField": "customfield_10042"',
+        )
+    jql = cfg.get("inboxJql")
+    if jql not in (None, ""):
+        line(
+            isinstance(jql, str) and bool(jql.strip()) and "\n" not in jql and "\r" not in jql,
+            "inboxJql is a single-line JQL query",
+            'e.g. "inboxJql": "status = \\"Ready for QA\\" ORDER BY updated DESC"',
+        )
+    link = cfg.get("jiraBugLinkType")
+    if link in (None, ""):  # optional, and team-specific: never guessed
+        print(
+            "note jiraBugLinkType not set: filing commands print no command linking a new bug to its story "
+            '(set your Jira\'s link type, e.g. "jiraBugLinkType": "Blocks"; `acli jira workitem link type` lists them)'
+        )
+    else:
+        line(
+            isinstance(link, str) and bool(link.strip()) and "\n" not in link and "'" not in link,
+            "jiraBugLinkType names a Jira link type",
+            'e.g. "jiraBugLinkType": "Blocks" (acli jira workitem link type)',
+        )
+
+
+def _check_pillow_and_profile(line):
+    """Pillow, the signed-in browser profile, and the cookie file of older versions."""
     try:
         import PIL
 
@@ -267,42 +256,83 @@ def doctor():
     old_state = core.CONFIG.with_name("qa-state.json")  # never opened: it holds cookies
     if os.path.lexists(old_state):
         line(False, f"old cookie file {old_state} (nothing uses it any more)", f"delete {old_state} yourself")
-    try:
-        con = core.connect()
-        n_pages, n_rows = con.execute("SELECT count(DISTINCT page), count(*) FROM codemap").fetchone()
-        recent = [r[0] for r in con.execute("SELECT build FROM runs ORDER BY ts DESC LIMIT 3")]
-        con.close()
-        line(True, f"memory DB {core.db_path()}")
-        if cfg.get("buildSource") and len(recent) == 3 and all(b == core.UNKNOWN for b in recent):
-            # the states, coverage and locators each run confirms are then stored on `unknown`: they count a week only
-            line(
-                False,
-                f"buildSource reads the build (the newest 3 runs all recorded {core.UNKNOWN})",
-                "correct buildSource or remove it (without it, record the build by hand: qa-mem stale <build>)",
-            )
-        paths = cfg.get("sourcePaths") if isinstance(cfg, dict) else None
-        if paths is not None and not (isinstance(paths, list) and all(isinstance(x, str) and x for x in paths)):
-            line(False, "sourcePaths is a list of folders", 'e.g. "sourcePaths": ["/home/me/work/app-ui"]')
-        paths = [x for x in paths if isinstance(x, str) and x] if isinstance(paths, list) else []
-        # not a vulnerability (S6549): a local path the user's own project or config names, not agent data
-        gone = [x for x in paths if not os.path.isdir(os.path.expanduser(x))]  # NOSONAR
-        if gone:
-            line(
-                False,
-                f"sourcePaths folders exist ({', '.join(core.short(x, 60) for x in gone)} not found)",
-                "fix the path in the config, or run /qa-sdet:qa-init with the right folders",
-            )
-        print(
-            f"ok   code map: {n_rows} rows on {n_pages} pages"
-            if n_rows
-            else "info no code map yet: /qa-sdet:qa-init maps routes, locators, rules and endpoints from your source"
-            + (f" ({len(paths)} source folders configured)" if paths else "")
-        )
+
+
+def _check_memory_db(line, cfg):
+    """The memory DB opens; the build is being read; the source folders exist; the code map's size."""
+    con = core.connect()
+    n_pages, n_rows = con.execute("SELECT count(DISTINCT page), count(*) FROM codemap").fetchone()
+    recent = [r[0] for r in con.execute("SELECT build FROM runs ORDER BY ts DESC LIMIT 3")]
+    con.close()
+    line(True, f"memory DB {core.db_path()}")
+    if cfg.get("buildSource") and len(recent) == 3 and all(b == core.UNKNOWN for b in recent):
+        # the states, coverage and locators each run confirms are then stored on `unknown`: they count a week only
         line(
-            core.db_path().parent.stat().st_mode & 0o077 == 0,
-            "memory DB folder readable only by you",
-            f"chmod 700 {core.db_path().parent}",
+            False,
+            f"buildSource reads the build (the newest 3 runs all recorded {core.UNKNOWN})",
+            "correct buildSource or remove it (without it, record the build by hand: qa-mem stale <build>)",
         )
+    paths = cfg.get("sourcePaths") if isinstance(cfg, dict) else None
+    if paths is not None and not (isinstance(paths, list) and all(isinstance(x, str) and x for x in paths)):
+        line(False, "sourcePaths is a list of folders", 'e.g. "sourcePaths": ["/home/me/work/app-ui"]')
+    paths = [x for x in paths if isinstance(x, str) and x] if isinstance(paths, list) else []
+    # not a vulnerability (S6549): a local path the user's own project or config names, not agent data
+    gone = [x for x in paths if not os.path.isdir(os.path.expanduser(x))]  # NOSONAR
+    if gone:
+        line(
+            False,
+            f"sourcePaths folders exist ({', '.join(core.short(x, 60) for x in gone)} not found)",
+            "fix the path in the config, or run /qa-sdet:qa-init with the right folders",
+        )
+    print(
+        f"ok   code map: {n_rows} rows on {n_pages} pages"
+        if n_rows
+        else "info no code map yet: /qa-sdet:qa-init maps routes, locators, rules and endpoints from your source"
+        + (f" ({len(paths)} source folders configured)" if paths else "")
+    )
+    line(
+        core.db_path().parent.stat().st_mode & 0o077 == 0,
+        "memory DB folder readable only by you",
+        f"chmod 700 {core.db_path().parent}",
+    )
+
+
+def doctor():
+    """Setup check for a new machine. Prints one line per item; returns the number of problems.
+    Subprocess timeouts sum to under 2 minutes (15 + 30 + 30 s) so a skill's Bash call never cuts it off."""
+    problems = 0
+
+    def line(ok, what, fix=""):
+        nonlocal problems
+        problems += not ok
+        print(f"{'ok  ' if ok else 'FIX '} {what}" + (f"  -> {fix}" if fix and not ok else ""))
+
+    line(
+        sys.version_info >= (3, 9), f"python {sys.version.split()[0]}", "install Python 3.9+ as python3 (hooks need it)"
+    )
+    cfg, cfg_err = {}, None
+    try:
+        cfg = core.config(strict=True)
+    except (OSError, ValueError) as e:
+        cfg_err = e
+    _check_browser_tool(line, cfg)
+    _check_acli(line)
+    if cfg_err:
+        line(
+            False,
+            f"config {core.CONFIG} ({cfg_err.__class__.__name__})",
+            f"fix the JSON ({cfg_err})"
+            if isinstance(cfg_err, ValueError)
+            else f"make it readable: chmod u+rwx {core.CONFIG.parent}; chmod u+rw {core.CONFIG}"
+            if isinstance(cfg_err, PermissionError)
+            else "run any qa-sdet skill once; it asks for the values",
+        )
+    else:
+        _check_config_required(line, cfg)
+        _check_config_optional(line, cfg)
+    _check_pillow_and_profile(line)
+    try:
+        _check_memory_db(line, cfg)
     except core.BadInput as e:  # a DB from before 0.4
         line(False, f"memory DB {core.db_path()}", str(e))
     except (OSError, sqlite3.Error) as e:
