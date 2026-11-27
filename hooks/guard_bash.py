@@ -1,6 +1,8 @@
 """The guard's check of one Bash command: the odd forms it won't read, each segment's rules, and the calls it
 approves at once."""
 
+from __future__ import annotations
+
 import os
 import re
 from itertools import takewhile
@@ -44,6 +46,24 @@ INLINE_REASON = (
 )
 
 
+@guard_paths.record
+class Command:
+    """One simple command of a Bash call, as check_segment read it."""
+
+    words: list[str]  # every word of it, the wrappers in front included
+    i: int | None  # where its program is in `words`; None: it runs none
+    name: str  # the program, without its folder; "" for none
+    rest: list[str]  # the words after the program
+    wrappers: list[str]  # the wrappers in front of the program: env, xargs, npx, ...
+    outs: list[str]  # the files it redirects output to; check_pw adds the ones playwright-cli reads and writes
+    ins: list[str]  # the files it redirects input from
+    feeds: list[str]  # what it reads on stdin from here-strings and heredocs
+    ndocs: int  # how many heredocs it reads
+    run: tuple[str | None, str | None]  # how a shell or an interpreter gets its code: guard_shell.how_run
+    q: list[str] | None  # the arguments after qa-mem when it runs qa-mem
+    cwds: set[str]  # the folders it may run in
+
+
 def inline_code(name, rest, kind):
     """An interpreter (not awk) given its code inline or on stdin, as how_run reads it; a module (python -m json.tool) and
     --version/--help are not inline code."""
@@ -57,27 +77,28 @@ def inline_code(name, rest, kind):
     return True
 
 
-def explorer_runs_code(i, words, cwds, ctx, kind, ins, name, rest, wrappers):
+def explorer_runs_code(cmd: Command, ctx):
     """Deny reason when the explorer runs a script file, inline code or a package (a page it read could have steered it to
     write or name one); None otherwise."""
+    kind = cmd.run[0]
     by_path = (
-        i is not None
-        and "/" in words[i]
+        cmd.i is not None
+        and "/" in cmd.words[cmd.i]
         and not (
-            any(guard_paths.real(words[i], c) == guard_paths.PLUGIN_QA_MEM for c in cwds)
-            or re.match(r"/(usr|bin|sbin|opt|snap)/", words[i])
+            any(guard_paths.real(cmd.words[cmd.i], c) == guard_paths.PLUGIN_QA_MEM for c in cmd.cwds)
+            or re.match(r"/(usr|bin|sbin|opt|snap)/", cmd.words[cmd.i])
         )
     )
-    if ctx.explorer and (kind == "file" or (kind == "stdin" and ins) or by_path):  # ./x.sh: may not exist yet
+    if ctx.explorer and (kind == "file" or (kind == "stdin" and cmd.ins) or by_path):  # ./x.sh: may not exist yet
         return "the explorer runs no script files (a page it read could have steered it to write one); run the commands directly"
-    if ctx.explorer and inline_code(name, rest, kind):
+    if ctx.explorer and inline_code(cmd.name, cmd.rest, kind):
         return INLINE_REASON
     if ctx.explorer and (
-        PKG_RE.fullmatch(name)
-        or "npx" in wrappers
+        PKG_RE.fullmatch(cmd.name)
+        or "npx" in cmd.wrappers
         or (
-            re.fullmatch(r"python[\d.]*", name)  # npx is a wrapper
-            and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(rest))
+            re.fullmatch(r"python[\d.]*", cmd.name)  # npx is a wrapper
+            and re.search(r"(^|\s)-m\s*(pip[\d.]*|pipx|uv|ensurepip)\b", " ".join(cmd.rest))
         )
     ):
         return (
@@ -86,10 +107,11 @@ def explorer_runs_code(i, words, cwds, ctx, kind, ins, name, rest, wrappers):
         )
 
 
-def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None, cwds=()):
+def odd_form(cmd: Command, ctx):
     """Deny reason for a form the guard doesn't read (O1-O9, in a guarded call), or the explorer running a script file or inline code."""
-    kind, val = run
-    reason = explorer_runs_code(i, words, cwds, ctx, kind, ins, name, rest, wrappers)
+    name, rest, words, i, q, wrappers = cmd.name, cmd.rest, cmd.words, cmd.i, cmd.q, cmd.wrappers
+    kind, val = cmd.run
+    reason = explorer_runs_code(cmd, ctx)
     if reason is not None:
         return reason
     if not ctx.guarded:
@@ -133,7 +155,7 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             INTERP_RE.fullmatch(name)
             and q is None
             and guard_paths.mentions_guarded(  # O5: inline code; stdin: the whole call
-                ctx.raw if kind == "stdin" else " ".join(rest + feeds), ctx.explorer
+                ctx.raw if kind == "stdin" else " ".join(rest + cmd.feeds), ctx.explorer
             ),
             f"{name} code that names a guarded tool or path",
         ),
@@ -156,7 +178,7 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             f"a guarded tool or command string run by {name}",
         ),
         (
-            name not in TEXT_TOOLS and any(map(hidden, feeds)),  # O8
+            name not in TEXT_TOOLS and any(map(hidden, cmd.feeds)),  # O8
             f"{name or 'a command'} reading a heredoc or here-string",
         ),
         (
@@ -164,8 +186,8 @@ def odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q=None,
             and any(
                 map(
                     guard_shell.dynamic,
-                    outs
-                    + ins
+                    cmd.outs
+                    + cmd.ins
                     + (
                         []
                         if name in guard_files.PRINTERS
@@ -459,36 +481,37 @@ def risky_click(rest, cwd):
 
 
 def approvable(
-    i, name, rest, outs, ins, feeds, cwd, explorer=False
+    cmd: Command, cwd, explorer=False
 ):  # R8: playwright-cli, qa-mem, read-only acli, head/tail/grep, sleep <=30; for the explorer also _read_only
     bases = {os.path.realpath(os.path.join(b, "qa-out")) for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b}
     if (
-        i != 0
-        or ins
-        or feeds
+        cmd.i != 0
+        or cmd.ins
+        or cmd.feeds
+        or cmd.ndocs
         or any(
             o not in ("/dev/null", "/dev/stdout", "/dev/stderr")
             and ("$" in o or not any(guard_paths.real(o, cwd).startswith(b + os.sep) for b in bases))
-            for o in map(guard_shell.unmark, outs)
+            for o in map(guard_shell.unmark, cmd.outs)
         )
     ):
         return False
-    q = guard_shell.qamem_args(name, rest, {cwd}, allow_var=False)
+    q = guard_shell.qamem_args(cmd.name, cmd.rest, {cwd}, allow_var=False)
     return (
-        name == "playwright-cli"
-        or (name == "acli" and _acli_approvable(rest))
-        or (name in ("head", "tail", "grep") and _filter_ok(name, rest, cwd, bases))
+        cmd.name == "playwright-cli"
+        or (cmd.name == "acli" and _acli_approvable(cmd.rest))
+        or (cmd.name in ("head", "tail", "grep") and _filter_ok(cmd.name, cmd.rest, cwd, bases))
         or (
-            name == "sleep"
-            and len(rest) == 1
-            and bool(re.fullmatch(r"\d+(?:\.\d+)?", rest[0]))
-            and float(rest[0]) <= 30
+            cmd.name == "sleep"
+            and len(cmd.rest) == 1
+            and bool(re.fullmatch(r"\d+(?:\.\d+)?", cmd.rest[0]))
+            and float(cmd.rest[0]) <= 30
         )
         or (q is not None and not (q[:1] == ["setup-permissions"] and "--apply" in q))
         or (  # never with a file redirect: `echo … > run-x.json` would be a write the guard hasn't read
             explorer
-            and all(guard_shell.unmark(o) in ("/dev/null", "/dev/stdout", "/dev/stderr") for o in outs)
-            and _read_only(name, rest, cwd, bases)
+            and all(guard_shell.unmark(o) in ("/dev/null", "/dev/stdout", "/dev/stderr") for o in cmd.outs)
+            and _read_only(cmd.name, cmd.rest, cwd, bases)
         )
     )
 
@@ -497,7 +520,7 @@ class Dirs(set):
     """The folders a call's later commands may run in, and the ones `cd -` returns to after a cd (None: unknown, as
     the shell's OLDPWD before this call). Without it `cd a; cd -` grew the set, and every path in it, pair by pair."""
 
-    old: "set[str] | None" = None
+    old: set[str] | None = None
 
     def snapshot(self):
         """A copy for a subshell's `( … )`: a cd inside it doesn't leak out."""
@@ -523,7 +546,21 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
         if name in guard_shell.SHELLS or (INTERP_RE.fullmatch(name) and q is None)
         else (None, None)
     )
-    if (r := odd_form(name, i, words, rest, wrappers, outs, ins, feeds, run, ctx, q, local)) or lookup:
+    cmd = Command(
+        words=words,
+        i=i,
+        name=name,
+        rest=rest,
+        wrappers=wrappers,
+        outs=outs,
+        ins=ins,
+        feeds=feeds,
+        ndocs=ndocs,
+        run=run,
+        q=q,
+        cwds=local,
+    )
+    if (r := odd_form(cmd, ctx)) or lookup:
         ctx.block(name or "its form")
         return r  # `command -v x` runs nothing
     if name in ("cd", "pushd", "popd"):  # where the later commands run
@@ -558,7 +595,7 @@ def check_segment(seg, cwds, start, ctx, depth, docs):
     ) or (guard_tools.explorer_net(name, rest, ctx.raw) if ctx.explorer and name in NET_CLIS else None)
     if name == "playwright-cli" and risky_click(rest, start):
         ctx.block(RISKY_WORD)
-    if not approvable(i, name, rest, outs, ins, feeds or ndocs, start, ctx.explorer):
+    if not approvable(cmd, start, ctx.explorer):
         ctx.block(name if i == 0 and name else "a prefix or wrapper")
     return (
         r
