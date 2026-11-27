@@ -256,6 +256,10 @@ class LibMirrorsGuard(Case):
                 with self.subTest(listed=listed, url=url):
                     want = gp.host_ok(url, hosts) and url.lower().startswith(("http://", "https://"))
                     self.assertEqual(core.url_allowed(url, hosts), want)
+        for whole in ([], ["qa.example.com"], "qa.example.com", 7, None):  # a config that is no object allows no host
+            mirror.write_text(json.dumps(whole))
+            with self.subTest(config=whole), mock.patch.object(gp, "CONFIG", mirror):
+                self.assertEqual((core.allowed_hosts(whole), gp.allowed_hosts()), (set(), set()))
 
 
 def runtime_imports(path):
