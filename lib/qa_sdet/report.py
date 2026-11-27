@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from . import core, ops, scrub
+from . import core, ops, probe, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:  # NOSONAR
@@ -992,7 +992,7 @@ PROFILE_SEGMENTS = {
 
 def _credential_call(path):
     """Whether a path is a login, session, token or user-profile call, whose body carries credentials."""
-    return bool(ops._auth_segment(path)) or any(
+    return bool(probe._auth_segment(path)) or any(
         re.sub(r"[-_]", "", x.lower()) in PROFILE_SEGMENTS for x in path.split("/")
     )
 
@@ -1131,7 +1131,7 @@ def check_body(run_dir, slug, index, text, op="", mutation=False):
         except ValueError:
             pass
         status = int(line.group(4)) if line.group(4).isdigit() else 0
-    write = mutation if RPC_PATH.search(path) else line is not None and line.group(2) in ops.API_WRITES
+    write = mutation if RPC_PATH.search(path) else line is not None and line.group(2) in probe.API_WRITES
     no_body = not text.strip() and 200 <= status < 300 and status not in (204, 205)
     findings = None if no_body else [scrub.redact(f) for f in body_verdict(text, path, status, write)]
     recorded: dict[str, Any] = _bodies(data, slug)
@@ -1175,7 +1175,7 @@ def _gql_operation(text):
 
 def _sign_in_operation(name):
     """Whether a GraphQL operation is named like a sign-in call (RefreshToken, login): its answer carries credentials."""
-    return any(w.lower() in ops.API_AUTH_SEGMENTS for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", name))
+    return any(w.lower() in probe.API_AUTH_SEGMENTS for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", name))
 
 
 def _saved_body(text):
@@ -1249,7 +1249,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     hosts = core.allowed_hosts(core.config()) if hosts is None else hosts
     checked, seen_2xx, checked_shapes = _bodies(data, slug), [], set()
     names, gone, unchecked = _body_ops(data, slug), _body_gone(data, slug), []
-    probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (ops._note_probe): the explorer's own
+    probes = []  # [method, url, status] of the requests `qa-mem api-probe` sent (probe._note_probe): the explorer's own
     for line in _text(data / f"probes-{slug}.jsonl").splitlines():
         try:
             p = json.loads(line)
@@ -1286,7 +1286,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
             pass
         elif index not in checked and code != "FAILED" and not _credential_call(path):  # body-check --all's work list
             turn = (2 if int(code) >= 500 else 3) if int(code) >= 400 else 0 if rpc else 1
-            if turn != 1 or method in ops.API_WRITES:
+            if turn != 1 or method in probe.API_WRITES:
                 unchecked.append((turn, index, method, path))
         if code == "FAILED" or int(code) >= 400:
             status = code if code != "FAILED" else f"FAILED {text}".strip()
@@ -1320,7 +1320,7 @@ def triage_signals(run_dir, slug, run, hosts=None):
     rank = lambda c: 0 if RPC_PATH.search(c[1]) else 1
     suspects = {}
     for method, path, shape, index in sorted(
-        (c for c in seen_2xx if (RPC_PATH.search(c[1]) or c[0] in ops.API_WRITES) and not _credential_call(c[1])),
+        (c for c in seen_2xx if (RPC_PATH.search(c[1]) or c[0] in probe.API_WRITES) and not _credential_call(c[1])),
         key=rank,
     ):
         if (method, shape) not in checked_shapes and not explained((method, path)):

@@ -14,7 +14,7 @@ from unittest import mock
 
 from support import ROOT, Base, cli, cli_mod, core, done
 
-from qa_sdet import ops
+from qa_sdet import evidence, ops, probe, session
 
 
 class Keys(Base):
@@ -520,7 +520,7 @@ class Prune(Base):
             mock.patch.object(Image, "open", side_effect=ValueError("Decompressed data too large")),
             self.assertRaises(core.BadInput),
         ):
-            ops.annotate(png, [(0, 0, 10, 10)], "x")
+            evidence.annotate(png, [(0, 0, 10, 10)], "x")
 
 
 class SessionCheck(Base):
@@ -550,7 +550,7 @@ class SessionCheck(Base):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("ok", out)
         self.assertIn("build=1.43.0", out)
-        self.assertTrue(ops.signed_in_stamp().exists())
+        self.assertTrue(session.signed_in_stamp().exists())
         self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
     def test_expired_sso_host_or_password_form_returns_1_without_stamp(self):
@@ -560,13 +560,13 @@ class SessionCheck(Base):
             '{"host":"LOGIN.MICROSOFTONLINE.COM:443","hasPassword":false}',
             '{"host":"qa.example.com","hasPassword":true}',
         ):
-            ops.signed_in_stamp().unlink(missing_ok=True)
+            session.signed_in_stamp().unlink(missing_ok=True)
             seq = [done(0), done(0), done(0, out=payload), done(0)]
             with mock.patch.object(subprocess, "run", side_effect=seq) as mrun:
                 code, out, err = cli("session-check", "--record")
             self.assertEqual(code, 1, payload)
             self.assertIn("session expired", err)
-            self.assertFalse(ops.signed_in_stamp().exists())
+            self.assertFalse(session.signed_in_stamp().exists())
             self.assertEqual(mrun.call_args_list[-1][0][0], ["playwright-cli", "-s=qa", "close"])
 
     def test_error_paths_profile_in_use_non_allowlisted_and_close_on_eval_error(self):
@@ -664,7 +664,7 @@ class PageStart(Base):
         self.start([*signed_in, done(0, out="\n")])  # read, but empty: the selector found nothing
         self.assertEqual(notices()[-1]["kind"], "build_unreadable")
         self.assertIn("empty", notices()[-1]["detail"])
-        with mock.patch.object(ops.subprocess, "run", side_effect=[*signed_in, subprocess.TimeoutExpired("x", 20)]):
+        with mock.patch.object(subprocess, "run", side_effect=[*signed_in, subprocess.TimeoutExpired("x", 20)]):
             cli("page-start", "https://qa.example.com/app/form")
         self.assertEqual(len(notices()), 3)
 
@@ -847,7 +847,7 @@ class ApiProbe(Base):
         code, out, _, _ = self.probe("GET", self.URL, seq=[self.page(500, html, {"content-type": "text/html"})])
         self.assertEqual((code, out["status"], out["ok"]), (0, 500, False))
         self.assertNotIn("abc.def.ghi", out["body"])
-        self.assertLessEqual(len(out["body"]), ops.API_BODY_CAP)
+        self.assertLessEqual(len(out["body"]), probe.API_BODY_CAP)
         self.assertTrue(out["body_truncated"])
         self.assertEqual(out["headers"], {"content-type": "text/html"})
 
@@ -1029,7 +1029,7 @@ class Evidence(Base):
 
         with (
             mock.patch.object(subprocess, "run", side_effect=fake),
-            mock.patch.object(ops, "annotate", return_value=annotate) as ann,
+            mock.patch.object(evidence, "annotate", return_value=annotate) as ann,
         ):
             code, out, err = cli("evidence", str(self.png), *args)
         return code, (json.loads(out) if out.strip() else None), calls, ann, err

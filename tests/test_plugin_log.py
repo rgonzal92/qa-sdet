@@ -430,7 +430,7 @@ class PluginLogCli(Base):
                 code, _, err = cli("session-check")
             self.assertEqual(code, 1)
             self.assertIn("session expired", err)  # still printed for the caller
-            with mock.patch("qa_sdet.ops.session_check", side_effect=leak):
+            with mock.patch("qa_sdet.session.session_check", side_effect=leak):
                 self.assertEqual(cli("session-check")[0], 1)
             self.assertEqual(cli("signal-ignore", "99")[0], 1)  # prints to stdout: the generic reason stays
         recs = [json.loads(x) for x in (self.proj / "qa-out/plugin-log.jsonl").read_text().splitlines()]

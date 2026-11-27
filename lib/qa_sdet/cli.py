@@ -102,7 +102,7 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         "discover",
     ):
         return None
-    from . import ops
+    from . import evidence, ops, probe, session
 
     if cmd == "keys":
         print(json.dumps(ops.expand_keys(args, core.config().get("jiraKeyPrefix"))))
@@ -143,12 +143,12 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             ops.marker_stop(o["_"][0])
             print("marker removed")
     elif cmd == "browser-open":
-        return ops.browser_open(args)
+        return session.browser_open(args)
     elif cmd == "session-check":
         o = _opts(args, flags=("--record", "--build"))
         if o["_"]:
             raise core.BadOption("session-check takes no positional arguments")
-        return ops.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
+        return session.session_check(record=o.get("--record", False), read_build=o.get("--build", False))
     elif cmd == "discover":
         o = _opts(args, valued=("--depth", "--max-pages"))
         if len(o["_"]) not in (1, 2):
@@ -164,19 +164,19 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
     elif cmd == "page-start":
         if len(args) != 1:
             raise core.BadInput("usage: qa-mem page-start <url>")
-        return ops.page_start(args[0])
+        return session.page_start(args[0])
     elif cmd == "api-probe":
         o = _opts(args, valued=("--json", "--content-type"), multi=("--header",))
         if len(o["_"]) != 2:
             raise core.BadInput(
                 "usage: qa-mem api-probe <METHOD> <url> [--json '<body>'] [--content-type <type>] [--header 'Name: value' ...]"
             )
-        return ops.api_probe(o["_"][0], o["_"][1], o.get("--json"), o.get("--content-type"), o.get("--header", []))
+        return probe.api_probe(o["_"][0], o["_"][1], o.get("--json"), o.get("--content-type"), o.get("--header", []))
     elif cmd == "evidence":
         o = _opts(args, valued=("--selector", "--ref", "--label"))
         if len(o["_"]) != 1 or ("--selector" in o) == ("--ref" in o) or not o.get("--label"):
             raise core.BadInput("usage: qa-mem evidence <png> (--selector <css> | --ref <ref>) --label <text>")
-        return ops.evidence(o["_"][0], o["--label"], selector=o.get("--selector"), ref=o.get("--ref"))
+        return evidence.evidence(o["_"][0], o["--label"], selector=o.get("--selector"), ref=o.get("--ref"))
     elif cmd == "prune":
         if len(args) not in (1, 2):
             raise core.BadInput("usage: qa-mem prune <project> [<run dir>]")
@@ -188,10 +188,10 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         o = _opts(args, valued=("--label",), multi=("--box",))
         if len(o["_"]) != 1 or not o.get("--label"):
             raise core.BadInput("usage: qa-mem annotate <png> [--box x,y,w,h ...] --label <text>")
-        boxes = [ops.parse_box(b) for b in o.get("--box") or []]  # none: the label alone, as a caption
-        png = ops.evidence_png(o["_"][0])
-        if not ops.annotate(png, boxes, o["--label"]):
-            print(ops.NO_PILLOW)
+        boxes = [evidence.parse_box(b) for b in o.get("--box") or []]  # none: the label alone, as a caption
+        png = evidence.evidence_png(o["_"][0])
+        if not evidence.annotate(png, boxes, o["--label"]):
+            print(evidence.NO_PILLOW)
         else:
             print(f"annotated {png}")
     elif cmd == "report":

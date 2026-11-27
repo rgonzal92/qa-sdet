@@ -14,7 +14,7 @@ from unittest import mock
 
 from support import Base, cli, cli_mod, core, done
 
-from qa_sdet import doctor, ops
+from qa_sdet import doctor, ops, session
 
 
 class Doctor(Base):
@@ -217,8 +217,8 @@ class Doctor(Base):
                 out.getvalue(),
             )
             self.assertIn("Pillow", out.getvalue())
-            ops.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
-            (ops.profile_dir() / "Default").mkdir()
+            session.ensure_profile_dir()  # browser-open made the folder, but nobody signed in: still FIX
+            (session.profile_dir() / "Default").mkdir()
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 doctor.doctor()
@@ -245,9 +245,9 @@ class Doctor(Base):
             with mock.patch.object(subprocess, "run", return_value=done(0)):
                 self.config(app="x", browser="chrome")
                 cli_mod.main(["browser-open"])  # a test run keeps the sign-in
-                self.assertTrue(ops.signed_in_stamp().exists())
+                self.assertTrue(session.signed_in_stamp().exists())
                 cli_mod.main(["browser-open", "--session", "qa-login", "--headed"])  # a new sign-in starts: forget it
-                self.assertFalse(ops.signed_in_stamp().exists())
+                self.assertFalse(session.signed_in_stamp().exists())
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
     def test_unreadable_folders_never_crash_and_cookie_file_is_never_read(self):

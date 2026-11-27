@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import codemap, core, ops
+from . import codemap, core, probe, session
 
 GOTO_SECONDS, EVAL_SECONDS = 60, 30
 MAX_FRAMES = 5  # shown iframes checked per route, by index
@@ -136,7 +136,7 @@ def check_js(spec, frame=False):
         return f"async el => {{ const d = el.ownerDocument; {body} return JSON.stringify(r); }}"
     return (
         f"(async () => {{ const d = document; {body} return JSON.stringify({{...r, frames: "
-        f"d.querySelectorAll('iframe').length, ...{ops.PAGE_STATE_JS}}}); }})()"
+        f"d.querySelectorAll('iframe').length, ...{session.PAGE_STATE_JS}}}); }})()"
     )
 
 
@@ -152,7 +152,7 @@ HARVESTER_JS = """(() => { const out = {links: [], states: []}, seen = new Set()
   return JSON.stringify({links: out.links.slice(0, 40), states: out.states.slice(0, 40)}); })()"""
 HARVEST_JS = (
     f"JSON.stringify({{...JSON.parse({HARVESTER_JS}), frames: document.querySelectorAll('iframe').length, "
-    f"...{ops.PAGE_STATE_JS}}})"
+    f"...{session.PAGE_STATE_JS}}})"
 )
 # run on FRAME's element: `document` and `location` are the frame's
 FRAME_HARVEST_JS = f"el => JSON.stringify({{...JSON.parse({HARVESTER_JS}), host: location.host}})"
@@ -164,7 +164,7 @@ def _pw(args, timeout):
     try:
         r = subprocess.run(
             ["playwright-cli", "-s=qa", *args],
-            env=ops._pw_env(),
+            env=session._pw_env(),
             capture_output=True,
             text=True,
             errors="replace",
@@ -178,8 +178,8 @@ def _pw(args, timeout):
 
 
 def _parsed(out):
-    v = ops._unwrap_raw(out)
-    v = ops._unwrap_raw(v) if isinstance(v, str) else v  # --raw prints the JSON string, quoted or not
+    v = session._unwrap_raw(out)
+    v = session._unwrap_raw(v) if isinstance(v, str) else v  # --raw prints the JSON string, quoted or not
     return v if isinstance(v, dict) else None
 
 
@@ -219,7 +219,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
     rec, opened = _Run(run, slug, url, cfg), False
     status, fields = "INCOMPLETE", {}
     try:
-        started = ops._start_page(cfg, hosts, url)
+        started = session._start_page(cfg, hosts, url)
         opened = started["status"] == "ok" or started["block_scope"] == "page"
         rec.doc["build"] = started.get("build") or core.UNKNOWN
         if started["status"] != "ok" and (started["block_scope"] != "page" or page_blocks):
@@ -236,7 +236,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
             for name, args in (("requests", ["requests", "--all"]), ("console", ["console", "error", "--all"])):
                 ok, out = _pw(args, EVAL_SECONDS)
                 core._write(rec.file.with_name(f"{name}-{slug}.log"), out if ok else "")
-            ops._close_qa(ops._pw_env())
+            session._close_qa(session._pw_env())
         rec.save(status=status, **fields)
         from . import memory
 
@@ -248,7 +248,7 @@ def _session(run, slug, url, cfg, hosts, walk, page_blocks):
 
 def _land(rec, cfg, hosts, where, state):
     """None when the page is a signed-in, allowed, loaded page; else ('blocked', fields) or ('skip', None)."""
-    signed_in, status = ops._signed_in(cfg, state)
+    signed_in, status = session._signed_in(cfg, state)
     if not signed_in:
         return "blocked", {
             "block_scope": "session",
@@ -291,7 +291,7 @@ def crawl(con, run, routes=()):
     mounts are looked for in the frames only: the shell's own document matching one (a button of the same name in the
     menu bar) says nothing about the module. Prints one JSON line; exit 0 COMPLETED or INCOMPLETE, 1 BLOCKED."""
     run = _run_dir(run, "crawl")
-    cfg, hosts = ops._qa_config("crawl")
+    cfg, hosts = session._qa_config("crawl")
     base = str(cfg.get("qaBaseUrl") or "").rstrip("/")
     if not core.url_allowed(base, hosts):
         raise core.BadInput(f"crawl: qaBaseUrl {base!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
@@ -314,7 +314,7 @@ def crawl(con, run, routes=()):
             if ":" not in x[0]
         ]
     # a sign-in page blocks the run and a sign-out page ends the session: only when the user names them
-    auth = [] if routes_given else [r for r in routes if ops._auth_segment(base + r) or SKIP_LINK_RE.search(r)]
+    auth = [] if routes_given else [r for r in routes if probe._auth_segment(base + r) or SKIP_LINK_RE.search(r)]
     routes = [r for r in routes if r not in auth]
     plan, skipped = [], [f"{r}: sign-in or sign-out page, not opened" for r in auth]
     for route in routes:
@@ -427,7 +427,7 @@ def discover(run, url=None, depth=2, max_pages=25):
     The states of the iframes a page shows are the page's (an app shell's module); a frame's links are not followed.
     Never follows logout, delete or sign-in links; never clicks or types. Prints one JSON line; exit 0, or 1 BLOCKED."""
     run = _run_dir(run, "discover")
-    cfg, hosts = ops._qa_config("discover")
+    cfg, hosts = session._qa_config("discover")
     start = url or str(cfg.get("qaBaseUrl") or "").rstrip("/")
     if not core.url_allowed(start, hosts):
         raise core.BadInput(f"discover: {start!r} must be an http(s) URL in allowedHosts ({sorted(hosts)})")
@@ -489,8 +489,8 @@ def discover(run, url=None, depth=2, max_pages=25):
                 to = urlsplit(raw).path + hash_route
                 if (
                     not core.url_allowed(origin + to, hosts)
-                    or ops._auth_segment(origin + to)
-                    or ops._auth_segment(origin + hash_route[1:].lstrip("!"))  # #/login is a sign-in page too
+                    or probe._auth_segment(origin + to)
+                    or probe._auth_segment(origin + hash_route[1:].lstrip("!"))  # #/login is a sign-in page too
                     or SKIP_LINK_RE.search(f"{to} {label}")
                 ):
                     continue

@@ -12,7 +12,7 @@ import unittest
 
 from support import ROOT, Base, cli, load_hook
 
-from qa_sdet import core, crawl, doctor, ops, report
+from qa_sdet import core, crawl, doctor, report, session
 
 serve = load_hook("fixture_serve", ROOT / "tests/fixture/serve.py")
 # a system browser: Playwright's own builds live under the real HOME, which the sandbox replaces
@@ -53,13 +53,13 @@ class BrowserBase(Base):
         os.chdir(self.proj)  # playwright-cli writes .playwright-cli/ into the folder it runs in
 
     def tearDown(self):
-        ops._close_qa(ops._pw_env())  # before the sandbox goes: the browser's profile lives in it
+        session._close_qa(session._pw_env())  # before the sandbox goes: the browser's profile lives in it
         os.chdir(self.cwd)
         super().tearDown()
 
     def open(self, path):
-        cfg, hosts = ops._qa_config("test")
-        started = ops._start_page(cfg, hosts, self.base + path)
+        cfg, hosts = session._qa_config("test")
+        started = session._start_page(cfg, hosts, self.base + path)
         self.assertEqual(started["status"], "ok", started)
         return started
 
@@ -70,7 +70,7 @@ class BrowserBase(Base):
         return out
 
     def js(self, script, target=None):
-        return ops._unwrap_raw(self.pw("--raw", "eval", script, *([target] if target else [])))
+        return session._unwrap_raw(self.pw("--raw", "eval", script, *([target] if target else [])))
 
 
 class PlaywrightCli(BrowserBase):
@@ -437,12 +437,12 @@ class Recipes(BrowserBase):
         shown = self.recipe(
             "Type key by key", **{"locator of the first part": "getByLabel('Hours')", "css of the parts": "#time input"}
         )
-        self.assertEqual(ops._unwrap_raw(shown), ":30")  # the hour typed first is gone
+        self.assertEqual(session._unwrap_raw(shown), ":30")  # the hour typed first is gone
 
     def test_a_count_is_read_once_it_stops_changing(self):
         self.open("/grid.html")
         self.assertEqual(
-            ops._unwrap_raw(self.recipe("Settled, not just loaded", **{"css of the count": "#range"})),
+            session._unwrap_raw(self.recipe("Settled, not just loaded", **{"css of the count": "#range"})),
             "Showing 1-20 of 65",
         )
 
@@ -450,13 +450,15 @@ class Recipes(BrowserBase):
         self.open("/form.html")
         self.pw("fill", "getByLabel('Zone name')", "qa-sdet-zone")
         fill = {"locator": "getByRole('button', { name: 'Save' })", "css of what appears": "#msg"}
-        shown = ops._unwrap_raw(self.recipe("Settled, not just loaded", 1, **fill))
+        shown = session._unwrap_raw(self.recipe("Settled, not just loaded", 1, **fill))
         self.assertEqual(shown, 'Saved zone "qa-sdet-zone" at 0 km/h')
 
     def test_a_popup_tab_is_read_and_closed(self):
         self.open("/export.html")
         self.pw("click", "getByRole('button', { name: 'Open daily report' })")
-        self.assertIn("Daily report | about:blank | Daily report", ops._unwrap_raw(self.recipe("Second tab or popup")))
+        self.assertIn(
+            "Daily report | about:blank | Daily report", session._unwrap_raw(self.recipe("Second tab or popup"))
+        )
         self.assertIn("- 0: (current) [Reports]", self.recipe("Second tab or popup", 1))
         self.assertNotIn("- 1:", self.pw("tab-list"))
 

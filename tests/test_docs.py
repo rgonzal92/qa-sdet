@@ -105,14 +105,14 @@ class Docs(unittest.TestCase):
             self.assertIn(status, core.STATUSES)
 
     def test_explorer_reports_the_categories_browser_open_prints(self):
-        step1, ops_src = (
+        step1, session_src = (
             re.search(r"^1\. \*\*Start.*", text("agents/qa-explorer.md"), re.M).group(0),
-            text("lib/qa_sdet/ops.py"),
+            text("lib/qa_sdet/session.py"),
         )
         for category in ("browser profile in use:", "can't start:", "browser tool failed:"):
             self.assertIn(category, step1)
         for printed in ('"browser profile in use:', "can't start\"", '"browser tool failed'):
-            self.assertIn(printed, ops_src)
+            self.assertIn(printed, session_src)
 
     def test_readme_verdicts_and_permission_rules_match_code(self):
         readme = text("README.md")

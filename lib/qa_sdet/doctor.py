@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import core, ops
+from . import core, session
 
 
 def installed_browsers(names=core.BROWSERS):
@@ -148,8 +148,8 @@ def doctor():
         missing = [k for k in ("app", "qaBaseUrl", "allowedHosts", "ssoHost") if not cfg.get(k)]
         line(not missing, "config has app, qaBaseUrl, allowedHosts, ssoHost", f"add {missing}")
         bs = cfg.get("buildSource")
-        if bs is None or bs == "":  # an app with no build the browser can read: ops._read_build takes the stored one
-            stored = ops._stored_build()
+        if bs is None or bs == "":  # no build the browser can read: session._read_build takes the stored one
+            stored = session._stored_build()
             line(
                 bool(stored),
                 f"buildSource unset: using the stored build {stored} (qa-mem stale)"
@@ -260,7 +260,7 @@ def doctor():
         line(True, f"Pillow {PIL.__version__}")
     except ImportError:
         line(False, "Pillow (annotated bug images need it)", pillow_fix())
-    if os.path.isfile(ops.signed_in_stamp()) and os.path.isdir(ops.profile_dir()):
+    if os.path.isfile(session.signed_in_stamp()) and os.path.isdir(session.profile_dir()):
         line(True, "signed-in profile present, from /qa-sdet:qa-login (expires with the app's session)")
     else:
         line(False, "signed-in browser profile", "run /qa-sdet:qa-login")
