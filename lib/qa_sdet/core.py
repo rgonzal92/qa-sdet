@@ -17,8 +17,35 @@ from urllib.parse import urlsplit
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true); importing typing costs every call ~5 ms
 if TYPE_CHECKING:  # NOSONAR
     from collections.abc import Iterable, Mapping
+    from dataclasses import dataclass as record
 
     from .contracts import JsonObj
+else:
+
+    def record(cls):
+        """What `dataclasses.dataclass` is to the type checker, without its import (6 ms on every call): the class's
+        annotations name its fields, and it gets an __init__ that takes each of them, by position or by name. A class
+        value is the field's default. Fields only: no comparison, no repr, no field(), no inheritance."""
+        names = tuple(cls.__annotations__)
+        defaults = {n: getattr(cls, n) for n in names if hasattr(cls, n)}
+        if any(isinstance(v, (list, dict, set)) for v in defaults.values()):
+            raise ValueError(f"{cls.__name__}: a list, dict or set default would be shared by every record")
+        if any(a in defaults and b not in defaults for a, b in zip(names, names[1:])):
+            raise TypeError(f"{cls.__name__}: a field without a default follows one with a default")
+
+        def __init__(self, *args, **fields):
+            given = dict(zip(names, args))
+            if len(args) > len(names) or given.keys() & fields.keys() or fields.keys() - set(names):
+                raise TypeError(f"{cls.__name__} takes {', '.join(names)}")
+            given.update(fields)
+            missing = [n for n in names if n not in given and n not in defaults]
+            if missing:
+                raise TypeError(f"{cls.__name__} needs {', '.join(missing)}")
+            vars(self).update({**defaults, **given})
+
+        cls.__init__ = __init__
+        return cls
+
 
 CONFIG = Path(os.environ.get("QA_SDET_CONFIG") or "~/.config/qa-sdet/config.json").expanduser()
 DATA_DIR = Path(os.environ.get("QA_SDET_DATA") or "~/.local/share/qa-sdet").expanduser()
