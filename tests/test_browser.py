@@ -12,7 +12,7 @@ import unittest
 
 from support import ROOT, Base, cli, load_hook
 
-from qa_sdet import core, crawl, doctor, report, session
+from qa_sdet import core, crawl, doctor, session, signals
 
 serve = load_hook("fixture_serve", ROOT / "tests/fixture/serve.py")
 # a system browser: Playwright's own builds live under the real HOME, which the sandbox replaces
@@ -250,7 +250,7 @@ class Signals(BrowserBase):
         self.assertEqual(code, 0, err)
         self.assertIn("4 bodies read, 3 with a finding", out)
         self.assertEqual((self.run_dir / ".data/requests-x.log").read_text().count("/graphql"), 4)
-        t = report.triage_signals(self.run_dir, "x", {})
+        t = signals.triage_signals(self.run_dir, "x", {})
         self.assertEqual(
             [k for k, _, _ in t["app"]],
             [
@@ -267,7 +267,7 @@ class Signals(BrowserBase):
         code, out, err = cli("body-check", str(self.run_dir), "--slug", "x", "--all")
         self.assertEqual(code, 0, err)
         self.assertIn("4 bodies read, 3 with a finding, 4 with no body left", out)
-        t = report.triage_signals(self.run_dir, "x", {})
+        t = signals.triage_signals(self.run_dir, "x", {})
         self.assertEqual((len(t["app"]), t["suspect_200"]), (3, []))
 
 

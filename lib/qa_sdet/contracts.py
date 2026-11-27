@@ -13,7 +13,7 @@ CaseStatus = Literal["PASS", "FAIL", "BLOCKED", "NOT_RUN", "QUESTION"]  # core.C
 BugStatus = Literal["OPEN", "FILED", "FIXED", "INVALID", "REGRESSED"]  # core.STATUSES
 BlockScope = Literal["page", "session", "browser"]  # ingest.BLOCK_SCOPES
 StopReason = Literal["saturated", "charter_complete", "diminishing_returns", "blocked"]  # ingest.STOP_REASONS
-Verdict = Literal["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS", "NOT STARTED"]  # report.VERDICT_ICON
+Verdict = Literal["FAIL", "BLOCKED", "PASS WITH NOTES", "PASS", "NOT STARTED"]  # results.VERDICT_ICON
 
 
 class Case(TypedDict, total=False):  # a run file's case result
@@ -23,7 +23,7 @@ class Case(TypedDict, total=False):  # a run file's case result
     notes: str
     bug: str
     annotated: bool
-    build: str  # build and ran: written by report.carry_prior on a result kept from an earlier run, never the agent
+    build: str  # build and ran: written by results.carry_prior on a result kept from an earlier run, never the agent
     ran: str
 
 

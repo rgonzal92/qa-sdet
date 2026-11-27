@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from support import load_hook
 
-from qa_sdet import cli, core, doctor, report
+from qa_sdet import cli, core, doctor, report, results, runstate
 
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
@@ -99,7 +99,7 @@ class Docs(unittest.TestCase):
         self.assertEqual(sorted(listed), sorted(core.CASE_STATUSES))
         self.assertEqual(
             re.search(r'"category": "([\w |]+)"', run_json).group(1).split(" | "),
-            [k for k, _ in report.NOT_TESTED_CATEGORIES],
+            [k for k, _ in results.NOT_TESTED_CATEGORIES],
         )
         for status in re.findall(r"\b(OPEN|FILED|FIXED|INVALID|REGRESSED)\b", text("skills/qa-memory/SKILL.md")):
             self.assertIn(status, core.STATUSES)
@@ -116,7 +116,7 @@ class Docs(unittest.TestCase):
 
     def test_readme_verdicts_and_permission_rules_match_code(self):
         readme = text("README.md")
-        for icon in report.VERDICT_ICON.values():
+        for icon in results.VERDICT_ICON.values():
             self.assertIn(icon, readme)
         rules = readme.split("## Reading REPORT.md", 1)[1].split("**Verdict per ticket**", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(
@@ -124,11 +124,11 @@ class Docs(unittest.TestCase):
         )
         t = {"key": "AB-1", "acs": [{"id": "AC-1"}]}
         case = lambda s: {"id": f"TC-{s}", "ticket": "AB-1", "ac": "AC-1", "status": s}
-        self.assertEqual(report.verdict(t, [case("FAIL"), case("BLOCKED")], [])[0], "FAIL")
-        self.assertEqual(report.verdict(t, [case("BLOCKED"), case("QUESTION")], [])[0], "BLOCKED")
-        self.assertEqual(report.verdict(t, [case("QUESTION")], [])[0], "PASS WITH NOTES")
-        blocking = report._q_items({"questions": ["Q1 [BLOCKING] x"]}, "test plan")  # rule 3's plan question
-        self.assertEqual(report.verdict(t, [case("PASS")], [], questions=blocking)[0], "PASS WITH NOTES")
+        self.assertEqual(results.verdict(t, [case("FAIL"), case("BLOCKED")], [])[0], "FAIL")
+        self.assertEqual(results.verdict(t, [case("BLOCKED"), case("QUESTION")], [])[0], "BLOCKED")
+        self.assertEqual(results.verdict(t, [case("QUESTION")], [])[0], "PASS WITH NOTES")
+        blocking = results._q_items({"questions": ["Q1 [BLOCKING] x"]}, "test plan")  # rule 3's plan question
+        self.assertEqual(results.verdict(t, [case("PASS")], [], questions=blocking)[0], "PASS WITH NOTES")
         block = readme.split("adds these allow rules", 1)[1].split("```", 2)[1]
         self.assertEqual(block.strip().splitlines(), doctor.PERMISSION_RULES)
 
@@ -615,7 +615,7 @@ class Docs(unittest.TestCase):
             (run / ".data/run-f.json").write_text(
                 json.dumps({"target": "/f", "cases": [{"id": "TC-1", "status": "FAIL"}]})
             )
-            entry = report._run_state(run)["retest_cases"][0]
+            entry = runstate._run_state(run)["retest_cases"][0]
         self.assertFalse(
             {"steps", "expected"} & set(entry)
         )  # copying these verbatim would drop what the explorer checks
@@ -636,7 +636,7 @@ class Docs(unittest.TestCase):
         for flag in ("--all", "--cases"):
             self.assertIn(flag, cli.COMMANDS["dispatch"])
             self.assertIn(f"| `{flag}", table)
-        state = text("lib/qa_sdet/report.py")
+        state = text("lib/qa_sdet/runstate.py")
         for field in ("has_runs", "builds", "retest_cases", "incomplete_routes", "run_dir", "subset_of"):
             self.assertIn("`subset_of`" if field == "subset_of" else f"`latest_run.{field}`", skill)
             self.assertIn(f'"{field}"', state)
@@ -735,7 +735,7 @@ class Docs(unittest.TestCase):
         self.assertIn("HYPOTHESIS:", text("agents/qa-explorer.md"))
         self.assertIn("test data", text("agents/qa-explorer.md"))
         for key in ("frontier", "run_patterns"):  # the keys explore-next writes
-            self.assertIn(f'"{key}"', text("lib/qa_sdet/report.py"))
+            self.assertIn(f'"{key}"', text("lib/qa_sdet/runstate.py"))
 
     def test_no_doc_or_agent_offers_a_run_limit(self):  # every run goes until the agent reaches its verdict
         gone = re.compile(
@@ -760,7 +760,7 @@ class Docs(unittest.TestCase):
         for word in ("expand_recommended", "stop_reason"):
             self.assertIn(word, skill)
         self.assertIn("expand_recommended", text("README.md"))
-        self.assertIn('"expand_recommended"', text("lib/qa_sdet/report.py"))
+        self.assertIn('"expand_recommended"', text("lib/qa_sdet/runstate.py"))
 
     def test_observed_endpoints_are_documented_where_gaps_and_the_card_are(self):
         self.assertIn("unexercised_apis", text("README.md"))
@@ -794,18 +794,18 @@ class Docs(unittest.TestCase):
             "UNEXERCISED ENDPOINTS",
             "UNTESTED TARGETS",
         ):  # what the stop check reads in the brief
-            self.assertIn(section, text("lib/qa_sdet/report.py"))
+            self.assertIn(section, text("lib/qa_sdet/audit.py"))
             self.assertIn(section, text("README.md") + text("lib/qa_sdet/cards.py"))
 
     def test_the_spec_template_passes_the_checker(self):  # the contract and qa-mem audit-bugs must not disagree
-        from qa_sdet import report
+        from qa_sdet import audit
 
         tmpl = re.search(r"```ts\n(.*?)```", text("references/bug-draft.md"), re.S).group(1)
         body = (
             tmpl
             + "test('t', async ({ page }) => { await page.goto('/form'); await expect(page.getByRole('status')).toBeVisible(); });\n"
         )
-        self.assertEqual(report.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
+        self.assertEqual(audit.spec_issues(body.replace("<qaBaseUrl>", "https://qa.example")), [])
 
     def test_the_critic_is_opt_in_and_read_only(self):
         meta = dict(re.findall(r"^([\w-]+): (.*)$", text("agents/qa-reviewer.md").split("---\n")[1], re.M))

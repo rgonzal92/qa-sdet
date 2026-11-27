@@ -222,13 +222,13 @@ def dispatch(
     all_cases every one; else, on a re-run, those the route's run file doesn't show as PASS, FAIL or QUESTION, or all
     when that file can't be read, ended BLOCKED (its PASS is not trusted) or is from an earlier build than the folder's
     newest run (a new build's re-run stopped before this page). An earlier run file is saved with the ids
-    given as .data/prior-<slug>.json: report.carry_prior merges it into what the explorer writes. open_record: the
+    given as .data/prior-<slug>.json: results.carry_prior merges it into what the explorer writes. open_record: the
     explorer starts on the list page `route` and tests the detail page it leads to, so its brief, cases, card and slug
     are that detail page's (the list page's own brief and run file stay); without a known detail page the slug is
     `<route>-record`. target_route names that
     detail page exactly (a list page may lead to several, or to one through another detail page). hypothesis: why this page
     was chosen (an earlier bug's pattern, a lead's reason): one scrubbed line of at most 400 characters, labelled as test data."""
-    from . import cards, gaps, report, scrub
+    from . import cards, gaps, results, scrub
 
     run = Path(run).resolve()
     data = run / ".data"
@@ -267,7 +267,7 @@ def dispatch(
     slug = _brief_slug(data, page, tag)
     text = lambda v: " ".join(str(v).split()) if v is not None and not isinstance(v, (dict, list)) else ""
     rf = data / f"run-{slug}.json"
-    report.carry_prior(run, slug)  # an earlier dispatch's copy no stop hook or report merged (a crashed explorer)
+    results.carry_prior(run, slug)  # an earlier dispatch's copy no stop hook or report merged (a crashed explorer)
     try:
         earlier = json.loads(rf.read_text(encoding="utf-8-sig"))
         ran = datetime.fromtimestamp(rf.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d")
@@ -285,8 +285,8 @@ def dispatch(
     elif (
         all_cases
         or earlier is None
-        or report._first_word(earlier.get("status")) == "blocked"
-        or report._older_build(earlier.get("build"), report._now_build(report.load_run(run)["runs"]))
+        or results._first_word(earlier.get("status")) == "blocked"
+        or results._older_build(earlier.get("build"), results._now_build(results.load_run(run)["runs"]))
     ):
         given = cases
     else:
@@ -566,9 +566,9 @@ def _log_run_summary(root, run, lines):
             bugs = b if isinstance(b := doc.get("bugs"), list) else []
             audit_n = 0
             if (rdir / "bugs").is_dir() and any((rdir / "bugs").glob("BUG-*.md")):
-                from . import report
+                from . import audit
 
-                audit_n = sum(len(v) for v in report.audit_bugs(rdir).values())
+                audit_n = sum(len(v) for v in audit.audit_bugs(rdir).values())
             fields |= {
                 "mode": doc.get("mode") or "",
                 "route": core.norm_route(doc.get("target") or ""),

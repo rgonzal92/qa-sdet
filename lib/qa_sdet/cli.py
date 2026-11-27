@@ -25,15 +25,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import (  # the rest load in the commands that use them (start-up time)
-    cards,
-    codemap,
-    core,
-    gaps,
-    ingest,
-    memory,
-    scrub,
-)
+# the rest load in the commands that use them (start-up time)
+from . import cards, codemap, core, gaps, ingest, memory, scrub
 
 TYPE_CHECKING = False  # mypy reads it as True (pyproject always_true): typing stays out of the import path
 if TYPE_CHECKING:
@@ -212,21 +205,21 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         o = _opts(args, valued=("--slug",))
         if len(o["_"]) != 1 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir():
             raise core.BadInput("usage: qa-mem signals-triage <run dir> --slug <slug>")
-        from . import report
+        from . import signals
 
         data = Path(o["_"][0]) / ".data"
         try:
             run = json.loads((data / f"run-{o['--slug']}.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             run = {}  # step 9 writes the run file last: nothing named yet
-        t = report.triage_signals(o["_"][0], o["--slug"], run if isinstance(run, dict) else {})
+        t = signals.triage_signals(o["_"][0], o["--slug"], run if isinstance(run, dict) else {})
         groups = (
             ("severe", "SEVERE (5xx, failed requests, a 200 with an error body, a leak)"),
             ("client", "CLIENT 4xx"),
             ("other", "OTHER (request loops, console errors)"),
         )
         lines = ["- " + (f"#{i} " if i else "") + key + (f" (×{n})" if n > 1 else "") for key, n, i in t["app"]]
-        sev = [report.signal_severity(key) for key, _, _ in t["app"]]
+        sev = [signals.signal_severity(key) for key, _, _ in t["app"]]
         print(
             (
                 "APP SIGNALS NO BUG EXPLAINS YET (while the browser is open, read a body with `playwright-cli -s=qa response-body "
@@ -256,9 +249,9 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
         if o.get("--all"):
             if len(o["_"]) != 1 or not o.get("--slug") or not (Path(o["_"][0]) / ".data").is_dir():
                 raise core.BadInput("usage: qa-mem body-check <run dir> --slug <slug> --all   (the browser still open)")
-            from . import report
+            from . import signals
 
-            r = report.sweep_bodies(o["_"][0], o["--slug"])
+            r = signals.sweep_bodies(o["_"][0], o["--slug"])
             bad = [x for x in r["checked"] if x[2]]
             print(
                 f"body-check --all: {len(r['checked'])} bodies read, {len(bad)} with a finding"
@@ -285,9 +278,9 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             raise core.BadInput(
                 "usage: <playwright-cli response-body <#>> | qa-mem body-check <run dir> --slug <slug> <#>"
             )
-        from . import report
+        from . import signals
 
-        what, findings = report.check_body(o["_"][0], o["--slug"], o["_"][1], sys.stdin.read(200_000))
+        what, findings = signals.check_body(o["_"][0], o["--slug"], o["_"][1], sys.stdin.read(200_000))
         print(
             f"body-check #{o['_'][1]}"
             + (f" {what}" if what else "")
@@ -306,24 +299,24 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
     elif cmd == "next-action":
         if len(args) != 2 or not (Path(args[0]) / ".data").is_dir():
             raise core.BadInput("usage: qa-mem next-action <run dir> <slug>")
-        from . import report
+        from . import runstate
 
-        print(json.dumps(report.next_action(args[0], args[1])))
+        print(json.dumps(runstate.next_action(args[0], args[1])))
     elif cmd == "explore-next":
         o = _opts(args, valued=("--run",))
         if len(o["_"]) != 1:
             raise core.BadInput("usage: qa-mem explore-next <project> [--run DIR]")
-        from . import report
+        from . import runstate
 
-        print(json.dumps(report.explore_next(o["_"][0], o.get("--run"))))
+        print(json.dumps(runstate.explore_next(o["_"][0], o.get("--run"))))
     elif cmd == "trace":
         o = _opts(args, valued=("--keys", "--fix-version"))
         if len(o["_"]) != 1:
             raise core.BadInput("usage: qa-mem trace <project> [--keys K1,K2] [--fix-version VER]")
-        from . import report
+        from . import inbox
 
         keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if o.get("--keys") else None
-        print(report.trace(o["_"][0], keys, o.get("--fix-version")))
+        print(inbox.trace(o["_"][0], keys, o.get("--fix-version")))
     elif cmd == "dup-check":
         if len(args) != 2 or not (Path(args[0]) / ".data").is_dir() or not re.fullmatch(r"BUG-\d+", args[1]):
             raise core.BadInput("usage: <acli jira workitem search ... --json> | qa-mem dup-check <run dir> <BUG-n>")
@@ -365,9 +358,9 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
     elif cmd == "audit-bugs":
         if len(args) != 1 or not Path(args[0]).is_dir():
             raise core.BadInput("usage: qa-mem audit-bugs <run dir>")
-        from . import report
+        from . import audit
 
-        found = report.audit_bugs(args[0])
+        found = audit.audit_bugs(args[0])
         print(
             "\n".join(
                 f"{bid}: {'CRITICAL ' if crit else ''}{text}" for bid, issues in found.items() for crit, text in issues
@@ -375,13 +368,13 @@ def wrapper_cmd(cmd: str, args: list[str]) -> int | None:
             or "bug drafts and repro specs: nothing to fix"
         )
     elif cmd == "plan-find":
-        from . import report
+        from . import runstate
 
         o = _opts(args, valued=("--keys", "--run"))
         if len(o["_"]) != 1 or sum(k in o for k in ("--keys", "--run")) != 1:
             raise core.BadInput("usage: qa-mem plan-find <project> (--keys K1,K2 | --run DIR)")
         keys = ops.expand_keys([o["--keys"]], core.config().get("jiraKeyPrefix")) if "--keys" in o else None
-        print(json.dumps(report.plan_find(o["_"][0], keys=keys, run_dir=o.get("--run")), indent=1))
+        print(json.dumps(runstate.plan_find(o["_"][0], keys=keys, run_dir=o.get("--run")), indent=1))
     elif cmd == "setup-permissions":
         from . import doctor
 
@@ -671,10 +664,10 @@ def _main(argv: list[str]) -> int:
         explorer_stops = marker and (hin or {}).get("hook_event_name") == "SubagentStop" and role == "qa-explorer"
         # the earlier attempt's results back in its run file before memory and the stop check read it
         if explorer_stops:
-            from . import report
+            from . import results
 
             try:  # the copy stays: a bounced explorer may write its file again (the report or next dispatch removes it)
-                report.carry_prior(marker["run_dir"], str(marker["slug"]), keep=True)
+                results.carry_prior(marker["run_dir"], str(marker["slug"]), keep=True)
             except Exception as e:  # noqa: BLE001
                 plugin_log.append_event(
                     Path(marker["run_dir"]).parent,
@@ -707,9 +700,9 @@ def _main(argv: list[str]) -> int:
             ingest.PARKED.extend(stale)
         todo = []
         if explorer_stops and not hin.get("stop_hook_active"):
-            from . import ops, report  # the marker was started MARKER_HOURS before it expires
+            from . import audit, ops  # the marker was started MARKER_HOURS before it expires
 
-            todo = report.verify_run(
+            todo = audit.verify_run(
                 marker["run_dir"], marker["slug"], float(marker["expires"]) - ops.MARKER_HOURS * 3600
             )
         if todo:
@@ -775,7 +768,7 @@ def _main(argv: list[str]) -> int:
                 _log_cli_error(cmd, code_, tee.reason(cmd, code_))
             return code_
         if cmd == "inbox":
-            from . import report
+            from . import inbox
 
             o = _opts(args)
             if len(o["_"]) != 1:
@@ -784,10 +777,10 @@ def _main(argv: list[str]) -> int:
                 data = json.loads(sys.stdin.read())
             except (OSError, ValueError, RecursionError) as e:  # RecursionError: garbage nested too deep
                 raise core.BadInput(f"inbox: can't read Jira JSON ({e})") from e
-            items = report.inbox_items(data)  # bad input fails before the DB is opened
+            items = inbox.inbox_items(data)  # bad input fails before the DB is opened
             con = core.connect()
             try:
-                print(report.inbox(con, o["_"][0], items, core.config().get("jiraKeyPrefix")), end="")
+                print(inbox.inbox(con, o["_"][0], items, core.config().get("jiraKeyPrefix")), end="")
             finally:
                 con.close()
             return 0
@@ -1050,9 +1043,9 @@ def run_cmd(con: sqlite3.Connection, cmd: str, args: list[str]) -> int:
     elif cmd == "prep":
         if len(args) < 2:
             return usage_error(cmd)
-        from . import report
+        from . import inbox
 
-        print(json.dumps(report.prep(con, args[0], args[1:]), indent=1, ensure_ascii=False))
+        print(json.dumps(inbox.prep(con, args[0], args[1:]), indent=1, ensure_ascii=False))
     elif cmd == "ingest" and len(args) == 1:
         # Same scrubbing as the hook path, so secrets stay out of the DB and hashes match `qa-mem hash`.
         try:

@@ -13,7 +13,7 @@ from unittest import mock
 
 from support import PLAN, RUN_FORM, RUN_LIST, Base, cli, done
 
-from qa_sdet import cards, core, ingest, memory, report
+from qa_sdet import audit, cards, core, inbox, ingest, memory, report, results, runstate, signals
 
 PLAN1 = {
     "kind": "ticket",
@@ -73,13 +73,13 @@ TEMPLATES = ["Release-A-{version}", "Release-B-{version}"]
 
 
 class Verdict(unittest.TestCase):
-    """report.verdict: PASS, PASS WITH NOTES, FAIL or BLOCKED for one ticket, and which bugs count as its own."""
+    """results.verdict: PASS, PASS WITH NOTES, FAIL or BLOCKED for one ticket, and which bugs count as its own."""
 
     def case(self, cid, status, ac="AC-1", route="/form", **kw):
         return {"id": cid, "ticket": "T-1", "ac": ac, "route": route, "status": status, "notes": "", "actual": "", **kw}
 
     def test_four_outcomes(self):
-        v = report.verdict
+        v = results.verdict
         self.assertEqual(
             v("T-1", [self.case("TC-1", "PASS"), self.case("TC-2", "PASS")], []), ("PASS", "all 2 cases passed")
         )
@@ -137,8 +137,8 @@ class Verdict(unittest.TestCase):
 
     def test_an_open_blocking_question_keeps_its_ticket_from_a_plain_pass(self):  # all cases passed, the rule undecided
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "PASS", ticket="T-2", route="/list")]
-        v = lambda key, *qs, cs=cases: report.verdict(
-            key, cs, [], known=["T-1", "T-2"], questions=report._q_items({"questions": list(qs)}, "test plan")
+        v = lambda key, *qs, cs=cases: results.verdict(
+            key, cs, [], known=["T-1", "T-2"], questions=results._q_items({"questions": list(qs)}, "test plan")
         )
         both = "Q1 [BLOCKING] Is 130 itself allowed?"  # untagged (a string can't name a ticket): every ticket's
         self.assertEqual([v(k, both) for k in ("T-1", "T-2")], [("PASS WITH NOTES", "Q1 open blocking question")] * 2)
@@ -159,7 +159,7 @@ class Verdict(unittest.TestCase):
         self.assertTrue(v("T-1", both, cs=busy)[1].startswith("Q1 open blocking question; TC-1 open question"))
         self.assertEqual(v("T-1", both, cs=[self.case("TC-1", "FAIL")])[0], "FAIL")  # worse verdicts still win
         self.assertEqual(
-            report.verdict("T-1", cases, [], started=False, questions=report._q_items({"questions": [both]}, ""))[0],
+            results.verdict("T-1", cases, [], started=False, questions=results._q_items({"questions": [both]}, ""))[0],
             "NOT STARTED",
         )
 
@@ -167,7 +167,7 @@ class Verdict(unittest.TestCase):
         bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
         own = self.case("TC-9", "FAIL", ticket=None, bug="BUG-1", actual="two zones saved")  # an explorer's own case
         for known in ((), ("T-1", "T-2")):
-            got = report.verdict("T-1", [self.case("TC-1", "PASS"), own], bug, known=known)
+            got = results.verdict("T-1", [self.case("TC-1", "PASS"), own], bug, known=known)
             self.assertEqual(got[0], "FAIL", known)
             self.assertIn("BUG-1 HIGH", got[1])
 
@@ -178,11 +178,11 @@ class Verdict(unittest.TestCase):
         ]
         for raw in ("0123456789abcdef", "#0123456789ab", "0123456789ab (known)"):
             known = [{"hash": raw, "route": "/list", "severity": "HIGH", "classification": "CONFIRMED", "title": "x"}]
-            self.assertEqual(report.verdict("A-1", cases, known)[0], "PASS", raw)
-            self.assertEqual(report.verdict("B-1", cases, known)[0], "FAIL", raw)
+            self.assertEqual(results.verdict("A-1", cases, known)[0], "PASS", raw)
+            self.assertEqual(results.verdict("B-1", cases, known)[0], "FAIL", raw)
 
     def test_multi_ticket_runs(self):
-        v = report.verdict
+        v = results.verdict
         # shared /form: an untagged bug named by T-2's failing case is T-2's, not T-1's
         cases = [self.case("TC-1", "PASS"), self.case("TC-2", "FAIL", ticket="T-2", bug="BUG-1", actual="131 saved")]
         bug = [{"id": "BUG-1", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}]
@@ -233,22 +233,22 @@ class Verdict(unittest.TestCase):
             {"id": f"BUG-{i}", "ticket": "T-1", "severity": "HIGH", "classification": "CONFIRMED"} for i in (1, 2, 3)
         ]
         self.assertEqual(
-            report.verdict("T-1", cases, bugs),
+            results.verdict("T-1", cases, bugs),
             ("FAIL", "4 cases failed (TC-1, TC-2, TC-3, TC-4) on AC-1, AC-10; BUG-1 HIGH; BUG-2 HIGH; +1 more"),
         )
-        v, why = report.verdict("T-1", cases[:1], [])
+        v, why = results.verdict("T-1", cases[:1], [])
         self.assertEqual(why, "TC-1 failed (AC-1)")  # what it saw is under its AC, whole
         stuck = self.case(
             "TC-12", "NOT_RUN", actual="Not testable: faults are off", notes="The 0 seen comes from the 404"
         )
-        self.assertEqual(report.verdict("T-1", [stuck], [])[1], "TC-12 not run")
+        self.assertEqual(results.verdict("T-1", [stuck], [])[1], "TC-12 not run")
         item = report._case_item({**stuck, "title": "t"}, "/x", True)
         self.assertTrue(
             item.startswith("- **TC-12 t: NOT RUN.** Not testable: faults are off. Notes: The 0 seen"), item
         )
         nine = [self.case(f"TC-{i}", "FAIL") for i in range(1, 10)]
         self.assertEqual(
-            report.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1"
+            results.verdict("T-1", nine, [])[1], "9 cases failed (TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, +3) on AC-1"
         )
 
     def test_untagged_or_mistagged_serious_bug_still_fails_the_ticket(self):
@@ -259,13 +259,13 @@ class Verdict(unittest.TestCase):
             {**serious, "route": "/incidents", "ticket": "none"},
             {**serious, "route": "/incidents", "ticket": "s-1 "},
         ):
-            self.assertEqual(report.verdict("S-1", [case], [bug])[0], "FAIL", bug)
+            self.assertEqual(results.verdict("S-1", [case], [bug])[0], "FAIL", bug)
         other = {**serious, "route": "/elsewhere", "target": "/elsewhere"}
-        self.assertEqual(report.verdict("S-1", [case], [other])[0], "PASS")
+        self.assertEqual(results.verdict("S-1", [case], [other])[0], "PASS")
         self.assertEqual(
-            report.run_bugs([("a", {"target": "/incidents", "bugs": [{"route": "/incidents/4521", "title": "t"}]})])[0][
-                "target"
-            ],
+            results.run_bugs([("a", {"target": "/incidents", "bugs": [{"route": "/incidents/4521", "title": "t"}]})])[
+                0
+            ]["target"],
             "/incidents",
         )
 
@@ -274,7 +274,7 @@ class Verdict(unittest.TestCase):
         cases = [case("TC-1", "S-1"), case("TC-3", "S-2")]
         bug = {"id": "BUG-1", "ticket": "S-3", "route": "/form", "severity": "HIGH", "classification": "CONFIRMED"}
         keys = ["S-1", "S-2", "S-3"]
-        self.assertEqual([report.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
+        self.assertEqual([results.verdict(k, cases, [bug], True, keys)[0] for k in keys], ["PASS", "PASS", "FAIL"])
 
     def test_a_run_that_ended_blocked_blocks_its_tickets(self):  # its PASS results can't be trusted
         cases = [self.case("TC-1", "PASS")]
@@ -285,27 +285,27 @@ class Verdict(unittest.TestCase):
             "cases": [{"id": "TC-1", "status": "PASS"}],
         }
         self.assertEqual(
-            report.verdict("T-1", cases, [], runs=[("form", blocked)]),
+            results.verdict("T-1", cases, [], runs=[("form", blocked)]),
             ("BLOCKED", "the run on /form ended BLOCKED: session expired, run /qa-sdet:qa-login"),
         )
         by_id = {**blocked, "target": "https://qa.example/elsewhere"}  # it reported the ticket's case
-        self.assertEqual(report.verdict("T-1", cases, [], runs=[("x", by_id)])[0], "BLOCKED")
+        self.assertEqual(results.verdict("T-1", cases, [], runs=[("x", by_id)])[0], "BLOCKED")
         other = {"target": "/list", "status": "BLOCKED", "cases": []}  # another ticket's page
-        self.assertEqual(report.verdict("T-1", cases, [], runs=[("list", other)])[0], "PASS")
+        self.assertEqual(results.verdict("T-1", cases, [], runs=[("list", other)])[0], "PASS")
         incomplete = {**blocked, "status": "INCOMPLETE"}  # budget ran out after the cases: they stand
-        self.assertEqual(report.verdict("T-1", cases, [], runs=[("form", incomplete)])[0], "PASS")
+        self.assertEqual(results.verdict("T-1", cases, [], runs=[("form", incomplete)])[0], "PASS")
 
     def test_severity_and_classification_read_by_their_first_word(self):  # "Confirmed (2/2)" was no CONFIRMED
         cases = [self.case("TC-1", "PASS")]
         bug = {"id": "BUG-1", "route": "/form", "severity": "High ", "classification": "Confirmed (2/2)"}
-        self.assertEqual(report.verdict("T-1", cases, [bug]), ("FAIL", "BUG-1 HIGH"))  # no second class in the reason
-        self.assertEqual(report.verdict("T-1", cases, [{**bug, "severity": "critical - data loss"}])[0], "FAIL")
+        self.assertEqual(results.verdict("T-1", cases, [bug]), ("FAIL", "BUG-1 HIGH"))  # no second class in the reason
+        self.assertEqual(results.verdict("T-1", cases, [{**bug, "severity": "critical - data loss"}])[0], "FAIL")
         for weak in (
             {**bug, "classification": "Not confirmed"},
             {**bug, "classification": "SUSPECTED"},
             {**bug, "severity": "MEDIUM (high impact later)"},
         ):
-            self.assertEqual(report.verdict("T-1", cases, [weak])[0], "PASS WITH NOTES", weak)
+            self.assertEqual(results.verdict("T-1", cases, [weak])[0], "PASS WITH NOTES", weak)
 
 
 class MergedCases(Base):
@@ -337,13 +337,13 @@ class MergedCases(Base):
                 {"id": "TC-1", "status": "NOT_RUN", "notes": "other route"},
             ],
         }
-        d = report.load_run(self.rundir(plan=plan, runs=[("a", older), ("b", newer)]))
-        cases = report.merged_cases(d["plan"], d["runs"])
+        d = results.load_run(self.rundir(plan=plan, runs=[("a", older), ("b", newer)]))
+        cases = results.merged_cases(d["plan"], d["runs"])
         self.assertEqual(
             [(c["id"], c["status"], c["actual"]) for c in cases],
             [("TC-1", "FAIL", "131 saved"), ("TC-2", "PASS", ""), ("TC-3", "PASS", "")],
         )
-        self.assertEqual(report.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed"))
+        self.assertEqual(results.verdict("PROJ-1", cases, []), ("FAIL", "TC-1 failed"))
         # a PASS from another run never hides a FAIL or a QUESTION, whichever run is newer
         for worse in ("FAIL", "QUESTION"):
             for first, second in ((worse, "PASS"), ("PASS", worse)):
@@ -351,9 +351,9 @@ class MergedCases(Base):
                     ("a", {"cases": [{"id": "TC-1", "status": first}]}),
                     ("b", {"cases": [{"id": "TC-1", "status": second}]}),
                 ]
-                self.assertEqual(report.merged_cases(plan, two)[0]["status"], worse, (first, second))
+                self.assertEqual(results.merged_cases(plan, two)[0]["status"], worse, (first, second))
         # same rank: the newest run wins
-        tie = report.merged_cases(
+        tie = results.merged_cases(
             plan,
             [
                 ("a", {"cases": [{"id": "TC-1", "status": "PASS", "actual": "old"}]}),
@@ -385,16 +385,16 @@ class MergedCases(Base):
                 },
             )
         ]
-        cases = report.merged_cases(plan, runs)
+        cases = results.merged_cases(plan, runs)
         self.assertEqual([c["ticket"] for c in cases], ["PROJ-1", "PROJ-1", "PROJ-1"])
-        self.assertEqual(report.verdict("PROJ-1", cases, [])[0], "FAIL")
+        self.assertEqual(results.verdict("PROJ-1", cases, [])[0], "FAIL")
         two = {**plan, "tickets": [{"key": "PROJ-1"}, {"key": "PROJ-2"}]}  # two tickets: no guess for TC-2
-        self.assertEqual([c.get("ticket") for c in report.merged_cases(two, runs)], ["PROJ-1", None, "PROJ-1"])
-        only_run = report.merged_cases(plan, [("form", {"cases": [{"id": "TC-9", "status": "FAIL"}]})])
+        self.assertEqual([c.get("ticket") for c in results.merged_cases(two, runs)], ["PROJ-1", None, "PROJ-1"])
+        only_run = results.merged_cases(plan, [("form", {"cases": [{"id": "TC-9", "status": "FAIL"}]})])
         self.assertIsNone(only_run[-1].get("ticket"))  # an explorer's own case is never assigned
 
     def test_a_float_case_id_ingest_accepts_is_reported(self):  # core.txt takes 1.0; the report dropped it silently
-        cases = report.merged_cases({}, [("a", {"cases": [{"id": 1.0, "status": "FAIL", "actual": "x"}]})])
+        cases = results.merged_cases({}, [("a", {"cases": [{"id": 1.0, "status": "FAIL", "actual": "x"}]})])
         self.assertEqual([(c["id"], c["status"]) for c in cases], [("1.0", "FAIL")])
 
     def test_case_without_or_with_a_repeated_id_is_named_not_dropped_silently(self):
@@ -474,7 +474,7 @@ class MergedCases(Base):
 
     def test_numeric_id_zero_is_an_id(self):
         warnings = []
-        cases = report.merged_cases(
+        cases = results.merged_cases(
             {"cases": [{"id": 0, "title": "zero"}]}, [("a", {"cases": [{"id": 0, "status": "PASS"}]})], warnings
         )
         self.assertEqual([(c["id"], c["status"]) for c in cases], [("0", "PASS")])
@@ -699,7 +699,7 @@ class Report(Base):
         )  # prep reads every folder like this
         con = core.connect()
         try:
-            self.assertIn("| PROJ-1 |", report.inbox(con, self.proj, [{"key": "PROJ-1", "fields": {"summary": "s"}}]))
+            self.assertIn("| PROJ-1 |", inbox.inbox(con, self.proj, [{"key": "PROJ-1", "fields": {"summary": "s"}}]))
         finally:
             con.close()
 
@@ -1336,7 +1336,7 @@ class Signals(Rendering):
         posts = "".join(f"{i}. [POST] http://localhost:8765/api/zones => [201] Created\n" for i in range(1, 8))
         gets = "".join(f"{i}. [GET] http://localhost:8765/api/zones/{i} => [200] OK\n" for i in range(8, 14))
         (d / ".data/requests-form.log").write_text(posts + gets)
-        keys = [k for k, _, _ in report.triage_signals(d, "form", RUN1)["app"]]
+        keys = [k for k, _, _ in signals.triage_signals(d, "form", RUN1)["app"]]
         self.assertEqual(keys, ["GET /api/zones/:id ×6 (the same call 6 times: a request loop?)"])
 
     def triage_dir(self, requests, console=None, run=RUN1, bodies=None, drafts=()):
@@ -1350,7 +1350,7 @@ class Signals(Rendering):
         return d
 
     def test_body_verdict_reads_error_envelopes_html_and_leaks(self):
-        v = report.body_verdict
+        v = signals.body_verdict
         self.assertEqual(v('{"data": {"zones": []}}'), [])
         self.assertEqual(v('{"errors": [{"message": "Forbidden"}], "data": null}'), ["error body: errors: Forbidden"])
         self.assertEqual(
@@ -1381,7 +1381,7 @@ class Signals(Rendering):
         )  # browser frames are the app's own JS
 
     def test_body_verdict_flags_a_mutations_errors_under_data(self):
-        v = report.body_verdict  # a GraphQL mutation reports its failure inside its own payload, in a 200
+        v = signals.body_verdict  # a GraphQL mutation reports its failure inside its own payload, in a 200
         failed = '{"data": {"saveNote": {"__typename": "SaveNotePayload", "note": null, "errors": [{"message": "Too long"}]}}}'
         self.assertEqual(v(failed), ["error body: data.saveNote.errors: Too long"])
         self.assertEqual(v('{"data": {"saveNote": {"errors": [{"message": "Too long"}]}}}'), v(failed))
@@ -1401,7 +1401,7 @@ class Signals(Rendering):
             self.assertEqual(v(fine), [], fine)
 
     def test_a_partial_failure_counts_only_on_a_write(self):
-        v = report.body_verdict
+        v = signals.body_verdict
         bulk = '{"data": {"bulkUpdate": {"updated": 2, "failed": 1, "results": [{"ok": true}, {"ok": false, "reason": "Locked"}]}}}'
         self.assertEqual(v(bulk), [])  # in a read, failed is data (a count of failed jobs)
         self.assertEqual(v(bulk, write=True), ["partial failure: data.bulkUpdate.failed 1"])
@@ -1433,10 +1433,10 @@ class Signals(Rendering):
     def test_a_clean_graphql_check_clears_only_that_call(self):  # every operation shares one method and path
         d = self.triage_dir(self.GQL_LOG)
         cli("body-check", str(d), "--slug", "form", "1", stdin='{"data": {"notes": []}}')
-        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
+        self.assertEqual(signals.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
         for n in "234":
             cli("body-check", str(d), "--slug", "form", n, stdin='{"data": {"notes": []}}')
-        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [])
+        self.assertEqual(signals.triage_signals(d, "form", RUN1)["suspect_200"], [])
 
     def sweep(self, d, responses, requests=None, log=None):
         """(exit code, stdout, the playwright-cli calls) of `qa-mem body-check --all` with a fake playwright-cli that
@@ -1499,7 +1499,7 @@ class Signals(Rendering):
         )
         self.assertIn("#2 POST /graphql#SaveNote → 200: error body: data.saveNote.errors: Too long", out)
         self.assertIn("#3 POST /graphql#BulkUpdate → 200: partial failure: data.bulkUpdate.failed 1", out)
-        t = report.triage_signals(d, "form", RUN1)
+        t = signals.triage_signals(d, "form", RUN1)
         self.assertEqual(
             [k for k, _, _ in t["app"]],
             [
@@ -1514,33 +1514,33 @@ class Signals(Rendering):
         # the baseline keeps one row per operation; a note explains the operation it names, not every GraphQL call
         self.assertEqual(memory.signal_key(t["app"][0][0]), ("request", "POST /graphql#SaveNote 200"))
         run = {**RUN1, "notes": "POST /graphql#SaveNote refuses a long text: expected."}
-        self.assertEqual(len(report.triage_signals(d, "form", run)["app"]), 3)
-        self.assertEqual(len(report.triage_signals(d, "form", {**RUN1, "notes": "POST /graphql is fine"})["app"]), 4)
+        self.assertEqual(len(signals.triage_signals(d, "form", run)["app"]), 3)
+        self.assertEqual(len(signals.triage_signals(d, "form", {**RUN1, "notes": "POST /graphql is fine"})["app"]), 4)
 
     def test_body_check_all_is_capped_and_says_what_is_left(self):
         d = self.triage_dir("".join(f"{i}. [POST] http://localhost:8765/graphql => [200] OK\n" for i in range(1, 36)))
         code, out, calls = self.sweep(d, {str(i): '{"data": {}}' for i in range(1, 36)})
-        self.assertEqual((code, sum(c.startswith("response-body") for c in calls)), (0, report.SWEEP_CALLS))
+        self.assertEqual((code, sum(c.startswith("response-body") for c in calls)), (0, signals.SWEEP_CALLS))
         self.assertIn("5 left", out)
-        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "31")])
+        self.assertEqual(signals.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "31")])
 
     def test_body_check_all_leaves_a_request_the_browser_dropped_as_a_suspect(self):
         d = self.triage_dir(self.GQL_LOG)
         code, out, _ = self.sweep(d, {"1": '{"data": {}}', "3": '{"data": {}}', "4": '{"data": {}}'})
         self.assertEqual(code, 0, out)
         self.assertIn("1 not read (Request #2 not found", out)
-        self.assertEqual(report.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
+        self.assertEqual(signals.triage_signals(d, "form", RUN1)["suspect_200"], [("POST /graphql", "2")])
 
     def test_a_binary_body_playwright_saved_to_a_file_is_removed_not_read(self):
         dump = self.proj / ".playwright-cli" / "response-2026-11-25T10-00-00-000Z.png"
         dump.parent.mkdir()
         dump.write_bytes(b"\x89PNG")
-        self.assertEqual(report._saved_body(f"{dump}\n"), "")
+        self.assertEqual(signals._saved_body(f"{dump}\n"), "")
         self.assertFalse(dump.exists())
         keep = self.proj / "response-notes.txt"
         keep.write_text("x")
         for text in ('{"data": {}}', str(keep), f"see {dump}", ""):
-            self.assertEqual(report._saved_body(text), text)
+            self.assertEqual(signals._saved_body(text), text)
         self.assertTrue(keep.exists())
 
     def test_an_empty_body_is_not_judged_clean(self):  # the browser drops a response's body when the page navigates
@@ -1551,7 +1551,7 @@ class Signals(Rendering):
         self.assertIn("3 bodies read, 1 with a finding, 2 with no body left", out)  # the 204 has none to read: read
         recorded = json.loads((d / ".data/bodies-form.json").read_text())
         self.assertEqual((sorted(k for k in recorded if k.isdigit()), recorded["gone"]), (["3", "4", "5"], ["1", "2"]))
-        t = report.triage_signals(d, "form", RUN1)
+        t = signals.triage_signals(d, "form", RUN1)
         self.assertEqual((len(t["app"]), t["suspect_200"], t["unchecked"]), (1, [], []))  # nothing left to ask for
         code, out, _ = cli("body-check", str(d), "--slug", "form", "1", stdin="\n")  # by hand: the same answer
         self.assertEqual(code, 0)
@@ -1586,14 +1586,14 @@ class Signals(Rendering):
             "8. [POST] http://localhost:8765/api/jobs => [200] OK\n"
             "9. [POST] https://cdn.example.com/rpc => [200] OK\n"
         )
-        t = report.triage_signals(d, "form", RUN1)
+        t = signals.triage_signals(d, "form", RUN1)
         self.assertEqual(t["app"], [])  # nothing is a signal until a body says so
         self.assertEqual(
             t["suspect_200"], [("POST /graphql", "1"), ("PUT /api/zones/:id", "4"), ("DELETE /api/zones/:id", "7")]
         )
         run = {**RUN1, "notes": "PUT /api/zones/:id saves the zone, body checked."}
         self.assertEqual(
-            [k for k, _ in report.triage_signals(d, "form", run)["suspect_200"]],
+            [k for k, _ in signals.triage_signals(d, "form", run)["suspect_200"]],
             ["POST /graphql", "DELETE /api/zones/:id", "POST /api/jobs"],
         )  # a named call is cleared, the next one fills in
 
@@ -1609,13 +1609,13 @@ class Signals(Rendering):
         code, out, _ = cli("body-check", str(d), "--slug", "form", "2", stdin='{"id": 7, "name": "qa-sdet-z"}')
         self.assertIn("nothing suspicious", out)
         cli("body-check", str(d), "--slug", "form", "3", stdin="PG::SyntaxError: ERROR: syntax error at or near")
-        t = report.triage_signals(d, "form", RUN1)
+        t = signals.triage_signals(d, "form", RUN1)
         self.assertEqual(
             [k for k, _, _ in t["app"]],
             ["POST /graphql → 200 [error body: errors: Forbidden]", "POST /api/zones → 500 [leak: SQL error]"],
         )
         self.assertEqual(t["suspect_200"], [])
-        self.assertEqual([report.signal_severity(k) for k, _, _ in t["app"]], ["severe", "severe"])
+        self.assertEqual([signals.signal_severity(k) for k, _, _ in t["app"]], ["severe", "severe"])
         code, out, _ = cli("signals-triage", str(d), "--slug", "form")
         self.assertLess(out.index("SEVERE"), out.index("#1 POST /graphql → 200"))
         self.assertNotIn("SUSPECT 200", out)
@@ -1695,7 +1695,7 @@ class Signals(Rendering):
         )
         self.assertNotIn("signal", check)
         ignored = {("/form", "request", "POST /form 500"): ("IGNORED", 2, "r0")}
-        with mock.patch.object(report, "_signal_baseline", return_value=ignored):
+        with mock.patch.object(signals, "_signal_baseline", return_value=ignored):
             _, check, _ = self.pass_draft("1. [POST] http://localhost:8765/form => [500] Error\n")
         self.assertNotIn("signal", check)
 
@@ -1927,7 +1927,7 @@ class JiraDraft(Rendering):
                 self.assertIn("QA result: BLOCKED", (d / "jira-comment.txt").read_text())  # never a pass
                 self.assertIn("PROJ-1 ⛔ BLOCKED", (d.parent / "README.md").read_text())  # the run index agrees
                 # a partial --retest must not carry a pass this verdict didn't trust
-                self.assertEqual(report._run_state(d)["passed_cases"], [])
+                self.assertEqual(runstate._run_state(d)["passed_cases"], [])
                 for f in (d / ".data").glob("run-*.json"):
                     f.unlink()
         failed = {**RUN1, "cases": [RUN1["cases"][0], {"id": "TC-2", "status": "FAIL", "actual": "131 saved"}]}
@@ -2101,7 +2101,7 @@ class JiraDraft(Rendering):
         # L4: non-ASCII jiraKeyPrefix 'ß' does not strip 'SS-' in inbox
         con = core.connect()
         try:
-            out = report.inbox(
+            out = inbox.inbox(
                 con, self.proj, [{"key": "SS-12", "fields": {"summary": "x", "status": {"name": "Open"}}}], prefix="ß"
             )
             self.assertIn("Next: /qa-sdet:qa-ticket SS-12", out)
@@ -2236,9 +2236,9 @@ class PlanFindAndRetest(Rendering):
                 }
                 ok = {"target": route, "status": "COMPLETED", "cases": [{"id": "TC-1", "status": "PASS"}]}
                 d = self.rundir("2026-11-20-PROJ-1", plan=plan, runs=[("a", ok), ("b", run)])
-                cases = report.merged_cases(plan, report.load_run(d)["runs"])
-                v = report.verdict({"key": "PROJ-1"}, cases, [], runs=report.load_run(d)["runs"])[0]
-                retested = [c["id"] for c in report._run_state(d)["retest_cases"]]
+                cases = results.merged_cases(plan, results.load_run(d)["runs"])
+                v = results.verdict({"key": "PROJ-1"}, cases, [], runs=results.load_run(d)["runs"])[0]
+                retested = [c["id"] for c in runstate._run_state(d)["retest_cases"]]
                 self.assertEqual((v, retested), ("BLOCKED", ["TC-1"]) if v == "BLOCKED" else ("PASS", []))
 
     def test_report_index_and_inbox_give_the_same_verdicts(self):  # one place feeds verdict(), not three
@@ -2269,10 +2269,10 @@ class PlanFindAndRetest(Rendering):
         self.assertIn(", ".join(f"{k} {v}" for k, v in want.items()), (d.parent / "README.md").read_text())
         con = core.connect()
         try:
-            inbox = report.inbox(con, self.proj, [{"key": k, "fields": {"summary": "s"}} for k in want])
+            table = inbox.inbox(con, self.proj, [{"key": k, "fields": {"summary": "s"}} for k in want])
         finally:
             con.close()
-        self.assertEqual({k: re.search(rf"\| {k} \|.*\| ([^|]+) \|$", inbox, re.M).group(1) for k in want}, want)
+        self.assertEqual({k: re.search(rf"\| {k} \|.*\| ([^|]+) \|$", table, re.M).group(1) for k in want}, want)
 
     def test_a_chained_retest_keeps_the_earlier_prior_passes(self):
         """Run 1 -> retest 2 -> retest 3: what retest 2 carried as prior passes must reach retest 3's plan."""
@@ -2287,7 +2287,7 @@ class PlanFindAndRetest(Rendering):
             plan=plan,
             runs=[("form", {**RUN1, "build": "1.43", "cases": [{"id": "TC-2", "status": "FAIL", "actual": "x"}]})],
         )
-        st = report._run_state(d)
+        st = runstate._run_state(d)
         self.assertEqual([(c["id"], c["build"]) for c in st["passed_cases"]], [("TC-1", "1.42")])
         self.assertEqual([c["id"] for c in st["retest_cases"]], ["TC-2"])
 
@@ -2519,7 +2519,7 @@ class Traceability(Rendering):
             ),
         ]
         self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=PLAN, runs=runs)
-        lr = report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
+        lr = runstate.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
         self.assertEqual(lr["subset_of"], ["PROJ-1", "PROJ-2"])
         self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
         self.assertEqual([c["id"] for c in lr["passed_cases"]], ["TC-4"])  # TC ids kept
@@ -2601,7 +2601,7 @@ class NewestRun(Rendering):
         ]
         self.age(self.rundir("2026-11-20-PROJ-2", plan=alone, runs=both("PASS")))
         self.rundir("2026-11-23-PROJ-1+PROJ-2", plan=PLAN, runs=both("FAIL"))
-        lr = report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
+        lr = runstate.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]
         self.assertEqual((lr["name"], lr["subset_of"]), ("2026-11-23-PROJ-1+PROJ-2", ["PROJ-1", "PROJ-2"]))
         self.assertEqual([c["id"] for c in lr["retest_cases"]], ["TC-3"])
         skill = (
@@ -2625,7 +2625,7 @@ class NewestRun(Rendering):
         self.age(old)
         self.rundir("2026-11-25-PROJ-1", plan=PLAN1, runs=run("FAIL"))
         report.write_report(old)
-        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]["name"], "2026-11-25-PROJ-1")
+        self.assertEqual(runstate.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]["name"], "2026-11-25-PROJ-1")
         line = next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
         self.assertIn("❌ FAIL", line)
 
@@ -2671,12 +2671,12 @@ class TicketFolder(Rendering):
 
     def test_plan_find_on_a_ticket_folder(self):
         d = self.rundir("PROJ-1", plan=PLAN1)
-        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        found = runstate.plan_find(self.proj, keys=["PROJ-1"])
         self.assertEqual(found["reusable_plan"]["run_dir"], str(d.resolve()))
         self.assertEqual(found["latest_run"]["name"], "PROJ-1")  # the folder is the run, even before it ran
         self.assertFalse(found["latest_run"]["can_retest"])
         (d / ".data/run-form.json").write_text(json.dumps(self.ran(("TC-1", "PASS"), status="INCOMPLETE")))
-        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        found = runstate.plan_find(self.proj, keys=["PROJ-1"])
         lr = found["latest_run"]
         self.assertIsNone(found["reusable_plan"])  # a case ran: the plan is this run's, re-run in place
         self.assertEqual(
@@ -2687,19 +2687,19 @@ class TicketFolder(Rendering):
 
     def test_an_old_combined_folder_is_found_until_the_ticket_has_its_own(self):
         both = self.rundir(plan=PLAN, runs=[("form", RUN_FORM)])
-        lr = report.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]
+        lr = runstate.plan_find(self.proj, keys=["PROJ-1"])["latest_run"]
         self.assertEqual((lr["name"], lr["subset_of"]), (both.name, ["PROJ-1", "PROJ-2"]))
         # the first run in the new layout retests from it: retest_of names the older folder
         one = {**PLAN1, "retest_of": both.name, "cases": PLAN1["cases"][1:], "prior_passed": lr["passed_cases"]}
         mine = self.rundir("PROJ-1", plan=one, runs=[("form", self.ran(("TC-2", "PASS")))])
         self.age(mine)  # older than the combined run: still the ticket's folder
-        found = report.plan_find(self.proj, keys=["PROJ-1"])
+        found = runstate.plan_find(self.proj, keys=["PROJ-1"])
         self.assertEqual(found["latest_run"]["name"], "PROJ-1")
         self.assertNotIn("subset_of", found["latest_run"])
         self.assertIsNone(found["reusable_plan"])
-        self.assertEqual(report._case_in_chain(mine, "TC-1")["steps"], ["Open form", "Type 130 | save"])
-        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-1", "PROJ-2"])["latest_run"]["name"], both.name)
-        self.assertEqual(report.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]["name"], both.name)
+        self.assertEqual(inbox._case_in_chain(mine, "TC-1")["steps"], ["Open form", "Type 130 | save"])
+        self.assertEqual(runstate.plan_find(self.proj, keys=["PROJ-1", "PROJ-2"])["latest_run"]["name"], both.name)
+        self.assertEqual(runstate.plan_find(self.proj, keys=["PROJ-2"])["latest_run"]["name"], both.name)
 
     def test_the_newest_ticket_folder_is_the_tickets_latest_qa(self):
         self.age(self.rundir(plan=PLAN, runs=[("form", RUN_FORM)]))
@@ -2791,8 +2791,8 @@ class NextAction(Rendering):
             **({"block_scope": scope} if scope else {}),
         }
         d = self.folder(("ok", {"status": "COMPLETED"}), ("admin", blocked("page")))
-        self.assertEqual(report.next_action(d, "admin")["action"], "continue")
-        self.assertEqual(report.next_action(d, "ok")["action"], "continue")
+        self.assertEqual(runstate.next_action(d, "admin")["action"], "continue")
+        self.assertEqual(runstate.next_action(d, "ok")["action"], "continue")
         for scope, summary, action in (
             (None, "session expired, run /qa-sdet:qa-login", "recover_sso"),
             (None, "browser profile in use: another qa-sdet browser", "abort"),
@@ -2800,8 +2800,8 @@ class NextAction(Rendering):
             (None, "the page returned 500", "continue"),
         ):
             d = self.folder(("p", blocked(scope, summary)))
-            self.assertEqual(report.next_action(d, "p")["action"], action, summary)
-        self.assertEqual(report.next_action(d, "missing")["action"], "abort")  # no run file: the explorer died
+            self.assertEqual(runstate.next_action(d, "p")["action"], action, summary)
+        self.assertEqual(runstate.next_action(d, "missing")["action"], "abort")  # no run file: the explorer died
         code, out, _ = cli("next-action", str(d), "p")
         self.assertEqual((code, json.loads(out)["block_scope"]), (0, "page"))
 
@@ -2810,38 +2810,40 @@ class NextAction(Rendering):
             ("a", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}),
             ("b", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}),
         )
-        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # the coordinator asks after each route
-        nxt = report.next_action(d, "b")
+        self.assertEqual(runstate.next_action(d, "a")["action"], "continue")  # the coordinator asks after each route
+        nxt = runstate.next_action(d, "b")
         self.assertEqual(nxt["action"], "abort")
         self.assertIn("2 pages in a row", nxt["reason"])
 
     def test_a_resumed_run_starts_a_new_streak(self):  # its run files from the stopped session are no streak
         blocked = {"status": "BLOCKED", "block_scope": "page", "summary": "403"}
         d = self.folder(("a", blocked))
-        self.assertEqual(report.next_action(d, "a")["action"], "continue")
+        self.assertEqual(runstate.next_action(d, "a")["action"], "continue")
         (d / ".data/run-b.json").write_text(json.dumps({**blocked, "summary": "500"}))
-        self.assertEqual(report.next_action(d, "b")["action"], "abort")  # 2 in a row: the run stops
+        self.assertEqual(runstate.next_action(d, "b")["action"], "abort")  # 2 in a row: the run stops
         (d / ".data/run-a.json").write_text(json.dumps(blocked))  # --resume: /a first again, still a 403
         os.utime(d / ".data/run-a.json")
-        self.assertEqual(report.next_action(d, "a")["action"], "continue")
-        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # asked twice about one result: same answer
+        self.assertEqual(runstate.next_action(d, "a")["action"], "continue")
+        self.assertEqual(
+            runstate.next_action(d, "a")["action"], "continue"
+        )  # asked twice about one result: same answer
 
     def test_a_session_stopped_after_a_page_blocker_does_not_carry_its_streak(self):  # the user interrupted it
         import time
 
         blocked = {"status": "BLOCKED", "block_scope": "page", "summary": "403"}
         d = self.folder(("a", blocked))
-        self.assertEqual(report.next_action(d, "a")["action"], "continue")  # one so far
+        self.assertEqual(runstate.next_action(d, "a")["action"], "continue")  # one so far
         time.sleep(0.01)
         (d / ".data/brief-b.md").write_text("b")  # /b was dispatched, then the session stopped: no answer for it
         (d / ".data/brief-c.md").write_text("c")  # --resume starts with /c, also blocked
         (d / ".data/run-c.json").write_text(json.dumps(blocked))
-        self.assertEqual(report.next_action(d, "c")["action"], "continue")
+        self.assertEqual(runstate.next_action(d, "c")["action"], "continue")
         d2 = self.folder(("a", blocked))
-        self.assertEqual(report.next_action(d2, "a")["action"], "continue")  # stopped right after this answer
+        self.assertEqual(runstate.next_action(d2, "a")["action"], "continue")  # stopped right after this answer
         (d2 / ".data/run-a.json").write_text(json.dumps(blocked))  # --resume runs /a again, still a 403
         os.utime(d2 / ".data/run-a.json", (time.time() + 5, time.time() + 5))
-        self.assertEqual(report.next_action(d2, "a")["action"], "continue")
+        self.assertEqual(runstate.next_action(d2, "a")["action"], "continue")
 
     def test_a_sign_in_recovered_mid_row_keeps_the_row(
         self,
@@ -2849,12 +2851,12 @@ class NextAction(Rendering):
         import time
 
         d = self.folder(("b", {"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
-        self.assertEqual(report.next_action(d, "b")["action"], "continue")
+        self.assertEqual(runstate.next_action(d, "b")["action"], "continue")
         (d / ".data/run-c.json").write_text(json.dumps({"status": "BLOCKED", "block_scope": "session", "summary": "x"}))
-        self.assertEqual(report.next_action(d, "c")["action"], "recover_sso")
+        self.assertEqual(runstate.next_action(d, "c")["action"], "recover_sso")
         (d / ".data/run-c.json").write_text(json.dumps({"status": "BLOCKED", "block_scope": "page", "summary": "500"}))
         os.utime(d / ".data/run-c.json", (time.time() + 5, time.time() + 5))
-        self.assertEqual(report.next_action(d, "c")["action"], "abort")
+        self.assertEqual(runstate.next_action(d, "c")["action"], "abort")
 
     def test_block_scope_is_checked_at_ingest(self):
         from qa_sdet import ingest
@@ -2883,7 +2885,7 @@ class CarryPrior(Rendering):
     def merged(self, f, **new):
         if new:
             f.write_text(json.dumps({**RUN1, "run_id": "r2", "status": "COMPLETED", **new}))
-        report.carry_prior(f.parent.parent, "form")
+        results.carry_prior(f.parent.parent, "form")
         self.assertFalse((f.parent / "prior-form.json").exists())
         return json.loads(f.read_text())
 
@@ -3001,7 +3003,7 @@ class CarryPrior(Rendering):
         run["cases"].append(RUN1["cases"][1])
         d, r = self.render_run([("form", run)], plan=PLAN1_ANSWERED)
         draft = (d / "jira-comment.txt").read_text()
-        st = report._run_state(d)  # a --retest of this folder carries TC-1 on the build it passed on
+        st = runstate._run_state(d)  # a --retest of this folder carries TC-1 on the build it passed on
         self.assertEqual([(c["id"], c["build"]) for c in st["passed_cases"]], [("TC-1", "1.42"), ("TC-2", "1.43")])
         plan = {**PLAN1_ANSWERED, "cases": PLAN1["cases"][1:], "prior_passed": [{**PLAN1["cases"][0], "build": "1.42"}]}
         d2, r2 = self.render_run([("form", {**run, "cases": RUN1["cases"][1:]})], plan=plan)
@@ -3045,11 +3047,11 @@ class CarryPrior(Rendering):
         self.assertIn("\n\nall 2 cases passed\n\n", r)  # an unknown build can't be compared: What to do names it
 
     def test_a_page_the_new_build_never_reached_is_left_to_run(self):  # the same command said: already tested
-        st = report._run_state(self.stopped_before_list()[0])
+        st = runstate._run_state(self.stopped_before_list()[0])
         self.assertEqual(
             (st["incomplete_routes"], st["completed_routes"], st["can_resume"]), (["/list"], ["/form"], True)
         )
-        st = report._run_state(self.stopped_before_list("unknown")[0])
+        st = runstate._run_state(self.stopped_before_list("unknown")[0])
         self.assertEqual((st["incomplete_routes"], st["completed_routes"]), ([], ["/form", "/list"]))
 
 
@@ -3077,7 +3079,7 @@ class ExploreStopCheck(Base):
         (d / ".data/run-form.json").write_text(
             json.dumps({"run_id": "r", "mode": mode, "status": "COMPLETED", **run_fields})
         )
-        return report.verify_run(d, "form")
+        return audit.verify_run(d, "form")
 
     def test_a_completed_explore_page_that_mentions_none_of_the_cards_open_items_is_sent_back_once(self):
         todo = self.stop(["states", "apis"])
@@ -3220,7 +3222,7 @@ class Frontier(Rendering):
     def nxt(self, *runs, title="/zones/new"):
         plan = {"kind": "explore", "title": title, "tickets": [], "cases": []}
         self.rundir("2026-11-25-explore", plan=plan, runs=list(runs))
-        return report.explore_next(self.proj)
+        return runstate.explore_next(self.proj)
 
     def routes(self, out):
         return [x["route"] for x in out["frontier"]]
@@ -3424,7 +3426,7 @@ class Frontier(Rendering):
             )
             os.utime(d / ".data/run-form.json", (ts, ts))
             ingest.ingest_pending(d.parent)
-            return report.explore_next(self.proj, d)
+            return runstate.explore_next(self.proj, d)
 
         first = explore("2026-11-25-a", "r1", time.time() - 3600, 500)
         self.assertIs(first["expand_recommended"], True)
@@ -3474,7 +3476,7 @@ class FilingBundle(Rendering):
             d = self.rundir(f"2026-11-23-PROJ-1+PROJ-2-{n}", plan=PLAN, runs=[("form", {**RUN_FORM, "bugs": bugs})])
             for i in range(1, n + 1):
                 (d / f"bugs/BUG-{i}.md").write_text(f"# Bug {i}\n")
-            with mock.patch.object(report, "ticket_bugs", wraps=report.ticket_bugs) as spy:
+            with mock.patch.object(results, "ticket_bugs", wraps=results.ticket_bugs) as spy:
                 r = report.render_report(d)
             mine = r.split("## PROJ-1")[1].split("## PROJ-2")[0]
             self.assertEqual(mine.count("- Page /form"), n)  # every untagged bug on /form still counts for PROJ-1
@@ -3642,11 +3644,11 @@ class AuditBugs(Rendering):
         return d
 
     def issues(self, d):
-        return [(crit, text) for crit, text in report.audit_bugs(d).get("BUG-1", [])]
+        return [(crit, text) for crit, text in audit.audit_bugs(d).get("BUG-1", [])]
 
     def test_a_complete_draft_and_spec_pass_and_the_report_says_so(self):
         d = self.folder(good_draft(self.H), GOOD_SPEC)
-        self.assertEqual(report.audit_bugs(d), {})
+        self.assertEqual(audit.audit_bugs(d), {})
         report.write_report(d)
         self.assertIn("repro ✓", (d / "REPORT.md").read_text())
 
@@ -3726,8 +3728,8 @@ class AuditBugs(Rendering):
             "evidence image",
         ):
             self.assertTrue(any(want in t for t in warn), (want, warn))
-        self.assertEqual(report.spec_issues(GOOD_SPEC), [])
-        self.assertEqual(report.draft_issues(good_draft(self.H)), [])
+        self.assertEqual(audit.spec_issues(GOOD_SPEC), [])
+        self.assertEqual(audit.draft_issues(good_draft(self.H)), [])
 
 
 SAMPLE_PROJ_1 = """# PROJ-1: Speed limit form

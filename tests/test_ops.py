@@ -1191,7 +1191,7 @@ class Dispatch(Base):
         self.assertIn("FOCUS: ties", (self.run_dir / ".data/brief-list-2.md").read_text())
 
     def test_resume_dispatches_an_unfinished_route_back_into_its_run_file(self):  # found in audit: stuck BLOCKED
-        from qa_sdet import report
+        from qa_sdet import runstate
 
         self.assertEqual(self.dispatch("/list?a=1")[1]["slug"], "list")
         (self.run_dir / ".data/run-list.json").write_text(
@@ -1206,7 +1206,7 @@ class Dispatch(Base):
                 }
             )
         )
-        routes = report.plan_find(self.proj, run_dir=str(self.run_dir))["latest_run"]["incomplete_routes"]
+        routes = runstate.plan_find(self.proj, run_dir=str(self.run_dir))["latest_run"]["incomplete_routes"]
         self.assertEqual(routes, ["/list?a=1", "/list?a=2"])  # each with its query: one brief and run file each
         out = self.dispatch(routes[0])[1]
         self.assertEqual((out["slug"], out["case_count"]), ("list", 1))  # rewrites run-list.json, with its case

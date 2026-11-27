@@ -166,12 +166,12 @@ def file_lint(data):
     except OSError:
         return None
     _lib()
-    from qa_sdet import ingest, report
+    from qa_sdet import audit, ingest, results
 
     qa_out, run_name = p.parent.parent.parent, p.parent.parent.name
     note = None
     if kind in ("draft", "spec"):
-        problems = [t for _, t in (report.draft_issues(text) if kind == "draft" else report.spec_issues(text))]
+        problems = [t for _, t in (audit.draft_issues(text) if kind == "draft" else audit.spec_issues(text))]
         rules = os.path.join(os.path.dirname(HERE), "references", "bug-draft.md")
         notes = [
             f"qa-sdet: {name}: {'; '.join(problems)}. Fix it (rules: {rules}) and Write it again."
@@ -194,7 +194,7 @@ def file_lint(data):
                     note = f"qa-sdet: memory can't save {name}: {e}. Fix that field (rules: {rules}) and Write the whole file again."
             else:
                 warnings = []
-                report.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
+                results.merged_cases(doc if isinstance(doc, dict) else {}, [], warnings)
                 note = f"qa-sdet: {name}: {' '.join(warnings)}" if warnings else None
     if note:
         _log_event(

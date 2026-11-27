@@ -14,7 +14,7 @@ GITLEAKS_SHA256 := 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f247
 ACTIONLINT_VERSION := 1.7.12
 ACTIONLINT_SHA256 := 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 # make mutation: a bounded trial on the redactor, the host rules and the verdict (a few minutes)
-MUTANTS ?= qa_sdet.scrub.* qa_sdet.core.x_url_allowed__* qa_sdet.core.x_allowed_hosts__* qa_sdet.report.x_verdict__*
+MUTANTS ?= qa_sdet.scrub.* qa_sdet.core.x_url_allowed__* qa_sdet.core.x_allowed_hosts__* qa_sdet.results.x_verdict__*
 
 .PHONY: setup hooks format lint typecheck test test-runtime test-browser coverage security validate architecture mutation check
 

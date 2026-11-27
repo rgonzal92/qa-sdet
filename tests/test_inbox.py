@@ -7,7 +7,7 @@ from unittest import mock
 
 from support import Base, cli, core
 
-from qa_sdet import report
+from qa_sdet import inbox
 
 
 class Inbox(Base):
@@ -37,14 +37,14 @@ class Inbox(Base):
     def test_shapes(self):
         flat = [{"key": "ops-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}]
         for data in (self.ACLI, {"issues": self.ACLI}, {"workItems": self.ACLI}, {"values": self.ACLI}):
-            self.assertEqual([x["key"] for x in report.inbox_items(data)], ["PROJ-5", "PROJ-7"])
+            self.assertEqual([x["key"] for x in inbox.inbox_items(data)], ["PROJ-5", "PROJ-7"])
         self.assertEqual(
-            report.inbox_items(flat + [{"nokey": 1}, "junk"]),
+            inbox.inbox_items(flat + [{"nokey": 1}, "junk"]),
             [{"key": "OPS-1", "summary": "Flat", "status": "Open", "priority": "P2", "updated": "2026-11-01"}],
         )
         for bad in ({"x": 1}, "text", 5):
             with self.assertRaises(core.BadInput):
-                report.inbox_items(bad)
+                inbox.inbox_items(bad)
 
     def test_new_tracking_persists(self):
         self.config(jiraKeyPrefix="PROJ")
@@ -126,11 +126,11 @@ class Inbox(Base):
 
         def b_runs_meanwhile(path, text):
             core._write = real
-            report.inbox(b, self.proj, [{"key": "OPS-2"}])
+            inbox.inbox(b, self.proj, [{"key": "OPS-2"}])
             real(path, text)
 
         with mock.patch.object(core, "_write", b_runs_meanwhile):
-            report.inbox(a, self.proj, [{"key": "OPS-1"}])
+            inbox.inbox(a, self.proj, [{"key": "OPS-1"}])
         self.assertEqual(sorted(json.loads(core.meta(a, "inbox_seen"))), ["OPS-1", "OPS-2"])
 
     def test_status_change_last_qa_column_and_empty_updated_omitted(self):
@@ -208,7 +208,7 @@ class Inbox(Base):
             os.utime(f, (t, t))
         one = {**PLAN, "tickets": PLAN["tickets"][:1], "cases": PLAN["cases"][:2]}
         self.rundir("PROJ-1", plan=one, runs=ran({"id": "TC-1", "status": "PASS"}, {"id": "TC-2", "status": "PASS"}))
-        found = report._qa_verdicts_by_key(self.proj / "qa-out", {"PROJ-1", "PROJ-2"})
+        found = inbox._qa_verdicts_by_key(self.proj / "qa-out", {"PROJ-1", "PROJ-2"})
         self.assertEqual(found, {"PROJ-1": "✅ PASS", "PROJ-2": "⛔ BLOCKED"})  # PROJ-2 still from the combined run
         out = cli("inbox", str(self.proj), stdin=json.dumps([{"key": "PROJ-1"}, {"key": "PROJ-2"}]))[1]
         self.assertIn("| PROJ-1 |  |  |  | ✅ PASS |", out)

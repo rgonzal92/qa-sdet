@@ -9,7 +9,7 @@ import unittest
 
 from support import load_hook
 
-from qa_sdet import contracts, core, ingest, report, scrub
+from qa_sdet import contracts, core, ingest, results, scrub
 
 
 class ContractsMatchCode(unittest.TestCase):
@@ -20,7 +20,7 @@ class ContractsMatchCode(unittest.TestCase):
         self.assertEqual(set(typing.get_args(contracts.BugStatus)), core.STATUSES)
         self.assertEqual(typing.get_args(contracts.StopReason), ingest.STOP_REASONS)
         self.assertEqual(typing.get_args(contracts.BlockScope), ingest.BLOCK_SCOPES)
-        self.assertEqual(set(typing.get_args(contracts.Verdict)), set(report.VERDICT_ICON))
+        self.assertEqual(set(typing.get_args(contracts.Verdict)), set(results.VERDICT_ICON))
 
 
 try:
@@ -159,7 +159,7 @@ else:
         def test_the_first_matching_rule_decides(self, statuses, n_acs):
             n_acs = min(n_acs, len(statuses))
             ticket, cases = one_ticket(statuses, n_acs)
-            v, _ = report.verdict(ticket, cases, [])
+            v, _ = results.verdict(ticket, cases, [])
             if "FAIL" in statuses:
                 self.assertEqual(v, "FAIL")
             elif {"BLOCKED", "NOT_RUN"} & set(statuses):
@@ -177,6 +177,6 @@ else:
                 return
             i = data.draw(st.sampled_from(better))
             worse = [*statuses[:i], data.draw(st.sampled_from(WORSE[statuses[i]])), *statuses[i + 1 :]]
-            before, _ = report.verdict(*one_ticket(statuses, n_acs), [])
-            after, _ = report.verdict(*one_ticket(worse, n_acs), [])
+            before, _ = results.verdict(*one_ticket(statuses, n_acs), [])
+            after, _ = results.verdict(*one_ticket(worse, n_acs), [])
             self.assertLessEqual(RANK[after], RANK[before], (statuses, worse))

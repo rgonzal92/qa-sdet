@@ -400,9 +400,9 @@ def _store_blind_spots(con, run, page, rid, build, ts):
     """The ledger of what runs leave untested, per page: each `not_tested` line of the run counts once per run. A line
     a later COMPLETED run no longer repeats is marked resolved (covered, or no longer deferred); repeating it again
     reopens it. An unfinished run says nothing about what a finished one left out."""
-    from . import report
+    from . import results
 
-    for cat, text in report._not_tested(run):
+    for cat, text in results._not_tested(run):
         con.execute(
             "INSERT INTO blind_spots(page,category,text,build,first_seen,last_seen,last_run) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(page,category,text) DO UPDATE SET seen_runs=seen_runs + (last_run IS NOT excluded.last_run), "
@@ -518,7 +518,7 @@ SIGNALS_PER_PAGE = 100
 
 def _store_signals(con, run, f, ts):
     """Upsert the unexplained app signals of run file f (.data/run-<slug>.json) for its page."""
-    from . import report
+    from . import signals
 
     slug = f.name[len("run-") : -len(".json")]
     if not any((f.parent / f"{k}-{slug}.log").is_file() for k in ("requests", "console")):
@@ -527,7 +527,7 @@ def _store_signals(con, run, f, ts):
     page = core.norm_route(target) if target.startswith(("/", "http", "#")) else "*"
     rid, build = str(run.get("run_id")), core.norm_build(core.txt(run.get("build"), "build"))
     with con:
-        for key, _, _ in report.triage_signals(f.parent.parent, slug, run)["app"]:
+        for key, _, _ in signals.triage_signals(f.parent.parent, slug, run)["app"]:
             ks = memory.signal_key(key)
             if ks:
                 con.execute(
@@ -552,7 +552,7 @@ def _store_observed(con, run, f, ts):
     """The calls the run's browser made (.data/requests-<slug>.log), kept per page and build as (method, path shape,
     status class): never a query string, a body or a host outside allowedHosts. The read-only crawl is skipped (one log
     for many pages)."""
-    from . import report
+    from . import results, signals
 
     slug = f.name[len("run-") : -len(".json")]
     log = f.parent / f"requests-{slug}.log"
@@ -561,8 +561,8 @@ def _store_observed(con, run, f, ts):
         return
     page, build = core.norm_route(target), core.norm_build(core.txt(run.get("build"), "build"))
     hosts, rows = core.allowed_hosts(core.config()), set()
-    for line in scrub.redact(report._text(log)).splitlines():
-        m = report.REQUEST_LINE.fullmatch(line)
+    for line in scrub.redact(results._text(log)).splitlines():
+        m = signals.REQUEST_LINE.fullmatch(line)
         if not m:
             continue
         _, method, url, code, _ = m.groups()
@@ -609,7 +609,7 @@ def check_report_fields(run):
             raise ValueError("every case needs an 'id' (TC-n from the plan)")
         for f in ("status", "actual", "notes", "bug"):
             core.txt(c.get(f), f"cases.{f}")
-        for f in ("build", "ran"):  # on a result report.carry_prior kept: its own text, compared with the run's build
+        for f in ("build", "ran"):  # on a result results.carry_prior kept: its own text, compared with the run's build
             if c.get(f) is not None and not isinstance(c[f], str):
                 raise ValueError(f"'cases.{f}' must be a string")
         if c.get("annotated") is not None and not isinstance(c["annotated"], bool):
