@@ -360,6 +360,52 @@ class Facts(MemBase):
         for t in facts:
             self.assertIn(t, c)
 
+    def both_shown(self, twins):
+        said = [t for rule, swap in twins for t in (rule, rule.replace(*swap))]
+        ingest.ingest(self.con, run(facts=[{"kind": "rule", "text": t} for t in said]))
+        c = cards.card(self.con, "/form")
+        for t in said:
+            self.assertIn(f"- [rule] {t}\n", c)
+
+    def test_long_rules_that_differ_in_one_word_are_two_rules(self):  # the card showed one of each pair
+        self.both_shown(
+            [
+                ("The Name field is required before the user can submit the form", ("Name", "Email")),
+                ("Admins can delete a zone that has no active closures", ("no active", "active")),
+                ("Viewers can't save the form changes on this page", ("can't", "can")),
+                ("The list is sorted by date when the page first loads", ("is sorted", "is not sorted")),
+                ("Drafts are deleted after thirty days without any change", ("are deleted", "are never deleted")),
+                ("Managers can approve a closure request from their own region", ("Managers", "Only managers")),
+                ("Admin users can open the audit log of every other user", ("Admin users", "Non-admin users")),
+            ]
+        )
+
+    def test_a_condition_added_to_a_long_rule_makes_another_rule(self):
+        self.both_shown(
+            [
+                ("A manager can close an incident that has open tasks", ("open tasks", "open tasks without approval")),
+                ("Every user can see the closures of every region on the map", ("the map", "the map except drafts")),
+                (
+                    "An editor can change the end date of a closure that has started",
+                    ("started", "started unless locked"),
+                ),
+            ]
+        )
+
+    def test_an_observation_that_says_the_opposite_does_not_hide_the_tickets_rule(self):
+        rule = "The Save button is disabled for users with the viewer role"
+        facts = lambda: [x for x in cards.card(self.con, "/form").splitlines() if x.startswith("- [rule]")]
+        tell = lambda text, hour, **f: ingest.ingest(
+            self.con, run(facts=[{"kind": "rule", "text": text, **f}]), f"2026-11-22T{hour}:00:00Z"
+        )
+        tell(rule, 10, source="PROJ-1")
+        opposite = rule.replace("disabled", "enabled")
+        tell(opposite, 11)
+        self.assertEqual(facts(), [f"- [rule] {opposite}", f"- [rule] {rule} (from PROJ-1)"])
+        restated = rule.replace("is disabled", "is always disabled")
+        tell(restated, 12)
+        self.assertEqual(facts(), [f"- [rule] {restated}", f"- [rule] {opposite}"])  # a restatement still stands in
+
     def test_ticket_fact_becomes_observed(self):
         ingest.ingest(
             self.con, run("unknown", facts=[{"kind": "rule", "text": "End date after start", "source": "PROJ-1"}])

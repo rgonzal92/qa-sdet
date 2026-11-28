@@ -55,8 +55,12 @@ def _frame_line(con, route, own=()):
     return [f"FRAME: no locator of this page names a frame yet; {loads} in one: try `{frame}` {tip}"]
 
 
+# one of these added to a fact reverses or narrows it ("t": can't, isn't, as core.norm splits them)
+NOT_A_RESTATEMENT = frozenset("not no never only without except unless non t".split())
+
+
 def _card_facts(con, r, focus_words, ids, current):
-    """FACTS: the charter's first, then rules before plain notes; near-duplicates collapse to the freshest."""
+    """FACTS: the charter's first, then rules before plain notes; a restatement collapses to the freshest."""
     out = []
     facts, seen = [], []
     # the charter's facts first (stemmed match on any of its words), then rules, flows, validations, API facts and
@@ -83,13 +87,15 @@ def _card_facts(con, r, focus_words, ids, current):
     pinned_ids = {x["id"] for x in pinned}
     for f in list({x["id"]: x for x in pinned + on_focus + rest}.values()):
         words = set(core.norm(f["text"]).split())
-        # Runs restate facts in new words; show only the freshest of near-duplicates.
+        # Runs restate facts with a word more or less; show only the freshest of those. A swapped word is another
+        # statement ('Name field …' and 'Email field …'), and so is an added number, 'not' or 'only'.
         if any(
             k == f["kind"]
+            and (words <= w or w <= words)
             and len(words & w) >= 0.8 * max(len(words | w), 1)
-            and not any(c.isdigit() for x in words ^ w for c in x)
+            and not any(x in NOT_A_RESTATEMENT or any(c.isdigit() for c in x) for x in words ^ w)
             for k, w in seen
-        ):  # '130km/h' vs '120km/h' is news
+        ):
             continue
         seen.append((f["kind"], words))
         facts.append(f)
