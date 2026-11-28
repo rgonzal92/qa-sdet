@@ -62,6 +62,31 @@ def normalize(cmd):
     return "".join(out)
 
 
+def brace_expands(cmd):
+    """Whether the shell makes several words of one of `cmd`'s: an unquoted `{a,b}` or `{1..3}`. The guard reads a word
+    as written, so a path it finds inside a folder can be, to the shell, a file outside it too."""
+    q, depth, i = None, 0, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and q != "'":
+            i += 2
+            continue
+        if q:
+            q = None if c == q else q
+        elif c in "'\"":
+            q = c
+        elif c == "{" and cmd[i - 1 : i] != "$":
+            depth += 1
+        elif c == "}" and depth:
+            depth -= 1
+        elif c in " \t\n;&|()<>":
+            depth = 0  # a list is one word
+        elif depth and (c == "," or cmd.startswith("..", i)):
+            return True
+        i += 1
+    return False
+
+
 def match_paren(cmd, k):
     """Index of the ')' closing the '(' at cmd[k] (len(cmd) if unclosed); parens inside quotes close nothing."""
     depth, j, q = 0, k, None

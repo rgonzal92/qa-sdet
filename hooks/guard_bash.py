@@ -238,6 +238,8 @@ def check(cmd, cwd, ctx=None, depth=0, explorer=False):
     if len(cmd) > guard_shell.MAX_TEXT:
         ctx.block("its length")
         return "the command is too long to check; split it" if ctx.guarded else None
+    if not depth and guard_shell.brace_expands(cmd):
+        ctx.block("a brace expansion")  # the words checked below are not the words the shell runs
     if (reason := _check(cmd, cwd, ctx, depth)) or depth:
         return reason
     if ctx.runs_pw and PW_ENV_RE.search(cmd):

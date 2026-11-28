@@ -259,6 +259,48 @@ class R8ApproveAndLog(Case):
         ]:
             self.assertNotEqual(decision(cmd, agent_type="qa-explorer"), "allow", cmd)
 
+    def test_a_word_the_shell_expands_by_braces_is_never_approved(self):
+        """The guard reads each word as written, and the shell makes several of `qa-out/{,../.env}`, one of them outside
+        the run folder. An approved call skips Claude Code's own permission check, so such a call is left to it."""
+        ex = {"agent_type": "qa-sdet:qa-explorer"}
+        held = [
+            ("cat qa-out/{,../.env}", ex),
+            ("cat qa-out/{,..}/{,..}/notes.txt", ex),
+            ("ls qa-out/{,../..}", ex),
+            ("sed -n 1,5p qa-out/{,../.env}", ex),
+            ("cat .playwright-cli/{,../.env}", ex),
+            ("cut -d {:,../.env} qa-out/x", ex),  # an option's value becomes a second file
+            ("cat qa-out/r/page-{1..3}.yml", ex),  # a sequence is a list too
+            ("playwright-cli -s=qa snapshot | grep -n x qa-out/{,../.env}", ex),
+            ("head -n 5 qa-out/{,../.env}", {}),  # head, tail and grep are approved for every role
+            ("tail qa-out/{,../.env}", {}),
+            ("grep -rn KEY qa-out/{,..}", {}),
+            ("grep {KEY,../.env} qa-out/x", {}),  # the pattern word becomes a file
+            ("head -n {5,../.env} qa-out/x", {}),
+        ]
+        for cmd, who in held:
+            self.assertIsNone(decision(cmd, **who), cmd)
+        for cmd in (  # no list: a quoted or escaped brace is text, and so is `{}`
+            "cat 'qa-out/{,../.env}'",
+            "cat qa-out/r/a\\{1,2\\}.txt",
+            "playwright-cli -s=qa requests | awk -F, '{print $1, $2}'",
+            """playwright-cli -s=qa eval "() => ({a: 1, b: 2})\"""",
+            """playwright-cli -s=qa fill e3 '{"a":1,"b":2}'""",
+            "playwright-cli -s=qa find {}",
+        ):
+            self.assertEqual(decision(cmd, **ex), "allow", cmd)
+        home_project = HOME / "p"  # from here `qa-out/../..` is HOME: the signed-in profile is two braces away
+        marker(home_project)
+        try:
+            cookies = ".local/share/qa-sdet/profiles/main/Default/Cookies"
+            self.assertEqual(decision(f"cat ~/{cookies}", cwd=home_project, **ex), "deny")
+            self.assertIsNone(decision(f"cat qa-out/{{,..}}/{{,..}}/{cookies}", cwd=home_project, **ex))
+        finally:
+            shutil.rmtree(home_project)
+        ctx = gb.Ctx(str(RUN), True, held[0][0])
+        gb.check(held[0][0], str(RUN), ctx)
+        self.assertEqual(ctx.blocker, "a brace expansion")  # what PostToolUse names to the explorer
+
     def test_the_first_word_that_blocks_approval_is_named(self):
         """PostToolUse tells the explorer which word sent a call to the slow check, and the run's trace counts them."""
         ctx_of = lambda cmd: (c := gb.Ctx(str(RUN), True, cmd), gb.check(cmd, str(RUN), c))[0]

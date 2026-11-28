@@ -379,7 +379,7 @@ def run_feedback(data, who):
             else f"qa-sdet: `{word}` sent that call to Claude Code's own permission check (about 5 s, against under 1 "
             "for an approved call). Approved at once: `playwright-cli`, `qa-mem` and `sleep` up to 30, joined by `;` or "
             "`&&` and piped into `grep`, `head`, `tail`, `sed -n 'N,Mp'`, `cut`, `sort`, `uniq`, `wc`, `tr` or `awk`, "
-            "with no variable, loop, `$(…)` or `cd` to another folder."
+            "with no variable, loop, `$(…)`, `{a,b}` list or `cd` to another folder."
         )
         append_progress(state, expires, {"t": "n", "n": f"slow:{word}"})
         _log_event(
