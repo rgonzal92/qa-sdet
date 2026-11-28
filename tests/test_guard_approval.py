@@ -105,6 +105,47 @@ class R8ApproveAndLog(Case):
             shutil.rmtree(snaps)
             trap.unlink(missing_ok=True)
 
+    def test_delete_or_remove_is_seen_inside_an_id_and_in_the_text_after_a_ref(self):
+        """An id joins its words (`deleteButton`, `btn_delete`, `DELETE_ROW`), and a control that is no button has its
+        text after the ref in the snapshot (`- generic [ref=e15]: Delete`). Both were approved at once."""
+        snaps = RUN / ".playwright-cli"
+        snaps.mkdir(exist_ok=True)
+        (snaps / "page-2026-11-27T10-00-00-000Z.yml").write_text(
+            "- generic [ref=e1]:\n"
+            "  - generic [ref=e15] [cursor=pointer]: Delete\n"
+            "  - listitem [ref=e18]: Remove member\n"
+            "  - generic [ref=e19] [cursor=pointer]: Saved\n"
+            '  - link "Removed items" [ref=e13]\n'
+        )
+        click = lambda loc: f'playwright-cli -s=qa click "{loc}"'
+        try:
+            for cmd in (
+                "playwright-cli -s=qa click e15",
+                "playwright-cli -s=qa dblclick e18",
+                click("getByTestId('zone_remove_button')"),
+                click("getByTestId('zoneRemoveButton')"),
+                click("getByTestId('deleteButton')"),
+                click("getByTestId('btn_delete')"),
+                click("locator('#delete_zone')"),
+                click("getByTestId('DELETE_ROW')"),
+                click("getByTestId('DeleteZone')"),
+                click("locator('iframe:visible').nth(0).contentFrame().getByTestId('rowRemove2')"),
+            ):
+                self.assertIsNone(decision(cmd), cmd)
+                self.assertIsNone(decision(cmd, agent_type="qa-sdet:qa-explorer"), cmd)
+            for cmd in (  # other words, and a parent's own line
+                "playwright-cli -s=qa click e19",
+                "playwright-cli -s=qa click e13",
+                "playwright-cli -s=qa click e1",
+                click("getByTestId('undelete')"),
+                click("getByTestId('removedCount')"),
+                click("getByTestId('saveButton')"),
+                click("getByText('Removed items')"),
+            ):
+                self.assertEqual(decision(cmd), "allow", cmd)
+        finally:
+            shutil.rmtree(snaps)
+
     def test_checked_calls_are_approved(self):
         outside = TMP / "outside.txt"
         outside.write_text("secret\n")

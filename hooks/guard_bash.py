@@ -436,15 +436,18 @@ def _acli_approvable(rest):
     )
 
 
-RISKY_CLICK = re.compile(r"\b(?:delete|remove)\b", re.I)
+RISKY_CLICK = {"delete", "remove"}  # a control's name holds one of them, as a word
+# the words of a name or an id: zone-remove-button, btn_delete, deleteButton, DELETE_ROW ("Removed" is another word)
+_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
 RISKY_WORD = "Delete or Remove click"  # Ctx.block's word for it: PostToolUse tells the explorer, the trace counts it
 SNAPSHOTS, SNAPSHOT_CAP = 5, 2 << 20  # the newest page-*.yml files read for a ref's name, and how much of each
 
 
 def ref_label(ref, cwd):
     """The line the newest snapshot playwright-cli saved (.playwright-cli/page-*.yml, under the call's folder or the
-    project's) has for `ref`, up to the ref, or "". After another page loads the refs start again, so the newest file
-    that holds the ref stands. Never through a link, never more than SNAPSHOT_CAP of a file; any trouble is no line."""
+    project's) has for `ref`, without the ref, or "": the element's role and name, and its text when it has no name
+    (`- generic [ref=e15]: Delete`). After another page loads the refs start again, so the newest file that holds the
+    ref stands. Never through a link, never more than SNAPSHOT_CAP of a file; any trouble is no line."""
     files = []
     for base in dict.fromkeys(b for b in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")) if b):
         try:
@@ -466,7 +469,7 @@ def ref_label(ref, cwd):
             continue
         line = next((x for x in text.splitlines() if mark in x), "")
         if line:
-            return line.split(mark)[0]
+            return line.replace(mark, " ")
     return ""
 
 
@@ -479,7 +482,8 @@ def risky_click(rest, cwd):
     if len(args) < 2 or args[0] not in ("click", "dblclick"):
         return False
     target = guard_shell.unmark(args[1])
-    return bool(RISKY_CLICK.search(ref_label(target, cwd) if re.fullmatch(r"(?:f\d+)?e\d+", target) else target))
+    named = ref_label(target, cwd) if re.fullmatch(r"(?:f\d+)?e\d+", target) else target
+    return any(w.lower() in RISKY_CLICK for w in _WORD_RE.findall(named))
 
 
 def approvable(
