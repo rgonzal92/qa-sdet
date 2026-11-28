@@ -339,6 +339,19 @@ class NewestRun(Rendering):
         self.assertIn("❌ FAIL", line)
         self.assertIn("2026-11-25-PROJ-1", line)
 
+    def test_trace_blocks_a_ticket_whose_newest_run_file_cannot_be_read(self):  # it showed the older folder's PASS
+        passed = {"target": "/form", "build": "1.42", "status": "COMPLETED", "cases": RUN1["cases"]}
+        self.age(self.rundir("2026-11-20-PROJ-1", plan=PLAN1_ANSWERED, runs=[("form", passed)]))
+        d = self.rundir("PROJ-1", plan=PLAN1_ANSWERED)
+        row = lambda: next(x for x in cli("trace", str(self.proj))[1].splitlines() if x.startswith("| PROJ-1"))
+        for cut in ('{"target": "/form", "cases": [{"id": "TC-2", "status": "FA', "", "null"):
+            (d / ".data/run-form.json").write_text(cut)  # the explorer was interrupted while it wrote
+            cells = [x.strip() for x in row().strip("|").split("|")]
+            self.assertEqual((cells[1], cells[5]), ("⛔ BLOCKED", "PROJ-1"), cut)  # its latest run, as the inbox says
+            self.assertEqual(inbox._qa_verdicts_by_key(self.proj / "qa-out", {"PROJ-1"})["PROJ-1"], "⛔ BLOCKED")
+        (d / ".data/run-form.json").unlink()  # planned, not run: the older run is still its latest
+        self.assertIn("2026-11-20-PROJ-1", row())
+
 
 class TicketFolder(Rendering):
     """qa-out/<KEY>/: one folder per ticket, its run, reused by every re-run; older dated folders keep working."""

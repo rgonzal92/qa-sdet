@@ -305,7 +305,7 @@ def trace(project, keys=None, fix_version=None):
     for p in runstate.plan_folders(qa_out) if qa_out.is_dir() else []:
         d = results.load_run(p)
         plan, runs = d["plan"], d["runs"]
-        if not runs or str(plan.get("kind")) == "plan":
+        if not (runs or d["unread"]) or str(plan.get("kind")) == "plan":  # a run file that can't be read ran it too
             continue
         cases, bugs = results.merged_cases(plan, runs), results.run_bugs(runs)
         vmap = results.verdicts(plan, runs, cases, bugs, d["unread"])
