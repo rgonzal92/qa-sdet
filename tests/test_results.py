@@ -347,7 +347,7 @@ class MergedCases(Base):
         )
         self.assertEqual(tie[0]["actual"], "new")
 
-    def test_a_pass_is_no_earlier_builds_pass_while_a_run_on_its_page_ended_blocked(self):  # the verdict skipped it
+    def test_a_pass_kept_from_an_earlier_build_does_not_hide_a_blocked_run_on_its_page(self):  # the verdict skipped it
         plan = {
             "tickets": [{"key": "T-1"}],
             "cases": [
@@ -355,15 +355,30 @@ class MergedCases(Base):
                 {"id": "TC-2", "ticket": "T-1", "route": "/list"},
             ],
         }
-        prior = lambda *runs: [c["id"] for c in results.merged_cases(plan, runs) if c.get("prior")]
+
+        def read(*runs):
+            cases = results.merged_cases(plan, runs)
+            return results.verdicts(plan, runs, cases, [])["T-1"], [c["id"] for c in cases if c.get("prior")]
+
+        kept_note = ("PASS WITH NOTES", "1 case verified on prior build 1.42; not re-run here")
+        # a ticket's folder keeps every re-run's files: /list last ran on 1.42, the 1.43 re-run reached /form only
         newer = ("run-form.json", {"target": "/form", "build": "1.43", "cases": [{"id": "TC-1", "status": "PASS"}]})
         older = {"target": "/list", "build": "1.42", "cases": [{"id": "TC-2", "status": "PASS"}]}
-        self.assertEqual(prior(("run-list.json", older), newer), ["TC-2"])
-        self.assertEqual(prior(("run-list.json", {**older, "status": "BLOCKED"}), newer), [])  # its PASS isn't trusted
+        self.assertEqual(read(("run-list.json", older), newer), (kept_note, ["TC-2"]))
+        blocked = ("run-list.json", {**older, "status": "BLOCKED"})
+        self.assertEqual(read(blocked, newer), (("BLOCKED", "the run on /list ended BLOCKED"), ["TC-2"]))
         # a pass carry_prior kept from build 1.42, then the page's next attempt ended BLOCKED
-        kept = {"target": "/form", "build": "1.43", "cases": [{"id": "TC-1", "status": "PASS", "build": "1.42"}]}
-        self.assertEqual(prior(("run-form.json", {**kept, "status": "INCOMPLETE"})), ["TC-1"])
-        self.assertEqual(prior(("run-form.json", {**kept, "status": "Blocked: session expired"})), [])
+        kept = {"target": "/list", "build": "1.43", "cases": [{"id": "TC-2", "status": "PASS", "build": "1.42"}]}
+        self.assertEqual(read(("run-list.json", {**kept, "status": "INCOMPLETE"}), newer), (kept_note, ["TC-2"]))
+        again = ("run-list.json", {**kept, "status": "Blocked: session expired"})
+        self.assertEqual(read(again, newer), (("BLOCKED", "the run on /list ended BLOCKED"), ["TC-2"]))  # still marked
+        # the kept pass is another ticket's: that ticket is blocked, this one is not
+        plan = {
+            "tickets": [{"key": "T-1"}, {"key": "T-2"}],
+            "cases": [plan["cases"][0], {**plan["cases"][1], "ticket": "T-2"}],
+        }
+        got = results.verdicts(plan, [blocked, newer], results.merged_cases(plan, [blocked, newer]), [])
+        self.assertEqual((got["T-1"], got["T-2"][0]), (("PASS", "all 1 cases passed"), "BLOCKED"))
 
     def test_a_case_belongs_to_its_ticket_however_the_key_is_written(self):  # a FAIL outside the ticket hid it
         plan = {
@@ -649,18 +664,20 @@ class CarryPrior(Rendering):
         older = {**RUN1, "target": "/list", "build": build, "cases": RUN1["cases"][1:], **list_run}
         return self.render_run([("list", older), ("form", {**RUN1, "build": "1.43", "cases": RUN1["cases"][:1]})], plan)
 
-    def test_a_pass_of_a_run_that_ended_blocked_never_reads_as_verified_on_its_build(self):  # a false PASS WITH NOTES
+    def test_a_run_that_ended_blocked_on_an_earlier_build_still_blocks_its_ticket(self):  # a false PASS WITH NOTES
         d, r = self.stopped_before_list(status="BLOCKED", summary="session expired")
         self.assertEqual(
             r.split("\n\n")[1:3],
             [
-                "⛔ BLOCKED · build 1.42, 1.43 · 2026-11-23 · 2 of 2 cases passed · no bugs",
+                "⛔ BLOCKED · build 1.43 · 2026-11-23 · 2 of 2 cases passed (1 on an earlier build) · no bugs",
                 "the run on /list ended BLOCKED: session expired",
             ],
         )
         draft = (d / "jira-comment.txt").read_text()
-        self.assertIn("QA result: BLOCKED on build 1.42, 1.43 (", draft)
-        self.assertNotIn("not re-run", draft)  # it said: "passed on build 1.42, not re-run on 1.43"
+        self.assertIn("QA result: BLOCKED on build 1.43 (", draft)
+        self.assertIn(
+            "\nAC-2 Rejects 131: passed on build 1.42, not re-run on 1.43.\n", draft
+        )  # which build it is from
 
     def test_a_pass_of_an_attempt_that_ended_blocked_does_not_stand_for_a_case_not_run_again(self):  # a false PASS
         # after a BLOCKED run dispatch gives every case again: its passes aren't trusted

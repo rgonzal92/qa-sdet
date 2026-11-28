@@ -141,8 +141,7 @@ def merged_cases(
     "not run" never hides its FAIL. A plan ticket's PASS whose own `build` is not its run file's (carry_prior kept it
     from an earlier attempt), or whose run file is from another known build than the newest run's (a ticket's folder
     keeps every re-run's files: a page the new build's run never reached), gets that build and `prior`: prior_passed
-    lists it as a pass not re-run here. Not while a run on its page, or one reporting it, ended BLOCKED (blocked_runs):
-    that PASS is not trusted. A plan case with no id or a repeated one can't get a result: it is left out
+    lists it as a pass not re-run here. A plan case with no id or a repeated one can't get a result: it is left out
     and named in `warnings`, and the case kept under that id gets `id_tickets` (every ticket using the id: verdict()
     blocks them)."""
     warnings = [] if warnings is None else warnings
@@ -204,7 +203,6 @@ def merged_cases(
             tk in keys
             and merged["status"] == "PASS"
             and (ran_on != core.norm_build(run_build.get(cid)) or older_build(ran_on, now))
-            and not blocked_runs([merged], runs)  # not trusted: it stays this run's, where verdict() blocks on that run
         ):
             merged.update(build=ran_on, prior=True)
         out.append(merged)
@@ -382,6 +380,7 @@ def verdict(
         return "NOT STARTED", "testing hasn't started yet"
     key = ticket.get("key") if isinstance(ticket, dict) else ticket
     mine = [c for c in cases if c.get("ticket") == key and not c.get("prior")]  # a prior pass is in prior_passed
+    kept = [c for c in cases if c.get("ticket") == key and c.get("prior")]  # this folder's own, from an earlier build
     prior_mine = [c for c in testing.prior_passed if c.get("ticket") == key]
     its_bugs = ticket_bugs(key, cases, bugs, testing.known)
     st = lambda c: c.get("status") or "NOT_RUN"
@@ -410,7 +409,7 @@ def verdict(
     ended = [
         f"the run on {core.norm_route(r.get('target')) or name} ended BLOCKED"
         + (f": {' '.join(str(r['summary']).split())}" if r.get("summary") else "")
-        for name, r in blocked_runs(mine, testing.runs)
+        for name, r in blocked_runs(mine + kept, testing.runs)  # a kept pass does not hide its page's blocked run
     ]
     if stuck or ended:
         return "BLOCKED", _some(
